@@ -146,6 +146,69 @@ Behaviour worth knowing:
   Import options accept booleans `import_actors`, `import_geometry`,
   `import_materials`, `import_lights`, `import_cameras`; export options accept
   booleans `export_actor_folders`, `export_sublayers`.
+  - `import_unreal_usd` files the assets under
+    `<destination_path>/<file name>` (the name as Unreal names assets: `my
+    robot.usda` becomes `my_robot`) and spawns the actors in the level being
+    edited. Without `replace_existing` (the default) an import into a folder
+    that already holds assets is refused with `InvalidState` and nothing is
+    imported, and existing actors are kept: the new ones are added beside
+    them. Unreal's USD importer otherwise replaces both, whatever
+    `AssetImportTask.replace_existing` says: a re-import replaced a mesh
+    customized since (its collision and lightmap resolution were lost) and
+    deleted the earlier import's actors. With `replace_existing` true the
+    folder's assets and the level's actors from an earlier import of the file
+    (the top-level actor named after the file) are replaced;
+    `removed_actor_paths` lists the actors that went.
+  - The import options are set without saving them. Unreal's
+    UsdStageImportOptions saves its settings to the project's
+    `Saved/Config/<Platform>Editor/EditorPerProjectUserSettings.ini` whenever
+    a change is notified, and earlier simul versions notified it, so one
+    import with `import_actors` false left `bImportActors=False` there for
+    every later import and the editor's own **Import into Level** dialog.
+    simul now sets `import_actors`, `import_geometry` and `import_materials`
+    on every import (true unless given) and, when the project's saved
+    settings differ from Unreal's defaults, says so in `warnings` and leaves
+    them alone: nothing tells a value simul wrote from one the user chose.
+    Reset them in the editor's USD import dialog.
+  - `export_unreal_usd` exports actors of the level being edited; a path in
+    another map is refused without loading it. `actors_exported` counts the
+    actors the written stage has a prim for, read back from the file
+    (`exported_prims` gives each one's prim), since Unreal's exporter leaves
+    out editor helpers such as WorldSettings or PlayerStart without an error;
+    they are listed in `skipped_actors`, and an export that wrote none of the
+    actors fails with `EngineError`. Mesh and material files are written next
+    to the output file.
+  - Both wait `unreal.import_export_timeout` (default 300 s,
+    `UNREAL__IMPORT_EXPORT_TIMEOUT`) instead of `unreal.timeout`: the first
+    USD export of an editor session loads Unreal's USD Python modules and
+    takes 25-40 s on UE 5.7. When the time runs out the error is
+    `TimeoutError` and says the import or export may still complete, since
+    Remote Control cannot stop a script it has stopped waiting for; check
+    before retrying.
+  - Neither leaves an editor object behind in the Python namespace Remote
+    Control runs its scripts in. The export's AssetExportTask used to keep
+    the editor world referenced there, and the next level load failed the
+    editor's world leak check and took the editor down.
+- `assign_unreal_material` assigns the material in one undoable transaction
+  that records the component first, which marks the level dirty (in a World
+  Partition level, the actor's package), so saving keeps the assignment and
+  Undo reverts it; the slot is read back, and `previous_material_path` is what
+  it rendered with before. The actor must be in the level being edited: a path
+  in another map is refused without loading that map, as is a map path given
+  as the material.
+- `create_unreal_material_instance` writes under the project's `/Game` folder:
+  `save_path`, else next to a parent in `/Game`, else `/Game/Materials`. It
+  used to save an instance of an `/Engine` parent into the engine install
+  (`Engine/Content/BasicShapes`), which every project using that engine
+  shares. A folder outside `/Game` (`/Engine`, a plugin's content) is refused
+  with `SandboxError` unless `allow_engine_content` is true, and
+  `set_unreal_material_params` refuses an instance outside `/Game` the same
+  way. A folder with an empty, `.` or `..` name, or with characters Unreal
+  does not allow, is a `ValidationError`: Unreal does not resolve `..` and
+  turned `/Game/../Engine` into a folder named `__`.
+- `search_unreal_assets` returns at most `max_results` assets, from 1 to 1000:
+  Remote Control sizes its result array to the limit it is sent, and -1
+  crashed the editor.
 - SimReady conversion and validation are not implemented for Unreal. Those
   tools return `UnsupportedOperation` without changing files.
 - `analyze_unreal_scene_for_robotics` classifies the actors loaded in the

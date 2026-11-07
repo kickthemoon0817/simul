@@ -376,7 +376,7 @@ def script_session(monkeypatch, tmp_path):
     )
     session = UnrealRuntimeSession(settings)
 
-    async def execute(code, mode="ExecuteFile"):
+    async def execute(code, mode="ExecuteFile", timeout=None):
         output = io.StringIO()
         try:
             with redirect_stdout(output):
@@ -447,13 +447,10 @@ async def test_component_operations_and_missing_component(script_session):
         actor.path, mass=9, linear_damping=1, angular_damping=2, enable_gravity=False
     )
     assert result["params_set"] == 4
-    assert not (await session.assign_material(actor.path, "/Game/Material")).get(
-        "error"
-    )
+    # assign_material has its own fake editor: tests/unreal/test_asset_tools.py.
     assert ("impulse", 7, 4) in component.events
     assert ("mass", 9) in component.events
     assert ("gravity", False) in component.events
-    assert any(event[0] == "material" for event in component.events)
     actor.root_component = None
     assert (await session.enable_physics(actor.path))["success"] is False
 

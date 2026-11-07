@@ -430,7 +430,9 @@
      },
      "max_results": {
       "default": 100,
-      "description": "Maximum number of results.",
+      "description": "Maximum number of results, from 1 to 1000.",
+      "maximum": 1000,
+      "minimum": 1,
       "type": "integer"
      }
     }
@@ -1159,7 +1161,7 @@
   {
    "name": "set_unreal_material_params",
    "title": "Set Unreal Material Params",
-   "description": "Set scalar, vector and texture parameters on a Material Instance Constant (left unsaved) and read them back; applied holds the values read back. Only global parameters are set: the call fails, writing nothing, when the material has no global parameter by a given name (a name only its Material Layers have included) or a texture does not load, and fails when a value reads back different, keeping what applied; not_applied gives each reason.",
+   "description": "Set scalar, vector and texture parameters on a Material Instance Constant (left unsaved) and read them back; applied holds the values read back. Only global parameters are set: the call fails, writing nothing, when the material has no global parameter by a given name (a name only its Material Layers have included) or a texture does not load, and fails when a value reads back different, keeping what applied; not_applied gives each reason. An instance outside /Game (engine or plugin content) is refused unless allow_engine_content is true.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1182,6 +1184,11 @@
       "default": "",
       "description": "JSON object of texture parameter name to a texture asset path. Empty string sets none.",
       "type": "string"
+     },
+     "allow_engine_content": {
+      "default": false,
+      "description": "Also write to content outside the project's /Game folder: /Engine or a plugin's content, which every project using that engine or plugin shares. Default false refuses it (SandboxError).",
+      "type": "boolean"
      }
     },
     "required": [
@@ -1207,7 +1214,7 @@
   {
    "name": "create_unreal_material_instance",
    "title": "Create Unreal Material Instance",
-   "description": "Create a Material Instance Constant from a parent material.",
+   "description": "Create and save a Material Instance Constant from a parent material, in the project's /Game folder: save_path, else the parent's folder when it is in /Game, else /Game/Materials. A folder outside /Game is refused unless allow_engine_content is true.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1222,8 +1229,13 @@
      },
      "save_path": {
       "default": "",
-      "description": "Content-relative save directory (auto if empty).",
+      "description": "Content folder for the new instance, such as /Game/Materials. Empty picks the parent's folder when it is under /Game, else /Game/Materials.",
       "type": "string"
+     },
+     "allow_engine_content": {
+      "default": false,
+      "description": "Also write to content outside the project's /Game folder: /Engine or a plugin's content, which every project using that engine or plugin shares. Default false refuses it (SandboxError).",
+      "type": "boolean"
      }
     },
     "required": [
@@ -1250,7 +1262,7 @@
   {
    "name": "assign_unreal_material",
    "title": "Assign Unreal Material",
-   "description": "Assign a material to a mesh component's material slot.",
+   "description": "Assign a material to a mesh component's material slot of an actor in the level being edited, as one undoable transaction that marks the level dirty, and read it back.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1764,7 +1776,7 @@
   {
    "name": "import_unreal_usd",
    "title": "Import Unreal Usd",
-   "description": "Import USD with Unreal's optional USDImporter plugin, enabled at editor startup.",
+   "description": "Import USD with Unreal's optional USDImporter plugin, enabled at editor startup: assets to <destination_path>/<file name>, and actors into the level being edited. Without replace_existing it is refused when that folder already holds assets, and existing actors are kept; with it, those assets and the level's actors from an earlier import of the file are replaced.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1790,6 +1802,11 @@
       ],
       "default": null,
       "description": "Boolean USD options: import_actors, import_geometry, import_materials, import_lights, import_cameras."
+     },
+     "replace_existing": {
+      "default": false,
+      "description": "Replace the assets already in <destination_path>/<file name> and the level's actors from an earlier import of this file. Default false refuses an import into a folder that holds assets (InvalidState) and replaces no actor.",
+      "type": "boolean"
      }
     },
     "required": [
@@ -1802,7 +1819,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": true,
     "idempotentHint": null,
     "openWorldHint": null
    },
@@ -1815,7 +1832,7 @@
   {
    "name": "export_unreal_usd",
    "title": "Export Unreal Usd",
-   "description": "Export selected Unreal actors with the optional USDImporter plugin's LevelExporterUSD.",
+   "description": "Export actors of the level being edited with the optional USDImporter plugin's LevelExporterUSD; actors_exported counts the actors the written stage has a prim for.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,

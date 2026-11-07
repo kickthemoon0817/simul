@@ -1711,7 +1711,8 @@
       "material_path": "/Game/Materials/M_Wood",
       "scalar_params": null,
       "vector_params": null,
-      "texture_params": null
+      "texture_params": null,
+      "allow_engine_content": false
      }
     }
    ],
@@ -1735,7 +1736,8 @@
     "material_path": "/Game/Materials/M_Wood",
     "scalar_params_json": "{\"Roughness\": 0.4}",
     "vector_params_json": "{\"Tint\": [1, 0.5, 0, 1]}",
-    "texture_params_json": "{\"Albedo\": \"/Game/Textures/T_Wood\"}"
+    "texture_params_json": "{\"Albedo\": \"/Game/Textures/T_Wood\"}",
+    "allow_engine_content": true
    },
    "envelope": [
     {
@@ -1763,7 +1765,8 @@
       },
       "texture_params": {
        "Albedo": "/Game/Textures/T_Wood"
-      }
+      },
+      "allow_engine_content": true
      }
     }
    ],
@@ -1801,7 +1804,8 @@
      "arguments": {
       "parent_path": "/Game/Materials/M_Wood",
       "instance_name": "MI_Chair",
-      "save_path": ""
+      "save_path": "",
+      "allow_engine_content": false
      }
     }
    ],
@@ -1824,7 +1828,8 @@
    "arguments": {
     "parent_path": "/Game/Materials/M_Wood",
     "instance_name": "MI_Chair",
-    "save_path": "/Game/Materials"
+    "save_path": "/Game/Materials",
+    "allow_engine_content": true
    },
    "envelope": [
     {
@@ -1840,7 +1845,8 @@
      "arguments": {
       "parent_path": "/Game/Materials/M_Wood",
       "instance_name": "MI_Chair",
-      "save_path": "/Game/Materials"
+      "save_path": "/Game/Materials",
+      "allow_engine_content": true
      }
     }
    ],
@@ -2478,7 +2484,8 @@
      "arguments": {
       "usd_path": "/tmp/in.usd",
       "destination_path": "/Game/Imports",
-      "import_options": null
+      "import_options": null,
+      "replace_existing": false
      }
     }
    ],
@@ -2503,7 +2510,8 @@
     "destination_path": "/Game/USD",
     "import_options": {
      "import_lights": false
-    }
+    },
+    "replace_existing": true
    },
    "envelope": [
     {
@@ -2521,7 +2529,8 @@
       "destination_path": "/Game/USD",
       "import_options": {
        "import_lights": false
-      }
+      },
+      "replace_existing": true
      }
     }
    ],

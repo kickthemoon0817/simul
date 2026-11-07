@@ -352,6 +352,16 @@ class UnrealConfig(BaseModel):
         description="HTTP request timeout in seconds",
         ge=1,
     )
+    import_export_timeout: int = Field(
+        default=300,
+        description=(
+            "Timeout in seconds for the asset import and export tools (import_unreal_usd, "
+            "export_unreal_usd), which can run for minutes: the first USD export of an editor "
+            "session loads the USD Python modules, 25-40 s on UE 5.7. Never shorter than timeout. "
+            "Env: UNREAL__IMPORT_EXPORT_TIMEOUT."
+        ),
+        ge=1,
+    )
     embedded_mode: bool = Field(
         default=False,
         description="Running inside UE5 Python interpreter",
@@ -748,7 +758,6 @@ def _normalise_isaac_instances(value: Any) -> Optional[List[Dict[str, Any]]]:
     for item in value:
         if not isinstance(item, dict):
             raise ValueError(f"Each instance must be a dict, got {type(item).__name__}")
-
 
         bridge = item.get("bridge") or {}
         instances.append(
