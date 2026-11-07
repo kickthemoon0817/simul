@@ -48,6 +48,7 @@ from pydantic import BaseModel
 
 from ...adapters.blender_runtime import BlenderRuntimeSession
 from ...tool_surfaces import THIN_BLENDER_TOOLS
+from .. import error_types
 from ..schemas.blender import (
     SCRIPT_OUTPUT_CHARS_DEFAULT,
     SCRIPT_OUTPUT_CHARS_MAX,
@@ -532,7 +533,7 @@ def _attach(server: "SimulMCPServer", request: Any) -> Dict[str, Any]:
         return {
             "success": False,
             "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
-            "error_type": "ValueError",
+            "error_type": "UnsupportedOperation",
         }
     from ...adapters.blender_connection import BlenderAttachments
 
@@ -541,11 +542,12 @@ def _attach(server: "SimulMCPServer", request: Any) -> Dict[str, Any]:
         return attachments.attach(request.instance_id, request.window_id)
     except (ValueError, RuntimeError) as exc:
         # List the candidates so the agent can choose without a shell.
+        fields = error_types.exception_fields(exc)
         return {
             "success": False,
             "error": str(exc),
-            "error_type": type(exc).__name__,
-            "details": {"instances": attachments.instances()},
+            "error_type": fields["error_type"],
+            "details": {**(fields["details"] or {}), "instances": attachments.instances()},
         }
 
 

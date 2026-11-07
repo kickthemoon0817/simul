@@ -18,10 +18,11 @@ Pinned through real FastMCP clients:
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Annotated, Any, Dict, List
 
 import pytest
 from fastmcp import Client
@@ -167,7 +168,9 @@ def test_schema_and_model_refusals_have_the_same_shape(tmp_path: Path) -> None:
 
 
 def test_an_unknown_tool_is_a_json_not_found_error(tmp_path: Path) -> None:
-    (result,) = _run(_usd_server(tmp_path), [("no_such_tool", {})])
+    instance = _usd_server(tmp_path, burst_size=1)
+
+    result, limited = _run(instance, [("no_such_tool", {}), ("another_made_up_tool", {})])
 
     assert result.is_error is True
     assert _json(result) == {
@@ -176,12 +179,56 @@ def test_an_unknown_tool_is_a_json_not_found_error(tmp_path: Path) -> None:
         "error_type": "NotFoundError",
         "details": {"tool": "no_such_tool"},
     }
+    # Recorded and rate limited like any call, under one name whatever was
+    # asked for, so made-up names add no records or buckets of their own.
+    assert _json(limited)["error_type"] == "RateLimitError"
+    records = list(reversed(instance.usage_tracker.get_recent(tool_name="<unknown tool>")))
+    assert [(r["success"], r["error"], r["params"]) for r in records] == [
+        (False, "Unknown tool: 'no_such_tool'", {"name": "no_such_tool"}),
+        (False, "rate_limited", {"name": "another_made_up_tool"}),
+    ]
+
+
+def test_a_script_tool_that_policy_hides_answers_script_execution_disabled(
+    tmp_path: Path,
+) -> None:
+    instance = _isaac_server(tmp_path, security={"allow_script_execution": False})
+
+    (result,) = _run(instance, [("execute_isaac_script", {"code": "print(1)"})])
+
+    payload = _json(result)
+    assert result.is_error is True
+    assert payload["error_type"] == "ScriptExecutionDisabled"
+    assert payload["details"] == {"tool": "execute_isaac_script"}
+    assert "allow_script_execution" in payload["error"]
+    assert [r["tool"] for r in instance.usage_tracker.get_recent()] == ["execute_isaac_script"]
 
 
 def test_a_long_argument_is_echoed_by_size_at_the_schema_layer(tmp_path: Path) -> None:
     (result,) = _run(_usd_server(tmp_path), [("load_usd_file", {"file_path": 1, "x": "y" * 5000})])
 
     assert _json(result)["details"]["input"] == {"file_path": 1, "x": "<5000 characters>"}
+
+
+def test_a_large_list_or_mapping_is_echoed_by_its_first_entries_and_a_count(
+    tmp_path: Path,
+) -> None:
+    """A 20 000-vertex mesh refused for one stray argument used to come back whole."""
+    vertices = [[i * 0.5, 1.0, 2.0] for i in range(20_000)]
+    settings = {f"/k{i}": i for i in range(100)}
+
+    (result,) = _run(
+        _usd_server(tmp_path),
+        [("load_usd_file", {"file_path": 1, "vertices": vertices, "settings": settings})],
+    )
+
+    echoed = _json(result)["details"]["input"]
+    assert echoed["vertices"][:2] == [[0.0, 1.0, 2.0], [0.5, 1.0, 2.0]]
+    assert echoed["vertices"][-1] == "<19984 more items, 20000 in all>"
+    assert len(echoed["vertices"]) == 17
+    assert list(echoed["settings"])[:2] == ["/k0", "/k1"]
+    assert echoed["settings"]["..."] == "<84 more keys, 100 in all>"
+    assert len(result.content[-1].text) < 4000
 
 
 def test_a_schema_refusal_names_the_constraint_and_the_value(tmp_path: Path) -> None:
@@ -247,6 +294,79 @@ def test_a_nested_model_field_and_a_secret_argument(tmp_path: Path) -> None:
     assert "hunter2" not in result.content[-1].text
 
 
+_SECRET_ARGUMENTS = {
+    "passphrase": "S1", "auth": "S2", "key": "S3", "password": "S4", "access_key": "S5",
+    "private_key": "S6", "passwd": "S7", "pwd": "S8", "bearer": "S9", "cookie": "S10",
+    "Authorization": "S11", "x_api_key": "S12", "client_secret": "S13", "session_token": "S14",
+    "credentials": "S15", "jwt": "S16", "pin": "S17", "apiKey": "S18", "X-Auth-Token": "S19",
+}
+
+
+def test_secrets_are_masked_by_name_word_and_nested(tmp_path: Path) -> None:
+    """Matched by whole words, so author is shown; under any mapping key or settings path."""
+    (unexpected, nested) = _run(
+        _usd_server(tmp_path),
+        [
+            ("load_usd_file", {"file_path": 1, **_SECRET_ARGUMENTS, "author": "Ada", "keyframe": 3}),
+            (
+                "load_usd_file",
+                {
+                    "file_path": 1,
+                    "attributes": {"api_key": "NESTED-SECRET", "color": "red"},
+                    "settings": {"/persistent/auth_token": "CARB-SECRET", "/app/fps": 60},
+                    "layers": [{"token": "LIST-SECRET"}],
+                },
+            ),
+        ],
+    )
+
+    echoed = _json(unexpected)["details"]["input"]
+    assert {name: echoed[name] for name in _SECRET_ARGUMENTS} == dict.fromkeys(_SECRET_ARGUMENTS, "***")
+    assert echoed["author"] == "Ada" and echoed["keyframe"] == 3
+    text = nested.content[-1].text
+    for secret in ("NESTED-SECRET", "CARB-SECRET", "LIST-SECRET"):
+        assert secret not in text
+    nested_input = _json(nested)["details"]["input"]
+    assert nested_input["attributes"] == {"api_key": "***", "color": "red"}
+    assert nested_input["settings"] == {"/persistent/auth_token": "***", "/app/fps": 60}
+    assert nested_input["layers"] == [{"token": "***"}]
+
+
+def test_a_constraint_names_only_the_bound_that_failed(tmp_path: Path) -> None:
+    """pydantic's context also describes the input (field_type, actual_length); not a constraint."""
+    instance = _usd_server(tmp_path)
+
+    @instance.mcp.tool(name="probe_list_tool")
+    async def probe_list_tool(
+        position: Annotated[List[float], Field(min_length=3, max_length=3)],
+    ) -> str:
+        return "ran"
+
+    (result,) = _run(instance, [("probe_list_tool", {"position": [1.0]})])
+
+    (error,) = _json(result)["details"]["errors"]
+    assert error["field"] == "position" and error["type"] == "too_short"
+    assert error["constraint"] == {"min_length": 3}
+
+
+def test_release_is_never_rate_limited(tmp_path: Path) -> None:
+    """An agent that spent its budget must still be able to let its claim go."""
+    instance = _isaac_server(tmp_path, security={"burst_size": 1})
+
+    claimed, refused, released = _run(
+        instance,
+        [
+            ("claim_isaac_instance", {"purpose": "probe"}),
+            ("claim_isaac_instance", {"purpose": "again"}),
+            ("release_isaac_instance", {}),
+        ],
+    )
+
+    assert _json(claimed)["success"] is True
+    assert _json(refused)["error_type"] == "RateLimitError"
+    assert _json(released)["success"] is True
+
+
 def test_a_schema_refusal_is_rate_limited_and_recorded(tmp_path: Path) -> None:
     """It used to leave no usage record and spend no token."""
     instance = _isaac_server(tmp_path, security={"burst_size": 1})
@@ -281,15 +401,33 @@ def test_a_schema_refusal_is_rate_limited_and_recorded(tmp_path: Path) -> None:
         (BrokenPipeError(32, "pipe"), "ConnectionError"),
         (TimeoutError(), "TimeoutError"),
         (asyncio.TimeoutError(), "TimeoutError"),
-        (OSError(65, "No route to host"), "ConnectionError"),
+        (OSError(errno.EHOSTUNREACH, "No route to host"), "ConnectionError"),
+        (OSError("closed"), "ConnectionError"),
+        (OSError(errno.ENOSPC, "No space left on device"), "EngineError"),
         (ValueError("seed must be an integer"), "ValidationError"),
-        (KeyError("x"), None),
-        (FileNotFoundError(2, "missing"), None),
-        (json.JSONDecodeError("bad", "{", 0), None),
+        (TypeError("expected str"), "ValidationError"),
+        (json.JSONDecodeError("bad", "{", 0), "ValidationError"),
+        (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), "EngineError"),
+        (KeyError("x"), "NotFoundError"),
+        (IndexError("x"), "NotFoundError"),
+        (FileNotFoundError(2, "missing"), "NotFoundError"),
+        (PermissionError(13, "denied"), "PermissionDenied"),
+        (NotImplementedError(), "UnsupportedOperation"),
+        (RuntimeError("poll() failed"), "EngineError"),
+        (AttributeError("x"), "EngineError"),
+        (Exception("bare"), "EngineError"),
     ],
 )
 def test_exceptions_map_onto_the_shared_classes(exc: BaseException, expected: Any) -> None:
     assert classify_exception(exc) == expected
+    assert classify_exception(exc) in error_types.VOCABULARY
+
+
+def test_the_isaac_bridge_protocol_error_is_not_a_validation_error() -> None:
+    """A ValueError subclass, but a reply the bridge sent: not the caller's input."""
+    from simul.adapters.isaac_socket_client import BridgeResponseProtocolError
+
+    assert classify_exception(BridgeResponseProtocolError("garbled")) == "BridgeProtocolError"
 
 
 def test_library_exception_names_map_by_class_name() -> None:
@@ -308,7 +446,7 @@ def test_library_exception_names_map_by_class_name() -> None:
     [
         (
             {"success": False, "error": "No response from Isaac Sim", "error_type": "EmptyResponse"},
-            {"error_type": "ConnectionError", "details": {"cause": "EmptyResponse"}},
+            {"error_type": "ConnectionError", "details": {"exception_type": "EmptyResponse"}},
         ),
         (
             {"success": False, "error": "", "error_type": "TimeoutError"},
@@ -325,9 +463,21 @@ def test_library_exception_names_map_by_class_name() -> None:
         ({"success": False, "error": "Prim not found"}, {"error_type": "EngineError"}),
         (
             {"success": False, "error": "Invalid light_type", "error_type": "ValueError"},
-            {"error_type": "ValidationError", "details": {"cause": "ValueError", "errors": [
+            {"error_type": "ValidationError", "details": {"exception_type": "ValueError", "errors": [
                 {"field": None, "message": "Invalid light_type", "type": "value_error"}
             ]}},
+        ),
+        (
+            {"success": False, "error": "boom", "error_type": "AttributeError"},
+            {"error_type": "EngineError", "details": {"exception_type": "AttributeError"}},
+        ),
+        (
+            {"success": False, "error": "gone", "error_type": "SimulNotFound"},
+            {"error_type": "NotFoundError", "details": {"exception_type": "SimulNotFound"}},
+        ),
+        (
+            {"success": False, "error": "x", "error_type": "TransformNotApplied"},
+            {"error_type": "TransformNotApplied", "details": None},
         ),
         (
             {"success": False, "error_type": "RefusedOperation", "error": "kept"},
@@ -356,7 +506,38 @@ def test_every_error_type_is_documented() -> None:
         for key, value in vars(error_types).items()
         if key.isupper() and isinstance(value, str) and not key.startswith("_")
     ]
-    assert names and [name for name in names if f"`{name}`" not in documented] == []
+    assert error_types.NOT_APPLIED_SUFFIX in names
+    names.remove(error_types.NOT_APPLIED_SUFFIX)
+    assert set(names) == error_types.VOCABULARY
+    assert [name for name in names if f"`{name}`" not in documented] == []
+    assert "`*NotApplied`" in documented
+
+
+# Where a tool's error_type is spelled: ``error_type="X"``, ``"error_type": "X"``
+# (a payload, or a generated script's print), ``error_type = "X"`` (a class).
+_ERROR_TYPE_LITERAL = re.compile(
+    r"""["']?error_type["']?\s*[:=]\s*["']([A-Za-z_]+)["']"""
+)
+_SRC = Path(__file__).resolve().parents[2] / "src" / "simul"
+
+
+def test_no_tool_source_spells_a_type_outside_the_vocabulary() -> None:
+    """Every error_type literal a tool can return is in the vocabulary.
+
+    The envelope maps anything else onto its family at run time
+    (``normalize_error_payload``); this catches the literal at its source, so
+    a new domain type is added to ``error_types`` and documented instead of
+    silently becoming an EngineError. The CLI's own JSON is not a tool's.
+    """
+    found: Dict[str, List[str]] = {}
+    for source in sorted(_SRC.rglob("*.py")):
+        if "cli" in source.relative_to(_SRC).parts:
+            continue
+        for name in _ERROR_TYPE_LITERAL.findall(source.read_text()):
+            found.setdefault(name, []).append(str(source.relative_to(_SRC)))
+    assert found
+    outside = {name: files for name, files in found.items() if not error_types.is_known(name)}
+    assert outside == {}
 
 
 # ---------------------------------------------------------------------------

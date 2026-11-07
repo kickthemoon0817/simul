@@ -97,8 +97,8 @@
           "error": "Several Blender processes are running; pass instance_id",
           "error_type": "ValidationError",
           "details": {
+            "exception_type": "ValueError",
             "instances": [],
-            "cause": "ValueError",
             "errors": [
               {
                 "field": null,
@@ -2752,17 +2752,7 @@
         "response": {
           "success": false,
           "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
-          "error_type": "ValidationError",
-          "details": {
-            "cause": "ValueError",
-            "errors": [
-              {
-                "field": null,
-                "message": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
-                "type": "value_error"
-              }
-            ]
-          }
+          "error_type": "UnsupportedOperation"
         },
         "usage": [{"tool": "attach_blender_window", "success": false}]
       },
@@ -2772,17 +2762,7 @@
         "response": {
           "success": false,
           "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
-          "error_type": "ValidationError",
-          "details": {
-            "cause": "ValueError",
-            "errors": [
-              {
-                "field": null,
-                "message": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
-                "type": "value_error"
-              }
-            ]
-          }
+          "error_type": "UnsupportedOperation"
         },
         "usage": [{"tool": "attach_blender_window", "success": false}]
       },

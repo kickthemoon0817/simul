@@ -204,7 +204,7 @@ class IsaacScriptBase(LoggerMixin):
         """
         return ErrorResponse(
             error=message,
-            error_type="RefusedOperation",
+            error_type=error_types.REFUSED_OPERATION,
             details=details or None,
         ).model_dump()
 
@@ -245,7 +245,7 @@ class IsaacScriptBase(LoggerMixin):
             if not isinstance(result_payload, dict):
                 return ErrorResponse(
                     error="Bridge response payload must be an object.",
-                    error_type="BridgeProtocolError",
+                    error_type=error_types.BRIDGE_PROTOCOL_ERROR,
                 ).model_dump()
             return apply_success_from_error(result_payload)
 
@@ -323,23 +323,20 @@ class IsaacScriptBase(LoggerMixin):
                 error=str(exc)
                 or f"Isaac Sim at {self._client.address} did not answer in time; the "
                 "script may still be running.",
-                error_type=error_types.TIMEOUT_ERROR,
-                details={"cause": type(exc).__name__},
+                **error_types.exception_fields(exc),
             ).model_dump()
         except (ConnectionError, OSError) as exc:
             # Refused, reset by the peer, or broken mid-reply: the shared class,
-            # with the transport's own name as the cause.
+            # with the transport's own name as details.exception_type.
             return ErrorResponse(
                 error=str(exc) or f"The connection to Isaac Sim at {self._client.address} failed.",
-                error_type=error_types.CONNECTION_ERROR,
-                details={"cause": type(exc).__name__},
+                **error_types.exception_fields(exc),
             ).model_dump()
         except Exception as exc:
             logger.error("Script execution failed: %s", exc, exc_info=True)
             return ErrorResponse(
                 error=str(exc) or type(exc).__name__,
-                error_type=error_types.ENGINE_ERROR,
-                details={"cause": type(exc).__name__},
+                **error_types.exception_fields(exc),
             ).model_dump()
 
         if not result.success:
@@ -350,7 +347,7 @@ class IsaacScriptBase(LoggerMixin):
         if not output:
             return ErrorResponse(
                 error="Script produced no output",
-                error_type="EmptyOutput",
+                error_type=error_types.EMPTY_OUTPUT,
             ).model_dump()
 
         data, other_output = extract_tool_json(output)
@@ -361,10 +358,11 @@ class IsaacScriptBase(LoggerMixin):
                 reason = str(exc)
             else:
                 reason = f"expected a JSON object, got {type(data).__name__}"
+            # The engine's output, not the caller's input, failed to parse.
             return ErrorResponse(
                 error=f"Failed to parse script output as JSON: {reason}",
-                error_type="JSONDecodeError",
-                details={"raw_output": output[:2000]},
+                error_type=error_types.ENGINE_ERROR,
+                details={"raw_output": output[:2000], "exception_type": "JSONDecodeError"},
             ).model_dump()
         if other_output:
             _note_foreign_output(data, other_output)
@@ -409,7 +407,7 @@ class IsaacScriptBase(LoggerMixin):
             # Running the script fallback now would apply it a second time.
             return ErrorResponse(
                 error=str(exc),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
         except (ConnectionRefusedError, TimeoutError, OSError) as exc:
             # The bridge is unreachable, not the action unsupported. When a
@@ -426,14 +424,14 @@ class IsaacScriptBase(LoggerMixin):
                 return None
             return ErrorResponse(
                 error=str(exc),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
         except ValueError as exc:
             # Protocol-level failure (oversized request, malformed frame). The
             # script path would not do better, so surface it.
             return ErrorResponse(
                 error=str(exc),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
 
         if (

@@ -1078,7 +1078,8 @@ def test_the_generator_tool_returns_its_tag_and_folder(monkeypatch: pytest.Monke
     [
         # An argument check's ValueError is a ValidationError in the shared taxonomy.
         ({"scene_type": "garage"}, "ValidationError", "scene_type must be one of"),
-        ({"scene_type": "room", "parameters": "{bad"}, "JSONDecodeError", "Expecting property name"),
+        # Malformed JSON text is a ValidationError naming the parameter.
+        ({"scene_type": "room", "parameters": "{bad"}, "ValidationError", "parameters: Expecting property name"),
         ({"scene_type": "room", "bounds_min": "0,0"}, "ValidationError", "bounds_min must be three finite"),
         ({"scene_type": "room", "bounds_min": "0,0,nan"}, "ValidationError", "bounds_min must be three finite"),
     ],

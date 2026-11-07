@@ -59,7 +59,7 @@ from ..utils.paths import PathPolicy, SandboxDenied, sandbox_error
 from ..utils.timing import RateLimiter
 from . import error_types
 from .backends import ALL_BACKEND_NAMES, BACKENDS, NOT_SELECTED, backend_skip_reason
-from .error_types import classify_exception, normalize_error_payload
+from .error_types import normalize_error_payload
 from .registration import register_stats_tools
 from .registration._helpers import apply_success_from_error
 from .result_budget import encode_result_budget
@@ -167,6 +167,14 @@ TaskConfig: Optional[Type[_TaskConfig]] = _TaskConfig
 # Tool key of the bucket that caps one agent's calls across every tool.
 _GLOBAL_RATE_BUCKET: str = "*"
 
+# The name a call to a tool that is not registered is recorded and rate
+# limited under; the name it gave is kept in the record's parameters.
+_UNKNOWN_TOOL: str = "<unknown tool>"
+
+# Tools the rate limit never refuses: releasing a claim must work for an agent
+# that has spent its budget, or the claim would outlive the agent's patience.
+_RATE_LIMIT_EXEMPT = frozenset({"release_isaac_instance"})
+
 # Transports ``SimulMCPServer.run`` accepts. ``http`` is streamable HTTP, the
 # current MCP network transport; ``sse`` is kept for clients that still speak it.
 NETWORK_TRANSPORTS: Tuple[str, ...] = ("http", "sse")
@@ -246,13 +254,43 @@ def _sniff_image_format(image_base64: str) -> Optional[str]:
 # Longest argument string a ValidationError echoes in details.input; a script
 # or a document is replaced by its size.
 _ECHO_MAX_CHARS: int = 256
+# Most list items or mapping keys echoed from one list or mapping, and most
+# scalars echoed from one argument; the rest is counted, not shown.
+_ECHO_MAX_ITEMS: int = 16
+_ECHO_MAX_VALUES: int = 64
+# Nesting deeper than this is echoed by its type and size.
+_ECHO_MAX_DEPTH: int = 4
 
-
-# Argument names whose values a ValidationError never echoes.
-_SECRET_NAME = re.compile(r"token|password|passphrase|secret|api_?key|auth|credential", re.I)
+# A name is secret when one of its words is one of these. Words split at
+# ``_``, ``-``, ``.``, ``/``, spaces and camelCase humps, so ``access_key``,
+# ``privateKey``, ``X-Api-Key`` and ``/persistent/auth_token`` match and
+# ``author`` or ``keyframe`` do not.
+_SECRET_WORDS = frozenset(
+    {
+        "token", "tokens", "password", "passwords", "passphrase", "passwd", "pwd",
+        "secret", "secrets", "key", "apikey", "auth", "authorization", "credential",
+        "credentials", "cookie", "cookies", "bearer", "jwt", "pin", "otp", "accesstoken",
+        "authtoken", "accesskey", "privatekey", "secretkey",
+    }
+)
+_NAME_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
 _MASKED = "***"
 # A quoted choice in pydantic's "Input should be 'a', 'b' or 'c'".
 _QUOTED = re.compile(r"'((?:[^'\\]|\\.)*)'")
+# The context keys of a pydantic error that state the constraint that failed
+# (not ``actual_length``, ``class_name`` or ``error``, which describe the input
+# or the failure).
+_CONSTRAINT_KEYS = frozenset(
+    {
+        "gt", "ge", "lt", "le", "multiple_of", "min_length", "max_length", "expected",
+        "pattern", "max_digits", "decimal_places", "allowed_schemes",
+    }
+)
+
+
+def _names_secret(name: str) -> bool:
+    """Whether an argument name, mapping key or settings path names a secret."""
+    return any(word.lower() in _SECRET_WORDS for word in _NAME_WORD.findall(name))
 
 
 def _jsonable(value: Any) -> Any:
@@ -266,13 +304,50 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-def _echo_value(field: Optional[str], value: Any, *, shorten: bool = True) -> Any:
-    """The value a ValidationError shows for ``field``: masked when secret, shortened when long."""
-    if field is not None and _SECRET_NAME.search(field):
-        return _MASKED
-    if shorten and isinstance(value, str) and len(value) > _ECHO_MAX_CHARS:
-        return f"<{len(value)} characters>"
-    return _jsonable(value)
+def _echo_value(field: Optional[str], value: Any) -> Any:
+    """The value a ValidationError shows for ``field``, bounded and with its secrets masked.
+
+    A value is masked (``***``) when ``field``, a dotted path, names a secret,
+    and so is every value nested under a mapping key that does (a key such as
+    ``api_key`` or a settings path such as ``/persistent/auth_token``). A
+    string longer than ``_ECHO_MAX_CHARS`` is shown by its size; a list or
+    mapping shows its first ``_ECHO_MAX_ITEMS`` entries and counts the rest,
+    and the whole value at most ``_ECHO_MAX_VALUES`` scalars.
+    """
+    budget = [_ECHO_MAX_VALUES]
+
+    def echo(name: Optional[str], item: Any, depth: int) -> Any:
+        if name is not None and _names_secret(name):
+            return _MASKED
+        if isinstance(item, (dict, list, tuple)) and depth >= _ECHO_MAX_DEPTH:
+            return f"<{type(item).__name__} of {len(item)}>"
+        if isinstance(item, dict):
+            entries = list(item.items())
+            shown: Dict[str, Any] = {}
+            for key, nested in entries[:_ECHO_MAX_ITEMS]:
+                if budget[0] <= 0:
+                    break
+                shown[str(key)] = echo(str(key), nested, depth + 1)
+            if len(shown) < len(entries):
+                shown["..."] = f"<{len(entries) - len(shown)} more keys, {len(entries)} in all>"
+            return shown
+        if isinstance(item, (list, tuple)):
+            listed: List[Any] = []
+            for nested in item[:_ECHO_MAX_ITEMS]:
+                if budget[0] <= 0:
+                    break
+                listed.append(echo(None, nested, depth + 1))
+            if len(listed) < len(item):
+                listed.append(f"<{len(item) - len(listed)} more items, {len(item)} in all>")
+            return listed
+        budget[0] -= 1
+        if item is not None and not isinstance(item, (bool, int, float, str)):
+            item = str(item)
+        if isinstance(item, str) and len(item) > _ECHO_MAX_CHARS:
+            return f"<{len(item)} characters>"
+        return item
+
+    return echo(field, value, 0)
 
 
 def _suggestion(
@@ -319,7 +394,7 @@ def _validation_errors(
         entry: Dict[str, Any] = {"field": field, "message": message, "type": error_type}
         context = error.get("ctx") or {}
         constraint = {
-            key: _jsonable(value) for key, value in context.items() if key != "error"
+            key: _jsonable(value) for key, value in context.items() if key in _CONSTRAINT_KEYS
         }
         if constraint:
             entry["constraint"] = constraint
@@ -346,18 +421,24 @@ def _summarize_validation_errors(errors: List[Dict[str, Any]]) -> str:
     )
 
 
-def _echo_arguments(arguments: Mapping[str, Any], *, shorten: bool = True) -> Dict[str, Any]:
-    """Return the arguments a ValidationError echoes: secrets masked, long strings by their size."""
-    return {
-        str(key): _echo_value(str(key), value, shorten=shorten) for key, value in arguments.items()
-    }
+def _echo_arguments(arguments: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return the arguments a ValidationError echoes, each bounded with its secrets masked.
+
+    At most ``_ECHO_MAX_ITEMS`` * 2 arguments are shown; a call carrying more
+    (unexpected ones) has the rest counted.
+    """
+    entries = list(arguments.items())
+    limit = _ECHO_MAX_ITEMS * 2
+    echoed = {str(key): _echo_value(str(key), value) for key, value in entries[:limit]}
+    if len(entries) > limit:
+        echoed["..."] = f"<{len(entries) - limit} more arguments, {len(entries)} in all>"
+    return echoed
 
 
 def validation_error_payload(
     exc: BaseException,
     arguments: Mapping[str, Any],
     *,
-    shorten: bool = False,
     known_fields: Iterable[str] = (),
 ) -> Dict[str, Any]:
     """Build the one ValidationError envelope every layer returns for invalid input.
@@ -366,15 +447,12 @@ def validation_error_payload(
     outside its bounds), a tool's request model and its own argument checks
     all report the same shape: ``error`` joins ``field: message`` for each
     failure, ``details.errors`` lists them, ``details.input`` echoes the
-    arguments.
+    arguments (bounded, secrets masked: ``_echo_value``).
 
     Args:
         exc: A pydantic ValidationError, or the exception an argument check
             raised with its message as written.
         arguments: The arguments the call received.
-        shorten: Echo the arguments with secrets masked and strings longer
-            than ``_ECHO_MAX_CHARS`` by their size, for a layer with no
-            ``input_echo`` hook of its own.
         known_fields: The tool's argument names, for suggesting a misspelt one.
 
     Returns:
@@ -383,13 +461,13 @@ def validation_error_payload(
     if isinstance(exc, PydanticValidationError):
         errors = _validation_errors(exc, known_fields)
     else:
-        errors = [{"field": None, "message": exception_message(exc), "type": "value_error"}]
+        errors = error_types.errors_from_message(exception_message(exc))
     return ErrorResponse(
         error=_summarize_validation_errors(errors),
         error_type=error_types.VALIDATION_ERROR,
         details={
             "errors": errors,
-            "input": _echo_arguments(arguments, shorten=shorten),
+            "input": _echo_arguments(arguments),
         },
     ).model_dump()
 
@@ -406,10 +484,13 @@ def build_error_envelope_middleware(server: "SimulMCPServer") -> Any:
     chain) and answers with the envelope every other failure gets, sent with
     ``isError: true``: ``ValidationError`` with each failing field's path,
     constraint, given value (secrets masked) and closest valid choice in
-    ``details.errors``, and ``NotFoundError`` for a tool that is not
-    registered. A refused call to a registered tool goes through the
-    envelope (``_exec_payload``), so it spends a rate-limit token and is
-    recorded in the usage log like any other failed call.
+    ``details.errors``; ``ScriptExecutionDisabled`` for an arbitrary-code
+    tool that ``security.allow_script_execution`` keeps off the surface; and
+    ``NotFoundError`` for any other tool that is not registered. Every refusal
+    goes through the envelope (``_exec_payload``), so it spends a rate-limit
+    token and is recorded in the usage log like any other failed call; an
+    unknown name is recorded and limited under ``_UNKNOWN_TOOL``, so made-up
+    names cannot grow the usage records or the rate-limit buckets.
 
     Args:
         server: The server whose envelope the refusals go through.
@@ -432,20 +513,22 @@ def build_error_envelope_middleware(server: "SimulMCPServer") -> Any:
                 payload = validation_error_payload(
                     cause if isinstance(cause, PydanticValidationError) else exc,
                     arguments,
-                    shorten=True,
                     known_fields=await server._tool_parameters(name),
                 )
                 return await server._exec_payload(name, payload)
             except FastMCPNotFoundError as exc:
+                if name in server._hidden_script_tools:
+                    return await server._exec_payload(
+                        name, server._script_execution_disabled(name)
+                    )
                 payload = ErrorResponse(
                     error=exception_message(exc),
                     error_type=error_types.NOT_FOUND_ERROR,
-                    details={"tool": name or None},
+                    details={"tool": _echo_value(None, name) or None},
                 ).model_dump()
-            return ToolResult(
-                content=[TextContent(type="text", text=encode_result_budget(payload))],
-                is_error=True,
-            )
+                return await server._exec_payload(
+                    _UNKNOWN_TOOL, payload, params={"name": _echo_value(None, name)}
+                )
 
     return ErrorEnvelopeMiddleware()
 
@@ -563,6 +646,9 @@ class SimulMCPServer(LoggerMixin):
         # _watch_session_end.
         self._watched_sessions: Set[str] = set()
         self._read_only_tools: Dict[str, bool] = {}
+        # Arbitrary-code tools security.allow_script_execution kept off the
+        # surface; a call to one answers ScriptExecutionDisabled.
+        self._hidden_script_tools: Set[str] = set()
         self._isaac_instance_locks: Dict[str, asyncio.Lock] = {}
         # Token buckets keyed by (agent, tool); the per-agent ceiling across
         # every tool uses _GLOBAL_RATE_BUCKET as the tool key.
@@ -854,7 +940,7 @@ class SimulMCPServer(LoggerMixin):
             The RateLimitError payload carrying ``retry_after_seconds``, or
             None when the call may proceed.
         """
-        if not self._rate_limit_enabled:
+        if not self._rate_limit_enabled or tool_name in _RATE_LIMIT_EXEMPT:
             return None
         agent = agent_id or self._resolve_agent_id(None)
         tool_bucket = self._get_rate_limiter(tool_name, agent)
@@ -1575,9 +1661,15 @@ class SimulMCPServer(LoggerMixin):
         try:
             payload = await call(request)
             if not isinstance(payload, dict):
-                raise TypeError(
-                    f"{tool_name} returned {type(payload).__name__}, not a JSON object"
+                # The engine side answered with something no tool returns: not
+                # the caller's input (a TypeError would read as ValidationError).
+                self.logger.error(
+                    "Tool %s returned %s, not a JSON object", tool_name, type(payload).__name__
                 )
+                return ErrorResponse(
+                    error=f"{tool_name} returned {type(payload).__name__}, not a JSON object",
+                    error_type=error_types.ENGINE_ERROR,
+                ).model_dump()
             apply_success_from_error(payload)
             if payload.get("success") is False and payload.get("error"):
                 # An error envelope built by the tool (input validation,
@@ -1609,10 +1701,13 @@ class SimulMCPServer(LoggerMixin):
         """Build the error envelope for an exception that escaped a tool call.
 
         A sandbox denial keeps the SandboxError envelope every layer reports.
-        Any other exception is named by its class, or by the ``error_type`` a
-        structured exception declares (Blender's AttachmentStale, an error the
-        Blender add-on relays), keeps the context its notes add, and carries
-        its ``details`` when it has any.
+        Any other exception gets the type of the vocabulary it belongs to
+        (``error_types.classify_exception``): the ``error_type`` a structured
+        exception declares (Blender's AttachmentStale, an error the Blender
+        add-on relays), or its family. A library's or Python's exception name
+        is no contract, so it is kept only as ``details.exception_type``. The
+        envelope keeps the context the exception's notes add and carries its
+        ``details`` when it has any.
 
         Args:
             tool_name: Registered tool name, for the log line.
@@ -1623,28 +1718,13 @@ class SimulMCPServer(LoggerMixin):
         """
         if isinstance(exc, SandboxDenied):
             return sandbox_error(exc.details)
-        error_type = exception_type_name(exc)
         message = exception_message(exc)
-        self.logger.error("Tool %s failed: %s: %s", tool_name, error_type, message)
-        details = getattr(exc, "details", None)
-        details = dict(details) if isinstance(details, dict) and details else {}
-        declared = getattr(exc, "error_type", None)
-        if not (isinstance(declared, str) and declared):
-            # A library's exception name is no contract: map transport
-            # failures onto the shared classes and keep the name as the cause.
-            canonical = classify_exception(exc)
-            if canonical is not None and canonical != error_type:
-                details.setdefault("cause", error_type)
-                error_type = canonical
-        payload = ErrorResponse(
-            error=message,
-            error_type=error_type,
-            details=details or None,
-        ).model_dump()
-        if error_type == error_types.VALIDATION_ERROR:
-            details.setdefault("errors", [{"field": None, "message": message, "type": "value_error"}])
-            payload["details"] = details
-        return payload
+        self.logger.error(
+            "Tool %s failed: %s: %s", tool_name, exception_type_name(exc), message
+        )
+        return normalize_error_payload(
+            ErrorResponse(error=message, **error_types.exception_fields(exc)).model_dump()
+        )
 
     @asynccontextmanager
     async def _isaac_admission(self, tool_name: str) -> AsyncIterator[Optional[Refusal]]:
@@ -1955,7 +2035,9 @@ class SimulMCPServer(LoggerMixin):
         lift, so every envelope is covered by one rule and an image never
         counts against the text it accompanies.
 
-        A payload with ``success: false`` is sent with ``isError: true``.
+        A payload with ``success: false`` is sent with ``isError: true``, and
+        with an ``error_type`` from the vocabulary (``normalize_error_payload``),
+        whichever path built it.
 
         Args:
             payload: The tool's result dict.
@@ -1963,6 +2045,8 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             One JSON text block, preceded by an image block when present.
         """
+        if payload.get("success") is False:
+            normalize_error_payload(payload)
         content: List[Any] = []
         image = payload.get("image_base64")
         if "image_base64" in payload:
@@ -2008,9 +2092,23 @@ class SimulMCPServer(LoggerMixin):
             return self.mcp.tool(**tool_kwargs)
 
         def unregistered(func: Callable[..., Any]) -> Callable[..., Any]:
+            self._hidden_script_tools.add(str(tool_kwargs.get("name") or func.__name__))
             return func
 
         return unregistered
+
+    @staticmethod
+    def _script_execution_disabled(tool_name: str) -> Dict[str, Any]:
+        """The ScriptExecutionDisabled envelope for a call to a hidden arbitrary-code tool."""
+        return ErrorResponse(
+            error=(
+                f"{tool_name} is not available: arbitrary script execution is disabled by "
+                "security.allow_script_execution. Use the granular tools, or set "
+                "SECURITY__ALLOW_SCRIPT_EXECUTION=true to enable it."
+            ),
+            error_type=error_types.SCRIPT_EXECUTION_DISABLED,
+            details={"tool": tool_name},
+        ).model_dump()
 
     def _tool_annotations(
         self,

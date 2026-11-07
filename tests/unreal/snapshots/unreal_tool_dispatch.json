@@ -4556,15 +4556,23 @@
     "is_error": true,
     "payload": {
      "success": false,
-     "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-     "error_type": "JSONDecodeError",
-     "details": null
+     "error": "scalar_params_json: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+     "error_type": "ValidationError",
+     "details": {
+      "errors": [
+       {
+        "field": "scalar_params_json",
+        "message": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "type": "json_invalid"
+       }
+      ]
+     }
     }
    },
    "usage": [
     {
      "success": false,
-     "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+     "error": "scalar_params_json: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
     }
    ]
   },
@@ -4623,13 +4631,12 @@
     "is_error": true,
     "payload": {
      "success": false,
-     "error": "could not convert string to float: 'x'",
+     "error": "location: could not convert string to float: 'x'",
      "error_type": "ValidationError",
      "details": {
-      "cause": "ValueError",
       "errors": [
        {
-        "field": null,
+        "field": "location",
         "message": "could not convert string to float: 'x'",
         "type": "value_error"
        }
@@ -4640,7 +4647,7 @@
    "usage": [
     {
      "success": false,
-     "error": "could not convert string to float: 'x'"
+     "error": "location: could not convert string to float: 'x'"
     }
    ]
   },
@@ -4665,13 +4672,12 @@
     "is_error": true,
     "payload": {
      "success": false,
-     "error": "could not convert string to float: 'up'",
+     "error": "plane_normal: could not convert string to float: 'up'",
      "error_type": "ValidationError",
      "details": {
-      "cause": "ValueError",
       "errors": [
        {
-        "field": null,
+        "field": "plane_normal",
         "message": "could not convert string to float: 'up'",
         "type": "value_error"
        }
@@ -4682,7 +4688,7 @@
    "usage": [
     {
      "success": false,
-     "error": "could not convert string to float: 'up'"
+     "error": "plane_normal: could not convert string to float: 'up'"
     }
    ]
   }

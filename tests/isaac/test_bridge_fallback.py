@@ -77,7 +77,8 @@ def test_bridge_action_still_reports_errors_when_fallback_disabled() -> None:
     outcome = asyncio.run(tools._execute_bridge_action("get_stage_info"))
 
     assert outcome is not None
-    assert outcome["error_type"] == "ConnectionRefusedError"
+    assert outcome["error_type"] == "ConnectionError"
+    assert outcome["details"] == {"exception_type": "ConnectionRefusedError"}
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +102,8 @@ def test_delivered_bridge_action_is_not_replayed_on_the_script_path() -> None:
 
     result = asyncio.run(tools.start_isaac_simulation())
 
-    assert result["error_type"] == "BridgeResponseTimeoutError"
+    assert result["error_type"] == "TimeoutError"
+    assert result["details"] == {"exception_type": "BridgeResponseTimeoutError"}
     assert client.execute.await_count == 0
     assert client.execute_vscode_only.await_count == 0
     assert client.execute_bridge_script_only.await_count == 0

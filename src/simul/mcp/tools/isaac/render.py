@@ -67,11 +67,11 @@ class RenderMixin:
             that did not lose data.
         """
         if len(aov_names) > 16:
-            return {"error": "aov_names must not exceed 16 entries", "error_type": "ValueError"}
+            return {"error": "aov_names must not exceed 16 entries", "error_type": "ValidationError"}
         num_frames = max(1, min(num_frames, 60))
         res = resolution or [256, 256]
         if len(res) != 2:
-            return {"error": "resolution must be [width, height]", "error_type": "ValueError"}
+            return {"error": "resolution must be [width, height]", "error_type": "ValidationError"}
         res = [max(1, min(res[0], 3840)), max(1, min(res[1], 2160))]
 
         _aov_names = _pyval(aov_names)
@@ -427,7 +427,7 @@ class RenderMixin:
             limit) are null, counted in ``non_finite_values``.
         """
         if attributes and len(attributes) > 32:
-            return {"error": "attributes must not exceed 32 entries", "error_type": "ValueError"}
+            return {"error": "attributes must not exceed 32 entries", "error_type": "ValidationError"}
         max_results = max(1, min(max_results, 2000))
         offset = max(0, offset)
         max_array_elements = max(0, min(int(max_array_elements), 10000))

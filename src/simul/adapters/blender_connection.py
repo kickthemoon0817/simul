@@ -14,6 +14,7 @@ from ..blender_bridge.protocol import BridgeFiles, BridgeRemoteError, BridgeWire
 from ..config import Settings
 from ..resources import find_checkout_root
 from ..utils.discovery import DiscoveryDir
+from ..utils.errors import ScriptExecutionDisabled
 from ..utils.paths import PathPolicy, SandboxDenied
 from .blender_runtime import BlenderRuntimeSession, add_context_hint
 
@@ -71,7 +72,7 @@ class BlenderConnection:
             timeout = self.settings.blender.connection_timeout
             if method == "execute_script":
                 if not self.settings.security.allow_script_execution:
-                    raise PermissionError("Script execution is disabled")
+                    raise ScriptExecutionDisabled("Script execution is disabled")
                 requested_timeout = arguments.arguments.get("timeout")
                 if requested_timeout is not None:
                     timeout = min(timeout, float(requested_timeout))
@@ -80,7 +81,9 @@ class BlenderConnection:
                     Path(self.settings.blender.attachment_path).expanduser()
                 )
             except FileNotFoundError as exc:
-                raise RuntimeError(
+                # Nothing to connect to yet: a ConnectionError, not the
+                # FileNotFoundError of the attachment file.
+                raise ConnectionError(
                     "No Blender window attached; run simul blender instances, then simul blender attach"
                 ) from exc
             policy = PathPolicy.from_settings(self.settings)

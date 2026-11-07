@@ -76,7 +76,8 @@ def test_interrupt_reports_an_unreachable_bridge() -> None:
     result = asyncio.run(IsaacTools(client).interrupt_script())
 
     assert result["success"] is False
-    assert result["error_type"] == "ConnectionRefusedError"
+    assert result["error_type"] == "ConnectionError"
+    assert result["details"] == {"exception_type": "ConnectionRefusedError"}
     assert "127.0.0.1:8229" in result["error"]
     assert "per-request timeout" in result["error"]
 

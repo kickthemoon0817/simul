@@ -146,6 +146,11 @@
      "mode": {
       "default": "ExecuteFile",
       "description": "ExecuteFile (multi-line), EvaluateStatement (expression), or ExecuteStatement (single statement).",
+      "enum": [
+       "ExecuteFile",
+       "EvaluateStatement",
+       "ExecuteStatement"
+      ],
       "type": "string"
      }
     },
@@ -2203,6 +2208,12 @@
     "properties": {
      "scene_type": {
       "description": "room, corridor, warehouse or outdoor.",
+      "enum": [
+       "room",
+       "corridor",
+       "warehouse",
+       "outdoor"
+      ],
       "type": "string"
      },
      "parameters": {
@@ -2256,6 +2267,11 @@
      "match_mode": {
       "default": "exact",
       "description": "exact (a tag equals label), contains (a tag contains label) or regex (label is a Python regular expression searched for in each tag; a repeated group that holds a quantifier or alternatives, as in (\\w+)+, is refused because it can run for hours); every mode ignores case.",
+      "enum": [
+       "exact",
+       "contains",
+       "regex"
+      ],
       "type": "string"
      },
      "max_results": {
@@ -2364,6 +2380,11 @@
      },
      "operation": {
       "description": "union, subtract, or intersect.",
+      "enum": [
+       "union",
+       "subtract",
+       "intersect"
+      ],
       "type": "string"
      }
     },
@@ -2600,6 +2621,11 @@
      "scheme": {
       "default": "catmull_clark",
       "description": "catmull_clark, loop, or uniform.",
+      "enum": [
+       "catmull_clark",
+       "loop",
+       "uniform"
+      ],
       "type": "string"
      }
     },

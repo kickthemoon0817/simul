@@ -145,7 +145,8 @@ def test_document_change_during_attach_does_not_publish(
 def test_no_bridge_never_creates_an_embedded_scene(settings: Settings) -> None:
     with pytest.raises(RuntimeError, match="No matching GUI"):
         BlenderAttachments(settings).attach()
-    with pytest.raises(RuntimeError, match="No Blender window attached"):
+    # Nothing to connect to: a ConnectionError, not a RuntimeError.
+    with pytest.raises(ConnectionError, match="No Blender window attached"):
         BlenderConnection(settings).create_object("CUBE")
 
 
@@ -498,9 +499,9 @@ def test_attach_blender_window_tool_attaches_and_lists_candidates_when_ambiguous
     info["windows"].append({**info["windows"][0], "window_id": "second"})
     payload = json.loads(asyncio.run(tool.func()).content[0].text)
     assert payload["success"] is False
-    # Reported as ValueError by the tool; ValidationError in the shared taxonomy.
+    # Raised as ValueError by the attachment; ValidationError in the shared taxonomy.
     assert payload["error_type"] == "ValidationError"
-    assert payload["details"]["cause"] == "ValueError"
+    assert payload["details"]["exception_type"] == "ValueError"
     assert {w["window_id"] for w in payload["details"]["instances"][0]["windows"]} == {"window", "second"}
     payload = json.loads(asyncio.run(tool.func(window_id="second")).content[0].text)
     assert payload["success"] is True and payload["window"]["window_id"] == "second"

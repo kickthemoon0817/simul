@@ -324,7 +324,7 @@ class ExplorationMixin:
         if light_type not in valid_types:
             return ErrorResponse(
                 error=f"Invalid light_type '{light_type}'. Must be one of: {valid_types}",
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         script = textwrap.dedent(f"""\
             import json
@@ -1113,13 +1113,13 @@ class ExplorationMixin:
         if len(origin) != 3 or len(direction) != 3:
             return ErrorResponse(
                 error="origin and direction must each be [x, y, z]",
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         length = math.sqrt(sum(float(c) * float(c) for c in direction))
         if length == 0.0 or not math.isfinite(length):
             return ErrorResponse(
                 error="direction must be a non-zero, finite vector",
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         _origin = _pyval([float(c) for c in origin])
         _direction = _pyval([float(c) / length for c in direction])

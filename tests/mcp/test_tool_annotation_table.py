@@ -201,6 +201,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "add_blender_force_field": (RW, False, True),
     "add_blender_modifier": (RW, False, True),
     "add_blender_rigid_body_constraint": (RW, False, True),
+    "apply_blender_modifier": (DESTRUCTIVE, False, True),
     "apply_simready_metadata": (DESTRUCTIVE, True, True),
     "assign_blender_material": (DESTRUCTIVE, True, True),
     "attach_blender_window": (RW, True, True),  # selects the target; Blender untouched
@@ -208,6 +209,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "capture_blender_viewport": (RO, True, True),  # base64 only, no file
     "capture_blender_viewport_sequence": (RO, True, True),  # base64 only, frame restored
     "check_blender_object_bounds": (RO, True, True),
+    "clean_blender_mesh": (DESTRUCTIVE, True, True),
     "clear_blender_object_parent": (DESTRUCTIVE, True, True),
     "control_blender_ui": (RW, False, True),
     "create_blender_mesh_from_data": (RW, False, True),
@@ -233,6 +235,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "get_blender_object_info": (RO, True, True),
     "get_blender_object_trajectory": (RO, True, True),
     "get_blender_physics_state": (RO, True, True),
+    "get_blender_rigid_body_world": (RO, True, True),
     "get_blender_viewport_info": (RO, True, True),
     "get_simready_metadata": (RO, True, True),
     "import_blender_file": (RW, False, True),
@@ -240,6 +243,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "list_blender_scene_objects": (RO, True, True),
     "open_blender_file": (DESTRUCTIVE, True, True),  # discards unsaved work
     "play_blender_animation": (RW, False, True),
+    "remove_blender_modifier": (DESTRUCTIVE, False, True),
     "save_blender_file": (DESTRUCTIVE, True, True),
     "search_blender_objects": (RO, True, True),
     "set_blender_camera_view": (RW, True, True),
@@ -248,6 +252,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "set_blender_light_params": (DESTRUCTIVE, True, True),
     "set_blender_object_parent": (DESTRUCTIVE, True, True),
     "set_blender_object_transform": (DESTRUCTIVE, True, True),
+    "set_blender_rigid_body_world": (DESTRUCTIVE, True, True),
     "setup_blender_rigid_body": (DESTRUCTIVE, True, True),
     "setup_simready_hierarchy": (RW, False, True),
     "summarize_blender_scene": (RO, True, True),

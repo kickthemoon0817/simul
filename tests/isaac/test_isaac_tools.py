@@ -96,7 +96,7 @@ class TestExecuteJsonScript:
         result = asyncio.run(tools.get_isaac_stage_info())
         assert result["success"] is False
         assert result["error_type"] == "EngineError"
-        assert result["details"] == {"cause": "RuntimeError"}
+        assert result["details"] == {"exception_type": "RuntimeError"}
         assert "boom" in result["error"]
 
     def test_a_reset_connection_is_a_connection_error(self) -> None:
@@ -104,7 +104,7 @@ class TestExecuteJsonScript:
         tools = _make_tools(execute_side_effect=ConnectionResetError(54, "Connection reset by peer"))
         result = asyncio.run(tools.get_isaac_stage_info())
         assert result["error_type"] == "ConnectionError"
-        assert result["details"] == {"cause": "ConnectionResetError"}
+        assert result["details"] == {"exception_type": "ConnectionResetError"}
 
     def test_a_timeout_without_a_message_says_what_happened(self) -> None:
         """A read deadline used to come back as TimeoutError with an empty error."""
@@ -152,12 +152,13 @@ class TestExecuteJsonScript:
         assert result["error_type"] == "EmptyOutput"
 
     def test_invalid_json(self) -> None:
-        """Non-JSON output produces a JSONDecodeError error."""
+        """Non-JSON output is the engine's failure: EngineError, naming the JSONDecodeError."""
         r = ScriptResult(success=True, output="not json at all")
         tools = _make_tools(execute_return=r)
         result = asyncio.run(tools.get_isaac_stage_info())
         assert result["success"] is False
-        assert result["error_type"] == "JSONDecodeError"
+        assert result["error_type"] == "EngineError"
+        assert result["details"]["exception_type"] == "JSONDecodeError"
         assert "raw_output" in result.get("details", {})
 
     def test_success_adds_flag(self) -> None:

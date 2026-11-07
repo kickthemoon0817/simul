@@ -1149,46 +1149,102 @@ refused it (the MCP input schema, a request model, the tool, the engine):
  "details": {"errors": [{"field": "width", "message": "...", "type": "less_than_equal"}], "input": {"width": 5000}}}
 ```
 
-and it is sent with `isError: true`. The classes below mean the same on every
-backend; tools keep more specific domain types where those say more
-(`RefusedOperation`, `CaptureError`, `UnsupportedFormat`). A transport
-failure never shows a library's exception name: it is `ConnectionError` or
-`TimeoutError`, with the original name in `details.cause`
-(`ClientConnectorError`, `ConnectionResetError`, `EmptyResponse`, ...). The
-names live in `simul.mcp.error_types`.
+and it is sent with `isError: true`. `error_type` is always one of the names
+below (`simul.mcp.error_types`): seven classes that mean the same on every
+backend, and domain types where a backend says more than a class would.
+Nothing else reaches a client. A library's or Python's exception name
+(`ClientConnectorError`, `ConnectionResetError`, `KeyError`, an
+`AttributeError` raised inside the engine) is mapped onto its family and kept
+in `details.exception_type`: a name with `Timeout` in it is a `TimeoutError`;
+`Connection*`, `BrokenPipeError` and `OSError` are a `ConnectionError`;
+`*NotFound*`, `FileNotFoundError`, `KeyError` and `LookupError` a
+`NotFoundError`; `ValueError`, `TypeError`, `JSONDecodeError`, `Invalid*` and
+`*ValidationError` a `ValidationError`; `PermissionError` a
+`PermissionDenied`; anything else an `EngineError`.
 
 | `error_type` | Meaning | What to do |
 |---|---|---|
-| `ValidationError` | The arguments do not fit the tool: wrong type, missing or unexpected argument, out of bounds, not among the choices. `details.errors` lists each field | Fix the call |
-| `NotFoundError` | What the call names (prim, actor, stage, instance, tool) does not exist | Check the name |
+| `ValidationError` | The arguments do not fit the tool: wrong type, missing or unexpected argument, out of bounds, not among the choices. `details.errors` lists each field; `details.code` names the check when a tool has several (USD's `InvalidPrimPath`, `InvalidAttribute`) | Fix the call |
+| `NotFoundError` | What the call names (prim, actor, object, material, stage, instance, tool, file) does not exist | Check the name |
 | `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
 | `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
-| `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a script that raised a non-domain error, a reply that does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
+| `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a non-domain exception, a reply that does not parse or does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
 | `InstanceBusy` | The Isaac instance is serving another call | Retry shortly |
 | `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
-| `RateLimitError` | The agent spent its rate-limit budget; `retry_after_seconds` says when to retry | Wait |
-| `InstanceClaimed` | Another agent holds a live claim on the Isaac instance (claims enforced) | Wait or use another instance |
-| `ClaimStoreError` | The claim records could not be read or saved | Check `~/.simul/sessions` |
-| `SessionRequired` | The tool keeps per-client state and the request has no client identity | Connect with a session |
-| `PermissionError` | The caller may not act on what it named (another agent's claim) | |
-| `RefusedOperation` | The tool refuses an operation that would damage the application or unsaved work without an override flag | Pass the flag if intended |
-| `PIEActive` | Unreal is in Play-In-Editor | Stop PIE |
-| `AuthenticationError` | The engine refused the credentials | Fix the token or passphrase |
-| `UnsupportedOperation` | The backend or mode cannot do this | |
-| `InvalidState` | Not possible in the current state (nothing claimed to release) | |
+
+Domain types of the server:
+
+| `error_type` | Meaning |
+|---|---|
+| `RateLimitError` | The agent spent its rate-limit budget; `retry_after_seconds` says when to retry. `release_isaac_instance` is never refused |
+| `InstanceClaimed` | Another agent holds a live claim on the Isaac instance (claims enforced) |
+| `ClaimStoreError` | The claim records could not be read or saved (check `$SIMUL_HOME/sessions`) |
+| `SessionRequired` | The tool keeps per-client state and the request has no client identity |
+| `PermissionDenied` | The caller may not act on what it named: another agent's claim, a file the process may not read or write |
+| `ScriptExecutionDisabled` | `security.allow_script_execution` is off; the arbitrary-code tools (`execute_isaac_script`, ...) answer this instead of an unknown-tool error |
+| `PayloadTooLarge` | A script or request is larger than the transport accepts |
+
+Domain types of the engines:
+
+| `error_type` | Meaning |
+|---|---|
+| `RefusedOperation` | The tool refuses an operation that would damage the application or unsaved work without an override flag |
+| `AuthenticationError` | The engine refused the credentials (python_server token, Remote Control passphrase) |
+| `UnsupportedOperation` | The backend or its mode cannot do this (`attach_blender_window` outside attached mode) |
+| `InvalidState` | Not possible in the current state (nothing claimed to release, a folder that already holds the import) |
+| `ScriptError` | An agent's script raised inside the engine; `details.exception_type` names what it raised, `details.traceback` where |
+| `EmptyOutput` | The engine's script printed nothing where the tool expected its reply |
+| `InvalidAssetType` | The asset is not of the kind the tool needs |
+| `UnsupportedFormat` | The file format is not one the tool reads or writes |
+| `CaptureError` | A viewport capture failed |
+| `ViewportUnavailable` | There is no viewport to read or drive (a headless editor) |
+| `UiUnavailable` | The editor UI the tool drives is not available |
+| `SimulationNotRunning` | The answer needs a running simulation (play or step once) |
+| `ValidationFailed` | An asset check ran and found errors |
+| `SimReadyValidationFailed` | A SimReady export was stopped by the validation it runs first |
+| `PIEActive` | Unreal is in Play-In-Editor |
+| `SpawnError` | Unreal could not spawn the actor from the class or asset given |
+| `PluginUnavailable` | The optional Unreal plugin the tool needs is not enabled |
+| `IncompatibleBody` | The Unreal body cannot simulate as asked; `details.problems` says why |
+| `EditorExited` | The Unreal editor exited while `simul unreal setup` waited for it |
+| `BridgeUnavailable` | The Isaac Sim bridge extension the tool needs is not configured |
+| `BridgeProtocolError` | A bridge (Isaac Sim's, Blender's) answered outside its protocol: another version, a malformed or unmatched reply; the request may have run |
+| `ResponseEncodingError` | Blender's bridge could not encode the result; the operation may have run |
+| `AttachmentError`, `AttachmentStale`, `AttachmentTargetChanged` | The attached Blender window could not be used, its process went away, or it loaded another file |
+| `UnsavedChangesError` | Blender refuses to replace a file with unsaved changes without the flag |
+| `LoadError` | A headless USD file could not be opened; `details.reason` says why |
+| `StageBusy` | A headless USD stage is serving a call that cannot run beside this one; retry shortly |
+| `ComputationError` | A headless USD computation failed |
+| `LogFileNotFound` | `simul logs` found no log file |
+| `*NotApplied` | The read-back family (`TransformNotApplied`, `MaterialNotApplied`, `RenderSettingNotApplied`, ...): the engine took the request, but what it reads back afterwards is not what was asked. The payload keeps the values read back, with `details.expected` and `details.actual` where the tool reports them. Match the family by the suffix |
 
 Each entry of a `ValidationError`'s `details.errors` has the `field` (a dotted
 path for a nested model's field, `metadata.physics.mass`), the `message` and
 pydantic's `type`, and when they apply the `constraint` that failed
-(`{"le": 3840}`, `{"expected": "'DomeLight', ... or 'CylinderLight'"}`), the
-`input` given and a `suggestion`: the closest valid choice, or the closest
-argument name for an unexpected one. A value whose argument name looks like a
-secret (`token`, `password`, `passphrase`, `secret`, `api_key`, `auth`) is
-echoed as `***`, and a long string by its size.
+(`{"le": 3840}`, `{"min_length": 3}`, `{"expected": "'DomeLight', ... or
+'CylinderLight'"}`), the `input` given and a `suggestion`: the closest valid
+choice, or the closest argument name for an unexpected one. A bpy enum
+refusal (`enum "BOXX" not found in ('BOX', 'SPHERE')`) gets the same
+`constraint`, `input` and `suggestion`.
+
+`details.input` (and each error's `input`) echoes the arguments bounded: a
+string longer than 256 characters by its size, a list or mapping by its first
+16 entries and a count of the rest (`"<19984 more items, 20000 in all>"`), at
+most 64 values per argument. A value whose name has a word that names a
+secret is echoed as `***`: an argument, a mapping key or a settings path, at
+any depth (`token`, `password`, `passphrase`, `passwd`, `pwd`, `secret`, `key`,
+`api_key`, `auth`, `authorization`, `credential`, `cookie`, `bearer`, `jwt`,
+`pin`; `access_key`, `apiKey`, `/persistent/auth_token`, but not `author` or
+`keyframe`).
 
 Arguments that do not fit the input schema are refused before the tool runs,
 but through the same envelope as every other failure: the call spends a
-rate-limit token and is recorded in the usage log and the audit log.
+rate-limit token and is recorded in the usage log and the audit log. A call to
+a tool that is not registered is a `NotFoundError`, recorded and rate limited
+under `<unknown tool>` with the name it gave in the record's parameters. On
+this version the audit row of a call that failed inside the envelope says
+`status: ok`, since it records only whether the MCP call raised; the usage log
+has the outcome.
 
 ## Annotations
 

@@ -346,6 +346,17 @@ _RENDER_LEVEL_SETTINGS: Dict[str, Tuple[str, str]] = {
 }
 
 
+class BlenderNotFoundError(ValueError):
+    """The object, material, collection or camera a call names does not exist.
+
+    A ValueError, as these lookups raised before, so a caller that catches
+    that keeps working; ``error_type`` makes the envelope report it as
+    ``NotFoundError``, on the bridge too (which relays a declared type).
+    """
+
+    error_type = "NotFoundError"
+
+
 class UnsavedChangesError(RuntimeError):
     """Opening a file would discard the open file's unsaved changes.
 
@@ -1358,7 +1369,7 @@ class BlenderRuntimeSession:
         blender_module: Any = bpy
         mat = blender_module.data.materials.get(material_name)
         if mat is None:
-            raise ValueError(f"Material not found: {material_name}")
+            raise BlenderNotFoundError(f"Material not found: {material_name}")
 
         use_nodes = bool(getattr(mat, "use_nodes", False))
         nodes: List[Dict[str, str]] = []
@@ -2436,11 +2447,11 @@ class BlenderRuntimeSession:
             try:
                 return self._get_object_or_raise(value)
             except ValueError:
-                raise ValueError(f"{what}: object '{value}' not found") from None
+                raise BlenderNotFoundError(f"{what}: object '{value}' not found") from None
         blender_module: Any = bpy
         datablock = getattr(blender_module.data, _ID_COLLECTIONS[rna.identifier]).get(value)
         if datablock is None:
-            raise ValueError(f"{what}: {type_name} '{value}' not found")
+            raise BlenderNotFoundError(f"{what}: {type_name} '{value}' not found")
         return datablock
 
     @staticmethod
@@ -3014,7 +3025,7 @@ class BlenderRuntimeSession:
         blender_module: Any = bpy
         collection = blender_module.data.collections.get(collection_name)
         if collection is None:
-            raise ValueError(f"Collection not found: {collection_name}")
+            raise BlenderNotFoundError(f"Collection not found: {collection_name}")
         view_layer = blender_module.context.view_layer
         objects = [o for o in collection.all_objects if o.name in view_layer.objects]
         if not objects:
@@ -5102,7 +5113,7 @@ class BlenderRuntimeSession:
             return scene.collection
         collection = blender_module.data.collections.get(collection_name)
         if collection is None:
-            raise ValueError(f"Collection '{collection_name}' not found")
+            raise BlenderNotFoundError(f"Collection '{collection_name}' not found")
         if collection not in scene.collection.children_recursive:
             raise ValueError(
                 f"Collection '{collection_name}' is not in scene '{scene.name}', so the "
@@ -6079,7 +6090,7 @@ class BlenderRuntimeSession:
         )
         obj = objects.get(object_name)
         if obj is None:
-            raise ValueError(f"Object not found: {object_name}")
+            raise BlenderNotFoundError(f"Object not found: {object_name}")
         return obj
 
     def _extract_principled_params(self, node: Any) -> Dict[str, Any]:
@@ -6154,7 +6165,7 @@ class BlenderRuntimeSession:
 
         collection = blender_module.data.collections.get(collection_name)
         if collection is None:
-            raise ValueError(f"Collection not found: {collection_name}")
+            raise BlenderNotFoundError(f"Collection not found: {collection_name}")
         if self._scene_scope:
             return [
                 obj
@@ -6182,7 +6193,7 @@ class BlenderRuntimeSession:
             )
             cam = objects.get(camera_name)
             if cam is None or cam.type != "CAMERA":
-                raise ValueError(f"Camera not found: {camera_name}")
+                raise BlenderNotFoundError(f"Camera not found: {camera_name}")
             return cam
 
         scene_cam = blender_module.context.scene.camera

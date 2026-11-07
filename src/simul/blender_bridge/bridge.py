@@ -23,7 +23,7 @@ import bpy
 from bpy.app.handlers import persistent
 
 from ..adapters.blender_runtime import BlenderRuntimeSession
-from ..utils.errors import exception_message
+from ..utils.errors import ScriptExecutionDisabled, exception_message, exception_type_name
 from ..utils.paths import PathPolicy, state_dir
 from .agent_control import reset_ui
 from .agent_cursor import cursors, hide_annotations, observations
@@ -315,7 +315,9 @@ class BlenderBridge:
                 # Notes carry context such as the object a bpy operator was
                 # adding a rigid body to; str(exc) alone would drop it.
                 "error": f"{type(exc).__name__}: {message}",
-                "error_type": type(exc).__name__,
+                # A declared type (NotFoundError, AttachmentStale) over the
+                # class name, as the envelope reports a local exception.
+                "error_type": exception_type_name(exc),
                 "details": getattr(exc, "details", {}),
             }
 
@@ -397,7 +399,7 @@ class BlenderBridge:
         if method == "execute_script" and not request.get(
             "allow_script_execution", False
         ):
-            raise PermissionError("Script execution is disabled")
+            raise ScriptExecutionDisabled("Script execution is disabled")
         policy = dict(request["path_policy"])
         policy["project_root"] = Path(policy["project_root"])
         session = BlenderRuntimeSession(

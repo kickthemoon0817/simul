@@ -297,10 +297,12 @@ def test_sessionless_http_clients_get_no_session_to_share(
     assert [payload["address"] for payload in pings] == [DEFAULT.address] * 3
     assert _agents(server) == [server_module._ANONYMOUS_AGENT] * 3
     assert server._session_routes == {}
-    # The refused session tools spend the shared anonymous budget too.
+    # The refused session tools spend the shared anonymous budget too, all
+    # but release_isaac_instance, which the rate limit never refuses.
     assert set(server._rate_limiters) == {
         (server_module._ANONYMOUS_AGENT, tool)
         for tool in ("ping_isaac", "*", *(name for name, _ in SESSION_TOOLS))
+        if tool != "release_isaac_instance"
     }
     assert server.session_manager.get_all_sessions() == []
 
