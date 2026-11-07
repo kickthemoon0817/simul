@@ -339,7 +339,8 @@
               "jpeg_quality": "85",
               "use_render_fallback": "False",
               "agent_id": "<session agent id>",
-              "method": "'auto'"
+              "method": "'auto'",
+              "camera_name": "None"
             }
           }
         ],
@@ -353,7 +354,8 @@
           "jpeg_quality": 70,
           "method": "auto",
           "use_render_fallback": true,
-          "agent_id": "snapshot-agent"
+          "agent_id": "snapshot-agent",
+          "camera_name": "Cam2"
         },
         "session_calls": [
           {
@@ -364,7 +366,8 @@
               "jpeg_quality": "70",
               "use_render_fallback": "False",
               "agent_id": "'snapshot-agent'",
-              "method": "'render'"
+              "method": "'render'",
+              "camera_name": "'Cam2'"
             }
           }
         ],
@@ -385,7 +388,8 @@
               "jpeg_quality": 85,
               "method": "auto",
               "use_render_fallback": false,
-              "agent_id": "snapshot-agent"
+              "agent_id": "snapshot-agent",
+              "camera_name": null
             }
           }
         }
@@ -510,7 +514,10 @@
               "height": "512",
               "jpeg_quality": "85",
               "agent_id": "<session agent id>",
-              "method": "'auto'"
+              "method": "'auto'",
+              "camera_name": "None",
+              "output_dir": "None",
+              "max_frames": "50"
             }
           }
         ],
@@ -526,7 +533,10 @@
           "height": 96,
           "jpeg_quality": 60,
           "agent_id": "snapshot-agent",
-          "method": "render"
+          "method": "render",
+          "camera_name": "Cam2",
+          "output_dir": "/tmp/frames",
+          "max_frames": 4
         },
         "session_calls": [
           {
@@ -539,11 +549,39 @@
               "height": "96",
               "jpeg_quality": "60",
               "agent_id": "'snapshot-agent'",
-              "method": "'render'"
+              "method": "'render'",
+              "camera_name": "'Cam2'",
+              "output_dir": "'/tmp/frames'",
+              "max_frames": "4"
             }
           }
         ],
         "response": {"checked_against": "BlenderCaptureSequenceResponse"},
+        "usage": [{"tool": "capture_blender_viewport_sequence", "success": false}]
+      },
+      "reversed": {
+        "arguments": {"start_frame": 9, "end_frame": 1, "agent_id": "snapshot-agent"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderCaptureSequenceRequest\n  Value error, end_frame (1) is before start_frame (9) [type=value_error, input_value={'start_frame': 9, 'end_f... None, 'max_frames': 50}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/value_error",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "start_frame": 9,
+              "end_frame": 1,
+              "step": 1,
+              "width": 512,
+              "height": 512,
+              "jpeg_quality": 85,
+              "agent_id": "snapshot-agent",
+              "method": "auto",
+              "camera_name": null,
+              "output_dir": null,
+              "max_frames": 50
+            }
+          }
+        },
         "usage": [{"tool": "capture_blender_viewport_sequence", "success": false}]
       },
       "invalid": {
@@ -562,7 +600,10 @@
               "height": 512,
               "jpeg_quality": 85,
               "agent_id": "snapshot-agent",
-              "method": "auto"
+              "method": "auto",
+              "camera_name": null,
+              "output_dir": null,
+              "max_frames": 50
             }
           }
         }

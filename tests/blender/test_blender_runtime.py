@@ -1,5 +1,6 @@
 """Tests for Blender runtime adapter functionality."""
 
+import base64
 import json
 import math
 from pathlib import Path
@@ -1918,29 +1919,29 @@ class TestVisualObservationTools:
         )
 
     @pytest.mark.parametrize(
-        ("half", "start_moved", "end_moved"),
+        "half",
         [
             # A 60 m cube stands about 275 m away, past the 100 m clip_end.
-            (30.0, False, True),
+            30.0,
             # A 1 cm cube stands about 5 cm away, nearer than the 10 cm clip_start.
-            (0.005, True, False),
-            # The default cube inside the default clip range changes nothing.
-            (1.0, False, False),
+            0.005,
+            # The default cube.
+            1.0,
         ],
-        ids=["far", "near", "inside"],
+        ids=["far", "near", "default"],
     )
-    def test_focus_on_object_widens_a_clip_range_that_cuts_the_object_away(
+    def test_focus_on_object_sets_a_clip_range_for_the_object(
         self,
         monkeypatch: pytest.MonkeyPatch,
         mathutils: Any,
         half: float,
-        start_moved: bool,
-        end_moved: bool,
     ) -> None:
         """Every corner lies inside the clip range afterwards, and the reply says so.
 
         The 60 m cube used to land 165 to 250 m away, beyond clip_end, so the
-        camera saw nothing while the tool reported success.
+        camera saw nothing while the tool reported success. The range starts
+        half way to the object's bounding sphere and spans a ratio of 1000,
+        as Blender's default camera does.
         """
         cam = self._make_camera_object(clip_start=0.1, clip_end=100.0)
 
@@ -1955,9 +1956,36 @@ class TestVisualObservationTools:
             cam.data.clip_start,
             cam.data.clip_end,
         )
-        assert (cam.data.clip_start != 0.1) is start_moved
-        assert (cam.data.clip_end != 100.0) is end_moved
-        assert result["clip_adjusted"] is (start_moved or end_moved)
+        radius = half * math.sqrt(3)
+        assert cam.data.clip_start == pytest.approx((result["distance"] - radius) / 2)
+        assert cam.data.clip_end == pytest.approx(1000 * cam.data.clip_start)
+        assert result["clip_adjusted"] is True
+
+    def test_focus_on_a_tiny_object_after_a_huge_one_narrows_the_clip_range(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Only widening left a 2 mm object framed at 0.0037 to 2577 m."""
+        cam = self._make_camera_object(clip_start=0.1, clip_end=100.0)
+        self._focus(monkeypatch, self._cube(half=250.0), cam)
+        assert cam.data.clip_end > 2000.0
+
+        result = self._focus(monkeypatch, self._cube(half=0.001), cam)
+
+        assert cam.data.clip_start == pytest.approx(
+            (result["distance"] - 0.001 * math.sqrt(3)) / 2
+        )
+        assert cam.data.clip_end < 10.0
+        assert result["clip_adjusted"] is True
+
+    def test_focusing_again_on_the_same_object_changes_no_clip_range(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        cam = self._make_camera_object(clip_start=0.1, clip_end=100.0)
+        self._focus(monkeypatch, self._cube(), cam)
+
+        again = self._focus(monkeypatch, self._cube(), cam)
+
+        assert again["clip_adjusted"] is False
 
     def test_focus_on_object_fits_an_orthographic_camera_by_its_scale(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
@@ -6207,16 +6235,23 @@ class TestVisualObservationTools:
 
     # -- capture_viewport_sequence -----------------------------------------
 
+    @staticmethod
+    def _sequence_session(tmp_path: Path) -> "blender_runtime.BlenderRuntimeSession":
+        """A session whose sandbox, and so whose capture directory, is the pytest tmp dir."""
+        return blender_runtime.BlenderRuntimeSession(
+            settings=Settings(security=SecurityConfig(allowed_paths=[str(tmp_path)]))
+        )
+
     def test_capture_viewport_sequence_basic(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """capture_viewport_sequence captures frames and restores frame."""
+        """Frames are written to files, their paths returned, and the frame restored."""
         cam = self._make_camera_object()
         fake_bpy = self._make_fake_bpy_with_camera(objects=[cam], frame_current=10)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._sequence_session(tmp_path)
 
         call_count = 0
 
@@ -6224,8 +6259,10 @@ class TestVisualObservationTools:
             nonlocal call_count
             call_count += 1
             return {
-                "image_base64": f"FRAME_{call_count}",
-                "capture_method": "gpu_offscreen",
+                "image_base64": base64.b64encode(f"FRAME_{call_count}".encode()).decode(),
+                "capture_method": "viewport",
+                "width": 64,
+                "height": 32,
             }
 
         monkeypatch.setattr(session, "capture_viewport", _mock_capture)
@@ -6233,18 +6270,22 @@ class TestVisualObservationTools:
         result = session.capture_viewport_sequence(start_frame=1, end_frame=3, step=1)
 
         assert result["frame_count"] == 3
-        assert len(result["frames"]) == 3
-        assert result["frames"][0]["frame"] == 1
-        assert result["frames"][1]["frame"] == 2
-        assert result["frames"][2]["frame"] == 3
-        assert result["frames"][0]["image_base64"] == "FRAME_1"
-        assert result["capture_method"] == "gpu_offscreen"
+        assert [f["frame"] for f in result["frames"]] == [1, 2, 3]
+        first = Path(result["frames"][0]["file_path"])
+        assert first.read_bytes() == b"FRAME_1"
+        assert first.name == "frame_000001.jpg"
+        assert first.parent == Path(result["output_dir"])
+        assert first.parent.parent == (tmp_path / "captures").resolve()
+        assert "image_base64" not in result["frames"][0]
+        assert (result["width"], result["height"]) == (64, 32)
+        assert result["capture_method"] == "viewport"
+        assert result["complete"] is True and result["next_start_frame"] is None
         # Original frame restored
         scene = fake_bpy.context.scene
         assert scene.frame_current == 10
 
     def test_capture_viewport_sequence_step(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """capture_viewport_sequence respects step parameter."""
         cam = self._make_camera_object()
@@ -6252,19 +6293,19 @@ class TestVisualObservationTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._sequence_session(tmp_path)
 
         monkeypatch.setattr(
             session,
             "capture_viewport",
-            lambda **kw: {"image_base64": "X", "capture_method": "render_fallback"},
+            lambda **kw: {"image_base64": "WA==", "capture_method": "render"},
         )
 
         result = session.capture_viewport_sequence(start_frame=1, end_frame=10, step=3)
 
         captured_frames = [f["frame"] for f in result["frames"]]
         assert captured_frames == [1, 4, 7, 10]
-        assert result["frame_count"] == 4
+        assert result["frame_count"] == result["requested_frame_count"] == 4
 
 
 # ---------------------------------------------------------------------------
@@ -7152,7 +7193,9 @@ class TestFileIOTools:
         assert "LegacyMesh" in result["imported_objects"]
         assert fake_bpy._ops_calls[0]["op"] == "import_scene.obj"
 
-    def test_import_fbx(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_import_fbx(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fbx_parser: Any
+    ) -> None:
         """FBX import uses import_scene.fbx (same for v3.6 and v4)."""
         fbx_file = tmp_path / "model.fbx"
         fbx_file.write_bytes(b"\x00")

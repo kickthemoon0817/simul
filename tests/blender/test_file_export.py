@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, List, Optional
@@ -1159,6 +1160,7 @@ def test_save_accepts_an_upper_case_blend_extension(
 def test_import_scale_goes_to_the_importer(
     fake: FakeBlender,
     session: Any,
+    fbx_parser: Any,
     tmp_path: Path,
     name: str,
     fmt: str,
@@ -1227,3 +1229,261 @@ def test_import_refuses_a_scale_that_is_not_positive(
 
     with pytest.raises(ValueError, match="scale must be a positive number"):
         session.import_file(str(tmp_path / "a.obj"), "OBJ", scale=scale)
+
+
+# -- files an import reads besides the one named (B1-20) ---------------------
+
+
+@pytest.fixture
+def outside(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A folder outside the session's sandbox, holding a secret image."""
+    folder = tmp_path_factory.mktemp("outside")
+    (folder / "secret.png").write_bytes(b"\x89PNG secret")
+    return folder
+
+
+def _write_gltf(path: Path, uris: List[str]) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "asset": {"version": "2.0"},
+                "buffers": [{"uri": "data:application/octet-stream;base64,AAAA"}],
+                "images": [{"uri": uri} for uri in uris],
+            }
+        )
+    )
+
+
+def _assert_refused(raised: pytest.ExceptionInfo, secret: Path, imported: Path) -> None:
+    details = raised.value.details
+    assert details["file_path"] == str(secret)
+    assert details["references_outside"] == [str(secret)]
+    assert details["referenced_by"] == str(imported)
+    assert "outside the sandbox" in details["hint"]
+
+
+def test_a_gltf_image_outside_the_sandbox_is_refused_before_importing(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path
+) -> None:
+    """The image a glTF inside the sandbox pointed at outside it was imported."""
+    gltf = tmp_path / "textured.gltf"
+    _write_gltf(gltf, [str(outside / "secret.png")])
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(gltf), "GLTF")
+
+    _assert_refused(raised, outside / "secret.png", gltf)
+    assert fake.calls == []
+
+
+def test_a_relative_gltf_uri_climbing_out_of_the_sandbox_is_refused(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path
+) -> None:
+    gltf = tmp_path / "deep" / "model.gltf"
+    gltf.parent.mkdir()
+    relative = os.path.relpath(outside / "secret.png", gltf.parent)
+    _write_gltf(gltf, [relative.replace(os.sep, "/").replace(" ", "%20")])
+
+    with pytest.raises(PermissionError):
+        session.import_file(str(gltf), "GLTF")
+
+
+def test_a_glb_json_chunk_is_checked(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path
+) -> None:
+    import struct
+
+    document = json.dumps({"images": [{"uri": str(outside / "secret.png")}]}).encode()
+    document += b" " * (-len(document) % 4)
+    glb = tmp_path / "model.glb"
+    glb.write_bytes(
+        b"glTF"
+        + struct.pack("<II", 2, 12 + 8 + len(document))
+        + struct.pack("<II", len(document), 0x4E4F534A)
+        + document
+    )
+
+    with pytest.raises(PermissionError):
+        session.import_file(str(glb), "GLTF")
+
+
+def test_gltf_references_inside_the_sandbox_or_missing_import(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path
+) -> None:
+    (tmp_path / "tex.png").write_bytes(b"\x89PNG")
+    gltf = tmp_path / "ok.gltf"
+    _write_gltf(gltf, ["tex.png", str(outside / "missing.png")])
+
+    session.import_file(str(gltf), "GLTF")
+
+    assert _call(fake, "import_scene.gltf") == {"filepath": str(gltf)}
+
+
+def test_an_obj_mtl_library_outside_the_sandbox_is_refused(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path
+) -> None:
+    (outside / "evil.mtl").write_text("newmtl M\n")
+    obj = tmp_path / "mesh.obj"
+    obj.write_text(f"mtllib {os.path.relpath(outside / 'evil.mtl', tmp_path)}\no M\n")
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(obj), "OBJ")
+
+    assert raised.value.details["references_outside"] == [str(outside / "evil.mtl")]
+
+
+@pytest.mark.parametrize(
+    "line", ["map_Kd -s 1 1 1 -o 0 0 {path}", "map_Bump -bm 0.5 {path}", "norm {path}"]
+)
+def test_an_mtl_texture_outside_the_sandbox_is_refused(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path, line: str
+) -> None:
+    texture = line.format(path=outside / "secret.png")
+    (tmp_path / "mesh.mtl").write_text(f"newmtl M\n{texture}\n")
+    obj = tmp_path / "mesh.obj"
+    obj.write_text("mtllib mesh.mtl\no M\n")
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(obj), "OBJ")
+
+    _assert_refused(raised, outside / "secret.png", obj)
+
+
+def test_an_mtl_texture_beside_it_imports(
+    fake: FakeBlender, session: Any, tmp_path: Path
+) -> None:
+    (tmp_path / "wood.png").write_bytes(b"\x89PNG")
+    (tmp_path / "mesh.mtl").write_text('newmtl M\nmap_Kd -s 2 2 "wood.png"\n')
+    obj = tmp_path / "mesh.obj"
+    obj.write_text("mtllib mesh.mtl\no M\n")
+
+    session.import_file(str(obj), "OBJ")
+
+    assert _call(fake, "wm.obj_import") == {"filepath": str(obj)}
+
+
+def test_an_fbx_texture_outside_the_sandbox_is_refused(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path, fbx_parser: Any
+) -> None:
+    fbx = tmp_path / "model.fbx"
+    fbx.write_bytes(b"Kaydara FBX Binary")
+    fbx_parser.textures.append({b"FileName": str(outside / "secret.png")})
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(fbx), "FBX")
+
+    _assert_refused(raised, outside / "secret.png", fbx)
+
+
+def test_an_fbx_texture_found_beside_it_imports(
+    fake: FakeBlender, session: Any, tmp_path: Path, fbx_parser: Any
+) -> None:
+    """An absolute path from another machine is looked up by name beside the FBX."""
+    (tmp_path / "wood.png").write_bytes(b"\x89PNG")
+    fbx = tmp_path / "model.fbx"
+    fbx.write_bytes(b"Kaydara FBX Binary")
+    fbx_parser.textures.append({b"FileName": "C:/Users/artist/textures/wood.png"})
+
+    session.import_file(str(fbx), "FBX")
+
+    assert _call(fake, "import_scene.fbx") == {"filepath": str(fbx)}
+
+
+def test_a_usd_texture_or_layer_outside_the_sandbox_is_refused(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path
+) -> None:
+    (outside / "other.usda").write_text("#usda 1.0\n")
+    stage = tmp_path / "scene.usda"
+    stage.write_text(
+        "#usda 1.0\n"
+        'def Xform "World" {\n'
+        '    def Shader "Tex" {\n'
+        f"        asset inputs:file = @{outside / 'secret.png'}@\n"
+        "    }\n"
+        "}\n"
+    )
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(stage), "USD")
+    _assert_refused(raised, outside / "secret.png", stage)
+
+    stage.write_text(f'#usda 1.0\n(\n    subLayers = [@{outside / "other.usda"}@]\n)\n')
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(stage), "USD")
+    assert raised.value.details["references_outside"] == [str(outside / "other.usda")]
+
+
+def test_a_usd_layer_inside_the_sandbox_is_followed(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path
+) -> None:
+    secret = outside / "secret.png"
+    (tmp_path / "props.usda").write_text(
+        f'#usda 1.0\ndef "P" {{\n    asset inputs:file = @{secret}@\n}}\n'
+    )
+    stage = tmp_path / "scene.usda"
+    stage.write_text('#usda 1.0\ndef "World" (\n    references = @./props.usda@\n) {}\n')
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(stage), "USD")
+
+    assert raised.value.details["references_outside"] == [str(secret)]
+
+
+def test_usd_references_inside_the_sandbox_import(
+    fake: FakeBlender, session: Any, tmp_path: Path
+) -> None:
+    (tmp_path / "tex.png").write_bytes(b"\x89PNG")
+    (tmp_path / "props.usda").write_text("#usda 1.0\n")
+    stage = tmp_path / "scene.usda"
+    stage.write_text(
+        "#usda 1.0\n(\n    subLayers = [@./props.usda@]\n)\n"
+        'def Shader "Tex" {\n    asset inputs:file = @tex.png@\n}\n'
+    )
+
+    session.import_file(str(stage), "USD")
+
+    assert _call(fake, "wm.usd_import") == {"filepath": str(stage)}
+
+
+def test_a_binary_usd_file_without_pxr_is_refused(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeBlender, session: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setitem(sys.modules, "pxr", None)
+    stage = tmp_path / "scene.usdc"
+    stage.write_bytes(b"PXR-USDC binary")
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(stage), "USD")
+
+    assert "Could not check" in raised.value.details["hint"]
+    assert fake.calls == []
+
+
+def test_a_text_usd_file_without_pxr_is_scanned(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: FakeBlender,
+    session: Any,
+    tmp_path: Path,
+    outside: Path,
+) -> None:
+    monkeypatch.setitem(sys.modules, "pxr", None)
+    secret = outside / "secret.png"
+    stage = tmp_path / "scene.usda"
+    stage.write_text(f'#usda 1.0\ndef "T" {{\n    asset inputs:file = @{secret}@\n}}\n')
+
+    with pytest.raises(PermissionError):
+        session.import_file(str(stage), "USD")
+
+
+def test_references_are_not_checked_with_the_sandbox_off(
+    fake: FakeBlender, tmp_path: Path, outside: Path
+) -> None:
+    session = blender_runtime.BlenderRuntimeSession(
+        settings=Settings(security={"sandbox_enabled": False})
+    )
+    gltf = tmp_path / "textured.gltf"
+    _write_gltf(gltf, [str(outside / "secret.png")])
+
+    session.import_file(str(gltf), "GLTF")
+
+    assert _call(fake, "import_scene.gltf") == {"filepath": str(gltf)}

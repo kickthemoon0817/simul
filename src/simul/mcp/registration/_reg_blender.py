@@ -52,6 +52,9 @@ from ..schemas.blender import (
     SCRIPT_OUTPUT_CHARS_DEFAULT,
     SCRIPT_OUTPUT_CHARS_MAX,
     SCRIPT_OUTPUT_JSON_BYTES_MAX,
+    SEQUENCE_FRAMES_DEFAULT,
+    SEQUENCE_FRAMES_MAX,
+    SEQUENCE_TIME_BUDGET_SECONDS,
     BlenderAddConstraintRequest,
     BlenderAddConstraintResponse,
     BlenderAddForceFieldRequest,
@@ -537,6 +540,7 @@ def _capture_viewport_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
         method: BlenderCaptureMethod = "auto",
         use_render_fallback: bool = False,
         agent_id: Optional[str] = None,
+        camera_name: Optional[str] = None,
     ) -> ToolResult:
         return await _exec(
             server,
@@ -547,6 +551,7 @@ def _capture_viewport_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
                 request.jpeg_quality,
                 agent_id=request.agent_id,
                 method=request.method,
+                camera_name=request.camera_name,
             ),
             {
                 "width": width,
@@ -555,6 +560,7 @@ def _capture_viewport_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
                 "method": method,
                 "use_render_fallback": use_render_fallback,
                 "agent_id": server._resolve_agent_id(agent_id),
+                "camera_name": camera_name,
             },
         )
 
@@ -578,6 +584,9 @@ def _capture_sequence_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
         jpeg_quality: int = 85,
         agent_id: Optional[str] = None,
         method: BlenderCaptureMethod = "auto",
+        camera_name: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        max_frames: int = SEQUENCE_FRAMES_DEFAULT,
     ) -> ToolResult:
         return await _exec(
             server,
@@ -591,6 +600,9 @@ def _capture_sequence_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
                 request.jpeg_quality,
                 agent_id=request.agent_id,
                 method=request.method,
+                camera_name=request.camera_name,
+                output_dir=request.output_dir,
+                max_frames=request.max_frames,
             ),
             {
                 "start_frame": start_frame,
@@ -601,6 +613,9 @@ def _capture_sequence_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
                 "jpeg_quality": jpeg_quality,
                 "agent_id": server._resolve_agent_id(agent_id),
                 "method": method,
+                "camera_name": camera_name,
+                "output_dir": output_dir,
+                "max_frames": max_frames,
             },
         )
 
@@ -755,11 +770,13 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "through the scene camera, or through a temporary camera removed afterwards: "
             "aligned to the 3D View when attached, framing the visible objects when embedded "
             "or when the window shows no 3D View "
-            "(render_temp_camera_view / render_temp_camera_framing). The image arrives as an MCP "
-            "image content block, followed by a JSON block with success, width, height, engine, "
-            "capture_method, format and image_attached=true. In attached mode, briefly show an "
-            "agent eye badge and border pulse after success. Agent annotations are excluded "
-            "from the captured image."
+            "(render_temp_camera_view / render_temp_camera_framing). camera_name captures "
+            "through that camera without changing the scene camera or the view: a render "
+            "renders through it, a viewport capture draws the 3D View's shading from it "
+            "(viewport_camera). The image arrives as an MCP image content block, followed by a "
+            "JSON block with success, width, height, engine, capture_method, camera_name, format "
+            "and image_attached=true. In attached mode, briefly show an agent eye badge and "
+            "border pulse after success. Agent annotations are excluded from the captured image."
         ),
         hints=READ_ONLY,
         operation="capture_viewport",
@@ -811,7 +828,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Frame a Blender object with a camera (the active one by default): aim it from "
             "the front and above at the object's bounding-box center, at the distance where "
             "the object fits the frame (an orthographic camera gets the ortho_scale that fits "
-            "it), widening the clip range when it would cut the object away. As with "
+            "it), and set the clip range for it: from half way to the object to 1000 times "
+            "that, at least twice its far side (clip_adjusted when that changed it). As with "
             "set_blender_camera_view, success means the framing is in the camera's "
             "transform and its constraints still apply: camera_location and "
             "camera_rotation_euler report where Blender evaluates the camera, and "
@@ -827,7 +845,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_viewport_info",
-        description="Get active viewport and render settings.",
+        description=(
+            "Get the render settings (engine, resolution, film, active camera) and, in attached "
+            "mode, view3d: the 3D View captures use, with its view_matrix, eye_location, "
+            "perspective, lens, clip range and shading. view3d is null without an editor window "
+            "(embedded bpy, blender -b) or 3D View, and view3d_unavailable_reason says which."
+        ),
         hints=READ_ONLY,
         operation="get_viewport_info",
         response=BlenderViewportInfoResponse,
@@ -835,9 +858,14 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="capture_blender_viewport_sequence",
         description=(
-            "Capture a frame range as base64-encoded JPEGs, each made like "
-            "capture_blender_viewport with the same method (the 3D View when attached, a "
-            "camera render in embedded mode). "
+            "Capture a frame range as JPEG files, each made like capture_blender_viewport "
+            "with the same method and camera_name (the 3D View when attached, a camera render "
+            "in embedded mode), and return their paths: frames [{frame, file_path}], "
+            "output_dir (default a new folder in the sandbox's capture directory), width and "
+            "height. end_frame must not be before start_frame. One call captures at most "
+            f"max_frames (default {SEQUENCE_FRAMES_DEFAULT}, at most {SEQUENCE_FRAMES_MAX}) and "
+            f"starts no frame after {SEQUENCE_TIME_BUDGET_SECONDS:g} s, since Blender is busy "
+            "meanwhile; then complete is false and next_start_frame says where to continue. "
             "In attached mode, briefly show an agent eye badge and border pulse after success. "
             "Agent annotations are excluded from the captured images."
         ),

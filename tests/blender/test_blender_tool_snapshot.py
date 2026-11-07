@@ -127,6 +127,7 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "method": "auto",
             "use_render_fallback": True,
             "agent_id": SNAPSHOT_AGENT,
+            "camera_name": "Cam2",
         },
     },
     "set_blender_camera_view": {
@@ -154,7 +155,11 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "jpeg_quality": 60,
             "agent_id": SNAPSHOT_AGENT,
             "method": "render",
+            "camera_name": "Cam2",
+            "output_dir": "/tmp/frames",
+            "max_frames": 4,
         },
+        "reversed": {"start_frame": 9, "end_frame": 1, "agent_id": SNAPSHOT_AGENT},
     },
     "create_blender_object": {
         "minimal": {"object_type": "CUBE"},

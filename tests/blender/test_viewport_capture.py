@@ -12,6 +12,7 @@ asked for, through a temporary camera when the scene has none.
 from __future__ import annotations
 
 import base64
+import json
 import math
 import sys
 from contextlib import contextmanager, nullcontext
@@ -838,12 +839,24 @@ def test_no_writable_capture_directory_fails_before_touching_the_scene(
     assert fake.linked == [] and fake.renders == []
 
 
-# -- sequences --------------------------------------------------------------
+# -- sequences (B1-05) --------------------------------------------------------
 
 
-def test_sequence_captures_each_frame_with_the_resolved_method(
+class _Clock:
+    """time.monotonic stand-in that advances by ``tick`` seconds per reading."""
+
+    def __init__(self, tick: float) -> None:
+        self.now, self.tick = 0.0, tick
+
+    def __call__(self) -> float:
+        self.now += self.tick
+        return self.now
+
+
+def _sequence_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+) -> Tuple[FakeBlender, blender_runtime.BlenderRuntimeSession, List[Dict[str, Any]]]:
+    """A session whose captures are recorded and return a tiny JPEG."""
     fake = FakeBlender(tmp_path)
     fake.scene.frame_current = 7
     fake.scene.frame_set = lambda frame: setattr(fake.scene, "frame_current", frame)
@@ -852,14 +865,339 @@ def test_sequence_captures_each_frame_with_the_resolved_method(
 
     def _capture(**kwargs: Any) -> Dict[str, Any]:
         calls.append({**kwargs, "frame": fake.scene.frame_current})
-        return {"image_base64": "X", "capture_method": "viewport"}
+        jpeg = JPEG_PREFIX + f"frame {fake.scene.frame_current}".encode()
+        return {
+            "image_base64": base64.b64encode(jpeg).decode("ascii"),
+            "capture_method": "viewport",
+            "width": 512,
+            "height": 256,
+        }
 
     monkeypatch.setattr(session, "capture_viewport", _capture)
+    return fake, session, calls
 
-    result = session.capture_viewport_sequence(1, 3, width=64, height=64)
 
-    assert [c["frame"] for c in calls] == [1, 2, 3]
+def test_sequence_writes_each_frame_to_a_file_and_returns_its_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Five 512 px frames inline came back as one, cut by the result budget."""
+    fake, session, calls = _sequence_session(monkeypatch, tmp_path)
+
+    result = session.capture_viewport_sequence(1, 5, width=512, height=512)
+
+    assert [c["frame"] for c in calls] == [1, 2, 3, 4, 5]
     assert {c["method"] for c in calls} == {"viewport"}
-    assert result["capture_method"] == "viewport" and fake.scene.frame_current == 7
-    empty = session.capture_viewport_sequence(5, 1, method="render")
-    assert empty == {"frames": [], "frame_count": 0, "capture_method": "render"}
+    assert fake.scene.frame_current == 7
+    folder = Path(result["output_dir"])
+    assert folder.parent == tmp_path / "captures" and folder.name.startswith("sequence-")
+    assert result["frames"] == [
+        {"frame": f, "file_path": str(folder / f"frame_{f:06d}.jpg")} for f in range(1, 6)
+    ]
+    assert Path(result["frames"][2]["file_path"]).read_bytes() == JPEG_PREFIX + b"frame 3"
+    assert result["frame_count"] == result["requested_frame_count"] == 5
+    assert result["complete"] is True
+    assert result["next_start_frame"] is None and result["stopped_by"] is None
+    assert (result["width"], result["height"], result["format"]) == (512, 256, "jpeg")
+    assert result["capture_method"] == "viewport"
+    assert len(json.dumps(result)) < 2_000
+
+
+def test_a_reversed_frame_range_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """start_frame 5, end_frame 1 reported success with no frames."""
+    _fake, session, calls = _sequence_session(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="before start_frame"):
+        session.capture_viewport_sequence(5, 1, method="render")
+
+    assert calls == []
+    assert not (tmp_path / "captures").exists()
+
+
+def test_a_long_range_stops_at_max_frames_and_names_where_to_continue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """1..1500 ran 7 s on Blender's main thread, then failed to encode."""
+    fake, session, calls = _sequence_session(monkeypatch, tmp_path)
+
+    result = session.capture_viewport_sequence(1, 1500, step=2, max_frames=3)
+
+    assert [f["frame"] for f in result["frames"]] == [1, 3, 5]
+    assert result["requested_frame_count"] == 750
+    assert result["complete"] is False
+    assert result["next_start_frame"] == 7
+    assert result["stopped_by"] == "max_frames"
+    assert fake.scene.frame_current == 7
+
+
+def test_a_slow_range_stops_starting_frames_after_the_time_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake, session, _calls = _sequence_session(monkeypatch, tmp_path)
+    # Each reading of the clock is 4 s later: frames start at 0, 4 and 8 s.
+    monkeypatch.setattr(blender_runtime.time, "monotonic", _Clock(4.0))
+
+    result = session.capture_viewport_sequence(10, 20)
+
+    assert [f["frame"] for f in result["frames"]] == [10, 11, 12]
+    assert result["stopped_by"] == "time_budget"
+    assert result["next_start_frame"] == 13
+
+
+def test_at_least_one_frame_is_captured_however_slow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake, session, _calls = _sequence_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(blender_runtime.time, "monotonic", _Clock(60.0))
+
+    result = session.capture_viewport_sequence(1, 3)
+
+    assert [f["frame"] for f in result["frames"]] == [1]
+    assert result["next_start_frame"] == 2
+
+
+@pytest.mark.parametrize("max_frames", [0, blender_runtime.MAX_SEQUENCE_FRAMES + 1])
+def test_max_frames_out_of_range_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, max_frames: int
+) -> None:
+    _fake, session, _calls = _sequence_session(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="max_frames"):
+        session.capture_viewport_sequence(1, 3, max_frames=max_frames)
+
+
+def test_a_sequence_goes_to_the_output_dir_asked_for_inside_the_sandbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake, session, _calls = _sequence_session(monkeypatch, tmp_path)
+    target = tmp_path / "shots" / "walk"
+
+    result = session.capture_viewport_sequence(3, 4, output_dir=str(target))
+
+    assert result["output_dir"] == str(target)
+    assert sorted(p.name for p in target.iterdir()) == [
+        "frame_000003.jpg",
+        "frame_000004.jpg",
+    ]
+
+
+def test_an_output_dir_outside_the_sandbox_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake, session, calls = _sequence_session(monkeypatch, tmp_path)
+    with pytest.raises(PermissionError, match="sandbox"):
+        session.capture_viewport_sequence(1, 2, output_dir="/etc/simul-frames")
+    assert calls == []
+
+
+def test_a_sequence_captures_through_the_named_camera(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake, session, calls = _sequence_session(monkeypatch, tmp_path)
+    fake.scene.objects = _SceneObjects([SimpleNamespace(name="Cam2", type="CAMERA")])
+
+    result = session.capture_viewport_sequence(1, 2, camera_name="Cam2")
+
+    assert {c["camera_name"] for c in calls} == {"Cam2"}
+    assert result["camera_name"] == "Cam2"
+    with pytest.raises(ValueError, match="Camera not found: Nope"):
+        session.capture_viewport_sequence(1, 2, camera_name="Nope")
+
+
+def test_the_sequence_frame_limits_match_the_mcp_schema() -> None:
+    from simul.mcp.schemas import blender as schemas
+
+    assert schemas.SEQUENCE_FRAMES_DEFAULT == blender_runtime.DEFAULT_SEQUENCE_FRAMES
+    assert schemas.SEQUENCE_FRAMES_MAX == blender_runtime.MAX_SEQUENCE_FRAMES
+    assert (
+        schemas.SEQUENCE_TIME_BUDGET_SECONDS
+        == blender_runtime.SEQUENCE_TIME_BUDGET_SECONDS
+    )
+
+
+# -- capturing through a named camera ----------------------------------------
+
+
+class _SceneObjects(list):
+    """scene.objects: iterable, and looked up by name."""
+
+    def get(self, name: str) -> Any:
+        return next((o for o in self if o.name == name), None)
+
+
+def _named_camera(name: str = "Cam2") -> SimpleNamespace:
+    """A camera whose evaluated copy has a world matrix and a projection."""
+    evaluated = SimpleNamespace(
+        matrix_world=SimpleNamespace(inverted=lambda: "cam2 view matrix"),
+        calc_matrix_camera=lambda depsgraph, x, y: ("cam2 projection", depsgraph, x, y),
+    )
+    return SimpleNamespace(
+        name=name, type="CAMERA", evaluated_get=lambda depsgraph: evaluated
+    )
+
+
+def test_render_through_a_named_camera_restores_the_scene_camera(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A render after focusing Cam2 used "Camera": no tool chose the camera."""
+    scene_camera, cam2 = _scene_camera(), _named_camera()
+    fake = FakeBlender(tmp_path, camera=scene_camera)
+    fake.scene.objects = _SceneObjects([scene_camera, cam2])
+    session = _session(monkeypatch, fake, tmp_path)
+
+    result = session.capture_viewport(method="render", camera_name="Cam2")
+
+    assert [r["camera"] for r in fake.renders] == [cam2]
+    assert fake.scene.camera is scene_camera
+    assert result["camera_name"] == "Cam2" and result["capture_method"] == "render"
+
+
+def test_render_through_a_named_camera_restores_a_scene_without_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cam2 = _named_camera()
+    fake = FakeBlender(tmp_path, camera=None)
+    fake.scene.objects = _SceneObjects([cam2])
+    session = _session(monkeypatch, fake, tmp_path)
+
+    session.capture_viewport(method="render", camera_name="Cam2")
+
+    assert [r["camera"] for r in fake.renders] == [cam2]
+    assert fake.scene.camera is None and fake.linked == []
+
+
+def test_a_failed_render_through_a_named_camera_restores_the_scene_camera(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    scene_camera, cam2 = _scene_camera(), _named_camera()
+    fake = FakeBlender(tmp_path, camera=scene_camera)
+    fake.scene.objects = _SceneObjects([scene_camera, cam2])
+    fake.render_error = RuntimeError("render failed")
+    session = _session(monkeypatch, fake, tmp_path)
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        session.capture_viewport(method="render", camera_name="Cam2")
+
+    assert fake.scene.camera is scene_camera
+
+
+def test_the_scene_camera_of_a_render_is_named(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeBlender(tmp_path, camera=_scene_camera())
+    session = _session(monkeypatch, fake, tmp_path)
+
+    assert session.capture_viewport(method="render")["camera_name"] == "Camera"
+
+
+def test_viewport_capture_through_a_named_camera_draws_from_its_matrices(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gpu: FakeGPU
+) -> None:
+    """The 3D View's shading from the camera; the user's view is left alone."""
+    cam2 = _named_camera()
+    fake = FakeBlender(tmp_path, camera=_scene_camera())
+    fake.scene.objects = _SceneObjects([cam2])
+    fake.render.pixel_aspect_x = fake.render.pixel_aspect_y = 1.0
+    session = _session(monkeypatch, fake, tmp_path)
+
+    result = session.capture_viewport(width=512, height=512, camera_name="Cam2")
+
+    assert result["capture_method"] == "viewport_camera"
+    assert result["camera_name"] == "Cam2"
+    # The 1920 x 1080 render frame keeps its aspect ratio inside 512 x 512.
+    assert (result["width"], result["height"]) == (512, 288)
+    (offscreen,) = gpu.offscreens
+    _scene, _layer, space, region, view_matrix, projection, _managed = offscreen.drawn
+    assert (space, region) == (fake.space, fake.region)
+    assert view_matrix == "cam2 view matrix"
+    assert projection == ("cam2 projection", "depsgraph", 512, 288)
+    fake.view.update.assert_not_called()
+    assert fake.renders == []
+
+
+def test_an_external_engines_rendered_view_cannot_be_drawn_through_a_camera(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gpu: FakeGPU
+) -> None:
+    fake = FakeBlender(tmp_path, shading="RENDERED", engine="CYCLES")
+    fake.scene.objects = _SceneObjects([_named_camera()])
+    session = _session(monkeypatch, fake, tmp_path)
+
+    with pytest.raises(RuntimeError, match="method='render'"):
+        session.capture_viewport(camera_name="Cam2")
+
+    assert gpu.offscreens == [] and fake.screenshots == []
+
+
+def test_a_named_object_that_is_no_camera_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeBlender(tmp_path)
+    fake.scene.objects = _SceneObjects([SimpleNamespace(name="Cube", type="MESH")])
+    session = _session(monkeypatch, fake, tmp_path)
+
+    with pytest.raises(ValueError, match="Camera not found: Cube"):
+        session.capture_viewport(method="render", camera_name="Cube")
+    assert fake.renders == []
+
+
+# -- get_viewport_info (B1-23) -------------------------------------------------
+
+
+def _viewport_info_fake(tmp_path: Path, **kwargs: Any) -> FakeBlender:
+    fake = FakeBlender(tmp_path, **kwargs)
+    fake.render.film_transparent = False
+    rows = [(1, 0, 0, -1), (0, 1, 0, -2), (0, 0, 1, -3), (0, 0, 0, 1)]
+    fake.view.view_matrix = FakeMatrix(rows)
+    fake.view.view_perspective = "PERSP"
+    fake.view.view_location = (0.0, 0.0, 0.0)
+    fake.view.view_rotation = (1.0, 0.0, 0.0, 0.0)
+    fake.view.view_distance = 3.7
+    fake.space.lens = 50.0
+    fake.space.camera = None
+    fake.space.use_local_camera = False
+    return fake
+
+
+def test_viewport_info_reports_the_3d_view_captures_use(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """It reported only render settings."""
+    fake = _viewport_info_fake(tmp_path, camera=_scene_camera())
+    session = _session(monkeypatch, fake, tmp_path)
+
+    info = session.get_viewport_info()
+
+    assert info["active_camera"] == "Camera"
+    view = info["view3d"]
+    assert view["view_matrix"][0] == [1.0, 0.0, 0.0, -1.0]
+    assert view["eye_location"] == pytest.approx([1.0, 2.0, 3.0])
+    assert (view["lens"], view["clip_start"], view["clip_end"]) == (50.0, 0.01, 1000.0)
+    assert view["view_perspective"] == "PERSP" and view["view_camera"] is None
+    assert (view["region_width"], view["region_height"]) == (2000, 1000)
+    assert view["shading_type"] == "SOLID"
+    assert info["view3d_unavailable_reason"] is None
+    fake.view.update.assert_called_once_with()
+
+
+def test_viewport_info_names_the_camera_a_camera_view_looks_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _viewport_info_fake(tmp_path, camera=_scene_camera())
+    fake.view.view_perspective = "CAMERA"
+    session = _session(monkeypatch, fake, tmp_path)
+
+    assert session.get_viewport_info()["view3d"]["view_camera"] == "Camera"
+
+
+def test_headless_viewport_info_says_why_it_has_no_3d_view(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _viewport_info_fake(tmp_path, with_view=False)
+    fake.bpy.app.background = True
+    session = _session(monkeypatch, fake, tmp_path, attached=False)
+
+    info = session.get_viewport_info()
+
+    assert info["view3d"] is None
+    assert "without an editor window" in info["view3d_unavailable_reason"]
+    assert info["resolution_x"] == 1920

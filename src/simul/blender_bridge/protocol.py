@@ -21,7 +21,8 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # agent edits now count as. An older add-on would reject the argument, or, if it were left out,
 # open over the unsaved work without the check.
 # Version 6: export_file takes object, modifier, animation and format options; import_file takes scale.
-PROTOCOL_VERSION = 6
+# Version 7: capture tools take camera_name; capture_viewport_sequence writes files (output_dir, max_frames).
+PROTOCOL_VERSION = 7
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
