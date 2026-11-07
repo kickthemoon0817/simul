@@ -1,5 +1,6 @@
 """Blender MCP schemas."""
 
+import math
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import AfterValidator, BaseModel, Field, model_validator
@@ -154,13 +155,88 @@ class BlenderObjectInfoResponse(BaseModel):
     name: str = Field(..., description="Object name")
     object_type: str = Field(..., description="Blender object type")
     location: List[float] = Field(
-        ..., description="World location [x, y, z]", min_length=3, max_length=3
+        ...,
+        description=(
+            "Location [x, y, z] of the object's own transform (Blender's Location field): "
+            "relative to its parent, before constraints; world_location is in world space"
+        ),
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: List[float] = Field(
-        ..., description="Rotation in Euler radians [x, y, z]", min_length=3, max_length=3
+        ...,
+        description=(
+            "Rotation of the object's own transform as XYZ Euler radians [x, y, z], "
+            "converted from rotation_mode; world_rotation_euler is in world space"
+        ),
+        min_length=3,
+        max_length=3,
     )
     scale: List[float] = Field(
-        ..., description="Scale [x, y, z]", min_length=3, max_length=3
+        ...,
+        description="Scale [x, y, z] of the object's own transform; world_scale is in world space",
+        min_length=3,
+        max_length=3,
+    )
+    # Optional from here to visible: an add-on built before them still answers.
+    rotation_mode: Optional[str] = Field(
+        None,
+        description="How Blender stores the rotation: an Euler order (XYZ, ZXY, ...), QUATERNION or AXIS_ANGLE",
+    )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description="Rotation of the object's own transform as a unit quaternion [w, x, y, z]",
+        min_length=4,
+        max_length=4,
+    )
+    rotation_in_mode: Optional[List[float]] = Field(
+        None,
+        description=(
+            "The rotation as Blender stores it for rotation_mode: Euler angles [x, y, z] "
+            "applied in that order, a quaternion [w, x, y, z], or [angle, x, y, z] for AXIS_ANGLE"
+        ),
+        min_length=3,
+        max_length=4,
+    )
+    world_location: Optional[List[float]] = Field(
+        None,
+        description="World-space location [x, y, z], from matrix_world (parents and constraints included)",
+        min_length=3,
+        max_length=3,
+    )
+    world_rotation_euler: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World-space rotation as XYZ Euler radians [x, y, z]: the rotation nearest "
+            "matrix_world, also where a parent's non-uniform scale shears it"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    world_rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description="World-space rotation as a unit quaternion [w, x, y, z], the same rotation",
+        min_length=4,
+        max_length=4,
+    )
+    world_scale: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World-space scale [x, y, z], from matrix_world; negative on every axis for a "
+            "mirrored object, as Blender decomposes it"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    matrix_world: Optional[List[List[float]]] = Field(
+        None,
+        description=(
+            "Blender's matrix_world as four rows of four; exact where the decomposed world "
+            "values cannot be, such as the shear of a turned child under a parent with "
+            "non-uniform scale"
+        ),
+        min_length=4,
+        max_length=4,
     )
     parent_name: Optional[str] = Field(None, description="Parent object name")
     children_names: List[str] = Field(
@@ -859,13 +935,17 @@ class BlenderSetTransformRequest(BaseModel):
     object_name: str = Field(..., description="Object to transform")
     location: Optional[List[float]] = Field(
         None,
-        description="New location [x, y, z]",
+        description="New location [x, y, z] relative to the object's parent (Blender's Location field)",
         min_length=3,
         max_length=3,
     )
     rotation_euler: Optional[List[float]] = Field(
         None,
-        description="New rotation [rx, ry, rz] radians",
+        description=(
+            "New rotation as XYZ Euler radians [rx, ry, rz], relative to the parent; converted "
+            "to the object's rotation_mode (quaternion, axis-angle or another Euler order), "
+            "which is kept"
+        ),
         min_length=3,
         max_length=3,
     )
@@ -875,6 +955,27 @@ class BlenderSetTransformRequest(BaseModel):
         min_length=3,
         max_length=3,
     )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description=(
+            "New rotation as a quaternion [w, x, y, z] instead of rotation_euler; normalized "
+            "and converted to the object's rotation_mode"
+        ),
+        min_length=4,
+        max_length=4,
+    )
+
+    @model_validator(mode="after")
+    def _one_rotation(self) -> "BlenderSetTransformRequest":
+        """Refuse two rotations, and a quaternion that is no rotation."""
+        if self.rotation_euler is not None and self.rotation_quaternion is not None:
+            raise ValueError("Give either rotation_euler or rotation_quaternion, not both")
+        if self.rotation_quaternion is not None:
+            if not all(math.isfinite(v) for v in self.rotation_quaternion):
+                raise ValueError("rotation_quaternion must be four finite numbers")
+            if not any(self.rotation_quaternion):
+                raise ValueError("rotation_quaternion must not have zero length")
+        return self
 
 
 class BlenderSetTransformResponse(BaseModel):
@@ -887,19 +988,35 @@ class BlenderSetTransformResponse(BaseModel):
     object_name: str = Field(..., description="Object name")
     location: List[float] = Field(
         ...,
-        description="Final location [x, y, z]",
+        description="Final location [x, y, z] relative to the parent",
         min_length=3,
         max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
-        description="Final rotation [rx, ry, rz]",
+        description="Final rotation as XYZ Euler radians [rx, ry, rz], relative to the parent",
         min_length=3,
         max_length=3,
     )
     scale: List[float] = Field(
         ...,
         description="Final scale [sx, sy, sz]",
+        min_length=3,
+        max_length=3,
+    )
+    # Optional: an add-on built before them still answers.
+    rotation_mode: Optional[str] = Field(
+        None, description="The object's rotation mode, which the write keeps"
+    )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description="Final rotation as a unit quaternion [w, x, y, z], relative to the parent",
+        min_length=4,
+        max_length=4,
+    )
+    world_location: Optional[List[float]] = Field(
+        None,
+        description="World-space location [x, y, z] after the change (parents and constraints included)",
         min_length=3,
         max_length=3,
     )
@@ -910,6 +1027,14 @@ class BlenderSetParentRequest(BaseModel):
 
     child_name: str = Field(..., description="Object to parent")
     parent_name: str = Field(..., description="Object to be the parent")
+    keep_transform: bool = Field(
+        True,
+        description=(
+            "Keep the child's world transform, as Blender's Parent > Object (Keep Transform); "
+            "false clears the parent inverse, so the child's own values become relative to "
+            "the parent and it moves"
+        ),
+    )
 
 
 class BlenderSetParentResponse(BaseModel):
@@ -921,6 +1046,19 @@ class BlenderSetParentResponse(BaseModel):
     )
     child_name: str = Field(..., description="Child object name")
     parent_name: str = Field(..., description="Parent object name")
+    # Optional: an add-on built before them still answers.
+    keep_transform: Optional[bool] = Field(
+        None, description="Whether the child's world transform was kept"
+    )
+    previous_parent: Optional[str] = Field(
+        None, description="The child's parent before the call, if it had one"
+    )
+    world_location: Optional[List[float]] = Field(
+        None,
+        description="The child's world-space location [x, y, z] afterwards",
+        min_length=3,
+        max_length=3,
+    )
 
 
 class BlenderClearParentRequest(BaseModel):

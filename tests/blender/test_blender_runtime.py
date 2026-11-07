@@ -578,7 +578,10 @@ class FakeObject:
         self._visible = visible
         self.hide_viewport = not visible
         self.location = FakeVector(location)
-        self.rotation_euler = FakeVector(rotation_euler)
+        self.rotation_mode = "XYZ"
+        self.rotation_euler = FakeEuler(rotation_euler)
+        self.rotation_quaternion = FakeVector((1.0, 0.0, 0.0, 0.0))
+        self.rotation_axis_angle = FakeVector((0.0, 0.0, 1.0, 0.0))
         self.scale = FakeVector(scale)
         self.parent = parent
         self.children = children or []
@@ -872,7 +875,9 @@ class TestObservationTools:
 
     # -- get_object_info --------------------------------------------------
 
-    def test_get_object_info_basic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_get_object_info_basic(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """Full object info is returned with transforms and metadata."""
         parent_obj = FakeObject(name="Parent", object_type="EMPTY", visible=True)
         child_obj = FakeObject(name="Child", object_type="MESH", visible=True)
@@ -6391,7 +6396,10 @@ class TestSceneManipulationTools:
 
         # bpy.ops — record calls and set active_object
         ops_calls: List[Dict[str, Any]] = []
-        context_holder = SimpleNamespace(active_object=active_object)
+        # Real bpy always has it; world-space reads evaluate transforms first.
+        context_holder = SimpleNamespace(
+            active_object=active_object, evaluated_depsgraph_get=lambda: "depsgraph"
+        )
 
         def _make_op(op_name: str):
             def op_fn(**kwargs: Any) -> None:
@@ -6520,7 +6528,9 @@ class TestSceneManipulationTools:
 
     # -- set_object_transform ------------------------------------------------
 
-    def test_set_transform_location_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_set_transform_location_only(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """Setting only location leaves rotation and scale untouched."""
         obj = FakeObject("Cube", "MESH", True, scale=(2.0, 2.0, 2.0))
         fake_bpy = self._make_fake_bpy_with_manipulation(objects={"Cube": obj})
@@ -6533,7 +6543,9 @@ class TestSceneManipulationTools:
         assert result["location"] == [5.0, 6.0, 7.0]
         assert result["scale"] == [2.0, 2.0, 2.0]
 
-    def test_set_transform_full(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_set_transform_full(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """Setting all three transform components."""
         obj = FakeObject("Cube", "MESH", True)
         fake_bpy = self._make_fake_bpy_with_manipulation(objects={"Cube": obj})
@@ -6554,7 +6566,9 @@ class TestSceneManipulationTools:
 
     # -- set_object_parent / clear_object_parent ------------------------------
 
-    def test_set_parent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_set_parent(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """Parent child to parent."""
         child = FakeObject("Child", "MESH", True)
         parent = FakeObject("Parent", "MESH", True)

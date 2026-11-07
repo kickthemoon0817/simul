@@ -652,7 +652,13 @@
         "session_calls": [
           {
             "method": "set_object_transform",
-            "arguments": {"object_name": "'Cube'", "location": "None", "rotation_euler": "None", "scale": "None"}
+            "arguments": {
+              "object_name": "'Cube'",
+              "location": "None",
+              "rotation_euler": "None",
+              "scale": "None",
+              "rotation_quaternion": "None"
+            }
           }
         ],
         "response": {"checked_against": "BlenderSetTransformResponse"},
@@ -672,7 +678,25 @@
               "object_name": "'Cube'",
               "location": "[1.0, 2.0, 3.0]",
               "rotation_euler": "[0.1, 0.2, 0.3]",
-              "scale": "[2.0, 2.0, 2.0]"
+              "scale": "[2.0, 2.0, 2.0]",
+              "rotation_quaternion": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetTransformResponse"},
+        "usage": [{"tool": "set_blender_object_transform", "success": false}]
+      },
+      "quaternion": {
+        "arguments": {"object_name": "Cube", "rotation_quaternion": [0.5, 0.5, 0.5, 0.5]},
+        "session_calls": [
+          {
+            "method": "set_object_transform",
+            "arguments": {
+              "object_name": "'Cube'",
+              "location": "None",
+              "rotation_euler": "None",
+              "scale": "None",
+              "rotation_quaternion": "[0.5, 0.5, 0.5, 0.5]"
             }
           }
         ],
@@ -687,7 +711,13 @@
           "error": "1 validation error for BlenderSetTransformRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
           "details": {
-            "input": {"object_name": {"bogus": 1}, "location": null, "rotation_euler": null, "scale": null}
+            "input": {
+              "object_name": {"bogus": 1},
+              "location": null,
+              "rotation_euler": null,
+              "scale": null,
+              "rotation_quaternion": null
+            }
           }
         }
       }
@@ -698,7 +728,18 @@
         "session_calls": [
           {
             "method": "set_object_parent",
-            "arguments": {"child_name": "'Wheel'", "parent_name": "'Car'"}
+            "arguments": {"child_name": "'Wheel'", "parent_name": "'Car'", "keep_transform": "True"}
+          }
+        ],
+        "response": {"checked_against": "BlenderSetParentResponse"},
+        "usage": [{"tool": "set_blender_object_parent", "success": false}]
+      },
+      "full": {
+        "arguments": {"child_name": "Wheel", "parent_name": "Car", "keep_transform": false},
+        "session_calls": [
+          {
+            "method": "set_object_parent",
+            "arguments": {"child_name": "'Wheel'", "parent_name": "'Car'", "keep_transform": "False"}
           }
         ],
         "response": {"checked_against": "BlenderSetParentResponse"},
@@ -711,7 +752,7 @@
           "success": false,
           "error": "1 validation error for BlenderSetParentRequest\nchild_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"child_name": {"bogus": 1}, "parent_name": "Car"}}
+          "details": {"input": {"child_name": {"bogus": 1}, "parent_name": "Car", "keep_transform": true}}
         }
       }
     },

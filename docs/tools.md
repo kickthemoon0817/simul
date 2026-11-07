@@ -303,6 +303,39 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 
 Behaviour worth knowing:
 
+- `get_blender_object_info` reports an object's own transform (`location`,
+  `rotation_euler`, `scale`: relative to its parent and before constraints, as
+  Blender's Location, Rotation and Scale fields show them) and where it is in
+  the scene (`world_location`, `world_rotation_euler`,
+  `world_rotation_quaternion`, `world_scale`, and the exact `matrix_world`).
+  A turned child of a parent with non-uniform scale has a sheared world
+  matrix that no rotation and scale rebuild; the world rotation is then the
+  rotation nearest it (its polar decomposition), the parent's rotation times
+  the child's, where Blender's `decompose()` and `to_euler()` were 0.19 and
+  0.15 rad off for a glTF link under a parent scaled 0.5 on Z. It also
+  reports `rotation_mode`, the rotation as Blender stores it in that mode
+  (`rotation_in_mode`) and as a quaternion (`rotation_quaternion`). Euler
+  angles are in XYZ order throughout, whatever the object's rotation mode.
+- `set_blender_object_transform` writes the object's own transform:
+  `location` relative to its parent, and `rotation_euler` (XYZ) or
+  `rotation_quaternion` (`[w, x, y, z]`, normalized), converted to the
+  object's rotation mode, which is kept. Blender reads only the property of
+  that mode, so a plain `rotation_euler` write left a glTF import's
+  quaternion nodes unturned. `control_blender_ui`'s `set_property` of
+  `rotation_euler` converts the same way.
+- `set_blender_object_parent` keeps the child's world transform, as Blender's
+  Parent > Object (Keep Transform) does: the parent inverse cancels the
+  parent's transform, and a child without a previous parent keeps its own
+  values. `keep_transform: false` clears the parent inverse instead, so the
+  child's values become relative to the parent and it moves. A parent that is
+  the child itself or one of its descendants is refused (Blender ignores such
+  a parent without an error).
+- Reads of world-space transforms (object info, distance, bounds, bounding
+  box, parenting) evaluate the depsgraph first: in embedded (bpy module) mode
+  Blender leaves a transform written by an earlier call out of `matrix_world`
+  until then. An add-on built before `rotation_quaternion` and
+  `keep_transform` still answers calls that leave them at their defaults, with
+  its own behaviour; the newer reply fields then come back `null`.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
