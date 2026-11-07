@@ -101,12 +101,18 @@ def test_overrides_name_parameters_of_the_operation() -> None:
         if spec.build is not None:
             # A hand-written wrapper declares its own parameters and call.
             assert (
-                not spec.params and not spec.descriptions and spec.call is None
+                not spec.params
+                and not spec.descriptions
+                and spec.call is None
+                and not spec.added_params
             ), spec.name
             continue
         parameters = _operation_parameters(spec)
         assert set(spec.params) <= set(parameters), spec.name
         assert set(spec.descriptions) <= set(parameters), spec.name
+        # An added parameter has a default, which an older add-on is left to apply.
+        for name in spec.added_params:
+            assert parameters[name].default is not parameters[name].empty, spec.name
         if spec.call is not None:
             inspect.signature(spec.call).bind(None, **dict.fromkeys(parameters))
 

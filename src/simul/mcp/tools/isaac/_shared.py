@@ -80,6 +80,15 @@ PRIM_DETAIL_ASPECTS = {
 # log's code_bytes reports a script's size in.
 MAX_SCRIPT_BYTES = 100_000
 
+# Script budget, in seconds, for operations that routinely outlast the default
+# (the socket timeout less one second, 29 s): opening or creating a stage, a
+# camera's first render while shaders compile, enabling a large extension. Past
+# the budget the bridge interrupts the script while Kit finishes the work, so
+# the tool reported failure for work that then completed. Kept under the
+# bridge's per-script ceiling (its 120 s request timeout less 5 s) so the
+# bridge still interrupts and reports instead of abandoning the request.
+HEAVY_SCRIPT_TIMEOUT_SECONDS = 110.0
+
 # 4K on the long edge, so a capture can't grow to tens of megabytes before
 # anything checks whether the result can be delivered.
 MAX_CAPTURE_DIMENSION = 3840
@@ -669,19 +678,106 @@ APPLY_RIGID_BODY_CORE = """\
 """
 
 APPLY_COLLISION_CORE = """\
-    def _apply_collision(stage, prim_path, approximation):
+    def _apply_collision(stage, prim_path, approximation, recursive=True):
+        # A CollisionAPI makes a shape only on geometry the physics parser
+        # knows; on an Xform or Scope (an asset root) it is ignored. So the
+        # API goes on the geometry at or under prim_path, and the
+        # approximation, a MeshCollisionAPI token, on meshes only: Cube,
+        # Sphere and the other implicit shapes always collide analytically.
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             return {"error": "Prim not found: " + prim_path}
-        UsdPhysics.CollisionAPI.Apply(prim)
-        if approximation != "none":
-            UsdPhysics.MeshCollisionAPI.Apply(prim)
-            UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Set(approximation)
-        return {
+        if prim.IsInstanceProxy():
+            return {"error": "Prim is inside an instance and cannot be edited here: " + prim_path}
+        shape_types = [
+            UsdGeom.Mesh, UsdGeom.Cube, UsdGeom.Sphere, UsdGeom.Capsule, UsdGeom.Cylinder,
+            UsdGeom.Cone, UsdGeom.Plane, UsdGeom.Points,
+        ]
+        for name in ("Capsule_1", "Cylinder_1"):
+            if hasattr(UsdGeom, name):
+                shape_types.append(getattr(UsdGeom, name))
+
+        def _is_shape(candidate):
+            return any(candidate.IsA(shape_type) for shape_type in shape_types)
+
+        targets = []
+        skipped_instances = []
+        if recursive:
+            for candidate in Usd.PrimRange(prim):
+                if candidate.IsInstance():
+                    # Its geometry lives in the shared prototype, which is
+                    # edited in the source asset, not through the instance.
+                    skipped_instances.append(str(candidate.GetPath()))
+                if _is_shape(candidate):
+                    targets.append(candidate)
+        elif _is_shape(prim):
+            targets.append(prim)
+        if not targets:
+            message = (
+                "No collision geometry (Mesh, Cube, Sphere, Capsule, Cylinder, Cone, Plane, "
+                "Points) at " + ("or under " if recursive else "") + prim_path
+            )
+            if not recursive:
+                message += "; pass recursive=true to apply collision to the geometry below it"
+            if skipped_instances:
+                message += "; instanced geometry is not editable here: " + ", ".join(skipped_instances[:5])
+            return {"error": message}
+
+        def _dynamic_body(shape):
+            ancestor = shape
+            while ancestor.IsValid() and not ancestor.IsPseudoRoot():
+                if ancestor.HasAPI(UsdPhysics.RigidBodyAPI):
+                    body = UsdPhysics.RigidBodyAPI(ancestor)
+                    kinematic = body.GetKinematicEnabledAttr().Get()
+                    enabled = body.GetRigidBodyEnabledAttr().Get()
+                    return enabled is not False and not kinematic
+                ancestor = ancestor.GetParent()
+            return False
+
+        shapes = []
+        warnings = []
+        for shape in targets:
+            path = str(shape.GetPath())
+            entry = {
+                "path": path,
+                "type": shape.GetTypeName(),
+                "already_had_collision": shape.HasAPI(UsdPhysics.CollisionAPI),
+            }
+            UsdPhysics.CollisionAPI.Apply(shape)
+            if shape.IsA(UsdGeom.Mesh):
+                if approximation is not None:
+                    UsdPhysics.MeshCollisionAPI.Apply(shape).CreateApproximationAttr().Set(approximation)
+                # Unauthored, the schema fallback is none (the triangle mesh).
+                resolved = UsdPhysics.MeshCollisionAPI(shape).GetApproximationAttr().Get()
+                entry["approximation"] = str(resolved) if resolved is not None else "none"
+                if entry["approximation"] == "none" and _dynamic_body(shape):
+                    warnings.append(
+                        path + ": a triangle-mesh collider (approximation none) on a dynamic "
+                        "rigid body is simulated by PhysX as convexHull; pass convexHull or "
+                        "convexDecomposition to choose"
+                    )
+            else:
+                entry["approximation"] = None
+            shapes.append(entry)
+        max_listed = 200
+        result = {
             "prim_path": prim_path,
             "collision_applied": True,
             "approximation": approximation,
+            "recursive": recursive,
+            "shape_count": len(shapes),
+            "shapes": shapes[:max_listed],
+            "shapes_truncated": len(shapes) > max_listed,
         }
+        if skipped_instances:
+            result["skipped_instances"] = skipped_instances[:max_listed]
+            warnings.append(
+                str(len(skipped_instances)) + " instanceable prim(s) skipped; their geometry "
+                "must be given collision in the source asset"
+            )
+        if warnings:
+            result["warnings"] = warnings
+        return result
 """
 
 SET_MASS_PROPERTIES_CORE = """\
@@ -768,8 +864,8 @@ BIND_MATERIAL_CORE = """\
         }
 """
 
-# Collision approximations UsdPhysics.MeshCollisionAPI accepts, plus "none"
-# for a plain CollisionAPI without a mesh approximation.
+# The approximation tokens UsdPhysics.MeshCollisionAPI allows; "none" is the
+# mesh itself as a triangle mesh.
 COLLISION_APPROXIMATIONS: tuple[str, ...] = (
     "none",
     "convexHull",

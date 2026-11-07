@@ -46,9 +46,9 @@ DEFAULT_RESULT_BUDGET_BYTES = 40_000
 HARD_RESULT_LIMIT_BYTES = 400_000
 
 _DEFAULT_HINT = (
-    "Result truncated to fit the response budget. Narrow the query — a more "
-    "specific root_path, a smaller max_items/max_prims, or a filter — to see "
-    "the rest."
+    "Result truncated to fit the response budget. A paged result continues at "
+    "next_offset; otherwise narrow the query (a more specific root_path, a "
+    "filter, or a smaller page size) to see the rest."
 )
 
 _HARD_LIMIT_HINT = (

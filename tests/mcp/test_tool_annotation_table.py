@@ -55,8 +55,10 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     # Headless USD
     "load_usd_file": (RO, True, False),
     "get_prim_info": (RO, True, False),
-    "create_prim": (RW, False, False),
-    "update_prim_attributes": (DESTRUCTIVE, False, False),
+    "get_prim_subtree": (RO, True, False),
+    "search_prims": (RO, True, False),
+    "create_prim": (DESTRUCTIVE, False, False),  # redefine_existing re-types a prim
+    "update_prim_attributes": (DESTRUCTIVE, True, False),
     "delete_prim": (DESTRUCTIVE, False, False),
     # Unreal
     "unreal_health_check": (RO, True, True),
@@ -68,7 +70,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "set_unreal_actor_property": (DESTRUCTIVE, True, True),
     "assign_unreal_material": (DESTRUCTIVE, True, True),
     "export_unreal_usd": (DESTRUCTIVE, False, True),
-    "import_unreal_usd": (RW, False, True),
+    "import_unreal_usd": (DESTRUCTIVE, False, True),  # replace_existing replaces assets and actors
     "execute_unreal_script": (DESTRUCTIVE, False, True),
     "control_unreal_simulation": (RW, False, True),
     "set_unreal_camera_view": (RW, True, True),
