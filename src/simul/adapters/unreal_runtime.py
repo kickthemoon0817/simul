@@ -30,9 +30,11 @@ from ..utils.regex_guard import (
 )
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_scripts import (
+    ACTOR_EXISTS,
     ACTOR_HELPERS,
     ADD_COMPONENT,
     CREATE_MATERIAL_INSTANCE,
+    DELETE_ACTOR,
     EDITOR_WORLD,
     ENGINE_METADATA,
     FIND_ACTORS_BY_TAG,
@@ -46,6 +48,7 @@ from ._unreal_scripts import (
     SCENE_SUMMARY,
     SET_ACTOR_PARENT,
     SET_ACTOR_TRANSFORM,
+    SET_ACTOR_VISIBILITY,
     SET_LIGHT_PARAMS,
     SET_MATERIAL_PARAMS,
     SIMULATION_STATUS,
@@ -242,6 +245,60 @@ def focus_view_error(fov: float, aspect_ratio: float) -> Optional[str]:
     return None
 
 
+#: Farthest the level viewport camera goes from the origin along each axis, in
+#: cm: Unreal clamps a location beyond it to it (UE_LARGE_HALF_WORLD_MAX, 2^42,
+#: about 44,000 km; UE 5.7.4).
+CAMERA_LOCATION_LIMIT = 4398046511104.0
+
+#: Steepest pitch the level viewport camera takes, in degrees: Unreal clamps a
+#: steeper one to just under it (95 reads back as 89.9999; UE 5.7.4).
+CAMERA_PITCH_LIMIT = 90.0
+
+
+def camera_view_error(
+    location: Optional[Sequence[float]], rotation: Optional[Sequence[float]]
+) -> Optional[str]:
+    """Why ``set_camera_view`` cannot place the camera there, or None.
+
+    Args:
+        location: Camera position (X, Y, Z) in cm, or None.
+        rotation: Camera rotation (Pitch, Yaw, Roll) in degrees, or None.
+    """
+    for name, value, axes in (("location", location, "x, y, z"), ("rotation", rotation, "pitch, yaw, roll")):
+        if value is not None:
+            try:
+                _vector3(name, value, axes)
+            except ValueError as exc:
+                return str(exc)
+    if location is not None and any(abs(v) > CAMERA_LOCATION_LIMIT for v in location):
+        return (
+            f"location components must be within {CAMERA_LOCATION_LIMIT:.0f} cm of the origin (2^42, the "
+            f"farthest Unreal moves the viewport camera), not {list(location)}"
+        )
+    if rotation is not None and abs(rotation[0]) > CAMERA_PITCH_LIMIT:
+        return (
+            f"pitch must be from -{CAMERA_PITCH_LIMIT:g} to {CAMERA_PITCH_LIMIT:g} degrees, the steepest the "
+            f"viewport camera looks, not {rotation[0]}"
+        )
+    return None
+
+
+#: ``set_actor_visibility`` scopes: which of an actor's hidden flags it sets.
+VISIBILITY_SCOPES = ("all", "editor", "game")
+
+
+def visibility_request_error(scope: str, persistent: bool) -> Optional[str]:
+    """Why ``set_actor_visibility`` cannot take this scope and persistence, or None."""
+    if scope not in VISIBILITY_SCOPES:
+        return f"scope must be one of {list(VISIBILITY_SCOPES)}, not {scope!r}"
+    if persistent and scope == "game":
+        return (
+            "persistent applies to the editor's hiding (scope 'editor' or 'all'); "
+            "hidden in game is always saved with the level"
+        )
+    return None
+
+
 def _focus_fit_distance(
     extent: Sequence[float],
     fov: float = FOCUS_FOV_DEGREES,
@@ -419,6 +476,22 @@ def _object_name_error(name: str, value: str) -> Optional[str]:
         return f"{name} {value!r} has characters Unreal refuses in an object name: {invalid!r}"
     if value.lower() == "none":
         return f"{name} cannot be 'None', which Unreal reserves for no name"
+    return None
+
+
+def _actor_label_error(label: str) -> Optional[str]:
+    """Why Unreal would not take ``label`` as an actor label, or None.
+
+    ``SetActorLabel`` trims surrounding whitespace and drops a label of 1024
+    characters or more, or one that reads "None", without a word (UE 5.7.4):
+    a 2000-character label was reported as applied.
+    """
+    if label != label.strip():
+        return f"label {label[:80]!r} has leading or trailing whitespace, which Unreal trims"
+    if len(label) > _MAX_OBJECT_NAME_LENGTH:
+        return f"label is {len(label)} characters long; Unreal keeps at most {_MAX_OBJECT_NAME_LENGTH}"
+    if label.lower() == "none":
+        return "label cannot be 'None', which Unreal reserves for no name"
     return None
 
 
@@ -1971,40 +2044,43 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
     async def set_camera_view(
         self,
-        location: Optional[tuple] = None,
-        rotation: Optional[tuple] = None,
+        location: Optional[Sequence[float]] = None,
+        rotation: Optional[Sequence[float]] = None,
     ) -> Dict[str, Any]:
         """
-        Set the editor viewport camera position and rotation.
+        Set the editor viewport camera position and rotation, and read it back.
 
         Field of view is not settable: Remote Control exposes no setter for
-        the level viewport's FOV.
+        the level viewport's FOV. Unreal clamps what it does not take without
+        a word, and the reply used to echo the request (a pitch of 95 read
+        back as 89.9999, an X of 1e300 as 4.4e12; UE 5.7.4), so the ranges are
+        checked first and the reply is the camera read back afterwards.
 
         Args:
-            location: Camera position (X, Y, Z) in cm; None leaves it unchanged.
-            rotation: Camera rotation (Pitch, Yaw, Roll) in degrees; None
-                leaves it unchanged.
+            location: Camera position (X, Y, Z) in cm, each within
+                CAMERA_LOCATION_LIMIT of the origin; None leaves it unchanged.
+            rotation: Camera rotation (Pitch, Yaw, Roll) in degrees, pitch from
+                -90 to 90; None leaves it unchanged.
 
         Returns:
-            Dictionary with the applied location and rotation; a field that
-            was not set is None.
+            Dictionary with the location and rotation read back from the
+            viewport camera (also when both were left unchanged). A
+            ``ValidationError`` envelope for a value out of range, before the
+            camera moves; ``ViewportUnavailable`` when the camera cannot be
+            read; ``EngineError``, with the read-back values, when the camera
+            reads back other than what was set.
         """
+        problem = camera_view_error(location, rotation)
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
         # SetLevelViewportCameraInfo takes both location and rotation, and
         # Remote Control zero-fills an omitted one; resend the current value
         # for whichever the caller left unset.
         params: Dict[str, Any] = {}
         if location is not None:
-            params["CameraLocation"] = {
-                "X": location[0],
-                "Y": location[1],
-                "Z": location[2],
-            }
+            params["CameraLocation"] = dict(zip(("X", "Y", "Z"), (float(v) for v in location)))
         if rotation is not None:
-            params["CameraRotation"] = {
-                "Pitch": rotation[0],
-                "Yaw": rotation[1],
-                "Roll": rotation[2],
-            }
+            params["CameraRotation"] = dict(zip(("Pitch", "Yaw", "Roll"), (float(v) for v in rotation)))
         if len(params) == 1:
             current = await self._call_function(
                 "/Script/UnrealEd.Default__UnrealEditorSubsystem",
@@ -2027,10 +2103,27 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 params,
             )
 
-        return {
-            "location": tuple(location) if location is not None else None,
-            "rotation": tuple(rotation) if rotation is not None else None,
+        info = await self.get_viewport_info()
+        if info.get("success") is False:
+            return info
+        result: Dict[str, Any] = {
+            "location": tuple(info["camera_location"]),
+            "rotation": tuple(info["camera_rotation"]),
         }
+        missed = [
+            name
+            for name, wanted in (("location", location), ("rotation", rotation))
+            if wanted is not None
+            and not _transform_component_applied(name, [float(v) for v in wanted], result[name])
+        ]
+        if missed:
+            return {
+                **result,
+                "success": False,
+                "error": "The viewport camera reads back other than what was set: " + ", ".join(missed),
+                "error_type": "EngineError",
+            }
+        return result
 
     async def focus_on_actor(
         self,
@@ -2194,27 +2287,46 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         is placed the way the editor places an asset dropped into the level:
         ``/Engine/BasicShapes/Cube.Cube`` becomes a StaticMeshActor showing
         the cube, a Blueprint asset its actor. Spawn and label are one
-        undoable editor transaction, run as one editor script.
+        undoable editor transaction, run as one editor script, and the label
+        is read back.
+
+        A class Unreal does not let you place is refused: its per-level
+        singletons and game-framework classes
+        (``_unreal_scripts.NOT_PLACEABLE_ACTOR_CLASSES``: a second
+        WorldSettings used to land in a saved level), the bare ``Brush`` (its
+        volumes spawn) and a Blueprint of one. So is a path into a map or an
+        actor in a level, before anything loads: loading one loads the map.
 
         Args:
             asset_path: Actor class path or asset path to spawn from.
             location: Spawn location (X, Y, Z) in cm.
             rotation: Spawn rotation (Pitch, Yaw, Roll) in degrees.
-            label: Optional actor label in the outliner.
+            label: Optional actor label in the outliner: no leading or
+                trailing whitespace, at most 1023 characters, not "None".
 
         Returns:
             Dictionary with actor_path, actor_class (the spawned actor's
             class), label, and the location and rotation read back from the
             new actor. An error envelope, never an empty actor_path, when the
             path loads nothing (``NotFoundError``) or names something Unreal
-            cannot place: a class that is not an Actor, an actor already in a
-            level, an asset no actor factory accepts (``SpawnError``); and
-            ``PIEActive`` while Play In Editor runs, when Unreal's editor
-            spawns nothing. Those are logged as refusals, not failures.
+            cannot or should not place: a class that is not an Actor or is
+            abstract, a class it does not let you place, an actor already in a
+            level, a map, an asset no actor factory accepts (``SpawnError``);
+            ``ValidationError`` for a label Unreal would not take (it trims
+            whitespace and drops the others without a word), before anything
+            spawns; and ``PIEActive`` while Play In Editor runs, when Unreal's
+            editor spawns nothing. Those are logged as refusals, not failures.
 
         Raises:
             ValueError: location or rotation is not three finite numbers.
         """
+        problem = None
+        if not asset_path.strip():
+            problem = "asset_path must name an Actor class or an asset"
+        elif label:
+            problem = _actor_label_error(label)
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
         args = {
             "path": asset_path,
             "location": _vector3("location", location, "x, y, z"),
@@ -2223,7 +2335,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         }
         result = await self._execute_json_script(
             f"args = {args!r}\n" + SPAWN_ACTOR,
-            expected_errors=("NotFoundError", "SpawnError"),
+            expected_errors=("NotFoundError", "SpawnError", "ValidationError"),
         )
         if not result.get("error") and not result.get("actor_path"):
             return self._script_error(
@@ -2233,31 +2345,31 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
     async def delete_actor(self, actor_path: str) -> Dict[str, Any]:
         """
-        Delete an actor from the level.
+        Delete an actor from the level, in one undoable editor transaction.
 
-        Uses ``EditorActorSubsystem.DestroyActor`` via Remote Control.
+        One editor script (``_unreal_scripts.DELETE_ACTOR``) resolves the
+        path, deletes the actor through ``EditorActorSubsystem.destroy_actor``
+        and reads its validity back.
 
         Args:
-            actor_path: Full actor path to delete.
+            actor_path: Full actor path to delete, as ``list_unreal_actors``
+                reports it (not its label).
 
         Returns:
-            Dictionary with actor_path, deleted status. When Unreal destroyed
-            nothing because Play In Editor runs (DestroyActor refuses then), a
-            ``PIEActive`` error envelope instead.
+            Dictionary with actor_path and deleted (True). A ``NotFoundError``
+            envelope when the path names no live actor of the level open in
+            the editor (a label, an actor already deleted, one of another
+            map); ``ValidationError`` for an actor the editor does not let you
+            delete (the level's WorldSettings or builder brush, an actor kept
+            out of the Outliner); ``PIEActive`` while Play In Editor runs,
+            when Unreal deletes nothing; ``EngineError`` when Unreal did not
+            delete it.
         """
-        data = await self._call_function(
-            "/Script/UnrealEd.Default__EditorActorSubsystem",
-            "DestroyActor",
-            {"ActorToDestroy": actor_path},
+        args = {"actor_path": actor_path}
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + DELETE_ACTOR,
+            expected_errors=("NotFoundError", "ValidationError"),
         )
-        deleted = bool(data.get("ReturnValue", False))
-        if not deleted and await self._pie_active():
-            return self._refused_during_pie("delete actors")
-
-        return {
-            "actor_path": actor_path,
-            "deleted": deleted,
-        }
 
     async def set_actor_transform(
         self,
@@ -2371,7 +2483,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         parameters: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Call a BlueprintCallable function on an actor.
+        Call a BlueprintCallable function on an actor, as one undo step.
+
+        The call goes through Remote Control's ``/remote/object/call`` with
+        ``generateTransaction``, which records the actor (and its root
+        component) before the function runs, so one undo reverts what the
+        function changed there. Without it the change left the undo history
+        alone, and the next undo reverted the change before it instead
+        (UE 5.7.4). A function that changes another object records only what
+        it records itself. Remote Control acts on whatever object the path
+        names, a deleted actor or one of a map loaded but not open included, so
+        an editor script first checks that the path names a live actor of the
+        level open in the editor.
 
         Args:
             actor_path: Full actor path.
@@ -2379,7 +2502,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             parameters: Parameters as JSON string.
 
         Returns:
-            Dictionary with actor_path, function_name, return_value.
+            Dictionary with actor_path, function_name, return_value. A
+            not-found error, before anything is called, when the path names
+            no live actor of the level open in the editor.
         """
         if not self.settings.security.allow_script_execution:
             return self._script_execution_denied()
@@ -2407,6 +2532,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 }
             body["parameters"] = decoded
 
+        args = {"actor_path": actor_path}
+        found = await self._execute_json_script(
+            f"args = {args!r}\n" + ACTOR_EXISTS, expected_errors=("NotFoundError",)
+        )
+        if found.get("error"):
+            return found
+        body["generateTransaction"] = True
         data = await self._http_put("/remote/object/call", body)
         return_value = json_lib.dumps(data) if data else None
 
@@ -2533,34 +2665,57 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_path: str,
         visible: bool = True,
         propagate: bool = True,
+        scope: str = "all",
+        persistent: bool = False,
     ) -> Dict[str, Any]:
         """
-        Set actor visibility.
+        Show or hide an actor in the editor, in the game, or both, and read it back.
 
-        Uses ``SetActorHiddenInGame`` UFUNCTION via Remote Control.
+        One editor script (``_unreal_scripts.SET_ACTOR_VISIBILITY``) writes the
+        flags ``scope`` names, on the actor and, with ``propagate``, on every
+        actor attached under it, in one undoable transaction, and reads every
+        actor's flags back. It used to set hidden-in-game alone, which the
+        level viewport and its captures ignore, through a Remote Control call
+        that took no ``propagate`` and recorded no undo step (UE 5.7.4).
 
         Args:
             actor_path: Full actor path.
             visible: Whether the actor should be visible.
-            propagate: Propagate to child components/actors.
+            propagate: Apply the same to every actor attached under it,
+                children of children included (a hidden parent hides none of
+                them).
+            scope: Which visibility to set, one of VISIBILITY_SCOPES:
+                ``editor`` (the editor's hide, as the Outliner's eye: the
+                level viewport and captures; kept for the editor session, not
+                saved), ``game`` (hidden in game, saved with the level: Play
+                In Editor and the packaged game; the viewport still draws the
+                actor outside Game View) or ``all`` (both).
+            persistent: Editor scopes only: also set Unreal's hidden at
+                editor startup flag (saved with the level, applied when it
+                loads), so the editor hiding outlasts a reload. Not while Play
+                In Editor runs.
 
         Returns:
-            Dictionary with actor_path, visible.
+            Dictionary with actor_path, visible, scope, propagate, persistent
+            and actors: each affected actor's hidden_in_editor,
+            hidden_in_editor_at_startup and hidden_in_game read back, the actor
+            first. ``EngineError``, with those, naming every actor whose flags
+            read back other than asked; ``ValidationError`` for an unknown
+            scope or persistent with the game scope; ``PIEActive`` for
+            persistent during PIE; a not-found error for a path that names no
+            live actor of the level open in the editor.
         """
-        body: Dict[str, Any] = {
-            "objectPath": actor_path,
-            "functionName": "SetActorHiddenInGame",
-            "parameters": {
-                "bNewHidden": not visible,
-                "bPropagateToChildren": propagate,
-            },
-        }
-        await self._http_put("/remote/object/call", body)
-
-        return {
+        problem = visibility_request_error(scope, persistent)
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
+        args = {
             "actor_path": actor_path,
-            "visible": visible,
+            "visible": bool(visible),
+            "scope": scope,
+            "propagate": bool(propagate),
+            "persistent": bool(persistent),
         }
+        return await self._execute_json_script(f"args = {args!r}\n" + SET_ACTOR_VISIBILITY)
 
     # ------------------------------------------------------------------
     # Phase 4 — Materials, Lighting & Rendering

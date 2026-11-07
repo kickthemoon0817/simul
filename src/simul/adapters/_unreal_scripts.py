@@ -104,9 +104,13 @@ ACTOR_NOT_FOUND = "Actor not found: {path}"
 # and left it dirty for the next Save All (UE 5.7.4). A destroyed actor stays
 # findable, invalid (SystemLibrary.is_valid is False), until garbage
 # collection; an actor of a map loaded but not open, or of the PIE world,
-# belongs to another world. Each raises SimulNotFound, whose message starts
+# belongs to another world; for the PIE world's copy of an actor the message
+# names the editor's path. Each raises SimulNotFound, whose message starts
 # with ACTOR_NOT_FOUND, and the session reports it as NotFoundError.
 ACTOR_HELPERS = EDITOR_WORLD + f"_ACTOR_NOT_FOUND = {ACTOR_NOT_FOUND!r}\n" + """
+# The package name prefix of a Play In Editor world, UEDPIE_<n>_<map>.
+_PIE_PACKAGE = "UEDPIE_[0-9]+_"
+
 class SimulNotFound(Exception):
     pass
 
@@ -115,15 +119,20 @@ def actor_at(path):
     world = editor_world()
     if not isinstance(actor, unreal.Actor) or not unreal.SystemLibrary.is_valid(actor):
         where = world.get_path_name() if world is not None else "no editor world"
+        hint = ("; pass the actor's full object path, as list_unreal_actors reports it, not its label"
+                if "/" not in path else "")
         raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path)
-                            + " (no live actor at that path in the level open in the editor, " + where + ")")
+                            + " (no live actor at that path in the level open in the editor, " + where + hint + ")")
     owner = actor.get_world()
     if world is None or owner != world:
+        playing = owner is not None and re.match(_PIE_PACKAGE, owner.get_outermost().get_name().rpartition("/")[2])
+        advice = ("Play In Editor's copy of an actor; pass the editor's, " + re.sub(_PIE_PACKAGE, "", path, count=1)
+                  if playing else "open that map to edit it")
         raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path) + " (it belongs to "
                             + (owner.get_path_name() if owner is not None else "no world")
                             + ", not to the level open in the editor, "
                             + (world.get_path_name() if world is not None else "none")
-                            + "; open that map to edit it)")
+                            + "; " + advice + ")")
     return actor
 
 def actor_transform(actor):
@@ -322,10 +331,11 @@ if values:
 print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}))
 """
 
-# Expects ``args`` = {"actor_path"}. Adds the actor to the editor selection,
-# reads the selection back and prints the actor's location and bounds for the
-# camera. The bounds are AActor::GetActorBounds over every primitive component,
-# its child actors' included, as a center and a half-size. The half-size is
+# Expects ``args`` = {"actor_path"}. Makes the actor the whole editor
+# selection (adding it left earlier focuses selected, UE 5.7.4), reads the
+# selection back and prints the actor's location and bounds for the camera.
+# The bounds are AActor::GetActorBounds over every primitive component, its
+# child actors' included, as a center and a half-size. The half-size is
 # zero when no primitive component has a size (a StaticMeshActor without a
 # mesh); the center is then where such a component sits, or the world origin
 # when the actor has none. The editor-only components the editor's own Focus
@@ -400,7 +410,7 @@ pie = pie_active()
 selected = False
 if not pie:
     subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-    subsystem.set_actor_selection_state(actor, True)
+    subsystem.set_selected_level_actors([actor])
     selected = actor in subsystem.get_selected_level_actors()
 origin, extent = focus_bounds(actor)
 print(json.dumps({"location": actor_transform(actor)["location"],
@@ -408,20 +418,86 @@ print(json.dumps({"location": actor_transform(actor)["location"],
                   "selected": selected, "pie_active": pie}))
 """
 
+#: Actor classes ``spawn_unreal_actor`` refuses, each with why, subclasses
+#: included: the engine's per-level singletons, which it creates with the
+#: level or the world, and the game-framework classes the game mode spawns when
+#: play starts. All are declared NotPlaceable in UE 5.7, which the editor's
+#: Place Actors panel honours and EditorActorSubsystem's spawns do not (a
+#: second WorldSettings landed in a saved level, UE 5.7.4); Unreal's Python API
+#: reports no class flags, so the list is fixed here.
+NOT_PLACEABLE_ACTOR_CLASSES = (
+    ("/Script/Engine.WorldSettings", "each level has exactly one WorldSettings, which Unreal creates with it"),
+    ("/Script/Engine.LevelScriptActor", "the level Blueprint's actor, which Unreal creates with the level"),
+    ("/Script/Engine.WorldDataLayers", "the level's data layer registry, which Unreal creates with the level"),
+    ("/Script/Engine.WorldPartitionMiniMap", "the World Partition minimap, which Unreal creates with the level"),
+    ("/Script/Engine.DefaultPhysicsVolume", "the world's default physics volume, which Unreal creates"),
+    ("/Script/Engine.ParticleEventManager", "the world's particle event manager, which Unreal creates"),
+    ("/Script/NavigationSystem.NavigationData", "navigation data, which Unreal builds from a NavMeshBoundsVolume"),
+    ("/Script/Engine.GameModeBase", "a game-framework class, which the game mode spawns when play starts"),
+    ("/Script/Engine.GameStateBase", "a game-framework class, which the game mode spawns when play starts"),
+    ("/Script/Engine.GameSession", "a game-framework class, which the game mode spawns when play starts"),
+    ("/Script/Engine.GameNetworkManager", "a game-framework class, which the game mode spawns when play starts"),
+    ("/Script/Engine.PlayerState", "a game-framework class, which the game mode spawns when play starts"),
+    ("/Script/Engine.Controller", "a game-framework class, which the game mode spawns when play starts"),
+    ("/Script/Engine.HUD", "a game-framework class, which the game mode spawns when play starts"),
+    ("/Script/Engine.PlayerCameraManager", "a game-framework class, which the game mode spawns when play starts"),
+)
+
+#: Why ``spawn_unreal_actor`` refuses the bare ``Brush`` class (its subclasses,
+#: the volumes, spawn): a brush spawned without geometry is the builder
+#: brush's class, and placing one rebuilt BSP for 14 s in a World Partition
+#: level (UE 5.7.4).
+BARE_BRUSH_REASON = (
+    "a bare BSP brush, which has no geometry; Unreal makes brushes with its brush tools. Spawn a volume "
+    "class such as /Script/Engine.BlockingVolume, or a mesh such as /Engine/BasicShapes/Cube.Cube"
+)
+
 # Expects ``args`` = {"path", "location", "rotation", "label"}: location
 # [x, y, z] cm, rotation [pitch, yaw, roll] degrees, label None to keep the
 # default. An Actor class (``/Script/Engine.PointLight``, a Blueprint's
 # ``..._C`` class) spawns through spawn_actor_from_class. Any other asset goes
 # through spawn_actor_from_object, the actor factory the editor uses when the
 # asset is dropped into the level: a StaticMesh becomes a StaticMeshActor
-# showing it, a Blueprint asset its actor. Spawn and label are one undoable
+# showing it, a Blueprint asset its actor. Before anything loads, a path into a
+# package (an actor in a level) and a map are refused: loading either loads a
+# map. A class Unreal does not let you place (NOT_PLACEABLE_ACTOR_CLASSES, the
+# bare Brush), or a Blueprint of one, is refused before the spawn. Spawn and
+# label are one undoable transaction, and the label is read back: one Unreal
+# does not take (it trims spaces and refuses "None" and labels of 1024
+# characters or more, without a word) removes the actor and cancels the
 # transaction. When the path loads nothing, or Unreal places no actor for it,
 # the script prints an error instead of an empty actor path; while PIE runs,
 # when Unreal places nothing whatever the path, it prints the PIE refusal.
-SPAWN_ACTOR = ACTOR_HELPERS + """
+SPAWN_ACTOR = ACTOR_HELPERS + f"""
+NOT_PLACEABLE = {NOT_PLACEABLE_ACTOR_CLASSES!r}
+BARE_BRUSH = {BARE_BRUSH_REASON!r}
+""" + """
+def refused(error_type, message):
+    return {"success": False, "error_type": error_type, "error": message}
+
+def placement_refusal(source, path):
+    cls = source.generated_class() if isinstance(source, unreal.Blueprint) else source
+    if not isinstance(cls, unreal.Class):
+        return None
+    if cls == unreal.Brush.static_class():
+        return path + " is " + BARE_BRUSH
+    for class_path, reason in NOT_PLACEABLE:
+        base = unreal.find_object(None, class_path)
+        if base is not None and unreal.MathLibrary.class_is_child_of(cls, base):
+            return (path + " is " + ("" if cls == base else "a subclass of ") + base.get_name() + ": " + reason
+                    + "; Unreal does not let you place it")
+    return None
+
 def spawn(path, location, rotation, label):
     if pie_active():
         return pie_refusal("spawn actors")
+    if ":" in path:
+        return refused("SpawnError", path + " names an object inside a package, such as an actor in a level, "
+                       "not a class or asset")
+    if not path.startswith("/Script/"):
+        assets = unreal.AssetRegistryHelpers.get_asset_registry().get_assets_by_package_name(path.split(".", 1)[0])
+        if any(str(asset.asset_class_path.asset_name) == "World" for asset in assets):
+            return refused("SpawnError", path + " is a map, not a class or asset; simul loads no map")
     source = unreal.load_object(None, path)
     if source is None:
         return {"success": False, "error_type": "NotFoundError",
@@ -429,28 +505,34 @@ def spawn(path, location, rotation, label):
                          "such as /Script/Engine.PointLight or an asset path such as "
                          "/Engine/BasicShapes/Cube.Cube"}
     if isinstance(source, unreal.Actor):
-        return {"success": False, "error_type": "SpawnError",
-                "error": path + " is an actor in a level, not a class or asset"}
+        return refused("SpawnError", path + " is an actor in a level, not a class or asset")
     is_class = isinstance(source, unreal.Class)
     if is_class and not unreal.MathLibrary.class_is_child_of(source, unreal.Actor.static_class()):
-        return {"success": False, "error_type": "SpawnError",
-                "error": path + " is a class but not an Actor class"}
+        return refused("SpawnError", path + " is a class but not an Actor class")
+    reason = placement_refusal(source, path)
+    if reason is not None:
+        return refused("SpawnError", reason)
     subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     location = unreal.Vector(*location)
     pitch, yaw, roll = rotation
     rotation = unreal.Rotator(pitch=pitch, yaw=yaw, roll=roll)
-    with unreal.ScopedEditorTransaction("simul: spawn actor"):
+    with unreal.ScopedEditorTransaction("simul: spawn actor") as transaction:
         if is_class:
             actor = subsystem.spawn_actor_from_class(source, location, rotation)
         else:
             actor = subsystem.spawn_actor_from_object(source, location, rotation)
         if actor is not None and label is not None:
             actor.set_actor_label(label)
+            if actor.get_actor_label() != label:
+                subsystem.destroy_actor(actor)
+                transaction.cancel()
+                return refused("ValidationError", "Unreal did not take the label " + repr(label[:80])
+                               + ", so the actor was removed again")
     if actor is None:
-        return {"success": False, "error_type": "SpawnError",
-                "error": "Unreal placed no actor for " + path + " (a "
-                         + source.get_class().get_name() + "); pass an Actor class or an "
-                         "asset the editor can place, such as a StaticMesh or a Blueprint"}
+        return refused("SpawnError", "Unreal placed no actor for " + path + " (a "
+                       + source.get_class().get_name() + "); pass a concrete Actor class (Unreal "
+                       "spawns no abstract class, such as Light or Info) or an asset the editor can "
+                       "place, such as a StaticMesh or a Blueprint")
     transform = actor_transform(actor)
     return {"actor_path": actor.get_path_name(), "actor_class": actor.get_class().get_name(),
             "label": actor.get_actor_label(), "location": transform["location"],
@@ -646,6 +728,128 @@ def add(actor_path, component_class, component_name, parent_component):
     return dict(describe(actor, component), actor_path=actor_path)
 
 print(json.dumps(add(**args)))
+"""
+
+# Expects ``args`` = {"actor_path"}. Raises SimulNotFound unless the path
+# names a live actor of the editor world; prints an empty object otherwise.
+# For an operation Remote Control performs on the object path itself, which
+# would act on a deleted actor, or on an actor of a map loaded but not open.
+ACTOR_EXISTS = ACTOR_HELPERS + """
+actor_at(args["actor_path"])
+print("{}")
+"""
+
+# Expects ``args`` = {"actor_path"}. Deletes the actor in one undoable
+# transaction and reads its validity back. While PIE runs Unreal deletes
+# nothing, so the PIE refusal comes first. A path that names no live actor of
+# the editor world, a label among them, is NotFoundError: it used to be
+# success with deleted false. Unreal's level listing leaves out the actors the
+# editor does not let you delete (the WorldSettings, the builder brush, actors
+# kept out of the Outliner), and EditorActorSubsystem.destroy_actor deletes
+# them anyway, so one the listing leaves out is refused.
+DELETE_ACTOR = ACTOR_HELPERS + """
+def delete(actor_path):
+    if pie_active():
+        return pie_refusal("delete actors")
+    try:
+        actor = actor_at(actor_path)
+    except SimulNotFound as exc:
+        return {"success": False, "error_type": "NotFoundError", "error": str(exc)}
+    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    if actor not in subsystem.get_all_level_actors():
+        if isinstance(actor, unreal.WorldSettings):
+            kind = "the level's WorldSettings"
+        elif actor.get_class() == unreal.Brush.static_class():
+            kind = "the level's builder brush"
+        else:
+            kind = "an actor the editor keeps out of the Outliner"
+        return {"success": False, "error_type": "ValidationError",
+                "error": actor_path + " is " + kind + ", which the editor does not let you delete"}
+    with unreal.ScopedEditorTransaction("simul: delete actor") as transaction:
+        destroyed = subsystem.destroy_actor(actor)
+        if not destroyed:
+            transaction.cancel()
+    if not destroyed or unreal.SystemLibrary.is_valid(actor):
+        return {"success": False, "error_type": "EngineError", "error": "Unreal did not delete " + actor_path}
+    return {"actor_path": actor_path, "deleted": True}
+
+print(json.dumps(delete(**args)))
+"""
+
+# Expects ``args`` = {"actor_path", "visible", "scope", "propagate",
+# "persistent"}. Three flags hide an actor (UE 5.7.4), and the scope names the
+# ones written:
+# - "editor": the editor's hide (set_is_temporarily_hidden_in_editor, the
+#   Outliner's eye and the H key), which the level viewport and its captures
+#   honour. Unreal keeps it for the editor session, not in the saved level.
+# - "game": hidden in game (set_actor_hidden_in_game, bHidden), saved with the
+#   level, which Play In Editor and a packaged game honour; the level viewport
+#   still draws the actor outside Game View.
+# - "all": both.
+# With persistent (editor scopes) the editor's hidden-at-startup flag
+# (bHiddenEd, saved with the level and applied when it loads) is written too,
+# through the editor's ACTOR HIDE / UNHIDE SELECTED STARTUP commands: Python
+# and Remote Control cannot set it (the property is not exposed and is
+# EditConst). They act on the selection, so the actors are selected for the
+# command, made selectable first (the editor selects no hidden actor), and the
+# selection is restored; the editor selects nothing during PIE, so persistent
+# is refused then. A hidden parent hides none of its attached actors, so
+# propagate applies the same flags to every actor attached under it, children
+# of children included. Everything is one undoable transaction with every actor
+# modified first, and every actor's flags are read back.
+SET_ACTOR_VISIBILITY = ACTOR_HELPERS + """
+STARTUP_COMMANDS = {True: "ACTOR HIDE SELECTED STARTUP", False: "ACTOR UNHIDE SELECTED STARTUP"}
+
+def flags(actor):
+    return {"actor_path": actor.get_path_name(),
+            "hidden_in_editor": bool(actor.is_temporarily_hidden_in_editor()),
+            "hidden_in_editor_at_startup": bool(actor.is_hidden_ed_at_startup()),
+            "hidden_in_game": bool(actor.get_editor_property("hidden"))}
+
+def set_hidden_at_startup(actors, hidden):
+    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    previous = list(subsystem.get_selected_level_actors())
+    for actor in actors:
+        if actor.is_temporarily_hidden_in_editor():
+            actor.set_is_temporarily_hidden_in_editor(False)
+    try:
+        subsystem.set_selected_level_actors(actors)
+        unreal.SystemLibrary.execute_console_command(None, STARTUP_COMMANDS[hidden])
+    finally:
+        subsystem.set_selected_level_actors(previous)
+
+def set_visibility(actor_path, visible, scope, propagate, persistent):
+    actor = actor_at(actor_path)
+    if persistent and pie_active():
+        return pie_refusal("change what is hidden at editor startup")
+    actors = [actor]
+    if propagate:
+        actors += list(actor.get_attached_actors(reset_array=True, recursively_include_attached_actors=True))
+    hidden = not visible
+    editor, game = scope in ("all", "editor"), scope in ("all", "game")
+    with unreal.ScopedEditorTransaction("simul: set actor visibility"):
+        for target in actors:
+            target.modify()
+        if editor and persistent:
+            set_hidden_at_startup(actors, hidden)
+        for target in actors:
+            if editor:
+                target.set_is_temporarily_hidden_in_editor(hidden)
+            if game:
+                target.set_actor_hidden_in_game(hidden)
+    states = [flags(target) for target in actors]
+    missed = [state["actor_path"] for state in states
+              if (editor and state["hidden_in_editor"] != hidden)
+              or (game and state["hidden_in_game"] != hidden)
+              or (editor and persistent and state["hidden_in_editor_at_startup"] != hidden)]
+    result = {"actor_path": actor_path, "visible": visible, "scope": scope, "propagate": propagate,
+              "persistent": persistent, "actors": states}
+    if missed:
+        result.update(success=False, error_type="EngineError",
+                      error="Unreal did not apply the visibility to: " + ", ".join(missed))
+    return result
+
+print(json.dumps(set_visibility(**args)))
 """
 
 # Expects ``args`` = {"label", "match_mode", "max_results"}. Semantic labels

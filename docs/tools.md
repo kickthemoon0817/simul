@@ -150,6 +150,59 @@ Behaviour worth knowing:
   class that is not a component and a name already used inside the actor are
   refused first. Unreal adds its usual helpers too, such as a light's editor
   icon (a BillboardComponent).
+- Every actor edit is one undoable editor transaction, with the actors it
+  changes recorded first, so one editor undo reverts that edit and nothing
+  before it: spawn, delete, transform, visibility, parenting, components and
+  `call_unreal_actor_function` (Remote Control's `generateTransaction`, which
+  records the actor and its root component; a function that changes another
+  object records only what it records itself). An edit outside a transaction
+  used to leave the undo history alone, so the next undo reverted the edit
+  before it. An edit that changes nothing, such as showing a visible actor or
+  calling a getter, leaves no undo step: Unreal drops a transaction that
+  records no change.
+- `set_unreal_actor_visibility` sets the visibility `scope` names, on the actor
+  and, with `propagate` (the default), on every actor attached under it, since
+  a hidden parent hides none of its children:
+  - `editor`: the editor's hide, as the Outliner's eye. The level viewport and
+    `capture_unreal_viewport` leave the actor out. It lasts the editor session;
+    with `persistent: true` the hidden-at-editor-startup flag, saved with the
+    level and applied when it loads, is set too (or cleared, to show it). Unreal
+    sets that flag only through its startup commands, which act on the
+    selection, so the actors are selected for it and the selection restored;
+    `persistent` is refused while PIE runs, when the editor selects nothing.
+  - `game`: hidden in game, saved with the level, which Play In Editor and the
+    packaged game honour. The level viewport still draws the actor outside
+    Game View.
+  - `all` (the default): both.
+
+  The reply's `actors` lists each actor's `hidden_in_editor`,
+  `hidden_in_editor_at_startup` and `hidden_in_game` read back, the actor
+  first; one that reads back other than asked fails the call with
+  `EngineError`.
+- `spawn_unreal_actor` refuses a class Unreal does not let you place, and a
+  Blueprint of one: the level's per-level singletons (WorldSettings,
+  LevelScriptActor, WorldDataLayers, the World Partition minimap, the default
+  physics volume, the particle event manager, navigation data) and the
+  game-framework classes the game mode spawns when play starts (GameModeBase,
+  GameStateBase, GameSession, GameNetworkManager, PlayerState, Controller,
+  HUD, PlayerCameraManager), all declared NotPlaceable, which the editor's
+  spawn functions ignore (a second WorldSettings landed in a saved level). It
+  refuses the bare `Brush` class too (volumes spawn), an abstract class, and,
+  before anything loads, a map or a path into one (an actor in a level). A
+  label with leading or trailing whitespace, over 1023 characters or `None` is
+  refused before anything spawns, since Unreal trims or drops it without a
+  word, and the label is read back: one Unreal still does not take removes the
+  actor again.
+- `delete_unreal_actor` takes the actor's full path; a label, a missing path or
+  an actor already deleted is `NotFoundError`. The level's WorldSettings, its
+  builder brush and the other actors the editor keeps out of the Outliner are
+  refused with `ValidationError`, as the editor does not let you delete them.
+  The deletion is read back.
+- `set_unreal_camera_view` takes each axis of `location` within
+  4398046511104 cm (2^42) of the origin and `pitch` from -90 to 90 degrees;
+  Unreal clamps anything beyond without a word, so a value outside is a
+  `ValidationError` and the camera does not move. The reply is the camera
+  read back, location and rotation, also for a group left unchanged.
 - Actor inspection, physics, materials and PIE start/stop/pause/resume use
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
@@ -226,7 +279,7 @@ Behaviour worth knowing:
   a transient Material Instance Dynamic that copies the material's
   parameters with their layers.
 - `focus_unreal_on_actor` points the level viewport camera at the actor and
-  selects it, reading the selection back: `selected` is false, with a
+  makes it the whole editor selection, reading the selection back: `selected` is false, with a
   `warning`, while PIE runs (below) and for an actor Unreal does not select:
   one hidden in the editor or in a hidden or locked level, a child actor or an
   actor inside a level instance (Unreal selects those only through their
@@ -295,7 +348,9 @@ Behaviour worth knowing:
   - Editing actors already in the level by path (transform, lights, collision,
     physics settings, visibility, materials, parenting, components) keeps
     working and changes the editor world, not the running game; a path into the
-    running game's world (`UEDPIE_<n>_<map>`) is not found.
+    running game's world (`UEDPIE_<n>_<map>`) is not found, and the error
+    names the editor's path. `set_unreal_actor_visibility` with `persistent`
+    is refused with `PIEActive`, as the editor selects nothing then.
   - `set_unreal_material_params` edits the material instance asset, which the
     running game uses too: an edit made during PIE shows in the game and stays
     after PIE stops.

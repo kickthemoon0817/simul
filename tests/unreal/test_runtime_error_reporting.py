@@ -215,18 +215,20 @@ def test_get_viewport_info_without_a_camera_is_an_error(monkeypatch: pytest.Monk
 
 def test_set_camera_view_keeps_the_unset_rotation(monkeypatch: pytest.MonkeyPatch) -> None:
     current = {"Pitch": -10.0, "Yaw": 30.0, "Roll": 0.0}
+    camera: Dict[str, Any] = {"CameraLocation": {"X": 1, "Y": 2, "Z": 3}, "CameraRotation": current}
 
     def handler(path: str, body: Dict[str, Any]) -> _Response:
         if body.get("functionName") == "GetLevelViewportCameraInfo":
-            return _Response({"CameraLocation": {"X": 1, "Y": 2, "Z": 3}, "CameraRotation": current,
-                              "ReturnValue": True})
+            return _Response({**camera, "ReturnValue": True})
+        camera.update(body["parameters"])
         return _Response({})
 
     session = _session(monkeypatch, handler)
 
     result = asyncio.run(session.set_camera_view(location=(10.0, 20.0, 30.0)))
 
-    assert result == {"location": (10.0, 20.0, 30.0), "rotation": None}
+    # The camera read back after the write: the new location, the kept rotation.
+    assert result == {"location": (10.0, 20.0, 30.0), "rotation": (-10.0, 30.0, 0.0)}
     sent = next(b for b in session._session.bodies if b.get("functionName") == "SetLevelViewportCameraInfo")
     assert sent["parameters"]["CameraLocation"] == {"X": 10.0, "Y": 20.0, "Z": 30.0}
     assert sent["parameters"]["CameraRotation"] == current
@@ -257,13 +259,21 @@ def test_call_actor_function_rejects_bad_parameters_without_calling(
 
 
 def test_call_actor_function_passes_a_json_object(monkeypatch: pytest.MonkeyPatch) -> None:
-    session = _session(monkeypatch, lambda path, body: _Response({"ReturnValue": 1}))
+    def handler(path: str, body: Dict[str, Any]) -> _Response:
+        if body.get("functionName") == "ExecutePythonCommandEx":  # the actor check
+            return _Response({"ReturnValue": True, "LogOutput": [{"Type": "Info", "Output": "{}"}]})
+        return _Response({"ReturnValue": 1})
+
+    session = _session(monkeypatch, handler)
 
     asyncio.run(session.call_actor_function(
         actor_path="/Game/Maps/T.T:PersistentLevel.A", function_name="SetSpeed", parameters='{"Speed": 2}',
     ))
 
-    assert session._session.bodies[0]["parameters"] == {"Speed": 2}
+    call = session._session.bodies[-1]
+    assert call["parameters"] == {"Speed": 2}
+    # One undo step that records the actor before the function runs.
+    assert call["generateTransaction"] is True
 
 
 # -- MCP wrappers ----------------------------------------------------------------

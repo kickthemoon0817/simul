@@ -99,8 +99,32 @@ UCLASS = Class("/Script/CoreUObject.Class", UOBJECT)
 ACTOR = Class("/Script/Engine.Actor", UOBJECT)
 STATIC_MESH_ACTOR = Class("/Script/Engine.StaticMeshActor", ACTOR)
 POINT_LIGHT = Class("/Script/Engine.PointLight", ACTOR)
+# Classes Unreal does not let you place (UE 5.7 declares them NotPlaceable),
+# and the brushes: the bare Brush is refused, its volumes are not.
+WORLD_SETTINGS = Class("/Script/Engine.WorldSettings", ACTOR)
+GAME_MODE = Class("/Script/Engine.GameModeBase", ACTOR)
+CONTROLLER = Class("/Script/Engine.Controller", ACTOR)
+PLAYER_CONTROLLER = Class("/Script/Engine.PlayerController", CONTROLLER)
+BRUSH = Class("/Script/Engine.Brush", ACTOR)
+BLOCKING_VOLUME = Class("/Script/Engine.BlockingVolume", BRUSH)
 STATIC_MESH = Class("/Script/Engine.StaticMesh", UOBJECT)
 MATERIAL = Class("/Script/Engine.Material", UOBJECT)
+
+
+class Blueprint:
+    """A Blueprint asset; ``generated_class`` is the class it compiles to."""
+
+    def __init__(self, path: str, generated: Class) -> None:
+        self.path, self.generated = path, generated
+
+    def get_path_name(self) -> str:
+        return self.path
+
+    def get_class(self) -> Class:
+        return Class("/Script/Engine.Blueprint", UOBJECT)
+
+    def generated_class(self) -> Class:
+        return self.generated
 
 
 class Asset:
@@ -113,6 +137,9 @@ class Asset:
     def get_class(self) -> Class:
         return self.cls
 
+
+#: Labels the fake's set_actor_label drops, as Unreal drops one it will not take.
+DROPPED_LABELS = {"Dropped"}
 
 CUBE = Asset("/Engine/BasicShapes/Cube.Cube", STATIC_MESH)
 SHAPE_MATERIAL = Asset(
@@ -162,8 +189,10 @@ class Actor:
         return self.label
 
     def set_actor_label(self, label: str) -> None:
+        """Unreal drops a label it will not take without a word (UE 5.7.4)."""
         self.events.append(("label", label))
-        self.label = label
+        if label not in DROPPED_LABELS:
+            self.label = label
 
     def get_actor_location(self) -> Vector:
         return self.location
@@ -194,8 +223,18 @@ class Editor:
                 STATIC_MESH,
                 CUBE,
                 SHAPE_MATERIAL,
+                WORLD_SETTINGS,
+                GAME_MODE,
+                CONTROLLER,
+                PLAYER_CONTROLLER,
+                BRUSH,
+                BLOCKING_VOLUME,
+                Blueprint("/Game/BP_Rules.BP_Rules", Class("/Game/BP_Rules.BP_Rules_C", GAME_MODE)),
             )
         }
+        # Map packages in the asset registry, and every path load_object got.
+        self.maps = {"/Game/Maps/Lab"}
+        self.loads: List[str] = []
         self.actors: List[Actor] = []
         self.spawn_calls: List[tuple] = []
         # Transactions, placements and label changes, in order.
@@ -204,6 +243,12 @@ class Editor:
         self.level_editor = SimpleNamespace(is_in_play_in_editor=lambda: False)
 
     def load_object(self, outer: Any, path: str) -> Any:
+        self.loads.append(path)
+        found = self.objects.get(path)
+        return found or next((a for a in self.actors if a.path == path), None)
+
+    def find_object(self, outer: Any, path: str) -> Any:
+        """Loaded objects only: the classes here, and the placed actors."""
         found = self.objects.get(path)
         return found or next((a for a in self.actors if a.path == path), None)
 
@@ -249,11 +294,16 @@ class Editor:
     def get_all_level_actors(self) -> List[Actor]:
         return list(self.actors)
 
+    def destroy_actor(self, actor: Actor) -> bool:
+        self.events.append(("destroy", actor.path))
+        self.actors.remove(actor)
+        return True
+
     @contextmanager
-    def transaction(self, description: str) -> Iterator[None]:
+    def transaction(self, description: str) -> Iterator[SimpleNamespace]:
         self.events.append(("begin", description))
         try:
-            yield
+            yield SimpleNamespace(cancel=lambda: self.events.append(("cancel", description)))
         finally:
             self.events.append(("end", description))
 
@@ -271,6 +321,18 @@ class Editor:
                 "LevelEditorSubsystem": self.level_editor,
             }.get(which),
             load_object=self.load_object,
+            find_object=self.find_object,
+            Blueprint=Blueprint,
+            Brush=SimpleNamespace(static_class=lambda: BRUSH),
+            AssetRegistryHelpers=SimpleNamespace(
+                get_asset_registry=lambda: SimpleNamespace(
+                    get_assets_by_package_name=lambda package: [
+                        SimpleNamespace(asset_class_path=SimpleNamespace(asset_name="World"))
+                    ]
+                    if package in self.maps
+                    else []
+                )
+            ),
             MathLibrary=SimpleNamespace(class_is_child_of=class_is_child_of),
             ScopedEditorTransaction=self.transaction,
         )
@@ -530,9 +592,94 @@ async def test_spawning_from_an_actor_in_the_level_is_an_error(editor: Editor) -
 
     assert payload["success"] is False, payload
     assert payload["error_type"] == "SpawnError"
-    assert "is an actor in a level" in payload["error"]
+    assert "names an object inside a package, such as an actor in a level" in payload["error"]
     assert editor.actors == [placed]
     assert editor.spawn_calls == []
+    # Refused before anything loads: loading an actor's path loads its map.
+    assert editor.loads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("asset_path", "message"),
+    [
+        (
+            "/Script/Engine.WorldSettings",
+            "/Script/Engine.WorldSettings is WorldSettings: each level has exactly one WorldSettings",
+        ),
+        (
+            "/Script/Engine.PlayerController",
+            "/Script/Engine.PlayerController is a subclass of Controller: a game-framework class",
+        ),
+        ("/Game/BP_Rules.BP_Rules", "/Game/BP_Rules.BP_Rules is a subclass of GameModeBase"),
+        ("/Script/Engine.Brush", "/Script/Engine.Brush is a bare BSP brush"),
+    ],
+)
+async def test_a_class_unreal_does_not_let_you_place_is_refused(
+    editor: Editor, asset_path: str, message: str
+) -> None:
+    """A second WorldSettings landed in a saved level, and a bare Brush took
+    14 s to place (UE 5.7.4): EditorActorSubsystem ignores NotPlaceable."""
+    async with remote_control(editor) as rc:
+        payload = await call_tool(rc.settings, "spawn_unreal_actor", {"asset_path": asset_path})
+
+    assert payload["success"] is False and payload["error_type"] == "SpawnError", payload
+    assert payload["error"].startswith(message)
+    assert editor.actors == [] and editor.spawn_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_volume_still_spawns(editor: Editor) -> None:
+    async with remote_control(editor) as rc:
+        payload = await call_tool(rc.settings, "spawn_unreal_actor", {"asset_path": BLOCKING_VOLUME.path})
+
+    assert payload["success"] is True and payload["actor_class"] == "BlockingVolume", payload
+
+
+@pytest.mark.asyncio
+async def test_a_map_is_refused_before_it_loads(editor: Editor) -> None:
+    async with remote_control(editor) as rc:
+        payload = await call_tool(rc.settings, "spawn_unreal_actor", {"asset_path": "/Game/Maps/Lab.Lab"})
+
+    assert payload["success"] is False and payload["error_type"] == "SpawnError"
+    assert payload["error"] == "/Game/Maps/Lab.Lab is a map, not a class or asset; simul loads no map"
+    assert editor.loads == [] and editor.actors == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "message"),
+    [
+        ("x" * 2000, "label is 2000 characters long; Unreal keeps at most 1023"),
+        (" Crate", "label ' Crate' has leading or trailing whitespace, which Unreal trims"),
+        ("None", "label cannot be 'None', which Unreal reserves for no name"),
+    ],
+)
+async def test_a_label_unreal_would_drop_is_refused_before_anything_spawns(
+    editor: Editor, label: str, message: str
+) -> None:
+    """A 2000-character label was dropped while the call reported success."""
+    async with remote_control(editor) as rc:
+        payload = await call_tool(
+            rc.settings, "spawn_unreal_actor", {"asset_path": POINT_LIGHT.path, "label": label}
+        )
+
+    assert payload["success"] is False and payload["error_type"] == "ValidationError"
+    assert payload["error"] == message
+    assert rc.requests == [] and editor.actors == []
+
+
+@pytest.mark.asyncio
+async def test_a_label_unreal_does_not_take_removes_the_actor_again(editor: Editor) -> None:
+    async with remote_control(editor) as rc:
+        payload = await call_tool(
+            rc.settings, "spawn_unreal_actor", {"asset_path": POINT_LIGHT.path, "label": "Dropped"}
+        )
+
+    assert payload["success"] is False and payload["error_type"] == "ValidationError"
+    assert payload["error"] == "Unreal did not take the label 'Dropped', so the actor was removed again"
+    assert editor.actors == []
+    assert [event[0] for event in editor.events] == ["begin", "spawn", "label", "destroy", "cancel", "end"]
 
 
 @pytest.mark.asyncio
@@ -736,7 +883,9 @@ def test_regex_mode_refuses_only_repeated_groups_that_can_split_a_tag(
 async def test_caller_strings_are_embedded_as_python_literals(
     method: str, kwargs: Dict[str, Any]
 ) -> None:
-    payload = "'; simul_injected(); #\"\\\n"
+    # Quotes, a backslash and a newline, inside the string: a label with
+    # surrounding whitespace is refused before any script is built.
+    payload = "'; simul_injected(); #\"\\\nend"
     session = UnrealRuntimeSession(Settings())
     session._execute_python = AsyncMock(
         return_value={

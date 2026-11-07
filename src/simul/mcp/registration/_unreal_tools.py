@@ -260,6 +260,13 @@ def _focus_view(request: Any) -> Optional[str]:
     return focus_view_error(request.fov, request.aspect_ratio)
 
 
+def _visibility_request(request: Any) -> Optional[str]:
+    """A scope the visibility tool knows, and persistence only for the editor's hiding."""
+    from ...adapters.unreal_runtime import visibility_request_error
+
+    return visibility_request_error(request.scope, request.persistent)
+
+
 def _parent_or_detach(request: Any) -> Optional[str]:
     """Attaching names the parent and detaching says so; one of the two, never both."""
     if bool(request.parent_path) == bool(request.detach):
@@ -612,7 +619,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_camera_view",
-        description="Set the editor viewport camera position and rotation.",
+        description=(
+            "Set the editor viewport camera position and rotation and return the camera read back. Each axis of "
+            "location within 4398046511104 cm (2^42) of the origin and pitch from -90 to 90 degrees, the furthest "
+            "Unreal takes; a group left out keeps its value."
+        ),
         response=UnrealSetCameraViewResponse,
         read_only=False,
         idempotent=True,
@@ -631,9 +642,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="focus_unreal_on_actor",
         description=(
-            "Focus the editor viewport camera on a specific actor and select it. With distance 0 the camera "
-            "looks at the center of the actor's bounds and backs off until they fit a view fov degrees across "
-            "and aspect_ratio wide per unit of height: by default UE's default 90-degree field of view on the "
+            "Focus the editor viewport camera on a specific actor and make it the whole selection. With distance 0 "
+            "the camera looks at the center of the actor's bounds and backs off until they fit a view fov degrees "
+            "across and aspect_ratio wide per unit of height: by default UE's default 90-degree field of view on the "
             "16:9 of the default capture. Editor Python cannot read the viewport's field of view, so pass fov "
             "when it was changed, and aspect_ratio for a capture of another shape. distance reports the "
             "distance used, and fit_warning says when an actor without bounds got the default 500 cm. "
@@ -678,7 +689,13 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- Scene manipulation ---------------------------------------------------
     UnrealTool(
         name="spawn_unreal_actor",
-        description="Spawn an actor from a class or asset path.",
+        description=(
+            "Spawn an actor from a class or asset path, with its label, in one undoable editor transaction; the "
+            "label and transform are read back. Refused: a class Unreal does not let you place (the level's "
+            "WorldSettings and other per-level singletons, game-framework classes such as GameModeBase or "
+            "PlayerController, a bare Brush), an abstract class, a map or an actor in a level, and a label Unreal "
+            "would not take (leading or trailing whitespace, over 1023 characters, 'None')."
+        ),
         response=UnrealSpawnActorResponse,
         read_only=False,
         method="spawn_actor",
@@ -690,18 +707,30 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("rotation_pitch", float, 0.0, description="Spawn pitch in degrees (rotation about Y)."),
             ToolParam("rotation_yaw", float, 0.0, description="Spawn yaw in degrees (rotation about Z)."),
             ToolParam("rotation_roll", float, 0.0, description="Spawn roll in degrees (rotation about X)."),
-            ToolParam("label", str, "", description="Optional actor label in the outliner."),
+            ToolParam(
+                "label",
+                str,
+                "",
+                description=(
+                    "Optional actor label in the outliner: no leading or trailing whitespace, at most 1023 "
+                    "characters, not 'None'."
+                ),
+            ),
         ),
         arguments=_spawn_arguments,
     ),
     UnrealTool(
         name="delete_unreal_actor",
-        description="Delete an actor from the level. DESTRUCTIVE operation.",
+        description=(
+            "Delete an actor from the level, in one undoable editor transaction. DESTRUCTIVE operation. A path that "
+            "names no actor of the level open in the editor (or a label) is NotFoundError; the level's "
+            "WorldSettings, its builder brush and other actors the editor keeps out of the Outliner are refused."
+        ),
         response=UnrealDeleteActorResponse,
         read_only=False,
         destructive=True,
         method="delete_actor",
-        params=(ToolParam("actor_path", str),),
+        params=(ToolParam("actor_path", str, description="Full actor path, as list_unreal_actors reports it."),),
     ),
     UnrealTool(
         name="set_unreal_actor_transform",
@@ -759,7 +788,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="call_unreal_actor_function",
-        description="Call a BlueprintCallable UFUNCTION on an actor.",
+        description=(
+            "Call a BlueprintCallable UFUNCTION on an actor of the level open in the editor, as one undo step that "
+            "records the actor and its root component first."
+        ),
         response=UnrealCallActorFunctionResponse,
         read_only=False,
         destructive=True,
@@ -847,17 +879,52 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_actor_visibility",
-        description="Set actor visibility in the Unreal level.",
+        description=(
+            "Show or hide an actor, in one undoable editor transaction, and read every flag back. scope 'editor' "
+            "is the editor's hide (the Outliner's eye): the level viewport and captures honour it, and it lasts the "
+            "editor session unless persistent also sets the hidden-at-editor-startup flag saved with the level. "
+            "scope 'game' is hidden in game, saved with the level: Play In Editor and the packaged game honour it, "
+            "the level viewport still draws the actor. 'all' (the default) sets both. propagate applies the same "
+            "to every actor attached under it. actors lists each actor's hidden_in_editor, "
+            "hidden_in_editor_at_startup and hidden_in_game read back."
+        ),
         response=UnrealSetActorVisibilityResponse,
         read_only=False,
         idempotent=True,
         destructive=True,
         method="set_actor_visibility",
         params=(
-            ToolParam("actor_path", str),
-            ToolParam("visible", bool, True),
-            ToolParam("propagate", bool, True),
+            ToolParam("actor_path", str, description="Full actor path."),
+            ToolParam("visible", bool, True, description="Show the actor (true) or hide it (false)."),
+            ToolParam(
+                "propagate",
+                bool,
+                True,
+                description=(
+                    "Apply the same to every actor attached under it, children of children included; a hidden "
+                    "parent hides none of them."
+                ),
+            ),
+            ToolParam(
+                "scope",
+                str,
+                "all",
+                description=(
+                    "Which visibility to set: 'editor' (level viewport and captures), 'game' (Play In Editor and "
+                    "the packaged game) or 'all'."
+                ),
+            ),
+            ToolParam(
+                "persistent",
+                bool,
+                False,
+                description=(
+                    "Editor scopes only: also set the hidden-at-editor-startup flag saved with the level, so the "
+                    "editor hiding outlasts a reload. Not while Play In Editor runs."
+                ),
+            ),
         ),
+        check=_visibility_request,
     ),
     # -- Materials, lighting and rendering --------------------------------------
     UnrealTool(
