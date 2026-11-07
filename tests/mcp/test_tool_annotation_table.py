@@ -57,8 +57,8 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "get_prim_info": (RO, True, False),
     "get_prim_subtree": (RO, True, False),
     "search_prims": (RO, True, False),
-    "create_prim": (RW, False, False),
-    "update_prim_attributes": (DESTRUCTIVE, False, False),
+    "create_prim": (DESTRUCTIVE, False, False),  # redefine_existing re-types a prim
+    "update_prim_attributes": (DESTRUCTIVE, True, False),
     "delete_prim": (DESTRUCTIVE, False, False),
     # Unreal
     "unreal_health_check": (RO, True, True),

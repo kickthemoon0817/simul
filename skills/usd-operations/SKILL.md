@@ -190,6 +190,18 @@ mcp__simul__delete_prim
   prim_path: "/World/UnwantedPrim"
 ```
 
+Every edit is all or nothing: a call that fails changes nothing, and its
+error names the prim, each rejected attribute and the reason.
+
+- Paths are absolute (`/World/Box`, never `World/Box`).
+- `create_prim` takes a concrete registered type (`Xform`, `Cube`, ...) and
+  refuses an existing path unless `redefine_existing: true`.
+- `active`, `instanceable` and `kind` in `attributes` set prim metadata.
+- `delete_prim` refuses `/`, and the default prim unless
+  `allow_root_delete: true`. A prim that also comes from a sublayer or a
+  reference cannot be deleted from the root layer; deactivate it with
+  `attributes: {"active": false}` instead.
+
 **Note:** Modifications via these tools write back to the loaded stage. To persist changes to disk, the stage must be saved — use `execute_isaac_script` with `stage.Export(path)` if Isaac Sim is running, or be aware that headless modifications may require a separate save step depending on server configuration.
 
 ## Common Analysis Workflows

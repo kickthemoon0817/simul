@@ -110,6 +110,50 @@ that opens with missing sublayers, references or payloads loads, and lists
 them in `warnings`. `simul usd validate` runs the same checks and exits 1
 when the file is invalid.
 
+### Editing
+
+Edits go to the stage's edit target, its root layer, and are all or nothing:
+each call checks the whole request first, then writes, and if a write still
+fails it restores the specs it touched. A call that reports failure has
+changed nothing.
+
+Edit errors use the same types as the lookups above. Invalid input is a
+`ValidationError` whose `details.code` says which check failed
+(`InvalidPrimPath`, `UnknownPrimType`, `InvalidAttribute`). A missing stage or
+prim is a `NotFoundError`. A write that fails after the checks passed is an
+`EngineError` with `details.rolled_back: true`. A refusal that an explicit flag
+overrides is a `RefusedOperation` naming the flag in `details.override`, and
+an edit USD cannot express is an `UnsupportedOperation`.
+
+- **Paths** must be absolute prim paths (`/World/Box`). A relative path, a
+  property path (`/World/Box.size`), a trailing `/` or an invalid prim name
+  fails with `details.code: InvalidPrimPath`. The message names the bad
+  element and suggests the fix (`details.suggestion`). A missing prim names
+  the nearest prim that exists.
+- **`create_prim`** takes only concrete types registered with USD (`Xform`,
+  `Scope`, `Mesh`, `Cube`, `PhysicsRevoluteJoint`, ...). An unknown, abstract
+  or API schema name fails with `details.code: UnknownPrimType` and close
+  matches in `details.suggestions`. A path that already holds a prim is
+  refused unless `redefine_existing=true`, which changes its type and keeps
+  its children, properties and composition arcs.
+- **Attributes** are checked against the prim's existing property or its
+  schema definition: the value must fit the attribute's type, and a token
+  must be one of its `allowedTokens`. A new attribute is created as a custom
+  attribute with a type inferred from the value. An existing relationship
+  takes a target path or a list of them. The keys `active`, `instanceable`
+  and `kind` set prim metadata through USD's API; other metadata keys are
+  refused rather than written as attributes. One error
+  (`details.code: InvalidAttribute`) lists every rejected key with its reason
+  in `details.problems`.
+- **`delete_prim`** refuses `/`, and the stage's default prim unless
+  `allow_root_delete=true`. It also refuses a prim the delete cannot remove
+  because opinions outside the root layer keep it alive: a sublayer defines
+  it, or it comes from a reference or payload on an ancestor. Deactivate such
+  a prim instead with `update_prim_attributes {"active": false}`.
+- Prims inside an instanceable prim (instance proxies) cannot be authored;
+  edits to them fail with `UnsupportedOperation`. Set `instanceable` to
+  `false` on the instance first.
+
 ## Isaac Sim
 
 Requires a running Isaac Sim 5.1.0, 6.0.0 or 6.0.1 reachable over the bridge
@@ -124,7 +168,8 @@ Registered by default only on Linux and Windows, where Isaac Sim runs
 | Prim editing | `create_isaac_object`, `create_isaac_prim`, `delete_isaac_prim`, `set_isaac_prim_transform`, `set_isaac_prim_visibility`, `set_isaac_prim_attribute`, `duplicate_isaac_prim`, `reparent_isaac_prim` |
 | Lights | `list_isaac_lights`, `create_isaac_light` |
 | Cameras and viewport | `list_isaac_cameras`, `get_isaac_camera_info`, `set_isaac_camera`, `capture_isaac_viewport`, `focus_isaac_viewport`, `get_isaac_viewport_info` |
-| Physics | `get_isaac_physics_scene`, `create_isaac_physics_scene`, `add_isaac_rigid_body`, `add_isaac_collision`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects` |
+| Physics | `get_isaac_physics_scene`, `create_isaac_physics_scene`, `configure_isaac_physics_scene`, `add_isaac_rigid_body`, `add_isaac_collision`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects` |
+| Joints and articulations | `list_isaac_articulations`, `set_isaac_joint_drive`, `set_isaac_joint_limits` |
 | Simulation control | `get_isaac_simulation_state`, `start_isaac_simulation`, `pause_isaac_simulation`, `stop_isaac_simulation`, `step_isaac_simulation`, `reset_isaac_simulation`, `get_isaac_simulation_time` |
 | Materials | `list_isaac_materials`, `create_isaac_material`, `assign_isaac_material`, `set_isaac_material_property` |
 | Rendering and settings | `read_isaac_aovs`, `list_isaac_aovs`, `list_isaac_render_vars`, `get_isaac_carb_settings`, `set_isaac_carb_settings` |
@@ -168,12 +213,41 @@ Notes:
   schema's `-inf` fallback) as `null` with `center_of_mass_note`.
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
+- `create_isaac_physics_scene` derives a new scene's gravity from the stage:
+  Earth gravity along the negative up axis, in stage units (981 on a
+  centimetre stage); `gravity_magnitude` is taken in m/s^2. It refuses a prim
+  of another type at `prim_path` rather than retyping it.
+  `get_isaac_physics_scene` reports gravity resolved the way the simulation
+  reads it plus the PhysxSceneAPI settings authored on the scene (physics
+  rate, solver type, iteration clamps, GPU dynamics, broadphase, CCD,
+  stabilization, enhanced determinism); `configure_isaac_physics_scene`
+  writes them.
+- `add_isaac_collision` applies CollisionAPI to the geometry at and under
+  `prim_path` (an asset root's meshes, not the root Xform, which would make no
+  shape), puts `approximation` on meshes only, and lists the shapes.
+  `set_isaac_physics_material` binds a MaterialAPI material to the colliders
+  at or under `prim_path` with purpose `physics`, leaving the visual binding
+  alone, and lists them in `bound_to`.
+- The joint tools are USD-level (UsdPhysics DriveAPI, LimitAPI,
+  ArticulationRootAPI). `list_isaac_articulations` orders each
+  articulation's joints depth first from the root body; PhysX's DOF indices
+  need not follow that order. Angular drive targets and revolute limits are in
+  degrees. In the joint aspect, an infinite value ("no limit",
+  "unbreakable") is null with a `<key>_note`, since JSON has no infinity.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,
   selection, timeline and stage; `get_isaac_ui_window` walks one window's
   widget tree.
 - `execute_isaac_script` scripts should follow the scripting reference served
   as the `simul://isaac-sim/skills` resource. Isaac Sim 6.0 deprecates
   `isaacsim.core.{api,prims,utils}` and removes the `omni.isaac.*` shims.
+  On Isaac Sim 5.1 with the bridge down, scripts over 32 KiB are refused
+  (`ScriptTooLargeForSocket`): that socket runs each read as its own script.
+- `open_isaac_stage`, `new_isaac_stage`, `read_isaac_aovs`,
+  `capture_isaac_viewport` and `enable_isaac_extension` run with a budget of
+  at least 110 s instead of the default 29 s. Any timeout reply says that the
+  Kit work may still complete; check the state before retrying.
+- A tool whose script shared Kit's stdout with another callback returns its
+  result with the other text under `foreign_output` and a note in `warnings`.
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or
