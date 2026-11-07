@@ -159,16 +159,17 @@ augmentation and condition nodes run their `*Script` inputs. Both
 `.kit`. With the switch off, these tools refuse with `ScriptExecutionDisabled`:
 
 - `create_isaac_graph_node` refuses those node types and any type with
-  `script` in its name.
-- `set_isaac_graph_node_values` refuses code attributes (`inputs:script*`,
-  `inputs:code*`, `*Script`) and any write to a script-capable node.
+  `script` or `warp` in its name.
+- `set_isaac_graph_node_values` refuses code attributes (any name containing
+  `script` or `code`, without regard to case) and any write to a
+  script-capable node.
 - `connect_isaac_graph_nodes` refuses a connection into a code attribute or
   into a script-capable node.
 - `import_isaac_asset` and `add_isaac_reference` refuse an asset whose
   composed content holds such a node.
 - `enable_isaac_extension` refuses `omni.graph.scriptnode`,
-  `omni.kit.scripting`, `omni.warp` and any extension with `script` in its
-  name.
+  `omni.kit.scripting`, `omni.warp` and any extension with `script` or
+  `warp` in its name.
 
 Routes this does not close: the prim-editing tools (`set_isaac_prim_attribute`
 on a node's code attribute or `node:type`, `create_isaac_prim` and

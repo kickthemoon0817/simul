@@ -28,12 +28,16 @@ from .._meta import tool_meta
 # setting.
 # ---------------------------------------------------------------------------
 
-# Any node type, attribute or extension whose name contains this is treated
-# as code-running.
+# Any node type or extension whose name contains this is treated as
+# code-running. Kept as the single-hint name earlier callers import.
 SCRIPT_CAPABLE_NODE_HINT = "script"
 
-# Code-running node types whose names do not say "script". Compared without
-# case, as the full type ID or its last dotted segment.
+# Case-insensitive fragments of a node type or extension name that mark it
+# code-running: ScriptNode, the omni.warp kernel nodes.
+SCRIPT_CAPABLE_NODE_HINTS: tuple[str, ...] = ("script", "warp")
+
+# Code-running node types, compared without case as the full type ID or its
+# last dotted segment, whatever their names say.
 SCRIPT_CAPABLE_NODE_TYPES: frozenset[str] = frozenset(
     {
         "omni.graph.scriptnode.ScriptNode",
@@ -44,12 +48,13 @@ SCRIPT_CAPABLE_NODE_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# Attribute base names (after the last ":") starting with this carry code:
-# WarpKernel's inputs:codeStr, inputs:codeFile, inputs:codeProvider.
-CODE_ATTRIBUTE_PREFIX = "code"
+# Case-insensitive fragments of an attribute name that mark it as carrying
+# code: inputs:script / scriptPath, *Script (Replicator's augmentation and
+# condition scripts), WarpKernel's inputs:codeStr / codeFile / codeProvider.
+CODE_ATTRIBUTE_HINTS: tuple[str, ...] = ("script", "code")
 
 # Extensions that run Python attached to the stage, besides any whose name
-# contains SCRIPT_CAPABLE_NODE_HINT.
+# contains one of SCRIPT_CAPABLE_NODE_HINTS.
 SCRIPT_EXTENSIONS: frozenset[str] = frozenset(
     {"omni.graph.scriptnode", "omni.kit.scripting", "omni.warp"}
 )
@@ -58,38 +63,39 @@ _DENIED_TYPES_LOWER = frozenset(name.lower() for name in SCRIPT_CAPABLE_NODE_TYP
 _DENIED_SEGMENTS_LOWER = frozenset(name.rsplit(".", 1)[-1] for name in _DENIED_TYPES_LOWER)
 
 
-def is_script_capable_node_type(node_type: str) -> bool:
+def is_script_capable_node_type(type_name: str) -> bool:
     """Return True for an OmniGraph node type that can run Python given as data.
 
     Args:
-        node_type: Node type ID, e.g. ``omni.graph.scriptnode.ScriptNode`` or
+        type_name: Node type ID, e.g. ``omni.graph.scriptnode.ScriptNode`` or
             ``omni.warp.WarpKernel``.
 
     Returns:
         Whether creating or editing a node of this type amounts to running
         agent-authored code.
     """
-    lowered = (node_type or "").strip().lower()
+    lowered = (type_name or "").strip().lower()
     return (
-        SCRIPT_CAPABLE_NODE_HINT in lowered
+        any(hint in lowered for hint in SCRIPT_CAPABLE_NODE_HINTS)
         or lowered in _DENIED_TYPES_LOWER
         or lowered.rsplit(".", 1)[-1] in _DENIED_SEGMENTS_LOWER
     )
 
 
-def is_script_attribute(attribute_name: str) -> bool:
+def is_script_attribute(name: str) -> bool:
     """Return True for a node attribute that carries code or a path to code.
 
     Args:
-        attribute_name: Attribute name, e.g. ``inputs:script``,
-            ``inputs:codeStr`` or ``inputs:augmentationScript``. A full
-            attribute path (``/World/G/node.inputs:script``) works too.
+        name: Attribute name, e.g. ``inputs:script``, ``inputs:codeStr`` or
+            ``inputs:augmentationScript``. A full attribute path
+            (``/World/G/node.inputs:script``) works too; only the part after
+            the prim path is matched.
 
     Returns:
         Whether writing this attribute can change the Python a node runs.
     """
-    lowered = (attribute_name or "").strip().lower().rsplit(".", 1)[-1]
-    return SCRIPT_CAPABLE_NODE_HINT in lowered or lowered.rsplit(":", 1)[-1].startswith(CODE_ATTRIBUTE_PREFIX)
+    lowered = (name or "").strip().lower().rsplit(".", 1)[-1]
+    return any(hint in lowered for hint in CODE_ATTRIBUTE_HINTS)
 
 
 def is_script_extension(extension_id: str) -> bool:
@@ -103,7 +109,7 @@ def is_script_extension(extension_id: str) -> bool:
         Whether enabling it is refused while script execution is off.
     """
     bare = extension_bare_name(extension_id).lower()
-    return bare in SCRIPT_EXTENSIONS or SCRIPT_CAPABLE_NODE_HINT in bare
+    return bare in SCRIPT_EXTENSIONS or any(hint in bare for hint in SCRIPT_CAPABLE_NODE_HINTS)
 
 
 def extension_bare_name(extension_id: str) -> str:
@@ -130,7 +136,7 @@ SCRIPT_GUARD_CORE = """\
     def _script_capable_type(type_name):
         lowered = str(type_name or "").strip().lower()
         return (
-            SCRIPT_GUARD_HINT in lowered
+            any(hint in lowered for hint in SCRIPT_GUARD_HINTS)
             or lowered in SCRIPT_GUARD_TYPES
             or lowered.rsplit(".", 1)[-1] in SCRIPT_GUARD_SEGMENTS
         )
@@ -163,7 +169,7 @@ def script_guard_source() -> str:
         Python source defining the guard functions.
     """
     return (
-        f"SCRIPT_GUARD_HINT = {_pyval(SCRIPT_CAPABLE_NODE_HINT)}\n"
+        f"SCRIPT_GUARD_HINTS = {_pyval(SCRIPT_CAPABLE_NODE_HINTS)}\n"
         f"SCRIPT_GUARD_TYPES = {_pyval(sorted(_DENIED_TYPES_LOWER))}\n"
         f"SCRIPT_GUARD_SEGMENTS = {_pyval(sorted(_DENIED_SEGMENTS_LOWER))}\n"
         + textwrap.dedent(SCRIPT_GUARD_CORE)
@@ -328,7 +334,7 @@ class OmniGraphMixin:
             "isaacsim.core.nodes.IsaacArticulationController. With "
             "security.allow_script_execution off, node types that run Python given as data "
             "(ScriptNode, omni.warp.WarpKernel, Replicator's augmentation and condition nodes, "
-            "and any type with 'script' in its name) are refused."
+            "and any type with 'script' or 'warp' in its name) are refused."
         ),
         read_only=False,
     )
@@ -390,7 +396,7 @@ class OmniGraphMixin:
             "an outputs: attribute, target is an inputs: attribute. Example: connect "
             "'/World/Graph/OnTick.outputs:tick' to '/World/Graph/Controller.inputs:execIn'. "
             "With security.allow_script_execution off, a connection into a code attribute "
-            "(inputs:script*, inputs:code*, *Script) or into a script-capable node is refused: "
+            "(any name containing script or code) or into a script-capable node is refused: "
             "it would rewrite the code that node runs."
         ),
         read_only=False,
@@ -467,7 +473,7 @@ class OmniGraphMixin:
             "attribute names first. Every attribute is attempted; the call fails "
             "(success=false) when any of them failed, with the ones that were set under "
             "'applied' and the failures under 'errors'. With security.allow_script_execution "
-            "off, code attributes (inputs:script*, inputs:code*, *Script) and any write to a "
+            "off, code attributes (any name containing script or code) and any write to a "
             "script-capable node (ScriptNode, omni.warp.WarpKernel, ...) are refused."
         ),
         read_only=False,

@@ -844,6 +844,7 @@ def test_an_ordinary_connection_still_goes_through(monkeypatch: pytest.MonkeyPat
     [
         ("inputs:script", True), ("inputs:scriptPath", True), ("inputs:codeStr", True),
         ("inputs:CODEFILE", True), ("inputs:augmentationScript", True),
+        ("inputs:sourceCode", True), ("inputs:conditionScript", True),
         ("/World/G/script.inputs:value", False), ("inputs:value", False), ("outputs:sum", False),
     ],
 )
@@ -857,11 +858,18 @@ def test_code_attribute_predicate(name: str, expected: bool) -> None:
         ("omni.graph.scriptnode.ScriptNode", True), ("omni.warp.WarpKernel", True),
         ("OMNI.WARP.WARPKERNEL", True), ("omni.replicator.core.OgnAugmentCPU", True),
         ("omni.replicator.core.OgnConditionScript", True), ("some.ext.WarpKernel", True),
+        ("my.ext.WarpSolver", True),
         ("omni.graph.nodes.Add", False), ("omni.graph.action.OnPlaybackTick", False),
     ],
 )
 def test_script_capable_node_type_predicate(node_type: str, expected: bool) -> None:
     assert is_script_capable_node_type(node_type) is expected
+
+
+def test_the_shared_predicates_keep_the_signatures_other_tools_call() -> None:
+    """The prim tools import these by name and keyword; the names are the contract."""
+    assert is_script_capable_node_type(type_name="omni.warp.WarpKernel") is True
+    assert is_script_attribute(name="inputs:codeStr") is True
 
 
 def test_the_kit_side_guard_finds_code_nodes_in_a_subtree(
