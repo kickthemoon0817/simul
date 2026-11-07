@@ -150,7 +150,7 @@ class HeadlessUSDSession(LoggerMixin):
         if stage is None:
             raise USDEditError(
                 editing.NOT_FOUND,
-                f"No loaded stage {stage_id!r}. Load the file with load_usd_file and pass the "
+                f"Stage not loaded: {stage_id!r}. Load the file with load_usd_file and pass the "
                 "stage_id it returns.",
                 stage_id=stage_id,
             )

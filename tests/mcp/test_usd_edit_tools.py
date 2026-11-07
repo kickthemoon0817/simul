@@ -95,7 +95,7 @@ def test_failed_create_creates_nothing(driver: _Driver, loaded: Dict[str, Any]) 
     )
 
     assert payload["success"] is False
-    assert payload["error_type"] == "InvalidAttribute"
+    assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", "InvalidAttribute")
     assert payload["details"]["problems"][0]["attribute"] == "bad"
     assert _unchanged(loaded)
 
@@ -110,7 +110,7 @@ def test_failed_update_changes_nothing(driver: _Driver, loaded: Dict[str, Any]) 
         },
     )
 
-    assert payload["error_type"] == "InvalidAttribute"
+    assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", "InvalidAttribute")
     assert "'zz'" in payload["error"]
     assert _unchanged(loaded)
 
@@ -135,7 +135,7 @@ def test_successful_update_reports_what_changed(driver: _Driver, loaded: Dict[st
 @pytest.mark.parametrize(
     "arguments, error_type",
     [
-        ({"prim_path": "World"}, "InvalidPrimPath"),
+        ({"prim_path": "World"}, "ValidationError"),
         ({"prim_path": "/World/DoesNotExist"}, "NotFoundError"),
         ({"prim_path": "/"}, "RefusedOperation"),
         ({"prim_path": "/World"}, "RefusedOperation"),
@@ -172,7 +172,7 @@ def test_unknown_prim_type(driver: _Driver, loaded: Dict[str, Any]) -> None:
         "create_prim", {"stage_id": loaded["id"], "prim_path": "/World/Typo", "prim_type": "Cub"}
     )
 
-    assert payload["error_type"] == "UnknownPrimType"
+    assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", "UnknownPrimType")
     assert payload["details"]["suggestions"][0] == "Cube"
     assert _unchanged(loaded)
 
@@ -213,7 +213,7 @@ def test_animated_attribute_takes_a_time_code_through_mcp(
 
     refused = driver.call("update_prim_attributes", arguments)
 
-    assert refused["error_type"] == "InvalidAttribute"
+    assert (refused["error_type"], refused["details"]["code"]) == ("ValidationError", "InvalidAttribute")
     assert "pass time_code" in refused["error"]
     assert _unchanged(loaded)
 
@@ -224,3 +224,30 @@ def test_animated_attribute_takes_a_time_code_through_mcp(
     assert "at time 12" in written["message"]
     attr = loaded["stage"].GetPrimAtPath("/World/Mover").GetAttribute("xformOp:translate")
     assert attr.GetTimeSamples() == [0.0, 12.0, 24.0]
+
+
+@pytest.mark.parametrize(
+    "stage_id, prim_path, error_type, prefix",
+    [
+        (None, "World/Box", "ValidationError", "Invalid prim path 'World/Box': "),
+        (None, "/World/Nope", "NotFoundError", "Prim not found: /World/Nope"),
+        ("not_loaded_123", "/World/Box", "NotFoundError", "Stage not loaded: 'not_loaded_123'."),
+    ],
+)
+def test_read_and_edit_tools_report_lookup_mistakes_alike(
+    driver: _Driver,
+    loaded: Dict[str, Any],
+    stage_id: Any,
+    prim_path: str,
+    error_type: str,
+    prefix: str,
+) -> None:
+    """The same bad stage id or prim path gets the same error type and wording from both kinds of tool."""
+    target = {"stage_id": stage_id or loaded["id"], "prim_path": prim_path}
+
+    read = driver.call("get_bounding_box", target)
+    edit = driver.call("update_prim_attributes", {**target, "attributes": {"custom:a": 1}})
+
+    assert read["error_type"] == edit["error_type"] == error_type
+    assert read["error"].startswith(prefix)
+    assert edit["error"].startswith(prefix)

@@ -110,7 +110,7 @@ class TestAllOrNothing:
             {"size": 2.0, "bad": {"nested": 1}},
         )
 
-        assert error.error_type == "InvalidAttribute"
+        assert (error.error_type, error.details["code"]) == ("ValidationError", "InvalidAttribute")
         assert error.details["problems"] == [
             {"attribute": "bad", "reason": "a JSON object is not an attribute value"}
         ]
@@ -127,7 +127,7 @@ class TestAllOrNothing:
             {"size": 7.0, "custom:a": 1, "zz": {"x": 1}},
         )
 
-        assert error.error_type == "InvalidAttribute"
+        assert (error.error_type, error.details["code"]) == ("ValidationError", "InvalidAttribute")
         assert [problem["attribute"] for problem in error.details["problems"]] == ["zz"]
         box = scene["stage"].GetPrimAtPath("/World/Box")
         assert box.GetAttribute("size").Get() == 2.0
@@ -209,7 +209,7 @@ class TestRollback:
             {"size": 3.0, "custom:b": 1, "kind": "component"},
         )
 
-        assert error.error_type == "EditFailed"
+        assert (error.error_type, error.details["code"]) == ("EngineError", "EditFailed")
         assert error.details["rolled_back"] is True
         assert error.details["attribute"] == "custom:b"
         assert not scene["stage"].GetPrimAtPath("/World/New")
@@ -273,7 +273,7 @@ class TestRollback:
 
         error = _refusal(session.delete_prim, scene["id"], "/World/Local")
 
-        assert error.error_type == "EditFailed"
+        assert (error.error_type, error.details["code"]) == ("EngineError", "EditFailed")
         assert error.details["rolled_back"] is True
         _assert_unchanged(scene, before)
         assert scene["stage"].GetPrimAtPath("/World/Local").GetRelationship("custom:inner").GetTargets() == [
@@ -297,7 +297,7 @@ class TestPaths:
 
         error = _refusal(getattr(session, call), scene["id"], *args)
 
-        assert error.error_type == "InvalidPrimPath"
+        assert (error.error_type, error.details["code"]) == ("ValidationError", "InvalidPrimPath")
         assert "relative" in error.message
         assert error.details["suggestion"] == "/" + args[0]
         _assert_unchanged(scene, before)
@@ -305,14 +305,14 @@ class TestPaths:
     def test_invalid_prim_name_is_named(self, session, scene) -> None:
         error = _refusal(session.create_prim, scene["id"], "/World/bad name", "Xform")
 
-        assert error.error_type == "InvalidPrimPath"
+        assert (error.error_type, error.details["code"]) == ("ValidationError", "InvalidPrimPath")
         assert error.details["element"] == "bad name"
         assert "absolute" not in error.message
 
     def test_property_path_points_at_the_prim(self, session, scene) -> None:
         error = _refusal(session.update_prim_attributes, scene["id"], "/World/Box.size", {"size": 1.0})
 
-        assert error.error_type == "InvalidPrimPath"
+        assert (error.error_type, error.details["code"]) == ("ValidationError", "InvalidPrimPath")
         assert error.details["suggestion"] == "/World/Box"
 
     def test_trailing_slash(self, session, scene) -> None:
@@ -366,7 +366,7 @@ class TestPrimTypes:
     def test_typo_is_refused_with_a_suggestion(self, session, scene) -> None:
         error = _refusal(session.create_prim, scene["id"], "/World/Typo", "Cub")
 
-        assert error.error_type == "UnknownPrimType"
+        assert (error.error_type, error.details["code"]) == ("ValidationError", "UnknownPrimType")
         assert error.details["suggestions"][0] == "Cube"
         assert not scene["stage"].GetPrimAtPath("/World/Typo")
 
@@ -374,7 +374,7 @@ class TestPrimTypes:
     def test_non_concrete_types_are_refused(self, session, scene, type_name, phrase) -> None:
         error = _refusal(session.create_prim, scene["id"], "/World/X", type_name)
 
-        assert error.error_type == "UnknownPrimType"
+        assert (error.error_type, error.details["code"]) == ("ValidationError", "UnknownPrimType")
         assert phrase in error.message
 
     def test_existing_prim_is_not_retyped(self, session, scene) -> None:

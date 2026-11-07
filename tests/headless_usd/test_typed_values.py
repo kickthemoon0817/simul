@@ -350,4 +350,4 @@ class TestTimeCodes:
             session.update_prim_attributes, scene["id"], "/World/Box", {"size": 1}, time_code=math.nan
         )
 
-        assert error.error_type == "InvalidTimeCode"
+        assert (error.error_type, error.details["code"]) == ("ValidationError", "InvalidTimeCode")

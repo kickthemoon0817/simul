@@ -23,6 +23,21 @@ No running application needed. File arguments must be inside the sandbox
 | Query | `get_prim_info`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
 | Edit | `create_prim`, `delete_prim`, `update_prim_attributes` |
 
+- **Bounds.** `get_bounding_box`, and the bounds in `get_prim_info` and
+  `summarize_scene`, are USD's own `UsdGeom.BBoxCache` bounds: every
+  transform applies and instances are followed. Only geometry whose purpose
+  is in `include_purposes` counts; the default, `default` and `render`, is
+  what renderers and simulators see, so `proxy` and `guide` geometry (often
+  collision shapes) needs `include_purposes` to be bounded. A prim with
+  nothing boundable is a successful result with `has_geometry: false` and
+  `bbox: null`, never a guessed box; `excluded_purposes_with_geometry` then
+  names the purposes left out that do hold geometry. `world_space: false`
+  bounds the prim in its own space (its descendants' transforms apply, its
+  own does not), and `time_code` evaluates animated transforms.
+- **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
+  is a `NotFoundError`; a relative, malformed or property path is a
+  `ValidationError`.
+
 ### Editing
 
 Edits go to the stage's edit target, its root layer, and are all or nothing:
@@ -30,22 +45,33 @@ each call checks the whole request first, then writes, and if a write still
 fails it restores the specs it touched. A call that reports failure has
 changed nothing.
 
+Edit errors use the same types as the lookups above. Invalid input is a
+`ValidationError` whose `details.code` says which check failed
+(`InvalidPrimPath`, `UnknownPrimType`, `InvalidAttribute`,
+`InvalidTimeCode`). A missing stage or prim is a `NotFoundError`. A write
+that fails after the checks passed is an
+`EngineError` with `details.rolled_back: true`. A refusal that an explicit flag
+overrides is a `RefusedOperation` naming the flag in `details.override`, and
+an edit USD cannot express is an `UnsupportedOperation`.
+
 - **Paths** must be absolute prim paths (`/World/Box`). A relative path, a
   property path (`/World/Box.size`), a trailing `/` or an invalid prim name
-  fails with `InvalidPrimPath`, which names the bad element and suggests the
-  fix. A missing prim is `NotFoundError`, naming the nearest prim that exists.
+  fails with `details.code: InvalidPrimPath`. The message names the bad
+  element and suggests the fix (`details.suggestion`). A missing prim names
+  the nearest prim that exists.
 - **`create_prim`** takes only concrete types registered with USD (`Xform`,
   `Scope`, `Mesh`, `Cube`, `PhysicsRevoluteJoint`, ...). An unknown, abstract
-  or API schema name fails with `UnknownPrimType` and close matches. A path
-  that already holds a prim is refused unless `redefine_existing=true`, which
-  changes its type and keeps its children, properties and composition arcs.
+  or API schema name fails with `details.code: UnknownPrimType` and close
+  matches in `details.suggestions`. A path that already holds a prim is
+  refused unless `redefine_existing=true`, which changes its type and keeps
+  its children, properties and composition arcs.
 - **Attributes** are checked against the prim's existing property or its
   schema definition: the value must fit the attribute's type, and a token
   must be one of its `allowedTokens`. An existing relationship takes a target
   path or a list of them. The keys `active`, `instanceable` and `kind` set
   prim metadata through USD's API; other metadata keys are refused rather
-  than written as attributes. One `InvalidAttribute` error lists every
-  rejected key with its reason.
+  than written as attributes. One error (`details.code: InvalidAttribute`)
+  lists every rejected key with its reason in `details.problems`.
 - **Values** are converted to the attribute's type: JSON numbers widen
   (`45` into a `float`, ints into a `double3`), an integer type refuses a
   fraction, vectors are lists (`[x, y, z]`), quaternions are `[w, x, y, z]`

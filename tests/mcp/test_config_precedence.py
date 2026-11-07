@@ -269,9 +269,10 @@ def test_env_example_lists_documented_variables() -> None:
     assert "CONFIG_FILE" in keys
 
 
-@pytest.mark.parametrize("key", [k for k in _env_example_keys() if k != "CONFIG_FILE"])
+@pytest.mark.parametrize("key", [k for k in _env_example_keys() if k not in ("CONFIG_FILE", "SIMUL_ENV_FILE")])
 def test_env_example_variable_names_a_real_settings_field(key: str) -> None:
-    """``CONFIG_FILE`` is read by the loader, not the model; everything else is ``SECTION__FIELD``."""
+    """``CONFIG_FILE`` and ``SIMUL_ENV_FILE`` are read by the loader, not the model;
+    everything else is ``SECTION__FIELD``."""
     section, _, field = key.lower().partition("__")
 
     assert section in Settings.model_fields, f"{key}: no Settings section {section!r}"
