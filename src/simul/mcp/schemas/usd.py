@@ -46,6 +46,7 @@ class USDIssue(BaseModel):
 class USDFileInfo(BaseModel):
     """USD file information."""
 
+    success: bool = Field(True, description="Whether the file was checked (see is_valid)")
     file_path: str = Field(..., description="Path to USD file")
     file_size: int = Field(..., description="File size in bytes")
     format: str = Field(..., description="File extension (usd, usda, usdc, usdz)")
@@ -89,6 +90,7 @@ class USDValidateRequest(BaseModel):
 class StageInfo(BaseModel):
     """USD stage information."""
 
+    success: bool = Field(True, description="Whether the stage loaded")
     stage_id: str = Field(..., description="Unique stage identifier")
     file_path: str = Field(..., description="Path to USD file")
     up_axis: str = Field(..., description="Stage up axis (Y or Z)")
@@ -119,6 +121,7 @@ class PrimInfo(BaseModel):
     ``"Infinity"``, ``"-Infinity"`` or ``"NaN"``.
     """
 
+    success: bool = Field(True, description="Whether the prim was read")
     path: str = Field(..., description="Prim path")
     name: str = Field(..., description="Prim name")
     type: str = Field(..., description="Prim type")
@@ -256,6 +259,7 @@ class PrimDeleteRequest(BaseModel):
 class MeshInfo(BaseModel):
     """USD mesh information."""
 
+    success: bool = Field(True, description="Whether the mesh was read")
     prim_path: str = Field(..., description="Mesh prim path")
     vertex_count: int = Field(..., description="Number of vertices")
     face_count: int = Field(..., description="Number of faces")

@@ -24,8 +24,10 @@ mapping keeps its prefix and is named in `truncated_fields`.
 
 ## Headless USD
 
-No running application needed. File arguments must be inside the sandbox
-(see [configuration.md](configuration.md#file-sandbox)).
+No running application needed. File arguments must be inside the sandbox,
+and so must every sublayer, reference, payload, clip and asset path the file
+draws on: one outside it fails the call with `SandboxError` listing them (see
+[configuration.md](configuration.md#file-sandbox)).
 
 | Group | Tools |
 |---|---|
@@ -144,7 +146,22 @@ parse error). The checks, in order:
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
 them in `warnings`. `simul usd validate` runs the same checks and exits 1
-when the file is invalid.
+when the file is invalid. A relative `file_path` resolves against
+`security.relative_path_base` (default: the server's working directory), and
+the result's `file_path` is the resolved path. A URL needs an asset resolver
+for its scheme, which usd-core does not ship, so `omniverse://` fails with
+`UnsupportedURL` (see [configuration.md](configuration.md#file-sandbox)).
+
+Every successful response carries `success: true`, like the other backends.
+The pxr work of each call runs on a worker thread, so a slow call does not
+hold up the server. Reads run concurrently, one at a time per stage, and an
+edit (`create_prim`, `update_prim_attributes`, `delete_prim`) runs alone,
+because pxr does not allow a write alongside reads of the same layers. A
+call that cannot start within `server.timeout` seconds (default 30) fails
+with `StageBusy`; retry it. Python cannot stop pxr mid-call, so a call the
+client cancels or times out still finishes in the background and holds its
+stage until it does. Calls on other stages and `validate_usd_file` carry on
+meanwhile.
 
 ### Editing
 
@@ -295,6 +312,30 @@ Notes:
   need not follow that order. Angular drive targets and revolute limits are in
   degrees. In the joint aspect, an infinite value ("no limit",
   "unbreakable") is null with a `<key>_note`, since JSON has no infinity.
+- `set_isaac_material_property` types a new input the way the shader declares
+  it (texture paths become assets, flags bools, enums ints) and refuses a
+  name that is not an OmniPBR or UsdPreviewSurface input, suggesting the
+  closest ones (`allow_unknown_input=true` overrides).
+- `import_isaac_asset` and `add_isaac_reference` reference USD layers only
+  (convert OBJ, FBX and glTF first). They reference the asset's first root
+  prim when it has no defaultPrim, and undo a reference that composes
+  nothing. An import never merges into an existing prim (it goes to
+  `<target_path>_N`). It corrects an authored metersPerUnit / upAxis
+  mismatch by making `target_path` an Xform with
+  `xformOp:scale:unitsResolve` and `xformOp:rotateX:unitsResolve` and
+  referencing the asset on its child `<target_path>/<asset root name>`
+  (`asset_root_path`), so the asset root's own transform is converted too.
+  A failed import removes every prim it created.
+- `save_isaac_stage` checks an in-place save's files against the write
+  sandbox, needs `overwrite=true` for URL targets, and refuses while the
+  timeline is playing or paused unless `allow_while_playing=true`.
+- `set_isaac_graph_node_values` fails when any attribute fails, still
+  reporting what was set. With script execution disabled, the graph, import
+  and extension tools refuse code-running nodes (ScriptNode,
+  omni.warp.WarpKernel, Replicator script nodes), code attributes,
+  connections into them and the script extensions
+  ([configuration.md](configuration.md#script-execution)).
+  `disable_isaac_extension` fails when the extension stays enabled.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,
   selection, timeline and stage; `get_isaac_ui_window` walks one window's
   widget tree.
@@ -379,7 +420,7 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 | Group | Tools |
 |---|---|
 | Engine and scene | `get_unreal_engine_info`, `get_unreal_loaded_map`, `summarize_unreal_scene`, `query_unreal_scene_graph`, `analyze_unreal_scene_for_robotics`, `get_unreal_viewport_info` |
-| Actors | `list_unreal_actors`, `get_unreal_actor_info`, `describe_unreal_object`, `get_unreal_actor_by_semantic_label`, `get_unreal_actor_thumbnail`, `spawn_unreal_actor`, `delete_unreal_actor`, `set_unreal_actor_transform`, `set_unreal_actor_property`, `set_unreal_actor_visibility`, `set_unreal_actor_parent`, `add_unreal_component`, `focus_unreal_on_actor` |
+| Actors | `list_unreal_actors`, `get_unreal_actor_info`, `list_unreal_actor_components`, `describe_unreal_object`, `get_unreal_actor_by_semantic_label`, `get_unreal_actor_thumbnail`, `spawn_unreal_actor`, `delete_unreal_actor`, `set_unreal_actor_transform`, `set_unreal_actor_property`, `set_unreal_actor_visibility`, `set_unreal_actor_parent`, `add_unreal_component`, `focus_unreal_on_actor` |
 | Assets | `search_unreal_assets` |
 | Camera, lights, rendering | `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
 | Materials | `get_unreal_material_info`, `assign_unreal_material`, `create_unreal_material_instance`, `set_unreal_material_params` |
@@ -391,6 +432,39 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 
 Behaviour worth knowing:
 
+- The scene reads go through the editor world, one page at a time.
+  `list_unreal_actors`, `get_unreal_actor_by_semantic_label`,
+  `list_unreal_actor_components` and `query_unreal_scene_graph` count every
+  match (`total`; `total_matches` for the label search) and return the page
+  from `offset`: up to `max_results` entries, stopping earlier rather than go
+  past 30,000 characters, so a reply always fits the 40 KB result budget
+  untrimmed. `count` is what came back, `next_offset` is where the next page
+  starts (`null` at the end), and `truncated` and `hint` say when more is left.
+  At 5,000 actors a page of actors holds about 80, in about 0.2 s.
+  `list_unreal_actors` filters by class (name, as in `StaticMeshActor` or
+  `BP_Door_C`, or path; `include_subclasses` also keeps derived classes, so
+  `Light` keeps point, spot and Blueprint lights), tag and label (text the
+  label contains, ignoring case). A class `include_subclasses` cannot resolve
+  (a Blueprint class is found by its path, or by its name when an actor of
+  that class is in the level) is matched by name only, with a `warning`.
+  Actor entries carry the attachment hierarchy: `parent` (the actor the root
+  component is attached to), `children` (the first 20 attached actors;
+  `get_unreal_actor_info` names 200) and `child_count`.
+- `query_unreal_scene_graph` returns the attachment hierarchy as a tree:
+  the level, whose children are the actors attached to nothing, or the actor
+  at `root_path`, down `max_depth` levels. The page holds the root's
+  children from `offset`, each with its subtree; an actor whose children lie
+  deeper has `children_truncated`, and a subtree too large for one page is
+  drawn shallower and named in `depth_limited` (query it with its actor as
+  `root_path`). `total_actors` and `total_depth` describe the whole tree. A
+  `class_filter` keeps the matching actors and the actors above them, which
+  carry `matches_filter: false`; `include_components` adds each actor's
+  components (name, class, root flag, the component it is attached to).
+- `list_unreal_actor_components` lists an actor's components, editor-only
+  ones included: class, root and editor-only flags, and for scene components
+  the component they are attached to (its path when it belongs to another
+  actor), world location, mobility and visibility; primitive components add
+  their world bounds (box center and half-size, sphere radius, in cm).
 - A failed call names its cause with one `error_type` from the set the
   backends share:
   - `ConnectionError`: nothing answered at the Remote Control endpoint, or
@@ -411,6 +485,16 @@ Behaviour worth knowing:
   `error` carries Remote Control's own message, and `details` carries the
   `status`, the `route` and `remote_control_message`. The domain types
   (`PIEActive`, `TransformNotApplied` and the like) are unchanged.
+- A change Unreal took without an error, but which the read-back shows it did
+  not make, fails with an `error_type` ending in `NotApplied`, so a client can
+  match the family by that suffix: `TransformNotApplied`,
+  `RenderSettingNotApplied`, `MaterialParamsNotApplied`, `PhysicsNotApplied`,
+  `PhysicsParamsNotApplied`, and for the actor tools `AttachmentNotApplied`
+  (parenting), `ComponentNotApplied` (a component not added),
+  `RenameNotApplied` (a component name or an actor label not taken),
+  `DeleteNotApplied`, `VisibilityNotApplied` and `CameraNotApplied` (the
+  viewport camera). The actor tools' ones carry `details.expected`, what was
+  asked, and `details.actual`, what Unreal reads back.
 - `batch_unreal_operations` (registered with script execution allowed) sends
   each operation as `RequestId`, `URL`, `Verb`, `Body`, in that order, with a
   unique `RequestId`. Operations without one are numbered. Remote Control
@@ -451,7 +535,7 @@ Behaviour worth knowing:
   Static; those come back as `ValidationError` (itself, a cycle) or
   `InvalidState` (mobility, an actor without a root component) with the reason,
   before anything changes. An attachment Unreal still refuses is an
-  `EngineError`, and its transaction is cancelled.
+  `AttachmentNotApplied`, and its transaction is cancelled.
 - `add_unreal_component` adds an instance component the way the editor's Add
   Component button does (`SubobjectDataSubsystem`): Remote Control refuses
   `AddComponentByClass` on UE 5.7. `component_class` is a native class name
@@ -466,6 +550,61 @@ Behaviour worth knowing:
   class that is not a component and a name already used inside the actor are
   refused first. Unreal adds its usual helpers too, such as a light's editor
   icon (a BillboardComponent).
+- Every actor edit is one undoable editor transaction, with the actors it
+  changes recorded first, so one editor undo reverts that edit and nothing
+  before it: spawn, delete, transform, visibility, parenting, components and
+  `call_unreal_actor_function` (Remote Control's `generateTransaction`, which
+  records the actor and its root component; a function that changes another
+  object records only what it records itself). An edit outside a transaction
+  used to leave the undo history alone, so the next undo reverted the edit
+  before it. An edit that changes nothing, such as showing a visible actor or
+  calling a getter, leaves no undo step: Unreal drops a transaction that
+  records no change.
+- `set_unreal_actor_visibility` sets the visibility `scope` names, on the actor
+  and, with `propagate` (the default), on every actor attached under it, since
+  a hidden parent hides none of its children:
+  - `editor`: the editor's hide, as the Outliner's eye. The level viewport and
+    `capture_unreal_viewport` leave the actor out. It lasts the editor session;
+    with `persistent: true` the hidden-at-editor-startup flag, saved with the
+    level and applied when it loads, is set too (or cleared, to show it). Unreal
+    sets that flag only through its startup commands, which act on the
+    selection, so the actors are selected for it and the selection restored;
+    `persistent` is refused while PIE runs, when the editor selects nothing.
+  - `game`: hidden in game, saved with the level, which Play In Editor and the
+    packaged game honour. The level viewport still draws the actor outside
+    Game View.
+  - `all` (the default): both.
+
+  The reply's `actors` lists each actor's `hidden_in_editor`,
+  `hidden_in_editor_at_startup` and `hidden_in_game` read back, the actor
+  first; one that reads back other than asked fails the call with
+  `VisibilityNotApplied`.
+- `spawn_unreal_actor` refuses a class Unreal does not let you place, and a
+  Blueprint of one: the level's per-level singletons (WorldSettings,
+  LevelScriptActor, WorldDataLayers, the World Partition minimap, the default
+  physics volume, the particle event manager, navigation data) and the
+  game-framework classes the game mode spawns when play starts (GameModeBase,
+  GameStateBase, GameSession, GameNetworkManager, PlayerState, Controller,
+  HUD, PlayerCameraManager), all declared NotPlaceable, which the editor's
+  spawn functions ignore (a second WorldSettings landed in a saved level). It
+  refuses the bare `Brush` class too (volumes spawn), an abstract class, and,
+  before anything loads, a map or a path into one (an actor in a level). A
+  label with leading or trailing whitespace, over 1023 characters or `None` is
+  refused before anything spawns, since Unreal trims or drops it without a
+  word, and the label is read back: one Unreal still does not take removes the
+  actor again (`RenameNotApplied`).
+- `delete_unreal_actor` takes the actor's full path; a label, a missing path or
+  an actor already deleted is `NotFoundError`. The level's WorldSettings, its
+  builder brush and the other actors the editor keeps out of the Outliner are
+  refused with `ValidationError`, as the editor does not let you delete them.
+  The deletion is read back (`DeleteNotApplied` when the actor is still
+  there).
+- `set_unreal_camera_view` takes each axis of `location` within
+  4398046511104 cm (2^42) of the origin and `pitch` from -90 to 90 degrees;
+  Unreal clamps anything beyond without a word, so a value outside is a
+  `ValidationError` and the camera does not move. The reply is the camera
+  read back, location and rotation, also for a group left unchanged; a camera
+  that reads back other than what was set is a `CameraNotApplied`.
 - Actor inspection, physics, materials and PIE start/stop/pause/resume use
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
@@ -645,7 +784,7 @@ Behaviour worth knowing:
   a transient Material Instance Dynamic that copies the material's
   parameters with their layers.
 - `focus_unreal_on_actor` points the level viewport camera at the actor and
-  selects it, reading the selection back: `selected` is false, with a
+  makes it the whole editor selection, reading the selection back: `selected` is false, with a
   `warning`, while PIE runs (below) and for an actor Unreal does not select:
   one hidden in the editor or in a hidden or locked level, a child actor or an
   actor inside a level instance (Unreal selects those only through their
@@ -702,6 +841,7 @@ Behaviour worth knowing:
     loads the parent material and saves the new instance through Unreal's
     editor asset library, which loads, finds and saves no assets during PIE.
   - `list_unreal_actors`, `get_unreal_actor_by_semantic_label`,
+    `query_unreal_scene_graph`, `list_unreal_actor_components`,
     `summarize_unreal_scene`, `analyze_unreal_scene_for_robotics`,
     `get_unreal_actor_info`, `get_unreal_loaded_map` and
     `get_unreal_engine_info` report `pie_active: true` and read the editor
@@ -718,7 +858,9 @@ Behaviour worth knowing:
     physics or collision edit says so in its `warning`. A physics or collision
     edit given the actor's path in the simulation's world (`UEDPIE_<n>_<map>`)
     changes the running copy instead, which is neither undoable nor saved;
-    every other actor tool finds no actor at such a path.
+    every other actor tool finds no actor at such a path, and its error names
+    the editor's path. `set_unreal_actor_visibility` with `persistent` is
+    refused with `PIEActive`, as the editor selects nothing then.
   - `set_unreal_material_params` edits the material instance asset, which the
     running game uses too: an edit made during PIE shows in the game and stays
     after PIE stops.
