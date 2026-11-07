@@ -262,6 +262,39 @@ Behaviour worth knowing:
   `r.RayTracing`, which only startup configuration sets, and one Unreal limits
   or rounds. Post-process settings live on PostProcessVolume actors, not in
   console variables, and this tool does not change them.
+- The actor tools take an actor's full object path, as `list_unreal_actors`
+  reports it, in the level open in the editor. A path that names no live actor
+  there fails with `NotFoundError`, `Actor not found: <path>` and why: nothing
+  is at that path, the actor was deleted (Unreal keeps a deleted actor in memory, empty,
+  until garbage collection), or it belongs to another map, loaded or not, or to
+  the running game during PIE. The actor is looked up among the objects already
+  loaded, so simul never loads a map that is not open: a lookup that loaded one
+  used to edit that map unseen and leave it dirty for the next Save All.
+- `set_unreal_actor_parent` attaches the actor to `parent_path`, or detaches it
+  with `detach: true` and an empty `parent_path`; one of the two is required.
+  The actor keeps its world location, rotation and scale, the change is one
+  undoable transaction, and the parent is read back: `parent_path` is the
+  parent afterwards (null once detached), with `previous_parent_path` and
+  `changed`. Unreal refuses, without a reason, to attach an actor to itself or
+  under one of its own children, or a Static actor under a parent that is not
+  Static; those come back as `ValidationError` (itself, a cycle) or
+  `InvalidState` (mobility, an actor without a root component) with the reason,
+  before anything changes. An attachment Unreal still refuses is an
+  `EngineError`, and its transaction is cancelled.
+- `add_unreal_component` adds an instance component the way the editor's Add
+  Component button does (`SubobjectDataSubsystem`): Remote Control refuses
+  `AddComponentByClass` on UE 5.7. `component_class` is a native class name
+  (`PointLightComponent`) or a class path (`/Script/Engine.PointLightComponent`,
+  a Blueprint component's `/Game/BP_Lamp.BP_Lamp_C`); a path into a map's
+  package is refused before anything loads. A scene component attaches under
+  `parent_component` (by name) or the root component, and becomes the root of
+  an actor without one; other components take no parent. The add and the name
+  are one undoable transaction, and the reply is read back from the actor:
+  `component_path`, `component_name`, `component_class`, `parent_component` and
+  `is_root`. An abstract class (Unreal adds one and fires an engine ensure), a
+  class that is not a component and a name already used inside the actor are
+  refused first. Unreal adds its usual helpers too, such as a light's editor
+  icon (a BillboardComponent).
 - Actor inspection, physics, materials and PIE start/stop/pause/resume use
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
@@ -445,12 +478,13 @@ Behaviour worth knowing:
     of actors missing simple collision, as `null`, since Unreal does not
     report mesh collision during PIE.
   - Editing actors already in the level by path (transform, lights, collision,
-    physics settings, visibility, materials) keeps working and changes the
-    editor world, which the running simulation does not see: it takes effect
-    the next time the simulation starts, and a physics or collision edit says
-    so in its `warning`. A physics or collision edit given the actor's path
-    in the simulation's world (`UEDPIE_<n>_<map>`) changes the running copy
-    instead, which is neither undoable nor saved.
+    physics settings, visibility, materials, parenting, components) keeps
+    working and changes the editor world, which the running simulation does
+    not see: it takes effect the next time the simulation starts, and a
+    physics or collision edit says so in its `warning`. A physics or collision
+    edit given the actor's path in the simulation's world (`UEDPIE_<n>_<map>`)
+    changes the running copy instead, which is neither undoable nor saved;
+    every other actor tool finds no actor at such a path.
   - `set_unreal_material_params` edits the material instance asset, which the
     running game uses too: an edit made during PIE shows in the game and stays
     after PIE stops.
