@@ -26,6 +26,43 @@ The packaged YAML is the reference for every key and its default. This page
 covers the model and the settings people change most; it does not repeat the
 whole file.
 
+## When the configuration is wrong
+
+A configuration that cannot be used as written stops every command with
+`error_type: ConfigError` and exit code 2, before anything is started or
+contacted. The message names each setting, the value, where the value came
+from (`UNREAL__PORT`, the env file or the YAML file) and why it was refused.
+Under `--json` the envelope's `details.errors` carries one
+`{setting, source, value, reason}` entry per problem. `simul server` writes
+the message to stderr only, because over stdio its stdout is the MCP channel.
+The command stops when:
+
+- the YAML does not parse, is not a mapping of sections, or a section or group
+  has the wrong shape (`security: strict`);
+- `--config FILE` or `CONFIG_FILE` names a file that does not exist (only the
+  packaged default is allowed to be missing, with a warning);
+- a value fails validation, from any source: `UNREAL__PORT=70000`, or
+  `SECURITY__ALLOWED_PATHS=/a,/b` (list and mapping settings take JSON:
+  `'["/a","/b"]'`);
+- a key or variable under `security` names no setting, such as
+  `allow_scripts_execution` or `SECURITY__RATE_LIMITING__REQUESTS_PER_MINUTE`.
+  A typo there would otherwise leave the protection it names off, so it is an
+  error and the message suggests the setting it most likely meant.
+
+An unknown key or variable in any other section only warns, once, and is
+ignored. The warning says what it most likely meant (`unreal.portt` → did you
+mean `unreal.port`?). Keys that earlier releases shipped and nothing reads
+any more (`server.cors_origins`, `isaac_sim.kit`, the old `mesh` and
+`performance` sections and so on) load without a warning, so a file copied
+from an old `default.yaml` keeps working.
+
+`simul validate-config FILE` is stricter. Every unknown key in the file is an
+error, with a suggestion; a value the settings refuse is an error; retired
+keys and unknown non-security `SECTION__` variables in the environment are
+warnings. It exits 0 when the file is valid and 1 when it is not, with
+`valid`, `errors` and `warnings` in the JSON. A file that does not exist exits
+2.
+
 ## Environment variables: `SECTION__KEY`
 
 Each setting is named `<SECTION>__<FIELD>` with a double underscore, for
@@ -33,11 +70,16 @@ example `LOGGING__LEVEL=DEBUG` or `ISAAC_SIM__BRIDGE_PORT=8829`.
 
 Nested YAML blocks flatten into a single field name, so `usd.cache.enabled`
 in YAML is `USD__CACHE_ENABLED` in the environment, and `isaac_sim.bridge.port`
-is `ISAAC_SIM__BRIDGE_PORT`. [`.env.example`](../.env.example) lists every
-variable by its exact name and is the quickest way to find one.
+is `ISAAC_SIM__BRIDGE_PORT`. Spelling the nesting out
+(`ISAAC_SIM__BRIDGE__PORT`) names no setting; simul warns and suggests the
+flat name. [`.env.example`](../.env.example) lists every variable by its
+exact name and is the quickest way to find one.
 
 Sections: `SERVER`, `ISAAC_SIM`, `BLENDER`, `UNREAL`, `USD`, `VIEWPORT`,
-`LOGGING`, `SECURITY`.
+`LOGGING`, `SECURITY`. A variable named after a bare section (`SERVER=prod`,
+`LOGGING=1`, ordinary names in many shells and CI systems) is ignored unless
+its value is a JSON object, which then sets that section's fields
+(`SECURITY='{"allow_script_execution": false}'`).
 
 `ISAAC_SIM_PATH` (single underscore, no section) is the Isaac Sim install root
 used by `simul isaac launch` and `install-bridge`; the YAML default for
@@ -62,6 +104,8 @@ used by `simul isaac launch` and `install-bridge`; the YAML default for
 | `UNREAL__PASSPHRASE` | unset | Plaintext or MD5 hex for an editor set up with `--passphrase` |
 | `BLENDER__MODE` | `embedded` | `attached` uses the window chosen by `simul blender attach` |
 | `VIEWPORT__MAX_SIZE` | `2048` | Largest capture dimension |
+| `USD__ALLOWED_EXTENSIONS` | `[".usd",".usda",".usdc",".usdz"]` | Extensions the headless USD tools and `simul usd` commands open; load and validate share the list |
+| `USD__MAX_FILE_SIZE_MB` | `500` | Largest file they open; a bigger one fails with `FileTooLarge` |
 
 `simul logs paths` prints the log locations the current settings resolve
 to, and `simul logs tail --follow` streams them.

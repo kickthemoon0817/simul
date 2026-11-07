@@ -21,7 +21,10 @@ delete_prim(stage_id="abc123", prim_path="/World/OldPrim")
 
 ## Prim Type Filters for search_prims
 
-Use these exact strings with `search_type: "by_type"`:
+Use these strings with `search_type: "by_type"`. With the default `match: "auto"` a registered type also
+matches every type derived from it: `Gprim` covers Mesh, Cube, Sphere and the other primitives, and
+`PhysicsJoint` covers every joint type. Applied API schemas such as `PhysicsArticulationRootAPI` or
+`PhysicsRigidBodyAPI` are not prim types: search them with `search_type: "by_api_schema"`.
 
 | Type String | USD Schema | Common Use |
 |---|---|---|
@@ -39,7 +42,8 @@ Use these exact strings with `search_type: "by_type"`:
 | `"Cube"` | `UsdGeom.Cube` | Procedural cubes |
 | `"Sphere"` | `UsdGeom.Sphere` | Procedural spheres |
 | `"PhysicsScene"` | `UsdPhysics.Scene` | Physics scene descriptor |
-| `"ArticulationRoot"` | `UsdPhysics.ArticulationRootAPI` | Robot articulation roots |
+| `"Gprim"` | `UsdGeom.Gprim` | Every geometric primitive (family match) |
+| `"PhysicsJoint"` | `UsdPhysics.Joint` | Every joint type (family match) |
 
 ## Mesh Topology Analysis Patterns
 
@@ -88,8 +92,10 @@ update_prim_attributes(stage_id, root_path, {"xformOp:translate": translation})
 
 | Value | Behavior | Notes |
 |---|---|---|
-| `"by_type"` | Match USD schema type exactly | Use type strings from table above |
-| `"by_name"` | Substring match on prim name | Case-insensitive; matches the prim's own name, not full path |
+| `"by_type"` | The schema family of a registered type (`match: "exact"` for the type alone) | Use type strings from table above |
+| `"by_api_schema"` | Applied API schema names | `PhysicsDriveAPI` also matches `PhysicsDriveAPI:angular` |
+| `"by_name"` | Substring match on prim name | Case-insensitive unless `case_sensitive`; the prim's own name, not full path |
+| `"by_path"` | Substring match on the full path | `match: "glob"` for patterns such as `/World/*/joints/*` |
 
 For `by_name`, the prim name is the last component of the path. Searching for `"link"` will match prims named `base_link`, `arm_link_1`, but not a prim at `/World/links/part`.
 
