@@ -136,10 +136,35 @@ Registered by default only on Linux and Windows, where Isaac Sim runs
 
 Notes:
 
-- `get_isaac_prim_detail` reads one aspect of a prim per call: `info`,
-  `transform`, `ancestors`, `relationships`, `variants`, `bounding_box`,
-  `mesh`, `light`, `material`, `rigid_body`, `collision`, `joint`, `mass`,
-  `animation`.
+- `get_isaac_prim_detail` reads one or more aspects of a prim per call:
+  `info`, `transform`, `ancestors`, `relationships`, `variants`,
+  `bounding_box`, `mesh`, `light`, `material`, `rigid_body`, `collision`,
+  `joint`, `mass`, `animation`.
+- Poses (the `transform` aspect, `info`'s transform, `get_isaac_camera_info`
+  and the reply of `set_isaac_prim_transform`) are factored out of the
+  composed matrix, so rotation and scale stay right under scaled parents and
+  for matrix ops. Each carries `space` plus `local` and `world` blocks with
+  `translation`, `rotation_quat` (`[w, x, y, z]`), `rotation_euler_xyz`
+  (degrees, the order `set_isaac_prim_transform` takes) and `scale`;
+  `sheared: true` marks a rotated prim under a non-uniform scale, where no
+  rotation and per-axis scale reproduce the matrix exactly.
+- `set_isaac_prim_transform` takes local values (relative to the parent). A
+  prim whose stack holds a matrix op (`xformOp:transform`) is converted to
+  the equivalent translate/orient/scale stack first; a sheared matrix is
+  refused. An op with time samples is refused unless `time_code` names the
+  sample to write, and an animated rotate op the XYZ rotation would replace
+  is refused outright.
+- `set_isaac_prim_attribute` converts the JSON value to the attribute's type:
+  quaternions (`xformOp:orient`, `physics:localRot0`) as `[w, x, y, z]`,
+  matrices as rows or a flat row-major list, arrays as lists.
+- `query_isaac_typed_prims` resolves `type_name` through the schema registry
+  (`UsdPhysics.RevoluteJoint`, `PhysicsRevoluteJoint`,
+  `UsdPhysics.RigidBodyAPI`, any `pxr` module) and refuses a name that
+  resolves to nothing. Values come back as JSON; arrays longer than
+  `max_array_elements` (default 16) come back as a length summary, and
+  non-finite floats as `null`.
+- The `mass` and `rigid_body` aspects report an unset centre of mass (the
+  schema's `-inf` fallback) as `null` with `center_of_mass_note`.
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,

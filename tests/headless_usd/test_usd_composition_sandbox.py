@@ -84,6 +84,11 @@ def _denied(session: HeadlessUSDSession, path: Path, policy: PathPolicy) -> Dict
     return details
 
 
+def _api_key(session: HeadlessUSDSession, stage_id: str, prim_path: str) -> str:
+    """The composed ``custom:api_key`` the stage shows at ``prim_path``."""
+    return session.get_stage(stage_id).GetPrimAtPath(prim_path).GetAttribute("custom:api_key").Get()
+
+
 def _kinds(details: Dict) -> List[Tuple[str, str]]:
     return [(entry["kind"], entry["location"]) for entry in details["outside_sandbox"]]
 
@@ -259,7 +264,7 @@ class TestWhatStillLoads:
 
         stage_id = _load(session, path, policy)
 
-        assert session.get_prim_info(stage_id, "/World/A").attributes["custom:api_key"] == SECRET
+        assert _api_key(session, stage_id, "/World/A") == SECRET
 
     def test_missing_inside_reference_loads(self, dirs, policy, session) -> None:
         path = dirs[0] / "missing_inside.usda"
@@ -297,7 +302,7 @@ class TestWhatStillLoads:
         stage.GetRootLayer().Save()
 
         stage_id = _load(session, path, PathPolicy(enabled=False, allowed_paths=[]))
-        assert session.get_prim_info(stage_id, "/World/Leak").attributes["custom:api_key"] == SECRET
+        assert _api_key(session, stage_id, "/World/Leak") == SECRET
 
     def test_no_sandbox_argument_keeps_the_cli_unrestricted(self, dirs, session) -> None:
         inside, outside = dirs

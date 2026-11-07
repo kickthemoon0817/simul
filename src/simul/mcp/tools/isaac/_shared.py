@@ -136,7 +136,6 @@ BULK_GEOMETRY_ATTRIBUTES = frozenset(
 )
 
 
-
 def _pyval(value: Any) -> str:
     """Render a call parameter as a Python literal for embedding in a script.
 
@@ -167,12 +166,121 @@ def _compose_script(*fragments: str) -> str:
     return "\n".join(textwrap.dedent(fragment) for fragment in fragments)
 
 
+# What the mass and rigid_body aspects say beside a null centre of mass.
+# MassAPI's fallback is (-inf, -inf, -inf), the normal state after
+# set_isaac_mass_properties(mass=...); json.dumps spells it -Infinity, which
+# is not JSON. The bridge's PrimDetailReader carries the same text.
+UNSET_CENTER_OF_MASS_NOTE = (
+    "Not authored: the schema fallback (-inf) means PhysX derives the centre of mass "
+    "from the collision shapes."
+)
+
 # Script cores shared by the single-step tools and create_isaac_object. Each
 # defines one module-level function that takes the open stage plus plain
 # parameters and returns the dict the tool prints; a dict carrying "error"
 # reports failure without raising. They are Python *source*, not callables:
 # the tools embed them in the generated script so the logic exists once and
 # runs inside Kit, whichever tool invoked it.
+
+# Transform readback shared by every tool that reports a prim's pose. The
+# bridge extension's PrimDetailReader carries the same logic (it cannot import
+# this package inside Kit); test_prim_detail_bridge pins the two together.
+# Needs ``Gf`` and ``Usd`` imported by the script.
+XFORM_READ_CORE = """\
+    def _xf_round(values):
+        # Nine decimals drop float noise (6e-17 for zero, 2.0000000000000004)
+        # without losing anything a pose needs; + 0.0 turns -0.0 into 0.0.
+        return [round(float(value), 9) + 0.0 for value in values]
+
+    def _decompose_matrix(matrix):
+        # Matrix4d.ExtractRotation() orthonormalises a matrix that still
+        # carries scale, so a rotation under a scaled parent reads wrong (90
+        # degrees about Z under a parent scaled by 2 comes back as 60). The
+        # first scale op is not the scale either: it misses parents and
+        # matrix ops. Gf.Transform factors the scale out first.
+        xform = Gf.Transform(matrix)
+        rotation = xform.GetRotation()
+        quat = rotation.GetQuat()
+        # rotateXYZ composes X, then Y, then Z; Decompose takes the axes in
+        # the reverse of that order, so read Z, Y, X and flip.
+        z_y_x = rotation.Decompose(Gf.Vec3d(0, 0, 1), Gf.Vec3d(0, 1, 0), Gf.Vec3d(1, 0, 0))
+        result = {
+            "translation": _xf_round(matrix.ExtractTranslation()),
+            "rotation_quat": _xf_round([quat.GetReal()] + list(quat.GetImaginary())),
+            "rotation_euler_xyz": _xf_round(reversed(z_y_x)),
+            "scale": _xf_round(xform.GetScale()),
+        }
+        # A rotated prim under a non-uniformly scaled parent has axes that
+        # are no longer perpendicular: no rotation and per-axis scale
+        # reproduce it, so say so rather than present the fit as exact.
+        rows = [Gf.Vec3d(matrix[i][0], matrix[i][1], matrix[i][2]) for i in range(3)]
+        for a, b in ((0, 1), (0, 2), (1, 2)):
+            la = rows[a].GetLength()
+            lb = rows[b].GetLength()
+            if la > 1e-12 and lb > 1e-12 and abs(Gf.Dot(rows[a], rows[b])) > 1e-6 * la * lb:
+                result["sheared"] = True
+                break
+        return result
+
+    def _transform_report(xformable, world_space, time_code):
+        local = _decompose_matrix(xformable.GetLocalTransformation(time_code))
+        world = _decompose_matrix(xformable.ComputeLocalToWorldTransform(time_code))
+        ops = xformable.GetOrderedXformOps()
+        report = {"space": "world" if world_space else "local"}
+        report.update(world if world_space else local)
+        report["local"] = local
+        report["world"] = world
+        report["xform_op_order"] = [op.GetOpName() for op in ops]
+        animated = [op.GetOpName() for op in ops if op.GetNumTimeSamples() > 0]
+        if animated:
+            report["time_sampled_ops"] = animated
+        if xformable.GetResetXformStack():
+            report["resets_xform_stack"] = True
+        if local.get("sheared") or world.get("sheared"):
+            report["note"] = (
+                "The transform is sheared (a rotated prim under a non-uniform scale): "
+                "rotation is the closest pure rotation and scale is measured along "
+                "the stretch axes, not the prim's own."
+            )
+        return report
+"""
+
+# USD value -> JSON. json.dumps cannot take Gf vectors, quaternions, matrices
+# or Vt arrays, and spells an infinite float (the -inf fallback of an unset
+# centre of mass, a joint's open limit) as -Infinity, which is not JSON.
+# Non-finite floats become null and are counted in _JSON_NON_FINITE so the
+# caller can say so. Quaternions read [w, x, y, z], real part first, the
+# order set_isaac_prim_attribute accepts. Needs ``Gf`` and ``Sdf``.
+JSON_VALUE_CORE = """\
+    import math as _jv_math
+
+    _JSON_NON_FINITE = [0]
+
+    def _json_value(value):
+        if value is None or isinstance(value, (bool, int, str)):
+            return value
+        if isinstance(value, float):
+            if _jv_math.isfinite(value):
+                return value
+            _JSON_NON_FINITE[0] += 1
+            return None
+        if isinstance(value, Sdf.AssetPath):
+            return value.path
+        if isinstance(value, (Gf.Quatf, Gf.Quatd, Gf.Quath)):
+            return [_json_value(float(value.GetReal()))] + [_json_value(float(c)) for c in value.GetImaginary()]
+        dimension = getattr(value, "dimension", None)
+        if isinstance(dimension, tuple):
+            return [[_json_value(float(value[i][j])) for j in range(dimension[1])] for i in range(dimension[0])]
+        if hasattr(value, "__len__") and hasattr(value, "__getitem__"):
+            try:
+                return [_json_value(item) for item in value]
+            except Exception:
+                pass
+        try:
+            return _json_value(float(value))
+        except Exception:
+            return str(value)
+"""
 
 DEFINE_PRIM_CORE = """\
     def _define_prim(stage, prim_path, prim_type, attributes):
@@ -194,54 +302,73 @@ DEFINE_PRIM_CORE = """\
 """
 
 SET_PRIM_TRANSFORM_CORE = """\
-    def _set_prim_transform(stage, prim_path, translation, rotation_euler, scale):
+    def _set_prim_transform(stage, prim_path, translation, rotation_euler, scale, time_code=None):
+        # Input is the prim's *local* transform; the reply reads back both the
+        # local and the world pose and labels which is which. Needs
+        # XFORM_READ_CORE in the same script.
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             return {"error": "Prim not found: " + prim_path}
         if not prim.IsA(UsdGeom.Xformable):
             return {"error": "Prim is not Xformable: " + prim_path}
+        for label, value in (("translation", translation), ("rotation_euler", rotation_euler), ("scale", scale)):
+            if value is not None and len(value) != 3:
+                return {"error": label + " must have 3 components [x, y, z]; got " + str(len(value))}
         xformable = UsdGeom.Xformable(prim)
         Op = UsdGeom.XformOp
+        default_time = Usd.TimeCode.Default()
+        when = default_time if time_code is None else Usd.TimeCode(float(time_code))
         rotate_types = (
             Op.TypeRotateXYZ, Op.TypeRotateXZY, Op.TypeRotateYXZ, Op.TypeRotateYZX,
             Op.TypeRotateZXY, Op.TypeRotateZYX, Op.TypeRotateX, Op.TypeRotateY,
             Op.TypeRotateZ, Op.TypeOrient,
         )
         ops = list(xformable.GetOrderedXformOps())
+        extra = {}
+
+        def _animated(op):
+            return op.GetAttr().GetNumTimeSamples() > 0
 
         # The prim's own translate / rotate / scale are the unsuffixed,
         # non-inverse ops; pivots and other suffixed ops are left untouched.
+        def _is_primary(op, types):
+            return (
+                not op.IsInverseOp()
+                and op.GetOpType() in types
+                and len(op.GetOpName().split(":")) == 2
+            )
+
         def _primary(types):
             for index, op in enumerate(ops):
-                if op.IsInverseOp() or op.GetOpType() not in types:
-                    continue
-                if len(op.GetOpName().split(":")) == 2:
+                if _is_primary(op, types):
                     return index
             return None
 
-        def _set_vec(op, value):
+        def _set_vec(op, value, at):
             precision = op.GetPrecision()
             if precision == Op.PrecisionDouble:
-                op.Set(Gf.Vec3d(*value))
+                op.Set(Gf.Vec3d(*value), at)
             elif precision == Op.PrecisionHalf:
-                op.Set(Gf.Vec3h(*value))
+                op.Set(Gf.Vec3h(*value), at)
             else:
-                op.Set(Gf.Vec3f(*value))
+                op.Set(Gf.Vec3f(*value), at)
 
-        def _set_orient(op, euler):
+        def _set_quat(op, quat, at):
+            precision = op.GetPrecision()
+            if precision == Op.PrecisionDouble:
+                op.Set(Gf.Quatd(quat), at)
+            elif precision == Op.PrecisionHalf:
+                op.Set(Gf.Quath(quat), at)
+            else:
+                op.Set(Gf.Quatf(quat), at)
+
+        def _euler_quat(euler):
             # rotateXYZ semantics: rotate about X first, then Y, then Z.
-            quat = (
+            return (
                 Gf.Rotation(Gf.Vec3d(1, 0, 0), float(euler[0]))
                 * Gf.Rotation(Gf.Vec3d(0, 1, 0), float(euler[1]))
                 * Gf.Rotation(Gf.Vec3d(0, 0, 1), float(euler[2]))
             ).GetQuat()
-            precision = op.GetPrecision()
-            if precision == Op.PrecisionDouble:
-                op.Set(Gf.Quatd(quat))
-            elif precision == Op.PrecisionHalf:
-                op.Set(Gf.Quath(quat))
-            else:
-                op.Set(Gf.Quatf(quat))
 
         def _op_for(attr_name, add_op, precision):
             # An attribute left over from an earlier op stack is reused;
@@ -249,9 +376,98 @@ SET_PRIM_TRANSFORM_CORE = """\
             attr = prim.GetAttribute(attr_name)
             return UsdGeom.XformOp(attr) if attr.IsValid() else add_op(precision)
 
+        def _hidden_error(names):
+            return {
+                "error": (
+                    ", ".join(names) + " on " + prim_path + " is animated (time-sampled): a value "
+                    "written at the default time is hidden by the samples. Pass time_code to "
+                    "write a sample at that time."
+                ),
+                "time_sampled_ops": names,
+            }
+
+        # A matrix op holds the whole transform; a translate stacked on it
+        # composes with the matrix's own translation instead of replacing it.
+        # Swap it for the equivalent translate / orient / scale stack first.
+        if any(op.GetOpType() == Op.TypeTransform for op in ops):
+            leftovers = [prim.GetAttribute(name) for name in ("xformOp:translate", "xformOp:orient", "xformOp:scale")]
+            animated = [op.GetOpName() for op in ops if _animated(op)] + [
+                attr.GetName() for attr in leftovers if attr.IsValid() and attr.GetNumTimeSamples() > 0
+            ]
+            if animated:
+                return {
+                    "error": (
+                        prim_path + " has a matrix op (xformOp:transform) in an animated op stack ("
+                        + ", ".join(animated) + "); converting it to translate/orient/scale would "
+                        "drop the animation. Set xformOp:transform per time code with "
+                        "set_isaac_prim_attribute instead."
+                    ),
+                    "time_sampled_ops": animated,
+                }
+            local = xformable.GetLocalTransformation(default_time)
+            parts = Gf.Transform(local)
+            rebuilt = Gf.Transform()
+            rebuilt.SetScale(parts.GetScale())
+            rebuilt.SetRotation(parts.GetRotation())
+            rebuilt.SetTranslation(parts.GetTranslation())
+            if not Gf.IsClose(rebuilt.GetMatrix(), local, 1e-6):
+                return {
+                    "error": (
+                        "The matrix op on " + prim_path + " carries shear, which translate/orient/"
+                        "scale cannot express, so it was left unchanged. Set xformOp:transform "
+                        "with set_isaac_prim_attribute instead."
+                    )
+                }
+            t_op = _op_for("xformOp:translate", xformable.AddTranslateOp, Op.PrecisionDouble)
+            r_op = _op_for("xformOp:orient", xformable.AddOrientOp, Op.PrecisionDouble)
+            s_op = _op_for("xformOp:scale", xformable.AddScaleOp, Op.PrecisionDouble)
+            _set_vec(t_op, parts.GetTranslation(), default_time)
+            _set_quat(r_op, parts.GetRotation().GetQuat(), default_time)
+            _set_vec(s_op, parts.GetScale(), default_time)
+            ops = [t_op, r_op, s_op]
+            extra["converted_matrix_op"] = True
+            extra["matrix_op_note"] = (
+                "The matrix op was replaced by the equivalent translate/orient/scale stack so its "
+                "components could be set; xformOp:transform is no longer in xformOpOrder."
+            )
+
         t_index = _primary((Op.TypeTranslate,))
         r_index = _primary(rotate_types)
         s_index = _primary((Op.TypeScale,))
+
+        # Refuse before anything is written: a default value under time
+        # samples changes nothing a viewer sees, and replacing an animated
+        # rotate op would throw its animation away.
+        if time_code is None:
+            hidden = []
+            if translation is not None and t_index is not None and _animated(ops[t_index]):
+                hidden.append(ops[t_index].GetOpName())
+            if (
+                rotation_euler is not None
+                and r_index is not None
+                and ops[r_index].GetOpType() in (Op.TypeOrient, Op.TypeRotateXYZ)
+                and _animated(ops[r_index])
+            ):
+                hidden.append(ops[r_index].GetOpName())
+            if scale is not None and s_index is not None and _animated(ops[s_index]):
+                hidden.append(ops[s_index].GetOpName())
+            if hidden:
+                return _hidden_error(hidden)
+        if rotation_euler is not None:
+            keeps = r_index is not None and ops[r_index].GetOpType() in (Op.TypeOrient, Op.TypeRotateXYZ)
+            dropped = [
+                op.GetOpName() for index, op in enumerate(ops)
+                if _is_primary(op, rotate_types) and not (keeps and index == r_index) and _animated(op)
+            ]
+            if dropped:
+                return {
+                    "error": (
+                        "rotation_euler would replace the animated rotate op(s) " + ", ".join(dropped)
+                        + " on " + prim_path + " with an XYZ rotation and drop their animation; "
+                        "set those ops with set_isaac_prim_attribute instead."
+                    ),
+                    "time_sampled_ops": dropped,
+                }
 
         # A missing op is inserted at its canonical slot (translate, then
         # rotate, then scale) rather than appended: an op appended after an
@@ -262,20 +478,20 @@ SET_PRIM_TRANSFORM_CORE = """\
                 t_index = 0
                 r_index = None if r_index is None else r_index + 1
                 s_index = None if s_index is None else s_index + 1
-            _set_vec(ops[t_index], translation)
+            _set_vec(ops[t_index], translation, when)
 
         if rotation_euler is not None:
             rotate_op = None if r_index is None else ops[r_index]
             if rotate_op is not None and rotate_op.GetOpType() == Op.TypeOrient:
-                _set_orient(rotate_op, rotation_euler)
+                _set_quat(rotate_op, _euler_quat(rotation_euler), when)
             elif rotate_op is not None and rotate_op.GetOpType() == Op.TypeRotateXYZ:
-                _set_vec(rotate_op, rotation_euler)
+                _set_vec(rotate_op, rotation_euler, when)
             else:
                 # No rotation yet, or one in another axis order: the value is
                 # XYZ Euler, so a rotateXYZ op takes that slot. An op of
                 # another order leaves the stack; its attribute stays.
                 new_op = _op_for("xformOp:rotateXYZ", xformable.AddRotateXYZOp, Op.PrecisionFloat)
-                _set_vec(new_op, rotation_euler)
+                _set_vec(new_op, rotation_euler, when)
                 if r_index is not None:
                     ops[r_index] = new_op
                 else:
@@ -291,10 +507,7 @@ SET_PRIM_TRANSFORM_CORE = """\
             kept = ops[r_index]
             ops = [
                 op for index, op in enumerate(ops)
-                if index == r_index
-                or op.IsInverseOp()
-                or op.GetOpType() not in rotate_types
-                or len(op.GetOpName().split(":")) != 2
+                if index == r_index or not _is_primary(op, rotate_types)
             ]
             r_index = next(index for index, op in enumerate(ops) if op is kept)
             t_index = _primary((Op.TypeTranslate,))
@@ -305,17 +518,17 @@ SET_PRIM_TRANSFORM_CORE = """\
                 anchor = r_index if r_index is not None else t_index
                 s_index = 0 if anchor is None else anchor + 1
                 ops.insert(s_index, _op_for("xformOp:scale", xformable.AddScaleOp, Op.PrecisionFloat))
-            _set_vec(ops[s_index], scale)
+            _set_vec(ops[s_index], scale, when)
 
         xformable.SetXformOpOrder(ops, xformable.GetResetXformStack())
-        world = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-        return {
-            "prim_path": prim_path,
-            "translation": list(world.ExtractTranslation()),
-            "rotation_euler_set": rotation_euler,
-            "scale_set": scale,
-            "xform_op_order": [op.GetOpName() for op in ops],
-        }
+        report = {"prim_path": prim_path}
+        report.update(_transform_report(xformable, False, when))
+        report["time_code"] = None if time_code is None else float(time_code)
+        report["translation_set"] = translation
+        report["rotation_euler_set"] = rotation_euler
+        report["scale_set"] = scale
+        report.update(extra)
+        return report
 """
 
 OPEN_ASSET_CORE = """\
@@ -462,4 +675,3 @@ COLLISION_APPROXIMATIONS: tuple[str, ...] = (
 # Default cap on list-shaped tool results, applied inside the generated script
 # so the trim happens before Kit serialises the payload.
 DEFAULT_MAX_RESULTS = 200
-
