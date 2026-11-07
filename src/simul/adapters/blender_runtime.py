@@ -4909,14 +4909,18 @@ class BlenderRuntimeSession:
         bone (build_rig). An armature needs the targets of its bones'
         constraints for its pose, and an object those its modifiers read
         (_modifier_transform_sources) for its geometry, which Blender
-        evaluates with the whole object. get_camera_info scans the scene once
-        for a camera and its parent: on Blender 5.0.1 a scan of 20 000
-        objects, 2 000 of them meshes with two modifiers, took 16 ms. Only an
-        armature has a pose, and only the types of _MODIFIER_OWNER_TYPES a
-        modifier stack; reading every object's took 6 ms more. Each bone's
-        chain is read once, however many children its bones have: 5 000
-        empties parented to the bones of a rig of 1 000 constrained bones
-        added 4 ms.
+        evaluates with the whole object. An IK or a Spline IK constraint
+        counts only where Blender relates its targets (_relates_targets).
+        get_camera_info scans the scene once for a camera and its parent: on
+        Blender 5.0.1 a scan of 20 000 objects, 2 000 of them meshes with two
+        modifiers, took 16 ms. Only an armature has a pose, and only the types
+        of _MODIFIER_OWNER_TYPES a modifier stack; reading every object's took
+        6 ms more. Each bone's chain is read once, however many children its
+        bones have: 5 000 empties parented to the bones of a rig of 1 000
+        constrained bones added 5 ms. A child of a bone is listed under each
+        target of its chain, though: with a distinct target on each bone,
+        5 000 empties on the bones of ten chains of 100 added 16 ms, and on
+        the last bone of one chain of 1 000, 180 ms.
 
         Returns:
             (dependents, readers): for each object, the children, children of
@@ -4930,11 +4934,11 @@ class BlenderRuntimeSession:
         # (armature, bone name).
         chains: Dict[Tuple[Any, str], List[Any]] = {}
 
-        def targets(constraints: Any) -> List[Any]:
+        def targets(constraints: Any, bone: Any = None) -> List[Any]:
             return [
                 target
                 for constraint in constraints
-                if self._applies(constraint)
+                if self._applies(constraint) and self._relates_targets(constraint, bone)
                 for target, _ in self._constraint_targets(constraint)
             ]
 
@@ -4950,7 +4954,9 @@ class BlenderRuntimeSession:
             found = [] if bone is None else chains[(armature, bone.name)]
             for chained in reversed(below):
                 # Each target once, however many bones of the chain it has.
-                found = list(dict.fromkeys(targets(chained.constraints) + found))
+                found = list(
+                    dict.fromkeys(targets(chained.constraints, chained) + found)
+                )
                 chains[(armature, chained.name)] = found
             # Also for a bone the pose lacks, which needs nothing.
             chains[(armature, name)] = found
@@ -4967,7 +4973,7 @@ class BlenderRuntimeSession:
             if kind == "ARMATURE":
                 pose = other.pose
                 bones = [] if pose is None else pose.bones
-                read = [s for bone in bones for s in targets(bone.constraints)]
+                read = [s for bone in bones for s in targets(bone.constraints, bone)]
             elif kind in _MODIFIER_OWNER_TYPES:
                 read = [
                     source
@@ -4979,6 +4985,39 @@ class BlenderRuntimeSession:
             for source in read:
                 readers.setdefault(source, []).append(other)
         return dependents, readers
+
+    @staticmethod
+    def _relates_targets(constraint: Any, bone: Any) -> bool:
+        """
+        Whether Blender relates a constraint it applies to the transform of its targets.
+
+        Blender 5.0.1 relates the targets of an IK or a Spline IK constraint
+        to the IK solver of its armature's pose (build_ik_pose,
+        build_splineik_pose), not to the constraint stack, and holds them in
+        the depsgraph either way. So it relates them to nothing on an object,
+        which has no pose, nor for an IK whose use_tail is off on a bone
+        without a parent: that IK has no chain, so no solver. On Blender 5.0.1
+        a disabled camera kept a matrix_world 11 m from a render when a
+        visible empty's IK targeted it, or its Spline IK a disabled curve
+        parented to the camera, and when an IK without a chain targeted it
+        from a bone of a visible armature, or of a disabled one with a visible
+        empty parented to that bone or to the bone below it. With use_tail
+        on, on a bone with a parent, or for a bone's Spline IK, the camera was
+        evaluated in full.
+
+        Args:
+            constraint: The constraint.
+            bone: The pose bone it is on, or None for an object's constraint.
+
+        Returns:
+            False for those IK and Spline IK constraints, True otherwise.
+        """
+        kind = constraint.type
+        if kind not in ("IK", "SPLINE_IK"):
+            return True
+        if bone is None:
+            return False
+        return kind == "SPLINE_IK" or constraint.use_tail or bone.parent is not None
 
     @classmethod
     def _modifier_transform_sources(cls, modifier: Any) -> List[Any]:

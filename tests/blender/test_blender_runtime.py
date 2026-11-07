@@ -4889,6 +4889,168 @@ class TestVisualObservationTools:
         # Once for the armature's own pose, once for the chain of its children.
         assert reads == {"Root": 2, "Bone": 2, "Below": 2, "Other": 1}
 
+    def _side_camera_an_ik_targets(
+        self,
+        kind: str,
+        constrained: Optional[str],
+        kid_bone: Optional[str],
+        use_tail: bool,
+    ) -> Tuple[FakeTransformObject, FakeViewLayer, List[FakeTransformObject]]:
+        """
+        Camera "Side" (_side_camera, with a Track To) and an IK or a Spline IK that targets it.
+
+        Args:
+            kind: "IK", or "SPLINE_IK", which targets a disabled curve "Path"
+                parented to Side instead, as a Spline IK needs a curve.
+            constrained: The bone of armature "Rig2" the constraint is on:
+                "Root" (without a parent) or "Bone" (under Root); None for an
+                enabled empty "Owner" instead.
+            kid_bone: The bone of a disabled Rig2 that an enabled empty "Kid"
+                is parented to (parent type BONE); None for Rig2 enabled,
+                without Kid.
+            use_tail: The IK's.
+
+        Returns:
+            Side, the view layer and every object to put in the scene.
+        """
+        side, view_layer = self._side_camera("object", _track_to((5.0, 5.0, 0.0)))
+        objects = [side]
+        target = side
+        if kind == "SPLINE_IK":
+            target = FakeTransformObject("Path", "CURVE", parent=side)
+            target.hide_viewport = True
+            objects.append(target)
+        settings = {"use_tail": use_tail} if kind == "IK" else {}
+        # The fake evaluates no pose, so the solve is never called on a bone.
+        ik = FakeConstraint(
+            "IK", kind, lambda matrix: matrix, target=target, **settings
+        )
+        if constrained is None:
+            objects.append(FakeTransformObject("Owner", constraints=[ik]))
+        else:
+            rig = FakeTransformObject(
+                "Rig2", "ARMATURE", SimpleNamespace(bones=["Root", "Bone"])
+            )
+            top = SimpleNamespace(name="Root", constraints=[], parent=None)
+            below = SimpleNamespace(name="Bone", constraints=[], parent=top)
+            {"Root": top, "Bone": below}[constrained].constraints.append(ik)
+            rig.pose = SimpleNamespace(bones=FakePoseBones([top, below]))
+            objects.append(rig)
+            if kid_bone is not None:
+                rig.hide_viewport = True
+                kid = FakeTransformObject("Kid", parent=rig)
+                kid.parent_type = "BONE"
+                kid.parent_bone = kid_bone
+                objects.append(kid)
+        for obj in objects[1:]:
+            view_layer.layer_collection.collection.link(obj)
+        return side, view_layer, objects
+
+    @pytest.mark.parametrize(
+        ("kind", "constrained", "kid_bone", "use_tail"),
+        [
+            ("IK", None, None, True),
+            ("SPLINE_IK", None, None, True),
+            ("IK", "Root", None, False),
+            ("IK", "Root", "Root", False),
+            ("IK", "Root", "Bone", False),
+        ],
+        ids=[
+            "object_ik",
+            "object_spline_ik",
+            "armature_ik_without_chain",
+            "bone_child_ik_without_chain",
+            "child_below_ik_without_chain",
+        ],
+    )
+    def test_get_camera_info_composes_a_camera_an_ik_without_a_solver_targets(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        kind: str,
+        constrained: Optional[str],
+        kid_bone: Optional[str],
+        use_tail: bool,
+    ) -> None:
+        """Blender relates an IK's or a Spline IK's targets to a pose's IK solver only,
+        so to nothing on an object, or for an IK without a chain.
+
+        On Blender 5.0.1 a disabled camera kept a matrix_world 11 m from a
+        render, held by the depsgraph, when it was the target of a visible
+        empty's IK, of a visible empty's Spline IK (through a disabled curve
+        parented to it), or of an IK with use_tail off on a bone without a
+        parent: of a visible armature, or of a disabled one with a visible
+        empty parented to that bone or to the bone below it. The reply called
+        that matrix evaluated, 11 m and 0.157 rad off.
+        """
+        side, view_layer, objects = self._side_camera_an_ik_targets(
+            kind, constrained, kid_bone, use_tail
+        )
+        # Blender holds the camera that the constraint targets without
+        # evaluating it.
+        session = self._session_in(monkeypatch, view_layer, *objects, lagging=[side])
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "transform"
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
+        assert "'Track To' (TRACK_TO)" in result["warning"]
+        assert side.update_tags == []
+
+    @pytest.mark.parametrize(
+        ("kind", "constrained", "kid_bone", "use_tail"),
+        [
+            ("IK", "Root", None, True),
+            ("IK", "Bone", None, False),
+            ("IK", "Root", "Root", True),
+            ("IK", "Bone", "Bone", False),
+            ("SPLINE_IK", "Root", None, True),
+            ("SPLINE_IK", "Root", "Root", True),
+        ],
+        ids=[
+            "armature_ik_with_tail",
+            "armature_ik_under_a_parent",
+            "bone_child_ik_with_tail",
+            "bone_child_ik_under_a_parent",
+            "armature_spline_ik",
+            "bone_child_spline_ik",
+        ],
+    )
+    def test_get_camera_info_keeps_the_evaluated_pose_of_a_camera_an_ik_chain_targets(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        kind: str,
+        constrained: Optional[str],
+        kid_bone: Optional[str],
+        use_tail: bool,
+    ) -> None:
+        """An IK with a chain to solve, and a bone's Spline IK, need their targets.
+
+        On Blender 5.0.1 a disabled camera kept the matrix_world a render gave
+        it, its Track To included, when it was the target of an IK on a bone
+        without a parent whose use_tail was on, or with use_tail off on a bone
+        with a parent, or of a Spline IK on a bone without a parent (through a
+        disabled curve parented to it): of a visible armature, or of a
+        disabled one with a visible empty parented to that bone.
+        """
+        side, view_layer, objects = self._side_camera_an_ik_targets(
+            kind, constrained, kid_bone, use_tail
+        )
+        # Blender holds the camera without evaluating it until it is tagged.
+        session = self._session_in(monkeypatch, view_layer, *objects, lagging=[side])
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "evaluated"
+        assert result["warning"] is None
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert self._looks_at(result, (5.0, 5.0, 0.0))
+        assert side.update_tags == [{"OBJECT"}]
+
     @staticmethod
     def _modifier_naming(
         source: FakeTransformObject, setup: str

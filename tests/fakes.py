@@ -515,10 +515,11 @@ class FakeConstraint:
 
     Only a type in ``TARGET_CONSTRAINT_TYPES`` has ``target`` (and may have
     ``subtarget``), only an Armature has ``targets`` (each with ``target``,
-    ``subtarget`` and ``weight``), only an Action ``use_eval_time`` and only a
-    Track To ``use_target_z`` (False, Blender's default, unless given), as on
-    a real constraint, so code reading them from another type fails here as
-    it does in Blender. Deleting a target object leaves ``target`` None and
+    ``subtarget`` and ``weight``), only an Action ``use_eval_time``, only a
+    Track To ``use_target_z`` (False, Blender's default, unless given) and
+    only an IK ``use_tail`` (True, Blender's default, unless given), as on a
+    real constraint, so code reading them from another type fails here as it
+    does in Blender. Deleting a target object leaves ``target`` None and
     ``is_valid`` True, since Blender 5.0.1 checks the targets only when the
     constraint is edited, and Blender's evaluation then does nothing; nor
     does ``apply``. Likewise for an Armature constraint once a target with
@@ -549,6 +550,10 @@ class FakeConstraint:
         if constraint_type == "TRACK_TO":
             # Target Z: the target's Z axis, not world Z, is the up direction.
             defaults["use_target_z"] = False
+        if constraint_type == "IK":
+            # Use Tail: the bone's tail, not its head, reaches for the target,
+            # so the bone itself is in the chain.
+            defaults["use_tail"] = True
         optional |= set(defaults)
         if not required <= set(settings) <= required | optional:
             raise TypeError(

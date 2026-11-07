@@ -400,9 +400,13 @@ Behaviour worth knowing:
   child in all 24 orders of the child, an object reading it, the armature
   and the camera, but for a child of the armature itself, of a bone above
   the constrained one or of another bone only in the 12 where the child came
-  before its reader. A particle system's boid rule that avoids or follows
-  the camera (Avoid, Follow Leader), and a texture its settings map through
-  the camera (OBJECT coordinates), count while the depsgraph holds the
+  before its reader. An IK constraint counts only on a bone that has a parent
+  or uses its tail, and a Spline IK only on a bone: Blender relates their
+  targets to an armature's IK solver, so to nothing on an object or for an
+  IK without a chain, and 5.0.1 left the camera stale for those. A particle
+  system's boid rule that avoids or follows the camera (Avoid, Follow
+  Leader), and a texture its settings map through the camera (OBJECT
+  coordinates), count while the depsgraph holds the
   object they name for something else, the particle system's modifier
   enabled in viewports or not: Blender builds that object for neither, so
   without another reference it relates them to nothing, and 5.0.1 left the
