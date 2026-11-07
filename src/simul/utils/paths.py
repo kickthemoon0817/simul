@@ -52,20 +52,34 @@ DEFAULT_ALLOWED_WRITE_URL_SCHEMES: Tuple[str, ...] = ()
 CAPTURE_SUBDIR = "captures"
 
 
+SANDBOX_DENIED_MESSAGE = "File path is not allowed by sandbox policy"
+
+
 class SandboxDenied(PermissionError):
     """A path or URL was refused by the sandbox policy.
 
     Carries the same ``details`` mapping the MCP error envelope reports, so
     every layer that catches it can surface an actionable denial.
+    ``error_message`` is the envelope's ``error``: the generic denial for a
+    refused path, or a caller's own sentence when the path itself passed but
+    something it draws on did not (a USD layer whose references leave the
+    sandbox).
     """
 
-    def __init__(self, path_str: str, details: Dict[str, Any]) -> None:
-        super().__init__(f"File path is not allowed by sandbox policy: {path_str}")
+    def __init__(
+        self,
+        path_str: str,
+        details: Dict[str, Any],
+        *,
+        error_message: str = SANDBOX_DENIED_MESSAGE,
+    ) -> None:
+        if error_message == SANDBOX_DENIED_MESSAGE:
+            super().__init__(f"File path is not allowed by sandbox policy: {path_str}")
+        else:
+            super().__init__(error_message)
         self.path_str: str = path_str
         self.details: Dict[str, Any] = details
-
-
-SANDBOX_DENIED_MESSAGE = "File path is not allowed by sandbox policy"
+        self.error_message: str = error_message
 
 
 def sandbox_error(
