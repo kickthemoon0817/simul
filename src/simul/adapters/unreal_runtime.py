@@ -45,9 +45,11 @@ from ._unreal_scripts import (
     ACTOR_HELPERS,
     CREATE_MATERIAL_INSTANCE,
     EDITOR_WORLD,
+    ENABLE_PHYSICS,
     ENGINE_METADATA,
     FIND_ACTORS_BY_TAG,
     FOCUS_ACTOR,
+    INCOMPATIBLE_BODY,
     INTERCHANGE_INFO,
     LOADED_MAP,
     MATERIAL_INFO,
@@ -56,8 +58,10 @@ from ._unreal_scripts import (
     ROBOTICS_SCENE_ANALYSIS,
     SCENE_SUMMARY,
     SET_ACTOR_TRANSFORM,
+    SET_COLLISION,
     SET_LIGHT_PARAMS,
     SET_MATERIAL_PARAMS,
+    SET_PHYSICS_PARAMS,
     SIMULATION_STATUS,
     SPAWN_ACTOR,
     USD_EXPORT,
@@ -87,6 +91,18 @@ ROBOTICS_CRITERIA: Dict[str, float] = {
 
 #: Most actor paths the collision summary lists; its counts cover every actor.
 ROBOTICS_LISTED_LIMIT = 50
+
+#: ``set_physics_params`` mass range, in kg. Unreal clamps a lighter override
+#: to 0.001 kg (FBodyInstance::MassInKgOverride's ClampMin); a body heavier than
+#: the maximum swamps the solver against kg-scale bodies, and 1e40 kg overflowed
+#: Unreal's 32-bit float to inf.
+PHYSICS_MIN_MASS_KG = 0.001
+PHYSICS_MAX_MASS_KG = 1e9
+
+#: Most linear or angular damping ``set_physics_params`` takes. Unreal scales a
+#: velocity by 1 / (1 + dt * damping) each step, so a body this damped stops
+#: within one 120 Hz step, as it would with any larger damping.
+PHYSICS_MAX_DAMPING = 1e6
 
 # UE's FMD5 hex output is lowercase. Accept either case from configured
 # input and normalize. Anything that isn't a clean 32-char hex digest is
@@ -3181,33 +3197,72 @@ component.set_material({slot_index!r}, material)
         self,
         actor_path: str,
         enable: bool = True,
-        simulate_physics: bool = True,
+        kinematic: bool = False,
+        make_movable: bool = True,
+        allow_detach: bool = False,
     ) -> Dict[str, Any]:
         """
-        Enable or disable physics simulation on an actor's root component.
+        Make an actor's body simulate physics, make it kinematic, or turn physics off.
+
+        Edits the actor's primitive component (its root, else its only one)
+        in one undoable editor transaction that marks the map dirty, so Save
+        All writes it and one Undo reverts it. A simulated body falls under
+        gravity and takes forces; a kinematic body keeps its physics collision,
+        so simulated bodies hit it, but moves only when its transform is set;
+        turning physics off stops the body simulating and keeps its collision
+        and mobility. Both physical modes need a Movable body with physics
+        collision (QUERY_AND_PHYSICS or PHYSICS_ONLY) and, for a static mesh,
+        a mesh with simple collision; a simulated mesh may not use its render
+        triangles as simple collision. Unreal accepts the simulate flag on any
+        body and reads it back as simulating even when the body never moves,
+        so a body that cannot take the mode is refused with nothing changed
+        (``IncompatibleBody``, each reason in ``details.problems``).
+
+        Unreal detaches a body from its parent when it starts simulating,
+        keeping its world transform; turning physics off does not reattach
+        it. So an attached body is refused unless ``allow_detach`` is true;
+        then it is detached in the same transaction (Undo reattaches it) and
+        the reply names the parent in ``detached_from``.
+
+        A path in a running simulation (``UEDPIE_<n>_<map>``) edits the play
+        copy, which is neither undoable nor saved. An editor path while Play
+        In Editor runs edits the editor world, which the running simulation
+        does not see; the reply's ``warning`` says so.
 
         Args:
             actor_path: Full actor object path.
-            enable: Whether physics should be enabled.
-            simulate_physics: Whether the body actively simulates.
+            enable: True makes the body physical (simulated, or kinematic with
+                ``kinematic``); False stops it simulating physics.
+            kinematic: With ``enable``, make the body kinematic instead of
+                simulated: physics collision on, not simulated.
+            make_movable: Make a Static or Stationary body Movable, which both
+                physical modes need; False refuses such a body instead.
+            allow_detach: Let a simulated body attached to a parent be
+                detached from it, as Unreal does; False refuses it.
 
         Returns:
-            Dict with actor_path and physics_enabled state.
+            Dict with actor_path, world ("editor" or "simulation"),
+            physics_enabled (the body simulates), physics_mode ("simulated",
+            "kinematic", "static" or "none" without physics collision) and
+            the body read back: component_path, simulate_physics, mobility,
+            collision_mode, collision_preset, mass_kg, mass_override_kg,
+            gravity_enabled, linear_damping, angular_damping, attach_parent;
+            mobility_changed_from and detached_from when this call changed
+            them; warning. Or an IncompatibleBody envelope, or
+            PhysicsNotApplied when the body did not read back as asked (every
+            value restored).
         """
-
-        target = bool(enable and simulate_physics)
-        code = f"""
-component.set_simulate_physics({target!r})
-if component.is_simulating_physics() != {target!r}:
-    raise RuntimeError("Physics state did not change; check mobility and collision geometry")
-"""
-        return await self._component_operation(
-            actor_path,
-            code,
-            {
-                "actor_path": actor_path,
-                "physics_enabled": target,
-            },
+        mode = "off" if not enable else ("kinematic" if kinematic else "simulate")
+        args = {
+            "actor_path": actor_path,
+            "mode": mode,
+            "make_movable": bool(make_movable),
+            "allow_detach": bool(allow_detach),
+            "transaction": "simul: enable physics" if enable else "simul: disable physics",
+        }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + ENABLE_PHYSICS,
+            expected_errors=(INCOMPATIBLE_BODY, "PhysicsNotApplied"),
         )
 
     async def set_collision(
@@ -3219,46 +3274,45 @@ if component.is_simulating_physics() != {target!r}:
         """
         Configure collision settings on an actor.
 
+        Writes the actor's primitive component in one undoable editor
+        transaction that marks the map dirty (a path in a running simulation
+        edits the play copy, which is neither undoable nor saved). Setting
+        ``collision_enabled`` on a static mesh clears its Use Default
+        Collision flag, as a preset does: with the flag set, Unreal put the
+        mesh's own collision back in the running simulation and after the map
+        reloaded.
+
         Args:
             actor_path: Full actor object path.
             collision_preset: Named collision preset (e.g. BlockAll,
-                OverlapAll, NoCollision); empty keeps the current preset.
+                PhysicsActor, OverlapAll, NoCollision); empty keeps the
+                current preset. An unknown preset changes nothing.
             collision_enabled: True for query and physics collision, False
                 for none. None keeps the collision mode the preset sets, or
                 the current one when no preset is given. Overriding a
                 preset's mode turns the preset into Custom.
 
         Returns:
-            Dict with actor_path and the collision_preset and
-            collision_enabled read back from the component afterwards, or a
-            ``ScriptError`` envelope for an unknown preset or an actor
-            without one unambiguous primitive component.
+            Dict with actor_path, world, the collision_preset,
+            collision_enabled and collision_mode read back afterwards,
+            use_default_collision (null for a component that is not a static
+            mesh), the body's physics_mode and other values as
+            ``enable_physics`` reads them, and warning (a simulated body left
+            with query-only collision falls through everything, one with no
+            collision does not move at all); or a
+            ValidationError envelope for an unknown preset, or a
+            ``ScriptError`` envelope for an actor without one unambiguous
+            primitive component.
         """
-
-        lines = [
-            f"component = actor_component(actor_at({actor_path!r}), unreal.PrimitiveComponent)"
-        ]
-        if collision_preset:
-            # Unreal renames an unknown preset to Custom instead of failing;
-            # put the previous preset back so the error leaves nothing changed.
-            lines += [
-                "previous_preset = component.get_collision_profile_name()",
-                f"component.set_collision_profile_name({collision_preset!r})",
-                "if str(component.get_collision_profile_name()).lower() != "
-                f"{collision_preset.lower()!r}:",
-                "    component.set_collision_profile_name(previous_preset)",
-                f"    raise ValueError('Unknown collision preset: ' + {collision_preset!r})",
-            ]
-        if collision_enabled is not None:
-            mode = "QUERY_AND_PHYSICS" if collision_enabled else "NO_COLLISION"
-            lines.append(f"component.set_collision_enabled(unreal.CollisionEnabled.{mode})")
-        lines.append(
-            f"print(json.dumps({{'actor_path': {actor_path!r}, "
-            "'collision_preset': str(component.get_collision_profile_name()), "
-            "'collision_enabled': "
-            "component.get_collision_enabled() != unreal.CollisionEnabled.NO_COLLISION}))"
+        args = {
+            "actor_path": actor_path,
+            "preset": collision_preset or None,
+            "enabled": collision_enabled,
+            "transaction": "simul: set collision",
+        }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + SET_COLLISION, expected_errors=("ValidationError",)
         )
-        return await self._execute_json_script(ACTOR_HELPERS + "\n".join(lines) + "\n")
 
     async def apply_force(
         self,
@@ -3325,43 +3379,52 @@ if component.is_simulating_physics() != {target!r}:
         enable_gravity: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Set physics body parameters on an actor.
+        Set physics body parameters on an actor and read them back.
+
+        Writes the actor's primitive component in one undoable editor
+        transaction that marks the map dirty (a path in a running simulation
+        edits the play copy, which is neither undoable nor saved), then reads
+        every value back. A Static or Stationary body keeps the values, but
+        Unreal gives it no mass and never simulates it until it is Movable,
+        which the reply's warning says. With no parameter given it only reads
+        the body.
 
         Args:
             actor_path: Full actor object path.
-            mass: Mass in kg.
-            linear_damping: Linear damping coefficient.
-            angular_damping: Angular damping coefficient.
+            mass: Mass override in kg, from 0.001 (Unreal's least) to 1e9.
+            linear_damping: Linear damping, 0 to 1e6.
+            angular_damping: Angular damping, 0 to 1e6.
             enable_gravity: Whether gravity affects this body.
 
         Returns:
-            Dict with actor_path and params_set count.
-        """
+            Dict with actor_path, world, applied (each value given, read back:
+            mass as the override stored, as the 32-bit float Unreal keeps),
+            params_set (how many read back as given), the body as
+            ``enable_physics`` reads it (mass_kg is the mass Unreal computes,
+            0 for a Static body) and warning; or a PhysicsParamsNotApplied
+            envelope naming a value that read back different (the others stay
+            written).
 
-        calls = []
+        Raises:
+            ValueError: A value is not finite or out of its range.
+        """
+        values: Dict[str, Any] = {}
         if mass is not None:
-            if mass <= 0:
-                raise ValueError("mass must be positive")
-            calls.append(
-                f"component.set_mass_override_in_kg('None', {float(mass)!r}, True)"
-            )
-        for method, value in (
-            ("set_linear_damping", linear_damping),
-            ("set_angular_damping", angular_damping),
-        ):
+            if not (math.isfinite(mass) and PHYSICS_MIN_MASS_KG <= mass <= PHYSICS_MAX_MASS_KG):
+                raise ValueError(
+                    f"mass must be from {PHYSICS_MIN_MASS_KG:g} to {PHYSICS_MAX_MASS_KG:g} kg, got {mass!r}"
+                )
+            values["mass"] = float(mass)
+        for name, value in (("linear_damping", linear_damping), ("angular_damping", angular_damping)):
             if value is not None:
-                if value < 0:
-                    raise ValueError("damping must be nonnegative")
-                calls.append(f"component.{method}({float(value)!r})")
+                if not (math.isfinite(value) and 0.0 <= value <= PHYSICS_MAX_DAMPING):
+                    raise ValueError(f"{name} must be from 0 to {PHYSICS_MAX_DAMPING:g}, got {value!r}")
+                values[name] = float(value)
         if enable_gravity is not None:
-            calls.append(f"component.set_enable_gravity({bool(enable_gravity)!r})")
-        return await self._component_operation(
-            actor_path,
-            "\n".join(calls),
-            {
-                "actor_path": actor_path,
-                "params_set": len(calls),
-            },
+            values["enable_gravity"] = bool(enable_gravity)
+        args = {"actor_path": actor_path, "values": values, "transaction": "simul: set physics params"}
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + SET_PHYSICS_PARAMS, expected_errors=("PhysicsParamsNotApplied",)
         )
 
     # ------------------------------------------------------------------
