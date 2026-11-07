@@ -340,6 +340,9 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "object_names": ["Cube"],
             "embed_metadata": False,
             "validate_before_export": False,
+            "include_children": False,
+            "include_lights_and_cameras": True,
+            "force": True,
         },
     },
     "setup_simready_hierarchy": {

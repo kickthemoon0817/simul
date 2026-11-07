@@ -4,11 +4,15 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+
 class SimReadySemanticLabels(BaseModel):
     """
     Semantic labeling for SimReady assets.
 
-    Follows the USDSemanticLabels API with class, hierarchy, and qcode fields.
+    export_simready_usd writes each field as a UsdSemantics LabelsAPI taxonomy
+    (``class``, ``hierarchy``, ``qcode``, and each additional label's key), or
+    with Isaac Sim's SemanticsAPI convention where Blender's USD has no
+    UsdSemantics.
     """
 
     semantic_class: str = Field(
@@ -29,17 +33,42 @@ class SimReadySemanticLabels(BaseModel):
     )
 
 
+#: collider_type values: the UsdPhysics MeshCollisionAPI approximations, then the
+#: earlier aliases (mesh = none, box = boundingCube, sphere = boundingSphere,
+#: capsule = convexHull, as UsdPhysics has no capsule approximation of a mesh).
+COLLIDER_TYPES = (
+    "convexHull",
+    "convexDecomposition",
+    "meshSimplification",
+    "none",
+    "boundingCube",
+    "boundingSphere",
+    "mesh",
+    "box",
+    "sphere",
+    "capsule",
+)
+
+
 class SimReadyPhysicsProperties(BaseModel):
     """
     Physics properties for SimReady assets.
 
-    Maps to USDPhysics schema: collider, mass, physical material, rigid body.
+    export_simready_usd writes them as UsdPhysics schemas: RigidBodyAPI,
+    MassAPI, CollisionAPI with a MeshCollisionAPI approximation on the meshes,
+    and a physics material (UsdPhysics.MaterialAPI) bound with the physics
+    purpose.
     """
 
     mass_kg: Optional[float] = Field(None, ge=0.0, description="Mass in kilograms")
     collider_type: Optional[str] = Field(
         None,
-        description="Collision shape: convexHull, mesh, box, sphere, capsule",
+        description=(
+            "UsdPhysics mesh collision approximation: convexHull, convexDecomposition, "
+            "meshSimplification, none (the triangle mesh), boundingCube or boundingSphere; "
+            "also mesh, box, sphere and capsule (written as none, boundingCube, "
+            "boundingSphere and convexHull)"
+        ),
     )
     static_friction: Optional[float] = Field(
         None, ge=0.0, description="Static friction coefficient"
@@ -61,12 +90,10 @@ class SimReadyPhysicsProperties(BaseModel):
     @classmethod
     def validate_collider_type(cls, v: Optional[str]) -> Optional[str]:
         """Validate collider type against allowed values."""
-        if v is not None:
-            allowed = {"convexHull", "mesh", "box", "sphere", "capsule"}
-            if v not in allowed:
-                raise ValueError(
-                    f"collider_type must be one of {sorted(allowed)}, got '{v}'"
-                )
+        if v is not None and v not in COLLIDER_TYPES:
+            raise ValueError(
+                f"collider_type must be one of {list(COLLIDER_TYPES)}, got '{v}'"
+            )
         return v
 
 
@@ -204,20 +231,95 @@ class SimReadyValidateResponse(BaseModel):
     issues: List[SimReadyValidationIssue] = Field(
         default_factory=list, description="Detailed issue list"
     )
+    meters_per_unit: Optional[float] = Field(
+        None,
+        description=(
+            "Meters per Blender unit (the scene's Unit Scale) the sizes were judged in"
+        ),
+    )
 
 
 class SimReadyExportRequest(BaseModel):
     """Request to export a SimReady-compliant USD file."""
 
-    file_path: str = Field(..., description="Output .usd / .usda / .usdc file path")
+    file_path: str = Field(
+        ..., description="Output .usd, .usda, .usdc or .usdz file path"
+    )
     object_names: Optional[List[str]] = Field(
-        None, description="Objects to export (null = all scene objects)"
+        None,
+        min_length=1,
+        description=(
+            "Objects to export, each with its descendants unless include_children is "
+            "false; listed objects are exported even when hidden. Null exports the "
+            "scene's objects that are visible in renders"
+        ),
     )
     embed_metadata: bool = Field(
-        True, description="Embed simready_ custom properties in USD"
+        True,
+        description=(
+            "Also keep the simready_ custom properties as userProperties attributes"
+        ),
     )
     validate_before_export: bool = Field(
         True, description="Run validation before exporting"
+    )
+    include_children: bool = Field(
+        True, description="Export the descendants of the listed objects"
+    )
+    include_lights_and_cameras: bool = Field(
+        False,
+        description="Also export lights, cameras and the World's dome light",
+    )
+    force: bool = Field(
+        False, description="Export although validation found errors"
+    )
+
+
+class SimReadyExportedPrim(BaseModel):
+    """Where one Blender object was written."""
+
+    object_name: str = Field(..., description="Blender object name")
+    prim_path: str = Field(..., description="Its prim path in the exported USD")
+
+
+class SimReadySkippedObject(BaseModel):
+    """An object the export left out, and why."""
+
+    object_name: str = Field(..., description="Blender object name")
+    reason: str = Field(..., description="Why it was not exported")
+
+
+class SimReadyExportPhysics(BaseModel):
+    """The UsdPhysics schemas the export authored (lists cut at 50 entries)."""
+
+    rigid_body_count: int = Field(0, description="Prims with RigidBodyAPI")
+    collider_count: int = Field(
+        0, description="Meshes with CollisionAPI and MeshCollisionAPI"
+    )
+    mass_count: int = Field(0, description="Prims with MassAPI")
+    physics_material_count: int = Field(
+        0, description="Physics materials (UsdPhysics.MaterialAPI)"
+    )
+    rigid_bodies: List[str] = Field(default_factory=list, description="Rigid body prims")
+    colliders: List[str] = Field(default_factory=list, description="Collider meshes")
+    physics_materials: List[str] = Field(
+        default_factory=list, description="Physics material prims"
+    )
+
+
+class SimReadyExportSemantics(BaseModel):
+    """The semantic labels the export authored."""
+
+    labels_schema: str = Field(
+        ...,
+        description=(
+            "UsdSemantics.LabelsAPI, or Isaac SemanticsAPI where Blender's USD has "
+            "no UsdSemantics"
+        ),
+    )
+    labelled_prim_count: int = Field(0, description="Prims given labels")
+    labelled_prims: List[str] = Field(
+        default_factory=list, description="Labelled prims (cut at 50)"
     )
 
 
@@ -229,12 +331,42 @@ class SimReadyExportResponse(BaseModel):
         None, description="Error message when success is False"
     )
     file_path: str = Field(..., description="Written file path")
-    object_count: int = Field(..., description="Number of objects exported")
-    validation_passed: bool = Field(
-        ..., description="Whether pre-export validation passed"
+    object_count: int = Field(..., description="Number of objects written")
+    default_prim: Optional[str] = Field(
+        None, description="The asset root, the stage's default prim"
     )
+    prims: List[SimReadyExportedPrim] = Field(
+        default_factory=list, description="Each written object's prim (cut at 50)"
+    )
+    meters_per_unit: Optional[float] = Field(
+        None, description="Stage metersPerUnit, from the scene's Unit Scale"
+    )
+    up_axis: Optional[str] = Field(None, description="Stage upAxis")
+    kilograms_per_unit: Optional[float] = Field(
+        None, description="Stage kilogramsPerUnit"
+    )
+    physics: Optional[SimReadyExportPhysics] = Field(
+        None, description="UsdPhysics schemas authored"
+    )
+    semantics: Optional[SimReadyExportSemantics] = Field(
+        None, description="Semantic labels authored"
+    )
+    skipped_objects: List[SimReadySkippedObject] = Field(
+        default_factory=list, description="Objects left out, and why (cut at 50)"
+    )
+    validation_passed: Optional[bool] = Field(
+        None, description="Whether pre-export validation passed; null when not run"
+    )
+    forced: bool = Field(
+        False, description="Exported with force although validation found errors"
+    )
+    issue_count: int = Field(0, description="Validation issues found")
     issues: Optional[List[SimReadyValidationIssue]] = Field(
-        None, description="Validation issues (if validation was run)"
+        None, description="Validation issues (cut at 50; null when not run)"
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Physics or layout problems worth fixing (cut at 50)",
     )
 
 
@@ -263,6 +395,7 @@ class SimReadySetupHierarchyResponse(BaseModel):
     children: List[str] = Field(..., description="Successfully parented children")
     hierarchy_path: str = Field(..., description="Logical hierarchy path from root")
 
+
 __all__ = [
     "SimReadySemanticLabels",
     "SimReadyPhysicsProperties",
@@ -275,7 +408,12 @@ __all__ = [
     "SimReadyValidationIssue",
     "SimReadyValidateRequest",
     "SimReadyValidateResponse",
+    "COLLIDER_TYPES",
     "SimReadyExportRequest",
+    "SimReadyExportedPrim",
+    "SimReadySkippedObject",
+    "SimReadyExportPhysics",
+    "SimReadyExportSemantics",
     "SimReadyExportResponse",
     "SimReadySetupHierarchyRequest",
     "SimReadySetupHierarchyResponse",

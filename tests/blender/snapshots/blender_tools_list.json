@@ -1277,23 +1277,38 @@
     "export_simready_usd": {
       "name": "export_simready_usd",
       "title": "Export Simready Usd",
-      "description": "Export a SimReady-compliant USD file from Blender. Validates objects before export, selects the requested objects, and carries simready_ custom properties into USD attributes.",
+      "description": "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, and UsdSemantics labels. The asset root is the default prim and holds its materials; metersPerUnit follows the scene's Unit Scale. Listed objects export with their descendants, hidden ones too; lights, cameras and the World are left out by default. Refuses when validation finds errors unless force=true. Returns each object's prim path.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "file_path": {"description": "Output .usd / .usda / .usdc path.", "type": "string"},
+          "file_path": {"description": "Output .usd, .usda, .usdc or .usdz path.", "type": "string"},
           "object_names": {
             "anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "Objects to export (None = all)."
+            "description": "Objects to export, each with its descendants unless include_children is false; listed objects are exported even when hidden. Null exports the scene's objects that are visible in renders. An empty list is refused."
           },
           "embed_metadata": {
             "default": true,
-            "description": "Include simready_ custom properties.",
+            "description": "Also keep the simready_ custom properties (and Blender's names) as userProperties attributes, which Blender's USD import reads back as custom properties.",
             "type": "boolean"
           },
-          "validate_before_export": {"default": true, "description": "Run validation first.", "type": "boolean"}
+          "validate_before_export": {"default": true, "description": "Validate the meshes first.", "type": "boolean"},
+          "include_children": {
+            "default": true,
+            "description": "Export the descendants of the listed objects.",
+            "type": "boolean"
+          },
+          "include_lights_and_cameras": {
+            "default": false,
+            "description": "Also export lights, cameras and the World's dome light, which are left out of an asset by default.",
+            "type": "boolean"
+          },
+          "force": {
+            "default": false,
+            "description": "Export although validation found errors.",
+            "type": "boolean"
+          }
         },
         "required": ["file_path"]
       },
