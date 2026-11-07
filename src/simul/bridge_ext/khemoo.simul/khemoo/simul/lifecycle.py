@@ -14,15 +14,27 @@ import tempfile
 import uuid
 from typing import Any, Awaitable, Callable
 
+from .protocol import DEFAULT_REQUEST_TIMEOUT_SECONDS, BridgeRequest, BridgeResponse
+
 # Stdlib on purpose: this module must stay importable without Kit, and inside
 # Kit these records land in the app log through the root handlers.
 logger = logging.getLogger(__name__)
 
-from .protocol import DEFAULT_REQUEST_TIMEOUT_SECONDS, BridgeRequest, BridgeResponse
-
 
 #: Raw-source auth header of Isaac Sim 6.0's isaacsim.code_editor.python_server.
+#: The bridge's raw-code path reads the same header, so one client token
+#: configuration covers both sockets.
 PYTHON_SERVER_TOKEN_HEADER = "# isaacsim-python-server-token:"
+
+#: Error name a rejected request carries, the same one python_server uses.
+AUTH_ERROR_NAME = "AuthenticationError"
+AUTH_ERROR_MESSAGE = "Missing or invalid bridge auth token"
+
+#: Mode of the optional Unix socket: owner only. connect(2) needs write
+#: permission on the inode, so 0600 keeps every other local user out. A
+#: container whose bridge runs as root and whose host user must connect opts
+#: into a wider mode explicitly (``socket_mode`` in the extension settings).
+DEFAULT_SOCKET_MODE = 0o600
 
 
 class _RequestReadTimeout(Exception):
@@ -30,7 +42,13 @@ class _RequestReadTimeout(Exception):
 
 
 class BridgeServerLifecycle:
-    """Manage the typed TCP bridge server lifecycle."""
+    """Manage the typed TCP bridge server lifecycle.
+
+    ``authenticate`` decides whether a presented token may use the bridge; it
+    runs before any request reaches the handler or the executor, on both the
+    framed protocol and the raw-code path. ``None`` accepts every request,
+    which is how the bridge behaved before it had authentication.
+    """
 
     def __init__(
         self,
@@ -43,6 +61,8 @@ class BridgeServerLifecycle:
         vscode_handler: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         socket_path: str | None = None,
+        socket_mode: int = DEFAULT_SOCKET_MODE,
+        authenticate: Callable[[str], bool] | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -53,6 +73,8 @@ class BridgeServerLifecycle:
         self._vscode_handler = vscode_handler
         self._request_timeout = request_timeout
         self._socket_path = socket_path
+        self._socket_mode = socket_mode & 0o777
+        self._authenticate = authenticate
         self._actual_socket_path: str | None = None
         self._socket_inode: tuple[int, int] | None = None
         self._server: asyncio.AbstractServer | None = None
@@ -134,11 +156,13 @@ class BridgeServerLifecycle:
                 self._handle_client, path=path
             )
             await self._unix_server.start_serving()
-            # connect(2) needs write permission on the socket inode. In a
-            # container this process is root, so the default mode would leave
-            # the host user unable to connect — the 0600 discovery-file
-            # failure again, one layer down.
-            os.chmod(path, 0o666)
+            # connect(2) needs write permission on the socket inode, so the
+            # mode is the access control: 0600 by default, which admits only
+            # this user. A container whose bridge runs as root while the host
+            # user connects configures a wider mode (the Compose file passes
+            # socket_mode=0666) and relies on the volume directory's mode and
+            # the bridge auth token instead.
+            os.chmod(path, self._socket_mode)
             self._actual_socket_path = path
             info = os.stat(path)
             self._socket_inode = (info.st_dev, info.st_ino)
@@ -350,14 +374,24 @@ class BridgeServerLifecycle:
                 ) from None
             request = BridgeRequest.from_json(request_bytes)
             request_id = request.request_id
-            # Without this, a script that never returns hangs Kit permanently:
-            # the handler runs on the main thread, so nothing else in the app
-            # makes progress and SIGKILL is the only way out. Cutting the wait
-            # does not stop the runaway work, but it releases the client and
-            # makes the failure visible instead of silent.
-            response = await asyncio.wait_for(
-                self._request_handler(request), timeout=self._request_timeout
-            )
+            if not self._is_authorized(request.auth_token):
+                # Checked before dispatch: a rejected request must not reach
+                # any handler, read-only ones included.
+                response = BridgeResponse.failure(
+                    request_id=request_id,
+                    name=AUTH_ERROR_NAME,
+                    message=AUTH_ERROR_MESSAGE,
+                )
+            else:
+                # Without this, a script that never returns hangs Kit
+                # permanently: the handler runs on the main thread, so nothing
+                # else in the app makes progress and SIGKILL is the only way
+                # out. Cutting the wait does not stop the runaway work, but it
+                # releases the client and makes the failure visible instead of
+                # silent.
+                response = await asyncio.wait_for(
+                    self._request_handler(request), timeout=self._request_timeout
+                )
         except _RequestReadTimeout as exc:
             response = BridgeResponse.failure(
                 request_id=request_id,
@@ -410,12 +444,22 @@ class BridgeServerLifecycle:
 
             code = b"".join(chunks).decode("utf-8", errors="replace")
             # A client configured for the 6.0 python_server prefixes a token
-            # header; the bridge has no token check, so drop the line rather
-            # than hand it to the executor as a stray comment.
+            # header. It is the token this path checks, and the line is
+            # dropped either way rather than handed to the executor.
+            presented = ""
             if code.startswith(PYTHON_SERVER_TOKEN_HEADER):
-                _, _, code = code.partition("\n")
+                header, _, code = code.partition("\n")
+                presented = header[len(PYTHON_SERVER_TOKEN_HEADER):].strip()
 
-            if self._vscode_handler is not None:
+            if not self._is_authorized(presented):
+                result = {
+                    "status": "error",
+                    "output": "",
+                    "ename": AUTH_ERROR_NAME,
+                    "evalue": AUTH_ERROR_MESSAGE,
+                    "traceback": [f"{AUTH_ERROR_NAME}: {AUTH_ERROR_MESSAGE}"],
+                }
+            elif self._vscode_handler is not None:
                 result = await self._vscode_handler(code)
             else:
                 result = {"status": "error", "output": "VS Code compat handler not configured."}
@@ -436,6 +480,20 @@ class BridgeServerLifecycle:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    def _is_authorized(self, presented: str) -> bool:
+        """Return whether a request presenting ``presented`` may proceed.
+
+        Fails closed: an authenticator that raises rejects the request
+        rather than letting it through unchecked.
+        """
+        if self._authenticate is None:
+            return True
+        try:
+            return bool(self._authenticate(presented or ""))
+        except Exception as exc:
+            logger.warning("Bridge auth check failed, rejecting the request: %s", exc)
+            return False
 
     async def _read_frame(self, reader: asyncio.StreamReader) -> bytes:
         """Read a length-prefixed request frame."""

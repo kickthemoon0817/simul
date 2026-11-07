@@ -193,7 +193,8 @@ Registered by default only on Linux and Windows, where Isaac Sim runs
 | Prim editing | `create_isaac_object`, `create_isaac_prim`, `delete_isaac_prim`, `set_isaac_prim_transform`, `set_isaac_prim_visibility`, `set_isaac_prim_attribute`, `duplicate_isaac_prim`, `reparent_isaac_prim` |
 | Lights | `list_isaac_lights`, `create_isaac_light` |
 | Cameras and viewport | `list_isaac_cameras`, `get_isaac_camera_info`, `set_isaac_camera`, `capture_isaac_viewport`, `focus_isaac_viewport`, `get_isaac_viewport_info` |
-| Physics | `get_isaac_physics_scene`, `create_isaac_physics_scene`, `add_isaac_rigid_body`, `add_isaac_collision`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects` |
+| Physics | `get_isaac_physics_scene`, `create_isaac_physics_scene`, `configure_isaac_physics_scene`, `add_isaac_rigid_body`, `add_isaac_collision`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects` |
+| Joints and articulations | `list_isaac_articulations`, `set_isaac_joint_drive`, `set_isaac_joint_limits` |
 | Simulation control | `get_isaac_simulation_state`, `start_isaac_simulation`, `pause_isaac_simulation`, `stop_isaac_simulation`, `step_isaac_simulation`, `reset_isaac_simulation`, `get_isaac_simulation_time` |
 | Materials | `list_isaac_materials`, `create_isaac_material`, `assign_isaac_material`, `set_isaac_material_property` |
 | Rendering and settings | `read_isaac_aovs`, `list_isaac_aovs`, `list_isaac_render_vars`, `get_isaac_carb_settings`, `set_isaac_carb_settings` |
@@ -237,12 +238,41 @@ Notes:
   schema's `-inf` fallback) as `null` with `center_of_mass_note`.
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
+- `create_isaac_physics_scene` derives a new scene's gravity from the stage:
+  Earth gravity along the negative up axis, in stage units (981 on a
+  centimetre stage); `gravity_magnitude` is taken in m/s^2. It refuses a prim
+  of another type at `prim_path` rather than retyping it.
+  `get_isaac_physics_scene` reports gravity resolved the way the simulation
+  reads it plus the PhysxSceneAPI settings authored on the scene (physics
+  rate, solver type, iteration clamps, GPU dynamics, broadphase, CCD,
+  stabilization, enhanced determinism); `configure_isaac_physics_scene`
+  writes them.
+- `add_isaac_collision` applies CollisionAPI to the geometry at and under
+  `prim_path` (an asset root's meshes, not the root Xform, which would make no
+  shape), puts `approximation` on meshes only, and lists the shapes.
+  `set_isaac_physics_material` binds a MaterialAPI material to the colliders
+  at or under `prim_path` with purpose `physics`, leaving the visual binding
+  alone, and lists them in `bound_to`.
+- The joint tools are USD-level (UsdPhysics DriveAPI, LimitAPI,
+  ArticulationRootAPI). `list_isaac_articulations` orders each
+  articulation's joints depth first from the root body; PhysX's DOF indices
+  need not follow that order. Angular drive targets and revolute limits are in
+  degrees. In the joint aspect, an infinite value ("no limit",
+  "unbreakable") is null with a `<key>_note`, since JSON has no infinity.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,
   selection, timeline and stage; `get_isaac_ui_window` walks one window's
   widget tree.
 - `execute_isaac_script` scripts should follow the scripting reference served
   as the `simul://isaac-sim/skills` resource. Isaac Sim 6.0 deprecates
   `isaacsim.core.{api,prims,utils}` and removes the `omni.isaac.*` shims.
+  On Isaac Sim 5.1 with the bridge down, scripts over 32 KiB are refused
+  (`ScriptTooLargeForSocket`): that socket runs each read as its own script.
+- `open_isaac_stage`, `new_isaac_stage`, `read_isaac_aovs`,
+  `capture_isaac_viewport` and `enable_isaac_extension` run with a budget of
+  at least 110 s instead of the default 29 s. Any timeout reply says that the
+  Kit work may still complete; check the state before retrying.
+- A tool whose script shared Kit's stdout with another callback returns its
+  result with the other text under `foreign_output` and a note in `warnings`.
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or
@@ -331,6 +361,39 @@ Behaviour worth knowing:
   `r.RayTracing`, which only startup configuration sets, and one Unreal limits
   or rounds. Post-process settings live on PostProcessVolume actors, not in
   console variables, and this tool does not change them.
+- The actor tools take an actor's full object path, as `list_unreal_actors`
+  reports it, in the level open in the editor. A path that names no live actor
+  there fails with `NotFoundError`, `Actor not found: <path>` and why: nothing
+  is at that path, the actor was deleted (Unreal keeps a deleted actor in memory, empty,
+  until garbage collection), or it belongs to another map, loaded or not, or to
+  the running game during PIE. The actor is looked up among the objects already
+  loaded, so simul never loads a map that is not open: a lookup that loaded one
+  used to edit that map unseen and leave it dirty for the next Save All.
+- `set_unreal_actor_parent` attaches the actor to `parent_path`, or detaches it
+  with `detach: true` and an empty `parent_path`; one of the two is required.
+  The actor keeps its world location, rotation and scale, the change is one
+  undoable transaction, and the parent is read back: `parent_path` is the
+  parent afterwards (null once detached), with `previous_parent_path` and
+  `changed`. Unreal refuses, without a reason, to attach an actor to itself or
+  under one of its own children, or a Static actor under a parent that is not
+  Static; those come back as `ValidationError` (itself, a cycle) or
+  `InvalidState` (mobility, an actor without a root component) with the reason,
+  before anything changes. An attachment Unreal still refuses is an
+  `EngineError`, and its transaction is cancelled.
+- `add_unreal_component` adds an instance component the way the editor's Add
+  Component button does (`SubobjectDataSubsystem`): Remote Control refuses
+  `AddComponentByClass` on UE 5.7. `component_class` is a native class name
+  (`PointLightComponent`) or a class path (`/Script/Engine.PointLightComponent`,
+  a Blueprint component's `/Game/BP_Lamp.BP_Lamp_C`); a path into a map's
+  package is refused before anything loads. A scene component attaches under
+  `parent_component` (by name) or the root component, and becomes the root of
+  an actor without one; other components take no parent. The add and the name
+  are one undoable transaction, and the reply is read back from the actor:
+  `component_path`, `component_name`, `component_class`, `parent_component` and
+  `is_root`. An abstract class (Unreal adds one and fires an engine ensure), a
+  class that is not a component and a name already used inside the actor are
+  refused first. Unreal adds its usual helpers too, such as a light's editor
+  icon (a BillboardComponent).
 - Actor inspection, physics, materials and PIE start/stop/pause/resume use
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
@@ -514,12 +577,13 @@ Behaviour worth knowing:
     of actors missing simple collision, as `null`, since Unreal does not
     report mesh collision during PIE.
   - Editing actors already in the level by path (transform, lights, collision,
-    physics settings, visibility, materials) keeps working and changes the
-    editor world, which the running simulation does not see: it takes effect
-    the next time the simulation starts, and a physics or collision edit says
-    so in its `warning`. A physics or collision edit given the actor's path
-    in the simulation's world (`UEDPIE_<n>_<map>`) changes the running copy
-    instead, which is neither undoable nor saved.
+    physics settings, visibility, materials, parenting, components) keeps
+    working and changes the editor world, which the running simulation does
+    not see: it takes effect the next time the simulation starts, and a
+    physics or collision edit says so in its `warning`. A physics or collision
+    edit given the actor's path in the simulation's world (`UEDPIE_<n>_<map>`)
+    changes the running copy instead, which is neither undoable nor saved;
+    every other actor tool finds no actor at such a path.
   - `set_unreal_material_params` edits the material instance asset, which the
     running game uses too: an edit made during PIE shows in the game and stays
     after PIE stops.
@@ -586,6 +650,39 @@ Behaviour worth knowing:
   unsaved changes; save them with `save_blender_file`, or pass
   `discard_unsaved: true`. Headless (embedded) Blender does not track unsaved
   changes, so there it opens without the check.
+- `get_blender_object_info` reports an object's own transform (`location`,
+  `rotation_euler`, `scale`: relative to its parent and before constraints, as
+  Blender's Location, Rotation and Scale fields show them) and where it is in
+  the scene (`world_location`, `world_rotation_euler`,
+  `world_rotation_quaternion`, `world_scale`, and the exact `matrix_world`).
+  A turned child of a parent with non-uniform scale has a sheared world
+  matrix that no rotation and scale rebuild; the world rotation is then the
+  rotation nearest it (its polar decomposition), the parent's rotation times
+  the child's, where Blender's `decompose()` and `to_euler()` were 0.19 and
+  0.15 rad off for a glTF link under a parent scaled 0.5 on Z. It also
+  reports `rotation_mode`, the rotation as Blender stores it in that mode
+  (`rotation_in_mode`) and as a quaternion (`rotation_quaternion`). Euler
+  angles are in XYZ order throughout, whatever the object's rotation mode.
+- `set_blender_object_transform` writes the object's own transform:
+  `location` relative to its parent, and `rotation_euler` (XYZ) or
+  `rotation_quaternion` (`[w, x, y, z]`, normalized), converted to the
+  object's rotation mode, which is kept. Blender reads only the property of
+  that mode, so a plain `rotation_euler` write left a glTF import's
+  quaternion nodes unturned. `control_blender_ui`'s `set_property` of
+  `rotation_euler` converts the same way.
+- `set_blender_object_parent` keeps the child's world transform, as Blender's
+  Parent > Object (Keep Transform) does: the parent inverse cancels the
+  parent's transform, and a child without a previous parent keeps its own
+  values. `keep_transform: false` clears the parent inverse instead, so the
+  child's values become relative to the parent and it moves. A parent that is
+  the child itself or one of its descendants is refused (Blender ignores such
+  a parent without an error).
+- Reads of world-space transforms (object info, distance, bounds, bounding
+  box, parenting) evaluate the depsgraph first: in embedded (bpy module) mode
+  Blender leaves a transform written by an earlier call out of `matrix_world`
+  until then. An add-on built before `rotation_quaternion` and
+  `keep_transform` still answers calls that leave them at their defaults, with
+  its own behaviour; the newer reply fields then come back `null`.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D

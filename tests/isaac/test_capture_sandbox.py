@@ -41,7 +41,7 @@ def _settings(sandbox_root: Path, capture_dir: Optional[str] = None) -> Settings
 def _tools(settings: Settings) -> Tuple[IsaacTools, List[str]]:
     captured: List[str] = []
 
-    def _record(code: str) -> ScriptResult:
+    def _record(code: str, **_kwargs: object) -> ScriptResult:
         captured.append(code)
         return ScriptResult(success=True, output=json.dumps({"path": "unused"}))
 
