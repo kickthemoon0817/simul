@@ -3,7 +3,14 @@
 import math
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import AfterValidator, BaseModel, Field, FiniteFloat, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    FiniteFloat,
+    field_validator,
+    model_validator,
+)
 from pydantic.json_schema import SkipJsonSchema
 
 # Printed-output cap of execute_blender_script. Mirrors DEFAULT_SCRIPT_OUTPUT_CHARS
@@ -83,8 +90,27 @@ class BlenderObjectInfo(BaseModel):
 
     name: str = Field(..., description="Object name")
     object_type: str = Field(..., description="Blender object type")
-    collection: Optional[str] = Field(None, description="Collection name filter")
+    collection: Optional[str] = Field(
+        None,
+        description=(
+            "A collection holding the object: the filtered one, else its first in the current "
+            "scene ('Scene Collection' for the scene's own); null from an add-on that predates it"
+        ),
+    )
     visible: bool = Field(..., description="Whether object is visible")
+
+
+# Mirrors LISTING_JSON_BYTES_MAX in simul.adapters.blender_runtime, which ships in
+# the Blender add-on and cannot import this module; a test keeps the two in step.
+LISTING_JSON_BYTES_MAX = 30_000
+
+_PAGE_COUNT = (
+    "Number of objects in this page; fewer than requested when their JSON would pass "
+    f"{LISTING_JSON_BYTES_MAX} bytes, so the reply fits the result budget"
+)
+_PAGE_TOTAL = "Number of matching objects in all pages"
+_PAGE_NEXT = "offset of the next page; null after the last page"
+_PAGE_TRUNCATED = "Whether more matching objects follow this page (see next_offset)"
 
 
 class BlenderSceneObjectsRequest(BaseModel):
@@ -104,6 +130,9 @@ class BlenderSceneObjectsRequest(BaseModel):
         ge=1,
         le=5000,
     )
+    offset: int = Field(
+        0, description="Matching objects to skip; pass the previous page's next_offset", ge=0
+    )
 
 
 class BlenderSceneObjectsResponse(BaseModel):
@@ -118,12 +147,16 @@ class BlenderSceneObjectsResponse(BaseModel):
         ..., description="Whether hidden objects were included"
     )
     max_items: int = Field(..., description="Maximum number of requested objects")
-    count: int = Field(..., description="Number of objects in response")
+    count: int = Field(..., description=_PAGE_COUNT)
     objects: List[BlenderObjectInfo] = Field(
         ...,
         description="Listed Blender objects",
     )
-    truncated: bool = Field(..., description="Whether output reached max_items limit")
+    truncated: bool = Field(..., description=_PAGE_TRUNCATED)
+    # Optional: an add-on built before paging still answers.
+    offset: Optional[int] = Field(None, description="Matching objects skipped before this page")
+    total: Optional[int] = Field(None, description=_PAGE_TOTAL)
+    next_offset: Optional[int] = Field(None, description=_PAGE_NEXT)
 
 
 # ---------------------------------------------------------------------------
@@ -369,9 +402,22 @@ class BlenderSearchObjectsRequest(BaseModel):
         ),
     )
     object_type: Optional[str] = Field(
-        None, description="Filter by Blender object type (MESH, LIGHT, CAMERA, etc.)"
+        None,
+        description=(
+            "Filter by Blender object type (MESH, LIGHT, CAMERA, etc.), in any case; "
+            "a type the running Blender does not have is refused"
+        ),
     )
     max_results: int = Field(50, description="Maximum number of results", ge=1, le=5000)
+    offset: int = Field(
+        0, description="Matching objects to skip; pass the previous page's next_offset", ge=0
+    )
+
+    @field_validator("object_type")
+    @classmethod
+    def _upper_case_type(cls, value: Optional[str]) -> Optional[str]:
+        """Blender's type identifiers are upper case: 'mesh' used to match nothing."""
+        return None if value is None else value.strip().upper()
 
 
 class BlenderSearchObjectsResponse(BaseModel):
@@ -383,9 +429,13 @@ class BlenderSearchObjectsResponse(BaseModel):
     )
     pattern: Optional[str] = Field(None, description="Name pattern used")
     object_type: Optional[str] = Field(None, description="Type filter used")
-    count: int = Field(..., description="Number of matching objects")
+    count: int = Field(..., description=_PAGE_COUNT)
     objects: List[BlenderObjectInfo] = Field(..., description="Matching objects")
-    truncated: bool = Field(..., description="Whether results were capped")
+    truncated: bool = Field(..., description=_PAGE_TRUNCATED)
+    # Optional: an add-on built before paging still answers.
+    offset: Optional[int] = Field(None, description="Matching objects skipped before this page")
+    total: Optional[int] = Field(None, description=_PAGE_TOTAL)
+    next_offset: Optional[int] = Field(None, description=_PAGE_NEXT)
 
 
 class BlenderSceneSummaryResponse(BaseModel):
@@ -400,7 +450,11 @@ class BlenderSceneSummaryResponse(BaseModel):
         ..., description="Object counts keyed by Blender type"
     )
     collection_names: List[str] = Field(
-        default_factory=list, description="Top-level collection names"
+        default_factory=list,
+        description=(
+            "The scene's top-level collections, directly under its own; nested ones, other "
+            "scenes' and unlinked ones are left out"
+        ),
     )
     active_camera: Optional[str] = Field(
         None, description="Name of the active scene camera"
@@ -487,6 +541,21 @@ class BlenderBoundsCheckRequest(BaseModel):
         ..., description="Maximum bounds [x, y, z]", min_length=3, max_length=3
     )
 
+    @model_validator(mode="after")
+    def _ordered(self) -> "BlenderBoundsCheckRequest":
+        """Refuse a box whose minimum passes its maximum: it holds nothing."""
+        values = [*self.bounds_min, *self.bounds_max]
+        if not all(math.isfinite(v) for v in values):
+            raise ValueError("bounds_min and bounds_max must be finite")
+        inverted = [
+            axis
+            for axis, low, high in zip("xyz", self.bounds_min, self.bounds_max)
+            if low > high
+        ]
+        if inverted:
+            raise ValueError(f"bounds_min exceeds bounds_max on {', '.join(inverted)}")
+        return self
+
 
 class BlenderBoundsCheckResponse(BaseModel):
     """Result of a spatial bounds check."""
@@ -497,11 +566,41 @@ class BlenderBoundsCheckResponse(BaseModel):
     )
     object_name: str = Field(..., description="Object name checked")
     within_bounds: bool = Field(
-        ..., description="Whether object location is within the bounds"
+        ...,
+        description=(
+            "Whether the object's whole world-space bounding box is within the bounds "
+            "(an add-on that predates relation tests only its origin)"
+        ),
     )
     object_location: List[float] = Field(
         ...,
-        description="Object world location [x, y, z]",
+        description="Object origin's world location [x, y, z]",
+        min_length=3,
+        max_length=3,
+    )
+    # Optional: an add-on built before them still answers.
+    relation: Optional[Literal["inside", "intersecting", "outside"]] = Field(
+        None,
+        description=(
+            "Where the object's world-space bounding box lies: wholly inside the bounds, "
+            "partly (touching counts), or not at all"
+        ),
+    )
+    intersects: Optional[bool] = Field(
+        None, description="Whether any part of the bounding box is within the bounds"
+    )
+    origin_within_bounds: Optional[bool] = Field(
+        None, description="Whether the object's origin is within the bounds"
+    )
+    object_bbox_min: Optional[List[float]] = Field(
+        None,
+        description="Minimum of the object's world-space bounding box corners [x, y, z]",
+        min_length=3,
+        max_length=3,
+    )
+    object_bbox_max: Optional[List[float]] = Field(
+        None,
+        description="Maximum of the object's world-space bounding box corners [x, y, z]",
         min_length=3,
         max_length=3,
     )
@@ -1053,12 +1152,31 @@ class BlenderCreateObjectResponse(BaseModel):
         min_length=3,
         max_length=3,
     )
+    # Optional: an add-on built before them still answers.
+    collection: Optional[str] = Field(None, description="Collection the object was created in")
+    mode: Optional[str] = Field(
+        None, description="Blender's mode after the creation (OBJECT unless it was not before)"
+    )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the active collection was excluded, hidden or disabled in viewports, "
+            "so the object went in the scene's own collection instead"
+        ),
+    )
 
 
 class BlenderDeleteObjectRequest(BaseModel):
     """Request to delete an object from the scene."""
 
     object_name: str = Field(..., description="Name of object to delete")
+    use_global: bool = Field(
+        False,
+        description=(
+            "Delete the object from every scene and the file (Blender's Delete Globally); by "
+            "default it leaves only the current scene, as Blender's Delete does"
+        ),
+    )
 
 
 class BlenderDeleteObjectResponse(BaseModel):
@@ -1069,6 +1187,47 @@ class BlenderDeleteObjectResponse(BaseModel):
         None, description="Error message when success is False"
     )
     deleted_name: str = Field(..., description="Name of deleted object")
+    # Optional: an add-on built before them still answers.
+    use_global: Optional[bool] = Field(
+        None, description="Whether it was deleted from every scene"
+    )
+    removed_from_file: Optional[bool] = Field(
+        None, description="Whether the object is gone from the file (no scene links it any more)"
+    )
+    remaining_scenes: Optional[List[str]] = Field(
+        None, description="Scenes that still link the object"
+    )
+
+
+class BlenderSetObjectModeRequest(BaseModel):
+    """Request to switch an object into a mode."""
+
+    mode: str = Field(
+        "OBJECT",
+        description=(
+            "OBJECT (default), EDIT, POSE, SCULPT, VERTEX_PAINT, WEIGHT_PAINT, TEXTURE_PAINT or "
+            "another mode Blender's object.mode_set takes, in any case"
+        ),
+    )
+    object_name: Optional[str] = Field(
+        None, description="Object to switch, made active first; the active object by default"
+    )
+
+
+class BlenderSetObjectModeResponse(BaseModel):
+    """Response after switching an object's mode."""
+
+    success: bool = Field(..., description="Whether the switch succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: Optional[str] = Field(
+        None, description="Object switched; null when there was none and the mode was OBJECT"
+    )
+    mode: str = Field(..., description="The object's mode afterwards")
+    previous_mode: str = Field(..., description="The object's mode before")
+    context_mode: str = Field(..., description="Blender's context mode afterwards, such as EDIT_MESH")
+    changed: bool = Field(..., description="Whether the mode changed")
 
 
 class BlenderSetTransformRequest(BaseModel):
@@ -1619,8 +1778,19 @@ class BlenderFileInfoResponse(BaseModel):
     file_path: str = Field(..., description="Current .blend file path")
     is_saved: bool = Field(..., description="Whether the file has been saved to disk")
     is_dirty: bool = Field(..., description="Whether there are unsaved changes")
-    object_count: int = Field(..., description="Number of objects in the scene")
+    object_count: int = Field(
+        ...,
+        description=(
+            "Number of objects in the current scene (an add-on that predates "
+            "file_object_count counts every object in the file)"
+        ),
+    )
     scene_name: str = Field(..., description="Active scene name")
+    # Optional: an add-on built before it still answers.
+    file_object_count: Optional[int] = Field(
+        None,
+        description="Number of objects in the file: every scene's and those no scene links",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2558,6 +2728,7 @@ __all__ = [
     "SCRIPT_OUTPUT_CHARS_DEFAULT",
     "SCRIPT_OUTPUT_CHARS_MAX",
     "SCRIPT_OUTPUT_JSON_BYTES_MAX",
+    "LISTING_JSON_BYTES_MAX",
     "BlenderCaptureMethod",
     "BlenderInfoResponse",
     "BlenderObjectInfo",
@@ -2598,6 +2769,8 @@ __all__ = [
     "BlenderCreateObjectResponse",
     "BlenderDeleteObjectRequest",
     "BlenderDeleteObjectResponse",
+    "BlenderSetObjectModeRequest",
+    "BlenderSetObjectModeResponse",
     "BlenderSetTransformRequest",
     "BlenderSetTransformResponse",
     "BlenderSetParentRequest",

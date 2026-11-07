@@ -117,18 +117,28 @@
         "session_calls": [
           {
             "method": "list_scene_objects",
-            "arguments": {"collection_name": "None", "include_hidden": "False", "max_items": "200"}
+            "arguments": {
+              "collection_name": "None",
+              "include_hidden": "False",
+              "max_items": "200",
+              "offset": "0"
+            }
           }
         ],
         "response": {"checked_against": "BlenderSceneObjectsResponse"},
         "usage": [{"tool": "list_blender_scene_objects", "success": false}]
       },
       "full": {
-        "arguments": {"collection_name": "Props", "include_hidden": true, "max_items": 7},
+        "arguments": {"collection_name": "Props", "include_hidden": true, "max_items": 7, "offset": 14},
         "session_calls": [
           {
             "method": "list_scene_objects",
-            "arguments": {"collection_name": "'Props'", "include_hidden": "True", "max_items": "7"}
+            "arguments": {
+              "collection_name": "'Props'",
+              "include_hidden": "True",
+              "max_items": "7",
+              "offset": "14"
+            }
           }
         ],
         "response": {"checked_against": "BlenderSceneObjectsResponse"},
@@ -141,7 +151,14 @@
           "success": false,
           "error": "1 validation error for BlenderSceneObjectsRequest\ncollection_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"collection_name": {"bogus": 1}, "include_hidden": false, "max_items": 200}}
+          "details": {
+            "input": {
+              "collection_name": {"bogus": 1},
+              "include_hidden": false,
+              "max_items": 200,
+              "offset": 0
+            }
+          }
         }
       }
     },
@@ -221,18 +238,18 @@
         "session_calls": [
           {
             "method": "search_objects",
-            "arguments": {"name_pattern": "None", "object_type": "None", "max_results": "50"}
+            "arguments": {"name_pattern": "None", "object_type": "None", "max_results": "50", "offset": "0"}
           }
         ],
         "response": {"checked_against": "BlenderSearchObjectsResponse"},
         "usage": [{"tool": "search_blender_objects", "success": false}]
       },
       "full": {
-        "arguments": {"name_pattern": "Cu*", "object_type": "MESH", "max_results": 3},
+        "arguments": {"name_pattern": "Cu*", "object_type": "mesh", "max_results": 3, "offset": 6},
         "session_calls": [
           {
             "method": "search_objects",
-            "arguments": {"name_pattern": "'Cu*'", "object_type": "'MESH'", "max_results": "3"}
+            "arguments": {"name_pattern": "'Cu*'", "object_type": "'MESH'", "max_results": "3", "offset": "6"}
           }
         ],
         "response": {"checked_against": "BlenderSearchObjectsResponse"},
@@ -245,7 +262,9 @@
           "success": false,
           "error": "1 validation error for BlenderSearchObjectsRequest\nname_pattern\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"name_pattern": {"bogus": 1}, "object_type": null, "max_results": 50}}
+          "details": {
+            "input": {"name_pattern": {"bogus": 1}, "object_type": null, "max_results": 50, "offset": 0}
+          }
         }
       }
     },
@@ -672,7 +691,13 @@
     "delete_blender_object": {
       "minimal": {
         "arguments": {"object_name": "Cube"},
-        "session_calls": [{"method": "delete_object", "arguments": {"object_name": "'Cube'"}}],
+        "session_calls": [{"method": "delete_object", "arguments": {"object_name": "'Cube'", "use_global": "False"}}],
+        "response": {"checked_against": "BlenderDeleteObjectResponse"},
+        "usage": [{"tool": "delete_blender_object", "success": false}]
+      },
+      "full": {
+        "arguments": {"object_name": "Cube", "use_global": true},
+        "session_calls": [{"method": "delete_object", "arguments": {"object_name": "'Cube'", "use_global": "True"}}],
         "response": {"checked_against": "BlenderDeleteObjectResponse"},
         "usage": [{"tool": "delete_blender_object", "success": false}]
       },
@@ -683,7 +708,31 @@
           "success": false,
           "error": "1 validation error for BlenderDeleteObjectRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {"input": {"object_name": {"bogus": 1}, "use_global": false}}
+        }
+      }
+    },
+    "set_blender_object_mode": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "set_object_mode", "arguments": {"mode": "'OBJECT'", "object_name": "None"}}],
+        "response": {"checked_against": "BlenderSetObjectModeResponse"},
+        "usage": [{"tool": "set_blender_object_mode", "success": false}]
+      },
+      "full": {
+        "arguments": {"mode": "edit", "object_name": "Cube"},
+        "session_calls": [{"method": "set_object_mode", "arguments": {"mode": "'edit'", "object_name": "'Cube'"}}],
+        "response": {"checked_against": "BlenderSetObjectModeResponse"},
+        "usage": [{"tool": "set_blender_object_mode", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"mode": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetObjectModeRequest\nmode\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"mode": {"bogus": 1}, "object_name": null}}
         }
       }
     },

@@ -23,7 +23,6 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -88,6 +87,15 @@ MAX_SCRIPT_OUTPUT_CHARS = 100_000
 # which leaves room for return_value and the rest of the reply. The MCP schemas
 # repeat it as SCRIPT_OUTPUT_JSON_BYTES_MAX.
 MAX_SCRIPT_OUTPUT_JSON_BYTES = 300_000
+
+# A page of list_scene_objects or search_objects stops before its entries' JSON
+# passes this many bytes. The server cuts any list that takes a reply past its
+# 40 KB result budget (simul.mcp.result_budget) and keeps the count it was
+# given: at 6,006 objects, a page of 5000 came back as 429 with count 5000. The
+# rest of the reply takes well under a kilobyte. The MCP schemas repeat it as
+# LISTING_JSON_BYTES_MAX; this module ships inside the Blender add-on and
+# cannot import them.
+LISTING_JSON_BYTES_MAX = 30_000
 
 # capture_viewport methods (issue #228). "auto" means "viewport" in attached
 # mode and "render" in embedded mode, which has no editor window.
@@ -711,6 +719,70 @@ def world_transform(obj: Any) -> Dict[str, Any]:
     }
 
 
+def _box_relation(
+    corners: List[List[float]],
+    rows: List[List[float]],
+    low: Sequence[float],
+    high: Sequence[float],
+) -> str:
+    """
+    Say where an object's world-space bounding box lies relative to an axis-aligned box.
+
+    The object's box is the parallelepiped its eight world-space corners span,
+    its edges along the columns of its world matrix. Two convex boxes are
+    apart exactly when some axis separates their projections, and the axes to
+    try are each box's face normals and the cross products of their edges
+    (the separating axis theorem). Comparisons allow for single-precision
+    rounding of the corners, so touching counts as intersecting and a box
+    that fills the bounds as inside.
+
+    Args:
+        corners: The eight world-space corners, in any order.
+        rows: The first three rows of the object's world matrix.
+        low: The bounds' minimum corner.
+        high: The bounds' maximum corner.
+
+    Returns:
+        "inside", "intersecting" or "outside".
+    """
+    extent = max(
+        [1.0] + [abs(v) for corner in corners for v in corner] + [abs(v) for v in (*low, *high)]
+    )
+    slack = 4 * _FLOAT32_EPSILON * extent
+    if all(
+        low[i] - slack <= corner[i] <= high[i] + slack for corner in corners for i in range(3)
+    ):
+        return "inside"
+
+    def cross(a: Sequence[float], b: Sequence[float]) -> List[float]:
+        return [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+
+    world_axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    edges = [[rows[0][i], rows[1][i], rows[2][i]] for i in range(3)]
+    axes = (
+        world_axes
+        + [cross(edges[1], edges[2]), cross(edges[2], edges[0]), cross(edges[0], edges[1])]
+        + [cross(w, e) for w in world_axes for e in edges]
+    )
+    middle = [(a + b) / 2 for a, b in zip(low, high)]
+    half = [(b - a) / 2 for a, b in zip(low, high)]
+    for axis in axes:
+        length = math.sqrt(sum(v * v for v in axis))
+        if length <= 1e-12:
+            continue
+        unit = [v / length for v in axis]
+        projected = [sum(u * c for u, c in zip(unit, corner)) for corner in corners]
+        centre = sum(u * m for u, m in zip(unit, middle))
+        reach = sum(abs(u) * h for u, h in zip(unit, half))
+        if max(projected) < centre - reach - slack or min(projected) > centre + reach + slack:
+            return "outside"
+    return "intersecting"
+
+
 # Blender 4.4 introduced slotted actions: one action can animate several IDs,
 # each through its own slot, and keeps each slot's F-curves in a channelbag
 # inside the action's layers and strips. Blender 5.0 removed Action.fcurves,
@@ -1198,16 +1270,6 @@ def _mesh_index(value: Any, what: str, vertex_count: int) -> int:
     return index
 
 
-@dataclass
-class BlenderObjectEntry:
-    """Serializable Blender object summary."""
-
-    name: str
-    object_type: str
-    collection: Optional[str]
-    visible: bool
-
-
 class BlenderRuntimeSession:
     """
     Blender runtime session for scene inspection operations.
@@ -1374,58 +1436,129 @@ class BlenderRuntimeSession:
         collection_name: Optional[str] = None,
         include_hidden: bool = False,
         max_items: int = 200,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
-        List scene objects from the active Blender data context.
+        List scene objects from the active Blender data context, a page at a time.
+
+        A page holds at most ``max_items`` objects, and fewer when their JSON
+        would pass LISTING_JSON_BYTES_MAX, so that it fits the server's result
+        budget instead of being cut below the count it reports; ``next_offset``
+        continues the listing.
 
         Args:
             collection_name: Optional collection name to filter objects.
             include_hidden: Include hidden objects when True.
             max_items: Maximum number of objects returned.
+            offset: How many matching objects to skip, as next_offset gives it.
 
         Returns:
-            Dictionary with object summaries and truncation metadata.
+            The page (objects, count), how many objects match (total), the
+            offset of the next page (next_offset, None after the last one) and
+            whether more follow (truncated).
         """
         if max_items < 1:
             raise ValueError("max_items must be greater than zero")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
 
         source_objects = self._resolve_object_source(collection_name)
-        object_entries: List[BlenderObjectEntry] = []
-
+        matching = []
         for scene_object in source_objects:
-            object_visible = self._is_object_visible(scene_object)
-            if not include_hidden and not object_visible:
-                continue
-
-            entry = BlenderObjectEntry(
-                name=scene_object.name,
-                object_type=scene_object.type,
-                collection=collection_name,
-                visible=object_visible,
-            )
-            object_entries.append(entry)
-
-            if len(object_entries) >= max_items:
-                break
-
-        serialized_objects = [
-            {
-                "name": entry.name,
-                "object_type": entry.object_type,
-                "collection": entry.collection,
-                "visible": entry.visible,
-            }
-            for entry in object_entries
-        ]
+            visible = self._is_object_visible(scene_object)
+            if include_hidden or visible:
+                matching.append((scene_object, visible))
+        page = self._page(
+            matching[offset : offset + max_items], offset, len(matching), collection_name
+        )
 
         return {
             "collection": collection_name,
             "include_hidden": include_hidden,
             "max_items": max_items,
-            "count": len(serialized_objects),
-            "objects": serialized_objects,
-            "truncated": len(serialized_objects) >= max_items,
+            **page,
         }
+
+    def _page(
+        self,
+        candidates: List[Tuple[Any, bool]],
+        offset: int,
+        total: int,
+        collection_name: Optional[str],
+    ) -> Dict[str, Any]:
+        """
+        Describe one page of matching objects.
+
+        Args:
+            candidates: The matching objects from ``offset`` on, as many as
+                the page may hold, each with whether it is visible.
+            offset: How many matching objects precede them.
+            total: How many objects match.
+            collection_name: The collection the listing filters by, which
+                each entry names; otherwise each names the object's own.
+
+        Returns:
+            offset, count, total, next_offset, objects and truncated.
+        """
+        scene_collections = self._scene_collection_pointers()
+        objects: List[Dict[str, Any]] = []
+        size = 2
+        for scene_object, visible in candidates:
+            entry = {
+                "name": scene_object.name,
+                "object_type": scene_object.type,
+                "collection": collection_name
+                or self._collection_of(scene_object, scene_collections),
+                "visible": visible,
+            }
+            # The server measures its budget as json.dumps does: non-ASCII
+            # escaped, ", " between list items.
+            entry_size = len(json.dumps(entry)) + 2
+            if objects and size + entry_size > LISTING_JSON_BYTES_MAX:
+                break
+            objects.append(entry)
+            size += entry_size
+        following = offset + len(objects)
+        more = following < total
+        return {
+            "offset": offset,
+            "count": len(objects),
+            "total": total,
+            "next_offset": following if more else None,
+            "objects": objects,
+            "truncated": more,
+        }
+
+    @staticmethod
+    def _scene_collection_pointers() -> set:
+        """The pointers of the current scene's collections, its master collection included."""
+        blender_module: Any = bpy
+        root = blender_module.context.scene.collection
+        return {root.as_pointer()} | {
+            child.as_pointer() for child in root.children_recursive
+        }
+
+    @staticmethod
+    def _collection_of(obj: Any, scene_collections: set) -> Optional[str]:
+        """
+        Name a collection that holds an object, one of the current scene's when it can.
+
+        An object can be in several collections and scenes. The scene's own
+        master collection is named "Scene Collection".
+
+        Args:
+            obj: The Blender object.
+            scene_collections: _scene_collection_pointers().
+
+        Returns:
+            The first of its collections in the current scene, else its first
+            collection anywhere (embedded mode lists every object in the
+            file), or None for an object in none.
+        """
+        holders = list(obj.users_collection)
+        in_scene = [c for c in holders if c.as_pointer() in scene_collections]
+        chosen = (in_scene or holders or [None])[0]
+        return None if chosen is None else chosen.name
 
     def get_object_info(self, object_name: str) -> Dict[str, Any]:
         """
@@ -1630,25 +1763,46 @@ class BlenderRuntimeSession:
         name_pattern: Optional[str] = None,
         object_type: Optional[str] = None,
         max_results: int = 50,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
-        Search for objects matching optional name pattern and type filter.
+        Search for objects matching optional name pattern and type filter, a page at a time.
+
+        A page is cut short to fit the server's result budget as
+        list_scene_objects' is; ``next_offset`` continues the search.
 
         Args:
             name_pattern: Python regular expression searched for in each object
                 name; a repeated group that holds a quantifier or alternatives,
                 as in (\\w+)+, is refused because it can run for hours.
-            object_type: Blender object type filter (MESH, LIGHT, etc.).
+            object_type: Blender object type filter (MESH, LIGHT, etc.), in any case.
             max_results: Maximum number of results.
+            offset: How many matching objects to skip, as next_offset gives it.
 
         Returns:
-            Dictionary with matched objects and truncation flag.
+            The page (objects, count), how many objects match (total), the
+            offset of the next page (next_offset, None after the last one) and
+            whether more follow (truncated).
 
         Raises:
             ValueError: name_pattern is not a valid regular expression, or
                 repeats a group that holds a quantifier or alternatives (see
-                ``simul.utils.regex_guard``).
+                ``simul.utils.regex_guard``); object_type is not one of the
+                running Blender's object types.
         """
+        if max_results < 1:
+            raise ValueError("max_results must be greater than zero")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        if object_type is not None:
+            # Blender's type identifiers are upper case: "mesh" matched nothing.
+            object_type = object_type.strip().upper()
+            known = self._object_type_names()
+            if object_type not in known:
+                raise ValueError(
+                    f"Unknown object_type {object_type!r}; Blender's object types: "
+                    + ", ".join(known)
+                )
         compiled_pattern = None
         if name_pattern:
             try:
@@ -1667,40 +1821,41 @@ class BlenderRuntimeSession:
                     "character class instead (\\w+ rather than (\\w+)+)"
                 )
         all_objects = self._resolve_object_source(None)
-        matches: List[Dict[str, Any]] = []
+        matching = [
+            obj
+            for obj in all_objects
+            if (compiled_pattern is None or compiled_pattern.search(obj.name))
+            and (object_type is None or obj.type == object_type)
+        ]
+        # Visibility is read only for the objects the page can describe.
+        page = self._page(
+            [
+                (obj, self._is_object_visible(obj))
+                for obj in matching[offset : offset + max_results]
+            ],
+            offset,
+            len(matching),
+            None,
+        )
 
-        for obj in all_objects:
-            if compiled_pattern and not compiled_pattern.search(obj.name):
-                continue
-            if object_type and obj.type != object_type:
-                continue
+        return {"pattern": name_pattern, "object_type": object_type, **page}
 
-            matches.append(
-                {
-                    "name": obj.name,
-                    "object_type": obj.type,
-                    "collection": None,
-                    "visible": self._is_object_visible(obj),
-                }
-            )
-            if len(matches) >= max_results:
-                break
-
-        return {
-            "pattern": name_pattern,
-            "object_type": object_type,
-            "count": len(matches),
-            "objects": matches,
-            "truncated": len(matches) >= max_results,
-        }
+    @staticmethod
+    def _object_type_names() -> List[str]:
+        """The running Blender's object type identifiers (MESH, LIGHT, ...)."""
+        blender_module: Any = bpy
+        return [
+            item.identifier
+            for item in blender_module.types.Object.bl_rna.properties["type"].enum_items
+        ]
 
     def summarize_scene(self) -> Dict[str, Any]:
         """
         Produce a high-level scene summary grouped by object type.
 
         Returns:
-            Dictionary with total counts, type breakdown, collections,
-            active camera, and frame range.
+            Dictionary with total counts, type breakdown, the scene's top-level
+            collections, active camera, and frame range.
         """
         blender_module: Any = bpy
         all_objects = self._resolve_object_source(None)
@@ -1710,7 +1865,9 @@ class BlenderRuntimeSession:
             type_counts[obj.type] = type_counts.get(obj.type, 0) + 1
 
         scene = blender_module.context.scene
-        collection_names = list(blender_module.data.collections.keys())
+        # The collections directly under the scene's own; bpy.data.collections
+        # also holds nested ones, other scenes' and orphans.
+        collection_names = [child.name for child in scene.collection.children]
         active_camera: Optional[str] = scene.camera.name if scene.camera else None
 
         return {
@@ -1802,26 +1959,56 @@ class BlenderRuntimeSession:
         bounds_max: List[float],
     ) -> Dict[str, Any]:
         """
-        Check whether an object's world location falls within axis-aligned bounds.
+        Check where an object's world-space bounding box lies relative to axis-aligned bounds.
+
+        The object's bounding box (``bound_box``, as get_bounding_box reports
+        it) is turned, scaled and moved with the object, and tested as that
+        box, not as the axis-aligned box around it: ``inside`` when all of it
+        is within the bounds, ``intersecting`` when part of it is, and
+        ``outside`` when none of it is. Its origin alone said a 10 m plane fit
+        a 2 m box. A box touching the bounds intersects them; single-precision
+        rounding of the corners is allowed for.
 
         Args:
             object_name: Object name to check.
             bounds_min: Minimum corner [x, y, z].
-            bounds_max: Maximum corner [x, y, z].
+            bounds_max: Maximum corner [x, y, z], at least bounds_min on every axis.
 
         Returns:
-            Dictionary with within_bounds flag and object location.
+            within_bounds (the whole box inside), relation, intersects,
+            origin_within_bounds, the object's origin (object_location) and its
+            world-space axis-aligned extent (object_bbox_min, object_bbox_max).
+
+        Raises:
+            ValueError: A bound is not finite, or bounds_min exceeds bounds_max.
         """
+        low = _finite(bounds_min, 3, "bounds_min")
+        high = _finite(bounds_max, 3, "bounds_max")
+        inverted = [axis for axis, (a, b) in zip("xyz", zip(low, high)) if a > b]
+        if inverted:
+            raise ValueError(
+                f"bounds_min exceeds bounds_max on {', '.join(inverted)}: "
+                f"{list(low)} > {list(high)}"
+            )
         obj = self._get_object_or_raise(object_name)
         self._evaluate_transforms()
         loc = [float(v) for v in obj.matrix_world.translation]
-
-        within = all(bounds_min[i] <= loc[i] <= bounds_max[i] for i in range(3))
+        corners = self._world_bound_box(obj)
+        relation = _box_relation(
+            corners, [list(row) for row in obj.matrix_world][:3], low, high
+        )
 
         return {
             "object_name": object_name,
-            "within_bounds": within,
+            "within_bounds": relation == "inside",
+            "relation": relation,
+            "intersects": relation != "outside",
+            "origin_within_bounds": all(
+                low[i] <= loc[i] <= high[i] for i in range(3)
+            ),
             "object_location": loc,
+            "object_bbox_min": [min(c[i] for c in corners) for i in range(3)],
+            "object_bbox_max": [max(c[i] for c in corners) for i in range(3)],
         }
 
     # -- Phase 2: Visual observation methods --------------------------------
@@ -2358,7 +2545,17 @@ class BlenderRuntimeSession:
         """
         Create a new object in the Blender scene.
 
-        Supports mesh primitives, lights, cameras, and empties.
+        Supports mesh primitives, lights, cameras, and empties. The object goes
+        in the active collection, as Blender's Add menu puts it, unless that
+        collection, or one holding it, is excluded from the view layer, hidden
+        in it or disabled in viewports: the object would be invisible there
+        (and in Blender 5.0.1 the 3D View then left context.active_object
+        unset), so it goes in the scene's own collection, and the reply's
+        warning says so. The object is told apart from the others by what the
+        add operator created, never by the active object, and removed again
+        when naming or scaling it fails. It never enters Edit Mode, whatever
+        the "Enter Edit Mode" preference says, and outside Object Mode the
+        call is refused before anything is added.
 
         Args:
             object_type: Type key (CUBE, SPHERE, POINT_LIGHT, CAMERA, etc.).
@@ -2368,55 +2565,286 @@ class BlenderRuntimeSession:
             scale: Initial scale [sx, sy, sz].
 
         Returns:
-            Dictionary with name, object_type, location.
+            Dictionary with name, object_type, location, the collection it
+            went in, the mode afterwards and a warning when it went elsewhere.
         """
         blender_module: Any = bpy
-        op_path = self._PRIMITIVE_OPS.get(object_type.upper())
+        kind = object_type.upper()
+        op_path = self._PRIMITIVE_OPS.get(kind)
         if op_path is None:
             raise ValueError(
                 f"Unsupported object type: {object_type}. "
                 f"Valid types: {', '.join(self._PRIMITIVE_OPS.keys())}"
             )
 
-        loc = tuple(location or [0.0, 0.0, 0.0])
-        rot = tuple(rotation_euler or [0.0, 0.0, 0.0])
+        loc = _finite(location or [0.0, 0.0, 0.0], 3, "location")
+        rot = _finite(rotation_euler or [0.0, 0.0, 0.0], 3, "rotation_euler")
+        size = None if scale is None else _finite(scale, 3, "scale")
 
         parts = op_path.split(".")
         op_module = getattr(blender_module.ops, parts[0])
         op_func = getattr(op_module, parts[1])
-
-        light_type = self._LIGHT_TYPE_MAP.get(object_type.upper())
+        properties: Dict[str, Any] = {"location": loc, "rotation": rot}
+        light_type = self._LIGHT_TYPE_MAP.get(kind)
         if light_type:
-            op_func(type=light_type, location=loc, rotation=rot)
-        else:
-            op_func(location=loc, rotation=rot)
+            properties["type"] = light_type
+        if "enter_editmode" in op_func.get_rna_type().properties.keys():
+            # The add operators read the preference when this is unset.
+            properties["enter_editmode"] = False
 
-        created = blender_module.context.active_object
-        if name:
-            created.name = name
-        if scale:
-            created.scale = tuple(scale)
+        view_layer = blender_module.context.view_layer
+        mode_before = blender_module.context.mode
+        if mode_before != "OBJECT":
+            # In Edit Mode an add operator adds to the edited mesh instead of
+            # creating an object. Attached mode's bridge refuses this up front;
+            # embedded mode has no such guard.
+            raise ValueError(
+                f"Blender is in {mode_before} mode; set_blender_object_mode switches back to "
+                "Object Mode, where objects can be created"
+            )
+        active_collection = view_layer.active_layer_collection
+        target, warning = self._creation_collection(view_layer)
+        existing = {obj.as_pointer() for obj in blender_module.data.objects}
+
+        def created_objects() -> List[Any]:
+            return [
+                obj
+                for obj in blender_module.data.objects
+                if obj.as_pointer() not in existing
+            ]
+
+        # bpy gives a new wrapper on every access; == compares what it wraps.
+        switch = target != active_collection
+        try:
+            if switch:
+                view_layer.active_layer_collection = target
+            try:
+                _bpy_op(f"Failed to add a {kind}", op_func, **properties)
+            finally:
+                if switch:
+                    view_layer.active_layer_collection = active_collection
+            created = created_objects()
+            if len(created) != 1:
+                raise RuntimeError(
+                    f"Adding a {kind} created {len(created)} objects, not one"
+                )
+            obj = created[0]
+            if blender_module.context.mode != "OBJECT":
+                with blender_module.context.temp_override(active_object=obj, object=obj):
+                    _bpy_op(
+                        f"Failed to return '{obj.name}' to Object Mode",
+                        blender_module.ops.object.mode_set,
+                        mode="OBJECT",
+                    )
+            if name:
+                obj.name = name
+            if size is not None:
+                obj.scale = size
+        except Exception:
+            # Never leave an unnamed, unscaled object behind a failed call.
+            for stray in created_objects():
+                self._remove_object_and_data(stray)
+            raise
 
         return {
-            "name": created.name,
-            "object_type": object_type.upper(),
-            "location": list(created.location),
+            "name": obj.name,
+            "object_type": kind,
+            "location": [float(v) for v in obj.location],
+            "collection": target.collection.name,
+            "mode": blender_module.context.mode,
+            "warning": warning,
         }
 
-    def delete_object(self, object_name: str) -> Dict[str, Any]:
+    @staticmethod
+    def _creation_collection(view_layer: Any) -> Tuple[Any, Optional[str]]:
         """
-        Delete an object from the Blender scene by name.
+        Choose the layer collection a new object goes in.
+
+        Args:
+            view_layer: The view layer the object is added to.
+
+        Returns:
+            The active layer collection and None, or the view layer's root
+            (the scene's own collection) and the reason, when the active one
+            or one holding it is excluded, hidden or disabled in viewports.
+        """
+        root = view_layer.layer_collection
+        active = view_layer.active_layer_collection
+
+        def path_to(node: Any) -> Optional[List[Any]]:
+            if node == active:
+                return [node]
+            for child in node.children:
+                found = path_to(child)
+                if found is not None:
+                    return [node, *found]
+            return None
+
+        for layer in (path_to(root) or [active])[1:]:
+            reason = (
+                "is excluded from the view layer"
+                if layer.exclude
+                else "is hidden in the view layer"
+                if layer.hide_viewport
+                else "is disabled in viewports"
+                if layer.collection.hide_viewport
+                else None
+            )
+            if reason is not None:
+                return root, (
+                    f"The active collection '{active.collection.name}' is not visible: "
+                    f"collection '{layer.collection.name}' {reason}, so the object was "
+                    f"created in the scene collection '{root.collection.name}' instead"
+                )
+        return active, None
+
+    @staticmethod
+    def _remove_object_and_data(obj: Any) -> None:
+        """Remove an object, and its data (mesh, light, camera) once nothing else uses it."""
+        blender_module: Any = bpy
+        data = obj.data
+        blender_module.data.objects.remove(obj, do_unlink=True)
+        if data is None or data.users:
+            return
+        for store in ("meshes", "lights", "cameras"):
+            collection = getattr(blender_module.data, store)
+            if collection.get(data.name) == data:
+                collection.remove(data)
+                return
+
+    def delete_object(self, object_name: str, use_global: bool = False) -> Dict[str, Any]:
+        """
+        Delete an object from the current scene, as Blender's Delete does.
+
+        This runs Blender's own Delete operator on the object alone, the
+        user's selection untouched. As in Blender, the object leaves the
+        current scene's collections and stays in the file while another scene
+        still links it; with use_global it is deleted from every scene (Delete
+        Globally). The operator also resets the rigid-body cache of a deleted
+        rigid body: removing the object directly left that cache in place, so
+        another body evaluated after a frame jump took the deleted one's cached
+        positions.
 
         Args:
             object_name: Name of the object to delete.
+            use_global: Delete it from every scene and the file, not only from
+                the current scene.
 
         Returns:
-            Dictionary with deleted_name.
+            Dictionary with deleted_name, use_global, whether the object left
+            the file (removed_from_file) and the scenes that still link it.
+
+        Raises:
+            ValueError: Without use_global, the object is not in the current
+                scene (embedded mode looks objects up in the whole file).
+            RuntimeError: Blender did not delete it, as for linked library data.
         """
         blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
-        blender_module.data.objects.remove(obj, do_unlink=True)
-        return {"deleted_name": object_name}
+        scene = blender_module.context.scene
+        if not use_global and scene.objects.get(object_name) is None:
+            raise ValueError(
+                f"Object '{object_name}' is not in scene '{scene.name}'; pass "
+                "use_global=true to delete it from every scene"
+            )
+        operator = blender_module.ops.object.delete
+        properties: Dict[str, Any] = {"use_global": use_global}
+        if "confirm" in operator.get_rna_type().properties.keys():
+            properties["confirm"] = False
+        with blender_module.context.temp_override(
+            selected_objects=[obj],
+            selected_editable_objects=[obj],
+            active_object=obj,
+            object=obj,
+        ):
+            _bpy_op(f"Failed to delete '{object_name}'", operator, **properties)
+        if scene.objects.get(object_name) is not None:
+            raise RuntimeError(
+                f"Blender did not delete '{object_name}' (linked library data cannot be deleted)"
+            )
+        return {
+            "deleted_name": object_name,
+            "use_global": use_global,
+            "removed_from_file": blender_module.data.objects.get(object_name) is None,
+            "remaining_scenes": [
+                other.name
+                for other in blender_module.data.scenes
+                if other.objects.get(object_name) is not None
+            ],
+        }
+
+    def set_object_mode(
+        self, mode: str = "OBJECT", object_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Switch an object into a mode, as the 3D View's mode menu does.
+
+        The way back to Object Mode for a window left in Edit or Pose Mode,
+        where object creation and the other mode-sensitive tools refuse to run.
+        With object_name, that object becomes the active one first.
+
+        Args:
+            mode: OBJECT (default), EDIT, POSE, SCULPT, VERTEX_PAINT,
+                WEIGHT_PAINT, TEXTURE_PAINT or another mode Blender's
+                object.mode_set takes, in any case.
+            object_name: The object to switch; the active object by default.
+
+        Returns:
+            object_name, mode (the object's afterwards), previous_mode,
+            context_mode (Blender's, such as EDIT_MESH) and changed.
+
+        Raises:
+            ValueError: The mode is not one Blender takes, or there is no
+                object to switch to a mode other than OBJECT.
+        """
+        blender_module: Any = bpy
+        operator = blender_module.ops.object.mode_set
+        wanted = mode.strip().upper()
+        modes = [
+            item.identifier
+            for item in operator.get_rna_type().properties["mode"].enum_items
+        ]
+        if wanted not in modes:
+            raise ValueError(f"Unknown mode {mode!r}; Blender's modes: {', '.join(modes)}")
+        view_layer = blender_module.context.view_layer
+        obj = (
+            view_layer.objects.active
+            if object_name is None
+            else self._get_object_or_raise(object_name)
+        )
+        if obj is None:
+            if wanted == "OBJECT":
+                return {
+                    "object_name": None,
+                    "mode": "OBJECT",
+                    "previous_mode": "OBJECT",
+                    "context_mode": blender_module.context.mode,
+                    "changed": False,
+                }
+            raise ValueError(f"No active object to switch to {wanted} mode; pass object_name")
+        previous = obj.mode
+        if previous != wanted:
+            was_active = view_layer.objects.active
+            if was_active != obj:
+                view_layer.objects.active = obj
+            try:
+                with blender_module.context.temp_override(active_object=obj, object=obj):
+                    _bpy_op(
+                        f"Failed to switch '{obj.name}' to {wanted} mode",
+                        operator,
+                        mode=wanted,
+                    )
+            except Exception:
+                # A refused switch leaves the user's active object as it was.
+                view_layer.objects.active = was_active
+                raise
+        return {
+            "object_name": obj.name,
+            "mode": obj.mode,
+            "previous_mode": previous,
+            "context_mode": blender_module.context.mode,
+            "changed": obj.mode != previous,
+        }
 
     def set_object_transform(
         self,
@@ -4084,16 +4512,20 @@ class BlenderRuntimeSession:
         Return information about the current .blend file.
 
         Returns:
-            Dict with file_path, is_saved, is_dirty, object_count, scene_name.
+            Dict with file_path, is_saved, is_dirty, object_count (objects in
+            the current scene), file_object_count (objects in the file: every
+            scene's and those no scene links) and scene_name.
         """
         blender_module: Any = bpy
         filepath = blender_module.data.filepath or ""
+        scene = blender_module.context.scene
         return {
             "file_path": filepath,
             "is_saved": bool(filepath),
             "is_dirty": blender_module.data.is_dirty,
-            "object_count": len(blender_module.data.objects),
-            "scene_name": blender_module.context.scene.name,
+            "object_count": len(scene.objects),
+            "file_object_count": len(blender_module.data.objects),
+            "scene_name": scene.name,
         }
 
     # -- End Phase 4 methods -------------------------------------------------
