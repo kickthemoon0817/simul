@@ -924,6 +924,34 @@ def test_launch_generate_auth_token_keeps_the_token_off_argv(tmp_path: Path) -> 
     assert payload["auth_required"] is True
 
 
+def test_launch_with_a_token_protects_the_bridge_too(tmp_path: Path) -> None:
+    """8229 runs the same Python as 8226; a token on one port alone left the other open."""
+    root = _write_isaac_root(tmp_path, "6.0.1", with_bridge=True)
+
+    for flags in (["--generate-auth-token"], ["--auth-token", "t0k"]):
+        result = runner.invoke(
+            app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run", *flags]
+        )
+
+        assert result.exit_code == 0, result.stdout
+        payload = json.loads(result.stdout)
+        command = payload["command"]
+        assert "--/exts/khemoo.simul/require_auth=true" in command
+        # The bridge accepts python_server's token; no second secret on argv.
+        assert not any(item.startswith("--/exts/khemoo.simul/auth_token") for item in command)
+        assert payload["bridge_auth_required"] is True
+
+
+def test_launch_without_a_token_leaves_the_bridge_as_it_was(tmp_path: Path) -> None:
+    root = _write_isaac_root(tmp_path, "6.0.1", with_bridge=True)
+
+    result = runner.invoke(app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run"])
+
+    payload = json.loads(result.stdout)
+    assert not any("khemoo.simul/require_auth" in item for item in payload["command"])
+    assert payload["bridge_auth_required"] is False
+
+
 def test_launch_generate_auth_token_requires_isaac_six(tmp_path: Path) -> None:
     root = _write_isaac_root(tmp_path, "5.1.0", with_bridge=True)
 

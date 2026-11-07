@@ -3,7 +3,14 @@
 import math
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import AfterValidator, BaseModel, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    FiniteFloat,
+    field_validator,
+    model_validator,
+)
 from pydantic.json_schema import SkipJsonSchema
 
 # Printed-output cap of execute_blender_script. Mirrors DEFAULT_SCRIPT_OUTPUT_CHARS
@@ -42,6 +49,15 @@ AgentLabel = Annotated[
     AfterValidator(_printable_agent_label),
 ]
 
+# Mesh data for create_blender_mesh_from_data. Blender's from_pydata flattens
+# the vertex list, so a vertex of 2 or 4 numbers shifted every later vertex
+# instead of failing; NaN and infinity are not positions. Indices are strict
+# integers so that true/false cannot pass for 1/0.
+MeshVertex = Annotated[List[FiniteFloat], Field(min_length=3, max_length=3)]
+MeshIndex = Annotated[int, Field(ge=0, strict=True)]
+MeshEdge = Annotated[List[MeshIndex], Field(min_length=2, max_length=2)]
+MeshFace = Annotated[List[MeshIndex], Field(min_length=3)]
+
 
 class BlenderInfoResponse(BaseModel):
     """Response with Blender runtime information."""
@@ -68,8 +84,27 @@ class BlenderObjectInfo(BaseModel):
 
     name: str = Field(..., description="Object name")
     object_type: str = Field(..., description="Blender object type")
-    collection: Optional[str] = Field(None, description="Collection name filter")
+    collection: Optional[str] = Field(
+        None,
+        description=(
+            "A collection holding the object: the filtered one, else its first in the current "
+            "scene ('Scene Collection' for the scene's own); null from an add-on that predates it"
+        ),
+    )
     visible: bool = Field(..., description="Whether object is visible")
+
+
+# Mirrors LISTING_JSON_BYTES_MAX in simul.adapters.blender_runtime, which ships in
+# the Blender add-on and cannot import this module; a test keeps the two in step.
+LISTING_JSON_BYTES_MAX = 30_000
+
+_PAGE_COUNT = (
+    "Number of objects in this page; fewer than requested when their JSON would pass "
+    f"{LISTING_JSON_BYTES_MAX} bytes, so the reply fits the result budget"
+)
+_PAGE_TOTAL = "Number of matching objects in all pages"
+_PAGE_NEXT = "offset of the next page; null after the last page"
+_PAGE_TRUNCATED = "Whether more matching objects follow this page (see next_offset)"
 
 
 class BlenderSceneObjectsRequest(BaseModel):
@@ -89,6 +124,9 @@ class BlenderSceneObjectsRequest(BaseModel):
         ge=1,
         le=5000,
     )
+    offset: int = Field(
+        0, description="Matching objects to skip; pass the previous page's next_offset", ge=0
+    )
 
 
 class BlenderSceneObjectsResponse(BaseModel):
@@ -103,12 +141,16 @@ class BlenderSceneObjectsResponse(BaseModel):
         ..., description="Whether hidden objects were included"
     )
     max_items: int = Field(..., description="Maximum number of requested objects")
-    count: int = Field(..., description="Number of objects in response")
+    count: int = Field(..., description=_PAGE_COUNT)
     objects: List[BlenderObjectInfo] = Field(
         ...,
         description="Listed Blender objects",
     )
-    truncated: bool = Field(..., description="Whether output reached max_items limit")
+    truncated: bool = Field(..., description=_PAGE_TRUNCATED)
+    # Optional: an add-on built before paging still answers.
+    offset: Optional[int] = Field(None, description="Matching objects skipped before this page")
+    total: Optional[int] = Field(None, description=_PAGE_TOTAL)
+    next_offset: Optional[int] = Field(None, description=_PAGE_NEXT)
 
 
 # ---------------------------------------------------------------------------
@@ -261,20 +303,57 @@ class BlenderMeshInfoRequest(BaseModel):
 
 
 class BlenderMeshInfoResponse(BaseModel):
-    """Counts-only mesh geometry information (O(1) access)."""
+    """Mesh geometry counts, of the stored mesh and after its modifiers.
+
+    The evaluated fields are null from an add-on built before they existed.
+    """
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     object_name: str = Field(..., description="Mesh object name")
-    vertex_count: int = Field(..., description="Number of vertices")
-    edge_count: int = Field(..., description="Number of edges")
-    face_count: int = Field(..., description="Number of polygon faces")
+    vertex_count: int = Field(..., description="Vertices of the stored (base) mesh")
+    edge_count: int = Field(..., description="Edges of the base mesh")
+    face_count: int = Field(..., description="Polygon faces of the base mesh")
+    triangle_count: Optional[int] = Field(
+        None, description="Triangles the base mesh's faces split into"
+    )
+    evaluated_vertex_count: Optional[int] = Field(
+        None,
+        description=(
+            "Vertices after the modifiers enabled in the viewport (what an export writes); "
+            "null when Blender does not evaluate the object"
+        ),
+    )
+    evaluated_edge_count: Optional[int] = Field(None, description="Edges after the modifiers")
+    evaluated_face_count: Optional[int] = Field(None, description="Faces after the modifiers")
+    evaluated_triangle_count: Optional[int] = Field(
+        None, description="Triangles after the modifiers"
+    )
+    evaluated_modifiers: Optional[List[str]] = Field(
+        None, description="Modifiers enabled in the viewport, which the evaluated counts include"
+    )
+    edit_mode: Optional[bool] = Field(
+        None, description="Whether the object was in Edit Mode (its edits are counted)"
+    )
     uv_layer_names: List[str] = Field(
         default_factory=list, description="UV layer names"
     )
     has_shape_keys: bool = Field(..., description="Whether mesh has shape keys")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Why evaluated counts are missing or may differ from a render-mode export",
+    )
+
+
+class BlenderMeshCounts(BaseModel):
+    """Vertex, edge, face and triangle counts of one mesh."""
+
+    vertex_count: int = Field(..., description="Number of vertices")
+    edge_count: int = Field(..., description="Number of edges")
+    face_count: int = Field(..., description="Number of polygon faces")
+    triangle_count: int = Field(..., description="Triangles the faces split into")
 
 
 class BlenderBoundingBoxRequest(BaseModel):
@@ -317,9 +396,22 @@ class BlenderSearchObjectsRequest(BaseModel):
         ),
     )
     object_type: Optional[str] = Field(
-        None, description="Filter by Blender object type (MESH, LIGHT, CAMERA, etc.)"
+        None,
+        description=(
+            "Filter by Blender object type (MESH, LIGHT, CAMERA, etc.), in any case; "
+            "a type the running Blender does not have is refused"
+        ),
     )
     max_results: int = Field(50, description="Maximum number of results", ge=1, le=5000)
+    offset: int = Field(
+        0, description="Matching objects to skip; pass the previous page's next_offset", ge=0
+    )
+
+    @field_validator("object_type")
+    @classmethod
+    def _upper_case_type(cls, value: Optional[str]) -> Optional[str]:
+        """Blender's type identifiers are upper case: 'mesh' used to match nothing."""
+        return None if value is None else value.strip().upper()
 
 
 class BlenderSearchObjectsResponse(BaseModel):
@@ -331,9 +423,13 @@ class BlenderSearchObjectsResponse(BaseModel):
     )
     pattern: Optional[str] = Field(None, description="Name pattern used")
     object_type: Optional[str] = Field(None, description="Type filter used")
-    count: int = Field(..., description="Number of matching objects")
+    count: int = Field(..., description=_PAGE_COUNT)
     objects: List[BlenderObjectInfo] = Field(..., description="Matching objects")
-    truncated: bool = Field(..., description="Whether results were capped")
+    truncated: bool = Field(..., description=_PAGE_TRUNCATED)
+    # Optional: an add-on built before paging still answers.
+    offset: Optional[int] = Field(None, description="Matching objects skipped before this page")
+    total: Optional[int] = Field(None, description=_PAGE_TOTAL)
+    next_offset: Optional[int] = Field(None, description=_PAGE_NEXT)
 
 
 class BlenderSceneSummaryResponse(BaseModel):
@@ -348,7 +444,11 @@ class BlenderSceneSummaryResponse(BaseModel):
         ..., description="Object counts keyed by Blender type"
     )
     collection_names: List[str] = Field(
-        default_factory=list, description="Top-level collection names"
+        default_factory=list,
+        description=(
+            "The scene's top-level collections, directly under its own; nested ones, other "
+            "scenes' and unlinked ones are left out"
+        ),
     )
     active_camera: Optional[str] = Field(
         None, description="Name of the active scene camera"
@@ -435,6 +535,21 @@ class BlenderBoundsCheckRequest(BaseModel):
         ..., description="Maximum bounds [x, y, z]", min_length=3, max_length=3
     )
 
+    @model_validator(mode="after")
+    def _ordered(self) -> "BlenderBoundsCheckRequest":
+        """Refuse a box whose minimum passes its maximum: it holds nothing."""
+        values = [*self.bounds_min, *self.bounds_max]
+        if not all(math.isfinite(v) for v in values):
+            raise ValueError("bounds_min and bounds_max must be finite")
+        inverted = [
+            axis
+            for axis, low, high in zip("xyz", self.bounds_min, self.bounds_max)
+            if low > high
+        ]
+        if inverted:
+            raise ValueError(f"bounds_min exceeds bounds_max on {', '.join(inverted)}")
+        return self
+
 
 class BlenderBoundsCheckResponse(BaseModel):
     """Result of a spatial bounds check."""
@@ -445,11 +560,41 @@ class BlenderBoundsCheckResponse(BaseModel):
     )
     object_name: str = Field(..., description="Object name checked")
     within_bounds: bool = Field(
-        ..., description="Whether object location is within the bounds"
+        ...,
+        description=(
+            "Whether the object's whole world-space bounding box is within the bounds "
+            "(an add-on that predates relation tests only its origin)"
+        ),
     )
     object_location: List[float] = Field(
         ...,
-        description="Object world location [x, y, z]",
+        description="Object origin's world location [x, y, z]",
+        min_length=3,
+        max_length=3,
+    )
+    # Optional: an add-on built before them still answers.
+    relation: Optional[Literal["inside", "intersecting", "outside"]] = Field(
+        None,
+        description=(
+            "Where the object's world-space bounding box lies: wholly inside the bounds, "
+            "partly (touching counts), or not at all"
+        ),
+    )
+    intersects: Optional[bool] = Field(
+        None, description="Whether any part of the bounding box is within the bounds"
+    )
+    origin_within_bounds: Optional[bool] = Field(
+        None, description="Whether the object's origin is within the bounds"
+    )
+    object_bbox_min: Optional[List[float]] = Field(
+        None,
+        description="Minimum of the object's world-space bounding box corners [x, y, z]",
+        min_length=3,
+        max_length=3,
+    )
+    object_bbox_max: Optional[List[float]] = Field(
+        None,
+        description="Maximum of the object's world-space bounding box corners [x, y, z]",
         min_length=3,
         max_length=3,
     )
@@ -911,12 +1056,31 @@ class BlenderCreateObjectResponse(BaseModel):
         min_length=3,
         max_length=3,
     )
+    # Optional: an add-on built before them still answers.
+    collection: Optional[str] = Field(None, description="Collection the object was created in")
+    mode: Optional[str] = Field(
+        None, description="Blender's mode after the creation (OBJECT unless it was not before)"
+    )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the active collection was excluded, hidden or disabled in viewports, "
+            "so the object went in the scene's own collection instead"
+        ),
+    )
 
 
 class BlenderDeleteObjectRequest(BaseModel):
     """Request to delete an object from the scene."""
 
     object_name: str = Field(..., description="Name of object to delete")
+    use_global: bool = Field(
+        False,
+        description=(
+            "Delete the object from every scene and the file (Blender's Delete Globally); by "
+            "default it leaves only the current scene, as Blender's Delete does"
+        ),
+    )
 
 
 class BlenderDeleteObjectResponse(BaseModel):
@@ -927,6 +1091,47 @@ class BlenderDeleteObjectResponse(BaseModel):
         None, description="Error message when success is False"
     )
     deleted_name: str = Field(..., description="Name of deleted object")
+    # Optional: an add-on built before them still answers.
+    use_global: Optional[bool] = Field(
+        None, description="Whether it was deleted from every scene"
+    )
+    removed_from_file: Optional[bool] = Field(
+        None, description="Whether the object is gone from the file (no scene links it any more)"
+    )
+    remaining_scenes: Optional[List[str]] = Field(
+        None, description="Scenes that still link the object"
+    )
+
+
+class BlenderSetObjectModeRequest(BaseModel):
+    """Request to switch an object into a mode."""
+
+    mode: str = Field(
+        "OBJECT",
+        description=(
+            "OBJECT (default), EDIT, POSE, SCULPT, VERTEX_PAINT, WEIGHT_PAINT, TEXTURE_PAINT or "
+            "another mode Blender's object.mode_set takes, in any case"
+        ),
+    )
+    object_name: Optional[str] = Field(
+        None, description="Object to switch, made active first; the active object by default"
+    )
+
+
+class BlenderSetObjectModeResponse(BaseModel):
+    """Response after switching an object's mode."""
+
+    success: bool = Field(..., description="Whether the switch succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: Optional[str] = Field(
+        None, description="Object switched; null when there was none and the mode was OBJECT"
+    )
+    mode: str = Field(..., description="The object's mode afterwards")
+    previous_mode: str = Field(..., description="The object's mode before")
+    context_mode: str = Field(..., description="Blender's context mode afterwards, such as EDIT_MESH")
+    changed: bool = Field(..., description="Whether the mode changed")
 
 
 class BlenderSetTransformRequest(BaseModel):
@@ -1114,11 +1319,19 @@ class BlenderAddModifierRequest(BaseModel):
     object_name: str = Field(..., description="Object to add modifier to")
     modifier_type: str = Field(
         ...,
-        description="Modifier type: SUBSURF, MIRROR, ARRAY, BEVEL, SOLIDIFY, BOOLEAN",
+        description=(
+            "Blender modifier type, e.g. SUBSURF, MIRROR, ARRAY, BEVEL, SOLIDIFY, BOOLEAN, "
+            "DECIMATE, TRIANGULATE, WELD"
+        ),
     )
     modifier_name: Optional[str] = Field(None, description="Modifier name")
     params: Dict[str, Any] = Field(
-        default_factory=dict, description="Modifier-specific parameters"
+        default_factory=dict,
+        description=(
+            "Modifier settings by Blender RNA name, e.g. {'ratio': 0.5} for DECIMATE or "
+            "{'object': 'Cutter'} for BOOLEAN; unknown names, enum values outside the "
+            "items and numbers outside the limits are refused"
+        ),
     )
 
 
@@ -1132,6 +1345,55 @@ class BlenderAddModifierResponse(BaseModel):
     object_name: str = Field(..., description="Object name")
     modifier_name: str = Field(..., description="Modifier name")
     modifier_type: str = Field(..., description="Modifier type")
+    params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The settings as Blender stored them (datablocks by name)",
+    )
+
+
+class BlenderModifierTargetRequest(BaseModel):
+    """Request naming one modifier of one object."""
+
+    object_name: str = Field(..., description="Object holding the modifier")
+    modifier_name: str = Field(..., description="Name of the modifier")
+
+
+class BlenderApplyModifierResponse(BaseModel):
+    """Response after applying a modifier to its object's mesh."""
+
+    success: bool = Field(..., description="Whether the modifier was applied")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    modifier_name: str = Field(..., description="Applied modifier")
+    modifier_type: str = Field(..., description="Applied modifier's type")
+    vertex_count: int = Field(..., description="Vertices of the mesh afterwards")
+    edge_count: int = Field(..., description="Edges of the mesh afterwards")
+    face_count: int = Field(..., description="Faces of the mesh afterwards")
+    triangle_count: int = Field(..., description="Triangles of the mesh afterwards")
+    remaining_modifiers: List[str] = Field(
+        default_factory=list, description="Modifiers left on the object, in stack order"
+    )
+    made_single_user: bool = Field(
+        ..., description="Whether shared mesh data was copied for this object first"
+    )
+    warnings: List[str] = Field(default_factory=list, description="Caveats of the result")
+
+
+class BlenderRemoveModifierResponse(BaseModel):
+    """Response after removing a modifier."""
+
+    success: bool = Field(..., description="Whether the modifier was removed")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    modifier_name: str = Field(..., description="Removed modifier")
+    modifier_type: str = Field(..., description="Removed modifier's type")
+    remaining_modifiers: List[str] = Field(
+        default_factory=list, description="Modifiers left on the object, in stack order"
+    )
 
 
 class BlenderSetLightParamsRequest(BaseModel):
@@ -1420,8 +1682,19 @@ class BlenderFileInfoResponse(BaseModel):
     file_path: str = Field(..., description="Current .blend file path")
     is_saved: bool = Field(..., description="Whether the file has been saved to disk")
     is_dirty: bool = Field(..., description="Whether there are unsaved changes")
-    object_count: int = Field(..., description="Number of objects in the scene")
+    object_count: int = Field(
+        ...,
+        description=(
+            "Number of objects in the current scene (an add-on that predates "
+            "file_object_count counts every object in the file)"
+        ),
+    )
     scene_name: str = Field(..., description="Active scene name")
+    # Optional: an add-on built before it still answers.
+    file_object_count: Optional[int] = Field(
+        None,
+        description="Number of objects in the file: every scene's and those no scene links",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1479,6 +1752,18 @@ class BlenderSetFrameRangeResponse(BaseModel):
     )
     frame_start: int = Field(..., description="Start frame that was set")
     frame_end: int = Field(..., description="End frame that was set")
+    # Defined with the physics schemas; resolved by model_rebuild() there.
+    rigid_body_cache: Optional["BlenderRigidBodyCache"] = Field(
+        None,
+        description=(
+            "The rigid-body cache after the change: an unbaked cache follows the new "
+            "range, a baked one keeps its own. Null without a rigid body world"
+        ),
+    )
+    warning: Optional[str] = Field(
+        None,
+        description="Set when a baked rigid-body cache leaves out part of the new range",
+    )
 
 
 class BlenderPlayAnimationRequest(BaseModel):
@@ -1761,10 +2046,83 @@ class BlenderGetConstraintInfoResponse(BaseModel):
     disable_collisions: bool = Field(..., description="Whether collisions are disabled")
 
 
+# Bounds of a Blender point cache's frame range (PointCache RNA, Blender
+# 4.2-5.0); BlenderRuntimeSession._CACHE_FRAME_MIN/_MAX repeat them.
+CACHE_FRAME_MIN = -1048574
+CACHE_FRAME_MAX = 1048574
+
+#: What bake_blender_simulation and free_blender_bake act on.
+BlenderBakeScope = Literal["rigid_body", "all"]
+
+#: Where get_blender_physics_state's pose comes from.
+BlenderPoseSource = Literal[
+    "evaluated",
+    "simulation",
+    "baked",
+    "before_cache",
+    "past_cache_end",
+    "world_disabled",
+    "unknown",
+]
+
+
+class BlenderRigidBodyCache(BaseModel):
+    """Range and bake state of the rigid-body world's point cache."""
+
+    frame_start: int = Field(..., description="First simulated frame")
+    frame_end: int = Field(
+        ...,
+        description="Last simulated frame: Blender holds the bodies at this frame's pose after it",
+    )
+    is_baked: bool = Field(..., description="Whether playback reads a bake")
+    is_outdated: bool = Field(
+        False,
+        description=(
+            "Blender's outdated flag: something changed since the cached frames were "
+            "simulated; they are dropped when the scene next steps from frame_start"
+        ),
+    )
+    info: str = Field(
+        "",
+        description="Blender's cache summary, such as '100 frames in memory (14 KiB).'",
+    )
+    covers_scene_range: bool = Field(
+        ..., description="Whether the cache spans the scene's whole frame range"
+    )
+
+
+class BlenderPointCacheEntry(BaseModel):
+    """One point cache in the scene."""
+
+    owner: str = Field(
+        ..., description="Object holding the cache, or the scene for the rigid body world"
+    )
+    kind: str = Field(
+        ...,
+        description="RIGID_BODY, CLOTH, SOFT_BODY, DYNAMIC_PAINT or PARTICLES",
+    )
+    name: str = Field(
+        ..., description="Modifier, canvas surface or particle system holding it"
+    )
+    frame_start: int = Field(..., description="First frame of the cache")
+    frame_end: int = Field(..., description="Last frame of the cache")
+    is_baked: bool = Field(..., description="Whether the cache is baked")
+
+
+BlenderSetFrameRangeResponse.model_rebuild()
+
+
 class BlenderGetPhysicsStateRequest(BaseModel):
     """Request to get physics state of an object."""
 
     object_name: str = Field(..., description="Name of the object")
+    step_simulation: bool = Field(
+        True,
+        description=(
+            "Step an unbaked rigid-body simulation from its cache start to the current "
+            "frame before reading the pose, at most 400 000 body-frames"
+        ),
+    )
 
 
 class BlenderGetPhysicsStateResponse(BaseModel):
@@ -1794,6 +2152,39 @@ class BlenderGetPhysicsStateResponse(BaseModel):
     mass: Optional[float] = Field(None, description="Mass if rigid body exists")
     collision_shape: Optional[str] = Field(
         None, description="Collision shape if rigid body exists"
+    )
+    # Null from an add-on built before the cache report.
+    frame: Optional[int] = Field(None, description="Frame the pose was read at")
+    pose_source: Optional[BlenderPoseSource] = Field(
+        None,
+        description=(
+            "evaluated: not a simulated body (no rigid body, passive, animated or "
+            "disabled), its transform and animation; simulation: the unbaked "
+            "simulation's pose for this frame; baked: read from the bake; "
+            "before_cache: before the cache start, the starting pose; past_cache_end: "
+            "held at the cache's last frame; world_disabled: the world does not "
+            "simulate; unknown: not stepped, so the pose is the simulation's only if "
+            "Blender already simulated this frame"
+        ),
+    )
+    simulated_for_frame: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the pose is the rigid-body simulation's result for this frame; "
+            "null when nothing simulates the object or it is unknown"
+        ),
+    )
+    stepped_frames: Optional[int] = Field(
+        None, description="Frames stepped to reach the current frame (0 when none)"
+    )
+    world_enabled: Optional[bool] = Field(
+        None, description="Whether the rigid body world simulates; null without one"
+    )
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None, description="The rigid-body cache; null without a rigid body world"
+    )
+    warning: Optional[str] = Field(
+        None, description="Why the pose may not be the simulation's for this frame"
     )
 
 
@@ -1848,8 +2239,36 @@ class BlenderGetTrajectoryResponse(BaseModel):
 class BlenderBakeSimulationRequest(BaseModel):
     """Request to bake physics simulation."""
 
-    frame_start: int = Field(..., description="First frame to bake")
-    frame_end: int = Field(..., description="Last frame to bake")
+    frame_start: int = Field(
+        ...,
+        description="First frame to bake",
+        ge=CACHE_FRAME_MIN,
+        le=CACHE_FRAME_MAX,
+    )
+    frame_end: int = Field(
+        ...,
+        description="Last frame to bake; after frame_start",
+        ge=1,
+        le=CACHE_FRAME_MAX,
+    )
+    scope: BlenderBakeScope = Field(
+        "rigid_body",
+        description=(
+            "rigid_body bakes only the rigid-body world's cache; all bakes every point "
+            "cache in the scene (rigid bodies, cloth, soft bodies, dynamic paint and "
+            "particles)"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "BlenderBakeSimulationRequest":
+        # An inverted range used to bake nothing and leave the cache unable to
+        # simulate any frame before its start, even after a free (Blender 5.0.1).
+        if self.frame_start >= self.frame_end:
+            raise ValueError(
+                f"frame_start ({self.frame_start}) must be less than frame_end ({self.frame_end})"
+            )
+        return self
 
 
 class BlenderBakeSimulationResponse(BaseModel):
@@ -1859,8 +2278,45 @@ class BlenderBakeSimulationResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    frame_start: int = Field(..., description="First baked frame")
-    frame_end: int = Field(..., description="Last baked frame")
+    scope: Optional[BlenderBakeScope] = Field(None, description="What was baked")
+    frame_start: Optional[int] = Field(
+        None,
+        description=(
+            "First frame of the rigid-body bake, as the cache holds it; null without "
+            "a rigid body world"
+        ),
+    )
+    frame_end: Optional[int] = Field(
+        None,
+        description=(
+            "Last frame of the rigid-body bake, as the cache holds it; null without "
+            "a rigid body world"
+        ),
+    )
+    frame_count: Optional[int] = Field(None, description="Frames in the rigid-body bake")
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None, description="The rigid-body cache after the bake"
+    )
+    caches: List[BlenderPointCacheEntry] = Field(
+        default_factory=list,
+        description="The caches in scope after the bake, with their ranges",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="What the bake leaves out, such as frames of the scene range past its end",
+    )
+
+
+class BlenderFreeBakeRequest(BaseModel):
+    """Request to free baked simulation data."""
+
+    scope: BlenderBakeScope = Field(
+        "rigid_body",
+        description=(
+            "rigid_body frees only the rigid-body world's cache; all frees every point "
+            "cache in the scene"
+        ),
+    )
 
 
 class BlenderFreeBakeResponse(BaseModel):
@@ -1869,6 +2325,128 @@ class BlenderFreeBakeResponse(BaseModel):
     success: bool = Field(..., description="Whether free bake succeeded")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
+    )
+    scope: Optional[BlenderBakeScope] = Field(None, description="What was freed")
+    freed: List[BlenderPointCacheEntry] = Field(
+        default_factory=list, description="The caches that were baked and are now freed"
+    )
+    caches: List[BlenderPointCacheEntry] = Field(
+        default_factory=list, description="The caches in scope after freeing"
+    )
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None,
+        description="The rigid-body cache after freeing, fitted to the scene range",
+    )
+    warnings: List[str] = Field(default_factory=list, description="Anything left as it was")
+
+
+class BlenderSetRigidBodyWorldRequest(BaseModel):
+    """Request to change the scene's rigid body world."""
+
+    enabled: Optional[bool] = Field(None, description="Run the simulation")
+    gravity: Optional[List[float]] = Field(
+        None,
+        description=(
+            "Scene gravity [x, y, z] in m/s^2, shared with cloth, soft bodies and particles"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    use_gravity: Optional[bool] = Field(None, description="Apply the scene gravity")
+    substeps_per_frame: Optional[int] = Field(
+        None, description="Simulation steps per frame", ge=1, le=32767
+    )
+    solver_iterations: Optional[int] = Field(
+        None, description="Constraint solver iterations per step", ge=1, le=1000
+    )
+    time_scale: Optional[float] = Field(
+        None,
+        description="Simulation speed relative to the frame rate",
+        ge=0.0,
+        le=100.0,
+        allow_inf_nan=False,
+    )
+    use_split_impulse: Optional[bool] = Field(
+        None, description="Reduce extra velocity from penetration recovery"
+    )
+    cache_frame_start: Optional[int] = Field(
+        None,
+        description="First simulated frame",
+        ge=CACHE_FRAME_MIN,
+        le=CACHE_FRAME_MAX,
+    )
+    cache_frame_end: Optional[int] = Field(
+        None,
+        description="Last simulated frame; after cache_frame_start",
+        ge=1,
+        le=CACHE_FRAME_MAX,
+    )
+
+    @model_validator(mode="after")
+    def _finite_ordered(self) -> "BlenderSetRigidBodyWorldRequest":
+        if self.gravity is not None and not all(math.isfinite(v) for v in self.gravity):
+            raise ValueError("gravity must be three finite numbers")
+        if (
+            self.cache_frame_start is not None
+            and self.cache_frame_end is not None
+            and self.cache_frame_start >= self.cache_frame_end
+        ):
+            raise ValueError(
+                f"cache_frame_start ({self.cache_frame_start}) must be less than "
+                f"cache_frame_end ({self.cache_frame_end})"
+            )
+        return self
+
+
+class BlenderRigidBodyWorldResponse(BaseModel):
+    """The scene's rigid body world."""
+
+    success: bool = Field(..., description="Whether the query or change succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    exists: bool = Field(..., description="Whether the scene has a rigid body world")
+    created: Optional[bool] = Field(
+        None, description="set_blender_rigid_body_world only: whether it added the world"
+    )
+    enabled: Optional[bool] = Field(None, description="Whether the world simulates")
+    gravity: List[float] = Field(
+        ..., description="Scene gravity [x, y, z] in m/s^2", min_length=3, max_length=3
+    )
+    use_gravity: bool = Field(..., description="Whether the scene gravity applies")
+    substeps_per_frame: Optional[int] = Field(
+        None, description="Simulation steps per frame"
+    )
+    solver_iterations: Optional[int] = Field(
+        None, description="Constraint solver iterations per step"
+    )
+    time_scale: Optional[float] = Field(
+        None, description="Simulation speed relative to the frame rate"
+    )
+    use_split_impulse: Optional[bool] = Field(
+        None, description="Whether split impulse is on"
+    )
+    collection: Optional[str] = Field(
+        None, description="Collection of the simulated bodies"
+    )
+    body_count: Optional[int] = Field(
+        None, description="Rigid bodies in the world, active and passive"
+    )
+    constraint_count: Optional[int] = Field(
+        None, description="Rigid body constraints in the world"
+    )
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None, description="The world's cache: simulated range and bake state"
+    )
+    scene_frame_start: int = Field(..., description="Scene start frame")
+    scene_frame_end: int = Field(..., description="Scene end frame")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "What makes the simulation differ from what playback suggests: a disabled "
+            "world, a cache that leaves out part of the scene range, a bake that "
+            "changed settings do not reach"
+        ),
     )
 
 
@@ -1952,20 +2530,26 @@ class BlenderCreateMeshFromDataRequest(BaseModel):
         description="Name for the new mesh object",
         min_length=1,
     )
-    vertices: List[List[float]] = Field(
+    vertices: List[MeshVertex] = Field(
         ...,
-        description="List of vertex positions, each [x, y, z]",
+        description="List of vertex positions, each exactly [x, y, z] finite numbers",
         min_length=1,
     )
-    edges: List[List[int]] = Field(
+    edges: List[MeshEdge] = Field(
         default_factory=list,
-        description="List of edges, each [v_index_a, v_index_b]",
+        description=(
+            "List of loose edges, each [v_index_a, v_index_b] of two different vertices; "
+            "face edges are made from the faces"
+        ),
     )
-    faces: List[List[int]] = Field(
+    faces: List[MeshFace] = Field(
         default_factory=list,
-        description="List of faces, each a list of vertex indices",
+        description=(
+            "List of faces, each three or more vertex indices, no vertex twice; a face "
+            "over the vertex set of another is refused as a duplicate"
+        ),
     )
-    location: Optional[List[float]] = Field(
+    location: Optional[List[FiniteFloat]] = Field(
         None,
         description="World-space location [x, y, z] for the object origin",
         min_length=3,
@@ -1974,7 +2558,8 @@ class BlenderCreateMeshFromDataRequest(BaseModel):
     collection_name: Optional[str] = Field(
         None,
         description=(
-            "Target collection name. Links to the active scene " "collection when None."
+            "Target collection, which must be in the current scene. Links to the "
+            "scene collection when None."
         ),
     )
 
@@ -1991,12 +2576,63 @@ class BlenderCreateMeshFromDataResponse(BaseModel):
     vertex_count: int = Field(..., description="Number of vertices created")
     edge_count: int = Field(..., description="Number of edges created")
     face_count: int = Field(..., description="Number of faces created")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="A renamed object, an excluded collection, or a validation change",
+    )
+
+
+class BlenderCleanMeshRequest(BaseModel):
+    """Request to repair a mesh object's data."""
+
+    object_name: str = Field(..., description="Mesh object whose data to clean")
+    merge_distance: Optional[FiniteFloat] = Field(
+        None,
+        gt=0,
+        description="Merge vertices closer than this (Merge by Distance); omit to skip",
+    )
+    dissolve_degenerate_distance: Optional[FiniteFloat] = Field(
+        None,
+        gt=0,
+        description=(
+            "Dissolve edges shorter and faces smaller than this (Degenerate Dissolve); "
+            "omit to skip"
+        ),
+    )
+    recalculate_normals: bool = Field(
+        False, description="Make face normals point consistently outside"
+    )
+
+
+class BlenderCleanMeshResponse(BaseModel):
+    """Response after cleaning a mesh."""
+
+    success: bool = Field(..., description="Whether the mesh was cleaned")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    mesh_name: str = Field(..., description="Mesh data-block cleaned")
+    before: BlenderMeshCounts = Field(..., description="Counts before cleaning")
+    after: BlenderMeshCounts = Field(..., description="Counts after cleaning")
+    validation_fixed: bool = Field(
+        ...,
+        description=(
+            "Whether validation removed invalid topology (faces repeating a vertex, "
+            "duplicate faces or edges)"
+        ),
+    )
+    vertices_merged: int = Field(..., description="Vertices removed by merging")
+    operations: List[str] = Field(..., description="Steps run, in order")
+    mesh_users: int = Field(..., description="Objects and other users sharing the mesh")
+    warnings: List[str] = Field(default_factory=list, description="Caveats of the result")
 
 
 __all__ = [
     "SCRIPT_OUTPUT_CHARS_DEFAULT",
     "SCRIPT_OUTPUT_CHARS_MAX",
     "SCRIPT_OUTPUT_JSON_BYTES_MAX",
+    "LISTING_JSON_BYTES_MAX",
     "BlenderCaptureMethod",
     "BlenderInfoResponse",
     "BlenderObjectInfo",
@@ -2009,6 +2645,7 @@ __all__ = [
     "BlenderObjectInfoResponse",
     "BlenderMeshInfoRequest",
     "BlenderMeshInfoResponse",
+    "BlenderMeshCounts",
     "BlenderBoundingBoxRequest",
     "BlenderBoundingBoxResponse",
     "BlenderSearchObjectsRequest",
@@ -2036,6 +2673,8 @@ __all__ = [
     "BlenderCreateObjectResponse",
     "BlenderDeleteObjectRequest",
     "BlenderDeleteObjectResponse",
+    "BlenderSetObjectModeRequest",
+    "BlenderSetObjectModeResponse",
     "BlenderSetTransformRequest",
     "BlenderSetTransformResponse",
     "BlenderSetParentRequest",
@@ -2046,6 +2685,9 @@ __all__ = [
     "BlenderAssignMaterialResponse",
     "BlenderAddModifierRequest",
     "BlenderAddModifierResponse",
+    "BlenderModifierTargetRequest",
+    "BlenderApplyModifierResponse",
+    "BlenderRemoveModifierResponse",
     "BlenderSetLightParamsRequest",
     "BlenderSetLightParamsResponse",
     "BlenderOpenFileRequest",
@@ -2095,4 +2737,6 @@ __all__ = [
     "BlenderExecuteScriptResponse",
     "BlenderCreateMeshFromDataRequest",
     "BlenderCreateMeshFromDataResponse",
+    "BlenderCleanMeshRequest",
+    "BlenderCleanMeshResponse",
 ]

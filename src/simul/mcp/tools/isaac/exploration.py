@@ -1,5 +1,6 @@
 """Scene Inspection & Exploration tools for Isaac Sim."""
 
+import math
 import textwrap
 from typing import Any, Dict, Optional
 
@@ -66,7 +67,8 @@ class ExplorationMixin:
                             "center": [ct[0], ct[1], ct[2]],
                         }}))
         """)
-        return await self._execute_json_script(script)
+        # World bounds follow USD transforms, which GPU physics stops updating.
+        return await self._execute_json_script(script, annotations=("usd_readback",))
 
     async def get_isaac_mesh_info(self, prim_path: str) -> Dict[str, Any]:
         """
@@ -558,7 +560,10 @@ class ExplorationMixin:
                     pay_meta = prim.GetMetadata("payload")
                     pay_list = []
                     if pay_meta:
-                        items = pay_meta.GetAddedOrExplicitItems() if hasattr(pay_meta, "GetAddedOrExplicitItems") else []
+                        items = (
+                            pay_meta.GetAddedOrExplicitItems()
+                            if hasattr(pay_meta, "GetAddedOrExplicitItems") else []
+                        )
                         for pay in items:
                             pay_list.append({{
                                 "asset_path": str(pay.assetPath) if pay.assetPath else None,
@@ -854,53 +859,119 @@ class ExplorationMixin:
     @tool_meta(
         name="focus_isaac_viewport",
         description=(
-            "Frame the viewport camera to focus on a specific prim, zooming to fit it in "
-            "view."
+            "Frame the active viewport's camera on a prim, zooming to fit it in view, "
+            "the way Isaac Sim's Edit > Focus Prim does. The selection is restored "
+            "afterwards. focused is true only when the camera moved (camera_moved) or "
+            "the framing call reported success; otherwise a warning says why."
         ),
         read_only=False,
         idempotent=True,
     )
     async def focus_isaac_viewport(self, prim_path: str) -> Dict[str, Any]:
         """
-        Frame the viewport camera to focus on a specific prim.
+        Frame the active viewport's camera on a prim.
+
+        Isaac Sim's Edit > Focus Prim (``isaacsim.gui.menu`` ``edit_menu.py``
+        ``focus_prim``) calls the module-level
+        ``omni.kit.viewport.utility.frame_viewport_selection()``, which frames
+        the current selection in the active viewport. This does the same with
+        the prim selected for the call, then restores the previous selection.
+        Viewport API objects have no such method and Isaac Sim has no
+        ``FrameSelectedCommand``, which is what the tool used to try, while
+        reporting ``focused`` regardless.
 
         Args:
             prim_path: USD path of the prim to focus on.
 
         Returns:
-            Dict confirming the viewport was focused.
+            Dict with ``focused``, ``camera_moved``, ``framed`` (what the
+            framing call returned, when it returned a bool), ``camera_path``
+            and ``selection_restored``; a ``warning`` when nothing shows the
+            view changed, or an error when framing is unavailable or failed.
         """
         _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
+            import asyncio
             import json
             import omni.usd
-            import omni.kit.commands
+            import omni.kit.app
+            from pxr import Usd, UsdGeom
 
-            stage = omni.usd.get_context().get_stage()
+            ctx = omni.usd.get_context()
+            stage = ctx.get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
                 prim = stage.GetPrimAtPath({_prim_path})
+                frame = None
+                viewport = None
+                try:
+                    import omni.kit.viewport.utility as vp_utils
+                    frame = getattr(vp_utils, "frame_viewport_selection", None)
+                    viewport = vp_utils.get_active_viewport()
+                except ImportError:
+                    pass
                 if not prim.IsValid():
                     print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
-                else:
-                    ctx = omni.usd.get_context()
-                    selection = ctx.get_selection()
-                    selection.set_selected_prim_paths([{_prim_path}], True)
-                    # Frame the selection in the viewport
-                    try:
-                        import omni.kit.viewport.utility as vp_utils
-                        vp_win = vp_utils.get_active_viewport_window()
-                        if vp_win:
-                            vp_win.viewport_api.frame_viewport_selection()
-                    except Exception:
-                        omni.kit.commands.execute("FrameSelectedCommand")
-                    # Wait for viewport update
-                    await omni.kit.app.get_app().next_update_async()
+                elif frame is None:
                     print(json.dumps({{
-                        "prim_path": {_prim_path},
-                        "focused": True,
+                        "error": "omni.kit.viewport.utility.frame_viewport_selection is not available",
                     }}))
+                elif viewport is None:
+                    print(json.dumps({{"error": "No active viewport to frame"}}))
+                else:
+                    camera_path = str(viewport.camera_path)
+
+                    def _camera_matrix():
+                        try:
+                            camera = stage.GetPrimAtPath(camera_path)
+                            if camera.IsValid():
+                                xformable = UsdGeom.Xformable(camera)
+                                return xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                        except Exception:
+                            pass
+                        return None
+
+                    before = _camera_matrix()
+                    selection = ctx.get_selection()
+                    previous = list(selection.get_selected_prim_paths())
+                    framed = None
+                    failure = None
+                    restored = False
+                    try:
+                        selection.set_selected_prim_paths([{_prim_path}], True)
+                        framed = frame()
+                        if asyncio.iscoroutine(framed):
+                            framed = await framed
+                        # The camera change lands with the next frame.
+                        await omni.kit.app.get_app().next_update_async()
+                    except Exception as e:
+                        failure = str(e)
+                    finally:
+                        try:
+                            selection.set_selected_prim_paths(previous, True)
+                            restored = True
+                        except Exception:
+                            pass
+                    after = _camera_matrix()
+                    moved = before is not None and after is not None and before != after
+                    framed_flag = framed if isinstance(framed, bool) else None
+                    result = {{
+                        "prim_path": {_prim_path},
+                        "camera_path": camera_path,
+                        "focused": bool(moved or framed_flag is True),
+                        "camera_moved": moved,
+                        "framed": framed_flag,
+                        "selection_restored": restored,
+                    }}
+                    if failure is not None:
+                        result["error"] = "Framing failed: " + failure
+                    elif not result["focused"]:
+                        result["warning"] = (
+                            "The viewport camera did not move: it may already frame this "
+                            "prim, or the prim has no bounds to frame."
+                        )
+                    print(json.dumps(result))
         """)
         return await self._execute_json_script(script)
 
@@ -1001,8 +1072,11 @@ class ExplorationMixin:
     @tool_meta(
         name="raycast_isaac_scene",
         description=(
-            "Cast a ray into the physics scene and return the closest hit prim, position, "
-            "normal, and distance."
+            "Cast a ray into the PhysX scene and return the closest hit: the collision "
+            "shape hit (collision_path), its rigid body (rigid_body_path), position, "
+            "normal and distance. The direction is normalized. PhysX builds its scene "
+            "when the simulation starts, so on a stopped timeline a miss is reported as "
+            "SimulationNotRunning rather than 'no hit'; play or step once first."
         ),
         read_only=True,
         idempotent=True,
@@ -1014,47 +1088,91 @@ class ExplorationMixin:
         max_distance: float = 10000.0,
     ) -> Dict[str, Any]:
         """
-        Cast a ray into the scene and return the closest hit.
+        Cast a ray into the PhysX scene and return the closest hit.
+
+        PhysX scene queries expect a unit direction (Isaac Sim's own
+        ``isaacsim.core.utils.collisions.ray_cast`` passes one), so the
+        direction is normalized here. The scene only holds colliders once
+        the simulation has started: a miss on a stopped timeline says that
+        instead of claiming nothing is there.
 
         Args:
             origin: Ray origin as [x, y, z] in world-space stage units (metres
                 by default; Isaac Sim stages are Z-up).
-            direction: Ray direction as [x, y, z] (will be normalized).
+            direction: Ray direction as [x, y, z]; normalized before casting,
+                and must not be zero.
             max_distance: Maximum ray distance in stage units.
 
         Returns:
-            Dict with hit prim, position, normal, and distance.
+            Dict with ``hit``, ``collision_path`` (the shape hit),
+            ``rigid_body_path`` (its body, empty for a static collider),
+            ``prim_path`` (the shape, else the body), ``position``,
+            ``normal``, ``distance`` and the normalized ``direction``; or a
+            SimulationNotRunning error for a miss on a stopped timeline.
         """
+        if len(origin) != 3 or len(direction) != 3:
+            return ErrorResponse(
+                error="origin and direction must each be [x, y, z]",
+                error_type="ValueError",
+            ).model_dump()
+        length = math.sqrt(sum(float(c) * float(c) for c in direction))
+        if length == 0.0 or not math.isfinite(length):
+            return ErrorResponse(
+                error="direction must be a non-zero, finite vector",
+                error_type="ValueError",
+            ).model_dump()
+        _origin = _pyval([float(c) for c in origin])
+        _direction = _pyval([float(c) / length for c in direction])
+        _max_distance = _pyval(float(max_distance))
         script = textwrap.dedent(f"""\
             import json
             try:
                 from omni.physx import get_physx_scene_query_interface
-                import carb
+                import omni.timeline
 
-                origin = carb.Float3({origin[0]}, {origin[1]}, {origin[2]})
-                direction = carb.Float3({direction[0]}, {direction[1]}, {direction[2]})
-
+                origin = tuple({_origin})
+                direction = tuple({_direction})
                 result = get_physx_scene_query_interface().raycast_closest(
-                    origin, direction, {max_distance}
+                    origin, direction, {_max_distance}
                 )
+                stopped = omni.timeline.get_timeline_interface().is_stopped()
                 if result and result.get("hit", False):
                     pos = result.get("position", (0, 0, 0))
                     nrm = result.get("normal", (0, 0, 0))
+                    collision = str(result.get("collision") or "")
+                    body = str(result.get("rigidBody") or "")
                     print(json.dumps({{
                         "hit": True,
-                        "prim_path": result.get("rigidBody", ""),
+                        "collision_path": collision,
+                        "rigid_body_path": body,
+                        "prim_path": collision or body,
                         "position": [pos[0], pos[1], pos[2]],
                         "normal": [nrm[0], nrm[1], nrm[2]],
                         "distance": result.get("distance", 0),
+                        "direction": list(direction),
+                    }}))
+                elif stopped:
+                    print(json.dumps({{
+                        "hit": None,
+                        "status": "simulation_not_running",
+                        "error": (
+                            "No hit, but the simulation is stopped: PhysX only holds the "
+                            "scene's colliders once the simulation has started. Play or "
+                            "step the simulation once, then cast again."
+                        ),
+                        "error_type": "SimulationNotRunning",
+                        "direction": list(direction),
                     }}))
                 else:
                     print(json.dumps({{
                         "hit": False,
-                        "message": "No hit detected within max distance",
+                        "status": "no_hit",
+                        "message": "No collider hit within max_distance",
+                        "direction": list(direction),
                     }}))
-            except ImportError:
+            except ImportError as e:
                 print(json.dumps({{
-                    "error": "PhysX scene query not available. Is physics enabled?",
+                    "error": f"PhysX scene query not available ({{e}}). Is omni.physx enabled?",
                 }}))
             except Exception as e:
                 print(json.dumps({{"error": f"Raycast failed: {{e}}"}}))
@@ -1203,5 +1321,4 @@ class ExplorationMixin:
                         "matches": matches,
                     }}))
         """)
-        return await self._execute_json_script(script)
-
+        return await self._execute_json_script(script, annotations=("usd_readback",))

@@ -110,6 +110,75 @@ that opens with missing sublayers, references or payloads loads, and lists
 them in `warnings`. `simul usd validate` runs the same checks and exits 1
 when the file is invalid.
 
+### Editing
+
+Edits go to the stage's edit target, its root layer, and are all or nothing:
+each call checks the whole request first, then writes, and if a write still
+fails it restores the specs it touched. A call that reports failure has
+changed nothing.
+
+Edit errors use the same types as the lookups above. Invalid input is a
+`ValidationError` whose `details.code` says which check failed
+(`InvalidPrimPath`, `UnknownPrimType`, `InvalidAttribute`,
+`InvalidTimeCode`). A missing stage or prim is a `NotFoundError`. A write
+that fails after the checks passed is an
+`EngineError` with `details.rolled_back: true`. A refusal that an explicit flag
+overrides is a `RefusedOperation` naming the flag in `details.override`, and
+an edit USD cannot express is an `UnsupportedOperation`.
+
+- **Paths** must be absolute prim paths (`/World/Box`). A relative path, a
+  property path (`/World/Box.size`), a trailing `/` or an invalid prim name
+  fails with `details.code: InvalidPrimPath`. The message names the bad
+  element and suggests the fix (`details.suggestion`). A missing prim names
+  the nearest prim that exists.
+- **`create_prim`** takes only concrete types registered with USD (`Xform`,
+  `Scope`, `Mesh`, `Cube`, `PhysicsRevoluteJoint`, ...). An unknown, abstract
+  or API schema name fails with `details.code: UnknownPrimType` and close
+  matches in `details.suggestions`. A path that already holds a prim is
+  refused unless `redefine_existing=true`, which changes its type and keeps
+  its children, properties and composition arcs.
+- **Attributes** are checked against the prim's existing property or its
+  schema definition: the value must fit the attribute's type, and a token
+  must be one of its `allowedTokens`. An existing relationship takes a target
+  path or a list of them. The keys `active`, `instanceable` and `kind` set
+  prim metadata through USD's API; other metadata keys are refused rather
+  than written as attributes. One error (`details.code: InvalidAttribute`)
+  lists every rejected key with its reason in `details.problems`.
+- **Values** are converted to the attribute's type: JSON numbers widen
+  (`45` into a `float`, ints into a `double3`), an integer type refuses a
+  fraction, vectors are lists (`[x, y, z]`), quaternions are `[w, x, y, z]`
+  with the real part first, matrices are a list of rows or the flat
+  row-major list, assets are path strings, and arrays are lists of their
+  element's form.
+- **Transform ops**: a new `xformOp:<type>[:<suffix>]` (`translate`,
+  `scale`, `rotateX`..`rotateZYX`, `orient`, `transform`) is created with the
+  op's value type (`double3` translate, `float3` scale, `quatf` orient,
+  `matrix4d` transform) and added to `xformOpOrder`, so it takes effect. An
+  existing op that is missing from the order is added to it. Pass
+  `xformOpOrder` in the same call to set the order yourself; every entry
+  must name an op the prim has or the call creates.
+- **New custom attributes** take their type from `attribute_types`
+  (`{"custom:offset": "double3"}`, which also picks a new op's precision), or
+  else from the value: `bool`, `int`, `float`, `string`, `float2`..`float4`
+  for 2 to 4 numbers, `int[]` / `float[]`, `float3[]` for a list of
+  3-number lists, `string[]`.
+- **Time samples**: `time_code` writes the values as samples at that time.
+  An attribute that already has time samples is refused without it, since a
+  default value is hidden by the samples at every frame. Uniform attributes
+  (such as `xformOpOrder`), relationships and metadata cannot take a
+  `time_code`. A sample is also refused when the attribute's animation comes
+  from a weaker layer (a sublayer or a referenced asset): USD takes all of an
+  attribute's samples from the strongest layer that has any, so one sample
+  in the root layer would replace that whole animation.
+- **`delete_prim`** refuses `/`, and the stage's default prim unless
+  `allow_root_delete=true`. It also refuses a prim the delete cannot remove
+  because opinions outside the root layer keep it alive: a sublayer defines
+  it, or it comes from a reference or payload on an ancestor. Deactivate such
+  a prim instead with `update_prim_attributes {"active": false}`.
+- Prims inside an instanceable prim (instance proxies) cannot be authored;
+  edits to them fail with `UnsupportedOperation`. Set `instanceable` to
+  `false` on the instance first.
+
 ## Isaac Sim
 
 Requires a running Isaac Sim 5.1.0, 6.0.0 or 6.0.1 reachable over the bridge
@@ -124,7 +193,8 @@ Registered by default only on Linux and Windows, where Isaac Sim runs
 | Prim editing | `create_isaac_object`, `create_isaac_prim`, `delete_isaac_prim`, `set_isaac_prim_transform`, `set_isaac_prim_visibility`, `set_isaac_prim_attribute`, `duplicate_isaac_prim`, `reparent_isaac_prim` |
 | Lights | `list_isaac_lights`, `create_isaac_light` |
 | Cameras and viewport | `list_isaac_cameras`, `get_isaac_camera_info`, `set_isaac_camera`, `capture_isaac_viewport`, `focus_isaac_viewport`, `get_isaac_viewport_info` |
-| Physics | `get_isaac_physics_scene`, `create_isaac_physics_scene`, `add_isaac_rigid_body`, `add_isaac_collision`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects` |
+| Physics | `get_isaac_physics_scene`, `create_isaac_physics_scene`, `configure_isaac_physics_scene`, `add_isaac_rigid_body`, `add_isaac_collision`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects` |
+| Joints and articulations | `list_isaac_articulations`, `set_isaac_joint_drive`, `set_isaac_joint_limits` |
 | Simulation control | `get_isaac_simulation_state`, `start_isaac_simulation`, `pause_isaac_simulation`, `stop_isaac_simulation`, `step_isaac_simulation`, `reset_isaac_simulation`, `get_isaac_simulation_time` |
 | Materials | `list_isaac_materials`, `create_isaac_material`, `assign_isaac_material`, `set_isaac_material_property` |
 | Rendering and settings | `read_isaac_aovs`, `list_isaac_aovs`, `list_isaac_render_vars`, `get_isaac_carb_settings`, `set_isaac_carb_settings` |
@@ -168,12 +238,77 @@ Notes:
   schema's `-inf` fallback) as `null` with `center_of_mass_note`.
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
+- `create_isaac_physics_scene` derives a new scene's gravity from the stage:
+  Earth gravity along the negative up axis, in stage units (981 on a
+  centimetre stage); `gravity_magnitude` is taken in m/s^2. It refuses a prim
+  of another type at `prim_path` rather than retyping it.
+  `get_isaac_physics_scene` reports gravity resolved the way the simulation
+  reads it plus the PhysxSceneAPI settings authored on the scene (physics
+  rate, solver type, iteration clamps, GPU dynamics, broadphase, CCD,
+  stabilization, enhanced determinism); `configure_isaac_physics_scene`
+  writes them.
+- `add_isaac_collision` applies CollisionAPI to the geometry at and under
+  `prim_path` (an asset root's meshes, not the root Xform, which would make no
+  shape), puts `approximation` on meshes only, and lists the shapes.
+  `set_isaac_physics_material` binds a MaterialAPI material to the colliders
+  at or under `prim_path` with purpose `physics`, leaving the visual binding
+  alone, and lists them in `bound_to`.
+- The joint tools are USD-level (UsdPhysics DriveAPI, LimitAPI,
+  ArticulationRootAPI). `list_isaac_articulations` orders each
+  articulation's joints depth first from the root body; PhysX's DOF indices
+  need not follow that order. Angular drive targets and revolute limits are in
+  degrees. In the joint aspect, an infinite value ("no limit",
+  "unbreakable") is null with a `<key>_note`, since JSON has no infinity.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,
   selection, timeline and stage; `get_isaac_ui_window` walks one window's
   widget tree.
 - `execute_isaac_script` scripts should follow the scripting reference served
   as the `simul://isaac-sim/skills` resource. Isaac Sim 6.0 deprecates
   `isaacsim.core.{api,prims,utils}` and removes the `omni.isaac.*` shims.
+  On Isaac Sim 5.1 with the bridge down, scripts over 32 KiB are refused
+  (`ScriptTooLargeForSocket`): that socket runs each read as its own script.
+- `open_isaac_stage`, `new_isaac_stage`, `read_isaac_aovs`,
+  `capture_isaac_viewport` and `enable_isaac_extension` run with a budget of
+  at least 110 s instead of the default 29 s. Any timeout reply says that the
+  Kit work may still complete; check the state before retrying.
+- A tool whose script shared Kit's stdout with another callback returns its
+  result with the other text under `foreign_output` and a note in `warnings`.
+- Pose and velocity readers (`get_isaac_prim_detail` transform, info,
+  bounding_box and rigid_body aspects, `find_isaac_prims_in_area`,
+  `get_isaac_camera_info`) read USD. Under GPU physics Isaac Sim's
+  SimulationManager stops PhysX writing to USD (`/physics/updateToUsd` and
+  `/physics/updateVelocitiesToUsd` false, `omni.physx.fabric` on). While the
+  simulation runs, those results then carry `stale_under_fabric: true`,
+  `usd_readback` and a warning: the values are from before play. Read the
+  simulated state with `execute_isaac_script` through a physics view (see
+  [isaac-sim.md](isaac-sim.md#reading-simulated-state)).
+- `step_isaac_simulation` advances N timeline frames. Each frame runs
+  `frame_dt / physics_dt` physics steps, reported under `physics`. The call's
+  budget grows with N up to 110 s, and a step that runs out stops, pauses
+  and says how far it got. The timeline stays paused, and with
+  `/physics/resetOnStop` on (Isaac Sim's default) the next stop or reset
+  restores simulated prims to their pre-play state. Edits made in between
+  (`set_isaac_prim_transform`, `set_isaac_prim_attribute`,
+  `create_isaac_object`) are reverted with them, so those tools add a
+  warning while paused.
+- `raycast_isaac_scene` normalizes the direction and returns both the
+  collision shape hit (`collision_path`) and its body (`rigid_body_path`).
+  PhysX holds colliders only once the simulation has started, so a miss on a
+  stopped timeline is `SimulationNotRunning`, not "no hit".
+- `focus_isaac_viewport` frames the prim the way Edit > Focus Prim does and
+  restores the selection. `focused` is true only when the camera moved or
+  the framing call said so.
+- `read_isaac_aovs` handles annotators that return `{data, info}`
+  (segmentation, bounding boxes, pointcloud): it reports the array's stats,
+  plus per-field ranges and counts for bounding boxes, and an `info`
+  summary such as `idToLabels`.
+- `get_isaac_logs` reads this instance's log (Kit's `/log/file`). When Kit
+  does not name it, the tool falls back to the newest Kit log and warns that
+  it may be another process's.
+- `set_isaac_carb_settings` refuses the transport namespaces (bridge,
+  python_server, 5.x VS Code). It refuses `/persistent/` keys, which Kit saves
+  for later sessions, unless `allow_persistent=true`. `get_isaac_carb_settings`
+  reads `auth_token` values back as `***`.
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or
@@ -364,6 +499,69 @@ Behaviour worth knowing:
   Import options accept booleans `import_actors`, `import_geometry`,
   `import_materials`, `import_lights`, `import_cameras`; export options accept
   booleans `export_actor_folders`, `export_sublayers`.
+  - `import_unreal_usd` files the assets under
+    `<destination_path>/<file name>` (the name as Unreal names assets: `my
+    robot.usda` becomes `my_robot`) and spawns the actors in the level being
+    edited. Without `replace_existing` (the default) an import into a folder
+    that already holds assets is refused with `InvalidState` and nothing is
+    imported, and existing actors are kept: the new ones are added beside
+    them. Unreal's USD importer otherwise replaces both, whatever
+    `AssetImportTask.replace_existing` says: a re-import replaced a mesh
+    customized since (its collision and lightmap resolution were lost) and
+    deleted the earlier import's actors. With `replace_existing` true the
+    folder's assets and the level's actors from an earlier import of the file
+    (the top-level actor named after the file) are replaced;
+    `removed_actor_paths` lists the actors that went.
+  - The import options are set without saving them. Unreal's
+    UsdStageImportOptions saves its settings to the project's
+    `Saved/Config/<Platform>Editor/EditorPerProjectUserSettings.ini` whenever
+    a change is notified, and earlier simul versions notified it, so one
+    import with `import_actors` false left `bImportActors=False` there for
+    every later import and the editor's own **Import into Level** dialog.
+    simul now sets `import_actors`, `import_geometry` and `import_materials`
+    on every import (true unless given) and, when the project's saved
+    settings differ from Unreal's defaults, says so in `warnings` and leaves
+    them alone: nothing tells a value simul wrote from one the user chose.
+    Reset them in the editor's USD import dialog.
+  - `export_unreal_usd` exports actors of the level being edited; a path in
+    another map is refused without loading it. `actors_exported` counts the
+    actors the written stage has a prim for, read back from the file
+    (`exported_prims` gives each one's prim), since Unreal's exporter leaves
+    out editor helpers such as WorldSettings or PlayerStart without an error;
+    they are listed in `skipped_actors`, and an export that wrote none of the
+    actors fails with `EngineError`. Mesh and material files are written next
+    to the output file.
+  - Both wait `unreal.import_export_timeout` (default 300 s,
+    `UNREAL__IMPORT_EXPORT_TIMEOUT`) instead of `unreal.timeout`: the first
+    USD export of an editor session loads Unreal's USD Python modules and
+    takes 25-40 s on UE 5.7. When the time runs out the error is
+    `TimeoutError` and says the import or export may still complete, since
+    Remote Control cannot stop a script it has stopped waiting for; check
+    before retrying.
+  - Neither leaves an editor object behind in the Python namespace Remote
+    Control runs its scripts in. The export's AssetExportTask used to keep
+    the editor world referenced there, and the next level load failed the
+    editor's world leak check and took the editor down.
+- `assign_unreal_material` assigns the material in one undoable transaction
+  that records the component first, which marks the level dirty (in a World
+  Partition level, the actor's package), so saving keeps the assignment and
+  Undo reverts it; the slot is read back, and `previous_material_path` is what
+  it rendered with before. The actor must be in the level being edited: a path
+  in another map is refused without loading that map, as is a map path given
+  as the material.
+- `create_unreal_material_instance` writes under the project's `/Game` folder:
+  `save_path`, else next to a parent in `/Game`, else `/Game/Materials`. It
+  used to save an instance of an `/Engine` parent into the engine install
+  (`Engine/Content/BasicShapes`), which every project using that engine
+  shares. A folder outside `/Game` (`/Engine`, a plugin's content) is refused
+  with `SandboxError` unless `allow_engine_content` is true, and
+  `set_unreal_material_params` refuses an instance outside `/Game` the same
+  way. A folder with an empty, `.` or `..` name, or with characters Unreal
+  does not allow, is a `ValidationError`: Unreal does not resolve `..` and
+  turned `/Game/../Engine` into a folder named `__`.
+- `search_unreal_assets` returns at most `max_results` assets, from 1 to 1000:
+  Remote Control sizes its result array to the limit it is sent, and -1
+  crashed the editor.
 - SimReady conversion and validation are not implemented for Unreal. Those
   tools return `UnsupportedOperation` without changing files.
 - `analyze_unreal_scene_for_robotics` classifies the actors loaded in the
@@ -529,10 +727,10 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Group | Tools |
 |---|---|
 | Scene and files | `get_blender_info`, `get_blender_file_info`, `summarize_blender_scene`, `list_blender_scene_objects`, `search_blender_objects`, `open_blender_file`, `save_blender_file`, `import_blender_file`, `export_blender_file` |
-| Objects | `create_blender_object`, `delete_blender_object`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `get_blender_mesh_info`, `add_blender_modifier` |
+| Objects | `create_blender_object`, `delete_blender_object`, `set_blender_object_mode`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
 | Materials and lights | `get_blender_material_info`, `assign_blender_material`, `set_blender_light_params` |
-| Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake` |
+| Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`, `get_blender_rigid_body_world`, `set_blender_rigid_body_world` |
 | Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `delete_blender_keyframe`, `get_blender_keyframes`, `get_blender_object_trajectory` |
 | Camera and viewport | `get_blender_camera_info`, `set_blender_camera_view`, `get_blender_viewport_info`, `focus_blender_on_object`, `capture_blender_viewport`, `capture_blender_viewport_sequence` |
 | UI and attachment | `control_blender_ui`, `attach_blender_window` |
@@ -578,12 +776,100 @@ Behaviour worth knowing:
   child's values become relative to the parent and it moves. A parent that is
   the child itself or one of its descendants is refused (Blender ignores such
   a parent without an error).
+- `create_blender_object` puts the object in the active collection, as
+  Blender's Add menu does. When that collection, or one holding it, is
+  excluded from the view layer, hidden or disabled in viewports, the object
+  goes in the scene's own collection instead, and `warning` says so; the
+  user's active collection stays as it was. The new object is the one the add
+  operator created (an object hidden in the 3D View is not its
+  `context.active_object`), and a failed call removes it again. It stays in
+  Object Mode whatever Blender's "Enter Edit Mode" preference says, and
+  outside Object Mode it is refused before anything is added (embedded mode
+  too, where an add operator would otherwise add to the edited mesh).
+  `set_blender_object_mode` switches an object (the active one by default)
+  into a mode, `OBJECT` by default: the way back for a window left in Edit or
+  Pose Mode, where creating, deleting, importing and the other mode-sensitive
+  tools refuse to run.
+- `delete_blender_object` runs Blender's own Delete on the object alone, the
+  selection untouched: the object leaves the current scene, and stays in the
+  file while another scene links it (`remaining_scenes`, `removed_from_file`).
+  `use_global: true` deletes it from every scene (Delete Globally). The
+  operator also resets a deleted rigid body's cache: removing the object
+  directly left the cache, so after a frame jump another body took the
+  deleted one's cached positions.
+- `list_blender_scene_objects` and `search_blender_objects` return a page:
+  `count` objects from `offset`, `total` matching, and `next_offset` for the
+  next page (`null` after the last; `truncated` says whether more follow). A
+  page stops before its entries pass 30 000 bytes of JSON, so it can hold
+  fewer than `max_items`/`max_results`: the server's 40 KB result budget used
+  to cut a longer list below the count it reported. Each entry's
+  `collection` names a collection holding the object, the scene's own being
+  "Scene Collection". `object_type` matches in any case and must be one of
+  the running Blender's object types.
+- `check_blender_object_bounds` tests the object's world-space bounding box,
+  turned and scaled with the object, against the axis-aligned bounds:
+  `relation` is `inside` (`within_bounds`), `intersecting` (touching counts)
+  or `outside`, and `origin_within_bounds` tests the origin alone, which is
+  all the tool used to test. `bounds_min` must not exceed `bounds_max`.
+- `summarize_blender_scene`'s `collection_names` are the scene's top-level
+  collections. `get_blender_file_info`'s `object_count` counts the current
+  scene's objects, and `file_object_count` the file's.
 - Reads of world-space transforms (object info, distance, bounds, bounding
   box, parenting) evaluate the depsgraph first: in embedded (bpy module) mode
   Blender leaves a transform written by an earlier call out of `matrix_world`
-  until then. An add-on built before `rotation_quaternion` and
-  `keep_transform` still answers calls that leave them at their defaults, with
-  its own behaviour; the newer reply fields then come back `null`.
+  until then. An add-on built before `rotation_quaternion`, `keep_transform`,
+  `offset` and `use_global` still answers calls that leave them at their
+  defaults, with its own behaviour; the newer reply fields then come back
+  `null`.
+- `create_blender_mesh_from_data` checks everything before it creates
+  anything: each vertex is exactly `[x, y, z]` finite numbers, each index is
+  an integer within the vertex list, no face repeats a vertex or the vertex
+  set of another face (in any order), no edge joins a vertex to itself or
+  repeats another edge, and `collection_name` names a collection in the
+  current scene that is not linked from a library. Blender's `from_pydata`
+  flattens the vertex list, so a vertex of 2 or 4 numbers used to shift every
+  later vertex, and faces such as `[0,1,2,1]` with duplicates froze Blender
+  5.0.1's Decimate. The new mesh is then validated (`mesh.validate()`), and
+  when any step fails the mesh and object made so far are removed: an orphan
+  object, or one in another scene, made whole-scene exports fail. `warnings`
+  reports a renamed object (`probe.001`), a collection the view layer
+  excludes, and any change validation made.
+- `clean_blender_mesh` repairs a mesh made elsewhere (an import, a script).
+  It always validates the mesh, removing faces that repeat a vertex and
+  duplicate faces and edges, then optionally merges vertices within
+  `merge_distance`, dissolves edges and faces smaller than
+  `dissolve_degenerate_distance`, and recalculates normals. It reports the
+  counts before and after; mesh data shared by several objects changes for
+  all of them.
+- `add_blender_modifier` checks each `params` key against the modifier
+  type's RNA: an unknown name is refused with the closest names, an enum takes
+  one of its items (matched case-insensitively; an enum flag such as
+  Decimate's `delimit` takes a list), a number must lie within the setting's
+  hard limits, which Blender would otherwise clamp silently, and an object,
+  collection or other datablock setting takes its name, such as
+  `{"object": "Cutter"}` for BOOLEAN. Blender silently drops a datablock its
+  poll refuses (a camera for a Boolean), which is reported as an error. The
+  reply's `params` echo the stored settings. A refused call removes the
+  modifier again, and an object without a modifier stack (camera, light,
+  empty) is refused up front. DECIMATE is refused on a mesh whose validation
+  would change it, as Decimate's collapse can loop forever there; the check
+  validates a throwaway copy (0.16 s for a million faces).
+- `apply_blender_modifier` is Blender's Apply: the modifier's result replaces
+  the mesh data. A modifier below others is applied to the base mesh without
+  them, with a warning; mesh data shared with other objects is copied first
+  (`made_single_user`). A modifier disabled in the viewport is refused, as
+  Blender 5.0.1 drops it unapplied. `remove_blender_modifier` removes one
+  without applying it. Both, and `clean_blender_mesh`, need the object in
+  Object Mode.
+- `get_blender_mesh_info` reports the stored mesh's counts and, as
+  `evaluated_*`, the counts after the modifiers enabled in the viewport, which
+  is the geometry an export writes (94 triangles where the base cube has 6
+  faces after Bevel, Decimate, Triangulate and Weld). A mesh in Edit Mode is
+  written back from the edit mesh first, so the counts include unsaved edits.
+  USD export evaluates modifiers for render, so `warnings` names modifiers
+  whose render settings differ (`show_render`, Subdivision `render_levels`).
+  An object Blender does not evaluate (outside the view layer) has null
+  evaluated counts.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
@@ -900,6 +1186,49 @@ Behaviour worth knowing:
   `error_count` and `warning_count` count them all. `export_simready_usd` runs
   every check on the objects it exports; `skip_checks` leaves checks out, so
   that one that does not apply needs no `force`, which lets every error through.
+- Rigid bodies simulate only inside the rigid-body world's cache range
+  (`rigid_body_cache` in the replies of `get_blender_rigid_body_world`,
+  `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`
+  and `set_blender_frame_range`): past its end Blender holds the bodies at the
+  end frame's pose. Blender makes a new world's cache 1-250 whatever the scene
+  range, so a world simul adds covers the scene's frame range instead;
+  `set_blender_frame_range` moves an unbaked cache with the scene range and
+  warns when a baked one leaves part of it out; and `free_blender_bake` gives a
+  freed cache the scene range back. `set_blender_rigid_body_world` sets the
+  range explicitly, along with `enabled`, the scene gravity (shared with cloth,
+  soft bodies and particles), substeps, solver iterations, time scale and split
+  impulse, adding the world when there is none. A baked cache's range changes
+  only after it is freed, and changed settings reach a baked simulation only
+  after a new bake; the reply's `warnings` says so.
+- `bake_blender_simulation` replaces an earlier bake. Blender skips a cache that
+  is already baked, so a second bake used to report the new range over the old
+  frames; the bake is freed first and the simulation restarts at `frame_start`
+  from the bodies' current transforms. `frame_start` must come before
+  `frame_end`: an inverted range baked nothing and left new bodies unable to
+  move. `scope: "rigid_body"` (the default) bakes only the rigid-body cache, by
+  stepping each frame and then marking that cache baked, because Blender 5.0.1's
+  `ptcache.bake` given that cache baked every cache in the scene (a cloth over
+  its own 250 frames) while `ptcache.free_bake` freed only the one.
+  `scope: "all"` frees and bakes every point cache, as Bake All Dynamics does:
+  rigid bodies, cloth, soft bodies and dynamic paint over the requested range,
+  particle systems over the range their emission settings give.
+  `free_blender_bake` takes the same scope and lists what it `freed`. A disabled
+  rigid body world is refused rather than marked baked with no frames. The bake
+  runs on Blender's main thread, stepping every frame, and the scene returns to
+  its current frame afterwards.
+- `get_blender_physics_state` steps an unbaked simulation from the cache start
+  to the current frame before reading the pose (`step_simulation`, default
+  true, at most 400 000 frames x bodies), as playback would: an unbaked
+  simulation advances one frame at a time, so after `set_blender_frame` jumped
+  from 1 to 48 a falling body still sat at its starting pose. Frames Blender has
+  cached are read, not simulated again. `pose_source` says where the pose comes
+  from: `simulation` or `baked`; `before_cache` (the starting pose);
+  `past_cache_end` (held at the cache's last frame); `world_disabled`; `unknown`
+  when it was not stepped; or `evaluated` for an object nothing simulates (no
+  rigid body, passive, animated or disabled). `simulated_for_frame` says whether
+  the pose is the simulation's result for the frame, and `warning` explains
+  when it is not. An add-on built before this report answers without these
+  fields, and the server returns them as `null`.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
   backtracks, and on a long object name such a pattern runs for hours on

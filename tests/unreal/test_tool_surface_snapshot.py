@@ -151,11 +151,13 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "scalar_params_json": '{"Roughness": 0.4}',
         "vector_params_json": '{"Tint": [1, 0.5, 0, 1]}',
         "texture_params_json": '{"Albedo": "/Game/Textures/T_Wood"}',
+        "allow_engine_content": True,
     },
     "create_unreal_material_instance": {
         "parent_path": MATERIAL,
         "instance_name": "MI_Chair",
         "save_path": "/Game/Materials",
+        "allow_engine_content": True,
     },
     "assign_unreal_material": {"actor_path": ACTOR, "material_path": MATERIAL, "slot_index": 2},
     "set_unreal_light_params": {
@@ -199,6 +201,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "usd_path": "/tmp/in.usd",
         "destination_path": "/Game/USD",
         "import_options": {"import_lights": False},
+        "replace_existing": True,
     },
     "export_unreal_usd": {
         "actor_paths": f"{ACTOR}, {PARENT}",
