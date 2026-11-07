@@ -279,7 +279,23 @@
     "get_blender_material_info": {
       "minimal": {
         "arguments": {"material_name": "Metal"},
-        "session_calls": [{"method": "get_material_info", "arguments": {"material_name": "'Metal'"}}],
+        "session_calls": [
+          {
+            "method": "get_material_info",
+            "arguments": {"material_name": "'Metal'", "max_nodes": "50"}
+          }
+        ],
+        "response": {"checked_against": "BlenderMaterialInfoResponse"},
+        "usage": [{"tool": "get_blender_material_info", "success": false}]
+      },
+      "full": {
+        "arguments": {"material_name": "Metal", "max_nodes": 10},
+        "session_calls": [
+          {
+            "method": "get_material_info",
+            "arguments": {"material_name": "'Metal'", "max_nodes": "10"}
+          }
+        ],
         "response": {"checked_against": "BlenderMaterialInfoResponse"},
         "usage": [{"tool": "get_blender_material_info", "success": false}]
       },
@@ -290,7 +306,7 @@
           "success": false,
           "error": "1 validation error for BlenderMaterialInfoRequest\nmaterial_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"material_name": {"bogus": 1}}}
+          "details": {"input": {"material_name": {"bogus": 1}, "max_nodes": 50}}
         }
       }
     },
@@ -889,9 +905,18 @@
             "arguments": {
               "object_name": "'Cube'",
               "material_name": "None",
-              "base_color": "[0.8, 0.8, 0.8, 1.0]",
-              "metallic": "0.0",
-              "roughness": "0.5"
+              "base_color": "None",
+              "metallic": "None",
+              "roughness": "None",
+              "slot_index": "None",
+              "face_indices": "None",
+              "link": "'DATA'",
+              "single_user": "False",
+              "reuse_existing": "True",
+              "base_color_texture": "None",
+              "metallic_texture": "None",
+              "roughness_texture": "None",
+              "normal_texture": "None"
             }
           }
         ],
@@ -904,7 +929,16 @@
           "material_name": "Red",
           "base_color": [1, 0, 0, 1],
           "metallic": 0.5,
-          "roughness": 0.25
+          "roughness": 0.25,
+          "slot_index": 1,
+          "face_indices": [0, 2],
+          "link": "OBJECT",
+          "single_user": true,
+          "reuse_existing": false,
+          "base_color_texture": "/tmp/albedo.png",
+          "metallic_texture": "/tmp/metallic.png",
+          "roughness_texture": "/tmp/roughness.png",
+          "normal_texture": "/tmp/normal.png"
         },
         "session_calls": [
           {
@@ -914,7 +948,16 @@
               "material_name": "'Red'",
               "base_color": "[1.0, 0.0, 0.0, 1.0]",
               "metallic": "0.5",
-              "roughness": "0.25"
+              "roughness": "0.25",
+              "slot_index": "1",
+              "face_indices": "[0, 2]",
+              "link": "'OBJECT'",
+              "single_user": "True",
+              "reuse_existing": "False",
+              "base_color_texture": "'/tmp/albedo.png'",
+              "metallic_texture": "'/tmp/metallic.png'",
+              "roughness_texture": "'/tmp/roughness.png'",
+              "normal_texture": "'/tmp/normal.png'"
             }
           }
         ],
@@ -932,9 +975,18 @@
             "input": {
               "object_name": {"bogus": 1},
               "material_name": null,
-              "base_color": [0.8, 0.8, 0.8, 1.0],
-              "metallic": 0.0,
-              "roughness": 0.5
+              "base_color": null,
+              "metallic": null,
+              "roughness": null,
+              "slot_index": null,
+              "face_indices": null,
+              "link": "DATA",
+              "single_user": false,
+              "reuse_existing": true,
+              "base_color_texture": null,
+              "metallic_texture": null,
+              "roughness_texture": null,
+              "normal_texture": null
             }
           }
         }
@@ -1055,7 +1107,12 @@
               "use_shadow": "None",
               "spot_size": "None",
               "spot_blend": "None",
-              "shadow_soft_size": "None"
+              "shadow_soft_size": "None",
+              "light_type": "None",
+              "angle": "None",
+              "size": "None",
+              "size_y": "None",
+              "shape": "None"
             }
           }
         ],
@@ -1070,7 +1127,12 @@
           "use_shadow": false,
           "spot_size": 0.8,
           "spot_blend": 0.2,
-          "shadow_soft_size": 0.1
+          "shadow_soft_size": 0.1,
+          "light_type": "AREA",
+          "angle": 0.1,
+          "size": 2,
+          "size_y": 1,
+          "shape": "RECTANGLE"
         },
         "session_calls": [
           {
@@ -1082,7 +1144,12 @@
               "use_shadow": "False",
               "spot_size": "0.8",
               "spot_blend": "0.2",
-              "shadow_soft_size": "0.1"
+              "shadow_soft_size": "0.1",
+              "light_type": "'AREA'",
+              "angle": "0.1",
+              "size": "2.0",
+              "size_y": "1.0",
+              "shape": "'RECTANGLE'"
             }
           }
         ],
@@ -1104,7 +1171,12 @@
               "use_shadow": null,
               "spot_size": null,
               "spot_blend": null,
-              "shadow_soft_size": null
+              "shadow_soft_size": null,
+              "light_type": null,
+              "angle": null,
+              "size": null,
+              "size_y": null,
+              "shape": null
             }
           }
         }
@@ -2263,6 +2335,70 @@
               "merge_distance": null,
               "dissolve_degenerate_distance": null,
               "recalculate_normals": false
+            }
+          }
+        }
+      }
+    },
+    "uv_unwrap_blender_mesh": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [
+          {
+            "method": "uv_unwrap_mesh",
+            "arguments": {
+              "object_name": "'Cube'",
+              "method": "'SMART_PROJECT'",
+              "uv_map_name": "None",
+              "angle_limit": "1.1519173063162575",
+              "island_margin": "0.0",
+              "cube_size": "1.0"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderUVUnwrapResponse"},
+        "usage": [{"tool": "uv_unwrap_blender_mesh", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "method": "CUBE_PROJECT",
+          "uv_map_name": "Lightmap",
+          "angle_limit": 1.0,
+          "island_margin": 0.02,
+          "cube_size": 2
+        },
+        "session_calls": [
+          {
+            "method": "uv_unwrap_mesh",
+            "arguments": {
+              "object_name": "'Cube'",
+              "method": "'CUBE_PROJECT'",
+              "uv_map_name": "'Lightmap'",
+              "angle_limit": "1.0",
+              "island_margin": "0.02",
+              "cube_size": "2.0"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderUVUnwrapResponse"},
+        "usage": [{"tool": "uv_unwrap_blender_mesh", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderUVUnwrapRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "method": "SMART_PROJECT",
+              "uv_map_name": null,
+              "angle_limit": 1.1519173063162575,
+              "island_margin": 0.0,
+              "cube_size": 1.0
             }
           }
         }
