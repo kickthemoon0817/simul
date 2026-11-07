@@ -27,13 +27,16 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # Version 8: export_simready_usd takes include_children, include_lights_and_cameras and force, and
 # authors UsdPhysics and UsdSemantics schemas through the add-on's bundled simready_usd module.
 # Version 9: capture tools take camera_name; capture_viewport_sequence writes files (output_dir, max_frames).
-# Version 10: assign_material replaces the object's material instead of appending a slot, reuses
+# Version 10: setup_rigid_body, add_force_field and add_rigid_body_constraint take new settings
+# (kinematic, direction, axis, limits, springs, motors, ...) and check them up front;
+# bake_simulation takes allow_long_bake and refuses a bake over its work budget without it.
+# Version 11: assign_material replaces the object's material instead of appending a slot, reuses
 # a material of the same name, and takes slot_index, face_indices, link, single_user,
 # reuse_existing and texture files; get_material_info takes max_nodes; set_light_params takes
 # light_type, angle, size, size_y and shape and refuses settings of another light type;
 # uv_unwrap_mesh is new. An older add-on would reject the arguments, or, left without them,
 # append a slot no face uses (the bug the new assignment fixes).
-PROTOCOL_VERSION = 10
+PROTOCOL_VERSION = 11
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 

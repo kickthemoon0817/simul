@@ -1615,7 +1615,12 @@
               "restitution": "0.0",
               "collision_shape": "'CONVEX_HULL'",
               "linear_damping": "0.04",
-              "angular_damping": "0.1"
+              "angular_damping": "0.1",
+              "kinematic": "None",
+              "collision_margin": "None",
+              "collision_collections": "None",
+              "use_deactivation": "None",
+              "start_deactivated": "None"
             }
           }
         ],
@@ -1631,7 +1636,12 @@
           "restitution": 0.3,
           "collision_shape": "BOX",
           "linear_damping": 0.1,
-          "angular_damping": 0.2
+          "angular_damping": 0.2,
+          "kinematic": true,
+          "collision_margin": 0.01,
+          "collision_collections": [0, 3],
+          "use_deactivation": true,
+          "start_deactivated": true
         },
         "session_calls": [
           {
@@ -1644,7 +1654,12 @@
               "restitution": "0.3",
               "collision_shape": "'BOX'",
               "linear_damping": "0.1",
-              "angular_damping": "0.2"
+              "angular_damping": "0.2",
+              "kinematic": "True",
+              "collision_margin": "0.01",
+              "collision_collections": "[0, 3]",
+              "use_deactivation": "True",
+              "start_deactivated": "True"
             }
           }
         ],
@@ -1667,7 +1682,12 @@
               "restitution": 0.0,
               "collision_shape": "CONVEX_HULL",
               "linear_damping": 0.04,
-              "angular_damping": 0.1
+              "angular_damping": 0.1,
+              "kinematic": null,
+              "collision_margin": null,
+              "collision_collections": null,
+              "use_deactivation": null,
+              "start_deactivated": null
             }
           }
         }
@@ -1679,14 +1699,38 @@
         "session_calls": [
           {
             "method": "add_force_field",
-            "arguments": {"field_type": "'WIND'", "strength": "1.0", "location": "None", "name": "None"}
+            "arguments": {
+              "field_type": "'WIND'",
+              "strength": "1.0",
+              "location": "None",
+              "name": "None",
+              "direction": "None",
+              "shape": "None",
+              "flow": "None",
+              "falloff_type": "None",
+              "falloff_power": "None",
+              "distance_max": "None",
+              "noise": "None"
+            }
           }
         ],
         "response": {"checked_against": "BlenderAddForceFieldResponse"},
         "usage": [{"tool": "add_blender_force_field", "success": false}]
       },
       "full": {
-        "arguments": {"field_type": "VORTEX", "strength": 3, "location": [1, 2, 3], "name": "Swirl"},
+        "arguments": {
+          "field_type": "VORTEX",
+          "strength": 3,
+          "location": [1, 2, 3],
+          "name": "Swirl",
+          "direction": [0, 1, 0],
+          "shape": "PLANE",
+          "flow": 0.5,
+          "falloff_type": "TUBE",
+          "falloff_power": 2,
+          "distance_max": 10,
+          "noise": 0.25
+        },
         "session_calls": [
           {
             "method": "add_force_field",
@@ -1694,7 +1738,14 @@
               "field_type": "'VORTEX'",
               "strength": "3.0",
               "location": "[1.0, 2.0, 3.0]",
-              "name": "'Swirl'"
+              "name": "'Swirl'",
+              "direction": "[0.0, 1.0, 0.0]",
+              "shape": "'PLANE'",
+              "flow": "0.5",
+              "falloff_type": "'TUBE'",
+              "falloff_power": "2.0",
+              "distance_max": "10.0",
+              "noise": "0.25"
             }
           }
         ],
@@ -1706,9 +1757,23 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderAddForceFieldRequest\nfield_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "1 validation error for BlenderAddForceFieldRequest\nfield_type\n  Input should be 'FORCE', 'WIND', 'VORTEX', 'MAGNET', 'HARMONIC', 'CHARGE', 'LENNARDJ', 'TEXTURE', 'GUIDE', 'BOID', 'TURBULENCE', 'DRAG' or 'FLUID' [type=literal_error, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
           "error_type": "ValidationError",
-          "details": {"input": {"field_type": {"bogus": 1}, "strength": 1.0, "location": null, "name": null}}
+          "details": {
+            "input": {
+              "field_type": {"bogus": 1},
+              "strength": 1.0,
+              "location": null,
+              "name": null,
+              "direction": null,
+              "shape": null,
+              "flow": null,
+              "falloff_type": null,
+              "falloff_power": null,
+              "distance_max": null,
+              "noise": null
+            }
+          }
         }
       }
     },
@@ -1741,7 +1806,15 @@
               "object1_name": "'A'",
               "object2_name": "'B'",
               "location": "None",
-              "disable_collisions": "True"
+              "disable_collisions": "True",
+              "axis": "None",
+              "limits": "None",
+              "springs": "None",
+              "motor_angular_velocity": "None",
+              "motor_angular_max_impulse": "None",
+              "motor_linear_velocity": "None",
+              "motor_linear_max_impulse": "None",
+              "breaking_threshold": "None"
             }
           }
         ],
@@ -1754,7 +1827,10 @@
           "object1_name": "A",
           "object2_name": "B",
           "location": [0, 0, 1],
-          "disable_collisions": false
+          "disable_collisions": false,
+          "axis": [0, 1, 0],
+          "limits": {"ang_z": [-0.5, 0.5]},
+          "breaking_threshold": 20
         },
         "session_calls": [
           {
@@ -1764,7 +1840,79 @@
               "object1_name": "'A'",
               "object2_name": "'B'",
               "location": "[0.0, 0.0, 1.0]",
-              "disable_collisions": "False"
+              "disable_collisions": "False",
+              "axis": "[0.0, 1.0, 0.0]",
+              "limits": "{'ang_z': [-0.5, 0.5]}",
+              "springs": "None",
+              "motor_angular_velocity": "None",
+              "motor_angular_max_impulse": "None",
+              "motor_linear_velocity": "None",
+              "motor_linear_max_impulse": "None",
+              "breaking_threshold": "20.0"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAddConstraintResponse"},
+        "usage": [{"tool": "add_blender_rigid_body_constraint", "success": false}]
+      },
+      "motor": {
+        "arguments": {
+          "constraint_type": "MOTOR",
+          "object1_name": "A",
+          "object2_name": "B",
+          "motor_angular_velocity": 2,
+          "motor_angular_max_impulse": 5,
+          "motor_linear_velocity": 0.5,
+          "motor_linear_max_impulse": 3
+        },
+        "session_calls": [
+          {
+            "method": "add_rigid_body_constraint",
+            "arguments": {
+              "constraint_type": "'MOTOR'",
+              "object1_name": "'A'",
+              "object2_name": "'B'",
+              "location": "None",
+              "disable_collisions": "True",
+              "axis": "None",
+              "limits": "None",
+              "springs": "None",
+              "motor_angular_velocity": "2.0",
+              "motor_angular_max_impulse": "5.0",
+              "motor_linear_velocity": "0.5",
+              "motor_linear_max_impulse": "3.0",
+              "breaking_threshold": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAddConstraintResponse"},
+        "usage": [{"tool": "add_blender_rigid_body_constraint", "success": false}]
+      },
+      "spring": {
+        "arguments": {
+          "constraint_type": "GENERIC_SPRING",
+          "object1_name": "A",
+          "object2_name": "B",
+          "limits": {"lin_z": [-1, 1]},
+          "springs": {"z": {"stiffness": 50, "damping": 0.5}}
+        },
+        "session_calls": [
+          {
+            "method": "add_rigid_body_constraint",
+            "arguments": {
+              "constraint_type": "'GENERIC_SPRING'",
+              "object1_name": "'A'",
+              "object2_name": "'B'",
+              "location": "None",
+              "disable_collisions": "True",
+              "axis": "None",
+              "limits": "{'lin_z': [-1.0, 1.0]}",
+              "springs": "{'z': {'stiffness': 50.0, 'damping': 0.5}}",
+              "motor_angular_velocity": "None",
+              "motor_angular_max_impulse": "None",
+              "motor_linear_velocity": "None",
+              "motor_linear_max_impulse": "None",
+              "breaking_threshold": "None"
             }
           }
         ],
@@ -1776,7 +1924,7 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderAddConstraintRequest\nconstraint_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "1 validation error for BlenderAddConstraintRequest\nconstraint_type\n  Input should be 'FIXED', 'POINT', 'HINGE', 'SLIDER', 'PISTON', 'GENERIC', 'GENERIC_SPRING' or 'MOTOR' [type=literal_error, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
           "error_type": "ValidationError",
           "details": {
             "input": {
@@ -1784,7 +1932,15 @@
               "object1_name": "A",
               "object2_name": "B",
               "location": null,
-              "disable_collisions": true
+              "disable_collisions": true,
+              "axis": null,
+              "limits": null,
+              "springs": null,
+              "motor_angular_velocity": null,
+              "motor_angular_max_impulse": null,
+              "motor_linear_velocity": null,
+              "motor_linear_max_impulse": null,
+              "breaking_threshold": null
             }
           }
         }
@@ -1882,18 +2038,23 @@
         "session_calls": [
           {
             "method": "bake_simulation",
-            "arguments": {"frame_start": "1", "frame_end": "50", "scope": "'rigid_body'"}
+            "arguments": {
+              "frame_start": "1",
+              "frame_end": "50",
+              "scope": "'rigid_body'",
+              "allow_long_bake": "False"
+            }
           }
         ],
         "response": {"checked_against": "BlenderBakeSimulationResponse"},
         "usage": [{"tool": "bake_blender_simulation", "success": false}]
       },
       "full": {
-        "arguments": {"frame_start": 1, "frame_end": 50, "scope": "all"},
+        "arguments": {"frame_start": 1, "frame_end": 50, "scope": "all", "allow_long_bake": true},
         "session_calls": [
           {
             "method": "bake_simulation",
-            "arguments": {"frame_start": "1", "frame_end": "50", "scope": "'all'"}
+            "arguments": {"frame_start": "1", "frame_end": "50", "scope": "'all'", "allow_long_bake": "True"}
           }
         ],
         "response": {"checked_against": "BlenderBakeSimulationResponse"},
@@ -1906,7 +2067,14 @@
           "success": false,
           "error": "1 validation error for BlenderBakeSimulationRequest\nframe_start\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
           "error_type": "ValidationError",
-          "details": {"input": {"frame_start": {"bogus": 1}, "frame_end": 50, "scope": "rigid_body"}}
+          "details": {
+            "input": {
+              "frame_start": {"bogus": 1},
+              "frame_end": 50,
+              "scope": "rigid_body",
+              "allow_long_bake": false
+            }
+          }
         }
       }
     },

@@ -71,6 +71,7 @@ from ..schemas.blender import (
     BlenderBakeScope,
     BlenderBakeSimulationRequest,
     BlenderBakeSimulationResponse,
+    BlenderBodyType,
     BlenderBoundingBoxRequest,
     BlenderBoundingBoxResponse,
     BlenderBoundsCheckRequest,
@@ -85,6 +86,9 @@ from ..schemas.blender import (
     BlenderCleanMeshResponse,
     BlenderClearParentRequest,
     BlenderClearParentResponse,
+    BlenderCollisionShape,
+    BlenderConstraintLimitAxis,
+    BlenderConstraintType,
     BlenderCreateMeshFromDataRequest,
     BlenderCreateMeshFromDataResponse,
     BlenderCreateObjectRequest,
@@ -99,9 +103,12 @@ from ..schemas.blender import (
     BlenderExecuteScriptResponse,
     BlenderExportFileRequest,
     BlenderExportFileResponse,
+    BlenderFalloffType,
+    BlenderFieldShape,
     BlenderFileInfoResponse,
     BlenderFocusOnObjectRequest,
     BlenderFocusOnObjectResponse,
+    BlenderForceFieldType,
     BlenderFreeBakeRequest,
     BlenderFreeBakeResponse,
     BlenderGetConstraintInfoRequest,
@@ -157,9 +164,18 @@ from ..schemas.blender import (
     BlenderSetTransformResponse,
     BlenderSetupRigidBodyRequest,
     BlenderSetupRigidBodyResponse,
+    BlenderSpringAxis,
+    BlenderSpringSettings,
     BlenderUVUnwrapRequest,
     BlenderUVUnwrapResponse,
     BlenderViewportInfoResponse,
+    FieldTenth,
+    NonNegativeFloat,
+    RigidBodyMass,
+    UnitFloat,
+    WorldSolverIterations,
+    WorldSubsteps,
+    WorldTimeScale,
 )
 from ..schemas.blender_ui import AgentControl, BlenderUIRequest, BlenderUIResponse
 from ..schemas.simready import (
@@ -1238,23 +1254,55 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     # -- Physics and simulation ----------------------------------------------
     BlenderTool(
         name="setup_blender_rigid_body",
-        description="Set up rigid body physics on a Blender object.",
+        description=(
+            "Set up rigid body physics on a mesh object, adding the scene's rigid body "
+            "world when there is none, or replace its settings. Every argument is "
+            "checked first (mass >= 0.001, friction >= 0, restitution and damping 0-1), "
+            "and a failure leaves the scene, world and selection unchanged. "
+            "kinematic=true makes an animated body that pushes simulated ones."
+        ),
         hints=OVERWRITING,
         operation="setup_rigid_body",
         request=BlenderSetupRigidBodyRequest,
         response=BlenderSetupRigidBodyResponse,
+        params={
+            "body_type": Param(BlenderBodyType),
+            "mass": Param(RigidBodyMass),
+            "friction": Param(NonNegativeFloat),
+            "restitution": Param(UnitFloat),
+            "collision_shape": Param(BlenderCollisionShape),
+            "linear_damping": Param(UnitFloat),
+            "angular_damping": Param(UnitFloat),
+            "collision_margin": Param(Optional[UnitFloat]),
+        },
     ),
     BlenderTool(
         name="add_blender_force_field",
-        description="Add a force field to the scene.",
+        description=(
+            "Add a force field to the scene, oriented in world space: its local +Z "
+            "(where WIND blows, the axis VORTEX turns about) points along direction, "
+            "world +Z by default, whatever the editor's Align preference. The reply "
+            "reports rotation_euler and direction."
+        ),
         hints=ADDITIVE,
         operation="add_force_field",
         request=BlenderAddForceFieldRequest,
         response=BlenderAddForceFieldResponse,
+        params={
+            "field_type": Param(BlenderForceFieldType),
+            "shape": Param(Optional[BlenderFieldShape]),
+            "falloff_type": Param(Optional[BlenderFalloffType]),
+            "falloff_power": Param(Optional[FieldTenth]),
+            "distance_max": Param(Optional[NonNegativeFloat]),
+            "noise": Param(Optional[FieldTenth]),
+        },
     ),
     BlenderTool(
         name="get_blender_force_field_info",
-        description="Get force field parameters for an object.",
+        description=(
+            "Get force field parameters, world location and direction (local +Z) for an "
+            "object; an object without a force field, such as a collider, is an error."
+        ),
         hints=READ_ONLY,
         operation="get_force_field_info",
         request=BlenderGetForceFieldInfoRequest,
@@ -1262,15 +1310,35 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="add_blender_rigid_body_constraint",
-        description="Add a rigid body constraint between two objects.",
+        description=(
+            "Add a rigid body constraint between two different rigid bodies, as an "
+            "empty at the pivot (location, default midway between them). axis sets "
+            "the constraint axis in world space: the hinge axis for HINGE, the slide "
+            "or motor axis for SLIDER, PISTON and MOTOR; unrotated by default, so a "
+            "HINGE turns about world Z. limits, springs, motor_* and "
+            "breaking_threshold configure it. Everything is checked first; a failure "
+            "leaves no empty behind. The reply reports pivot, axis and local_axes."
+        ),
         hints=ADDITIVE,
         operation="add_rigid_body_constraint",
         request=BlenderAddConstraintRequest,
         response=BlenderAddConstraintResponse,
+        params={
+            "constraint_type": Param(BlenderConstraintType),
+            "limits": Param(Optional[Dict[BlenderConstraintLimitAxis, List[float]]]),
+            "springs": Param(Optional[Dict[BlenderSpringAxis, BlenderSpringSettings]]),
+            "motor_angular_max_impulse": Param(Optional[NonNegativeFloat]),
+            "motor_linear_max_impulse": Param(Optional[NonNegativeFloat]),
+            "breaking_threshold": Param(Optional[NonNegativeFloat]),
+        },
     ),
     BlenderTool(
         name="get_blender_constraint_info",
-        description="Get rigid body constraint info for an object.",
+        description=(
+            "Get rigid body constraint info for a constraint empty: its bodies, pivot, "
+            "axis and local axes in world space, limits, springs, motor and breaking "
+            "threshold."
+        ),
         hints=READ_ONLY,
         operation="get_constraint_info",
         request=BlenderGetConstraintInfoRequest,
@@ -1311,8 +1379,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "bodies, cloth, soft bodies, dynamic paint, particles). Refused for a "
             "disabled rigid body world. The reply gives the range the cache holds "
             "and warns about scene frames it leaves out, where bodies hold their "
-            "pose. Runs on Blender's main thread: a long bake can outlast the "
-            "client timeout."
+            "pose. A bake runs on Blender's main thread and cannot be stopped, so one "
+            "over 20 000 frames or 400 000 body-frames (frames x bodies, up to about 16 s) "
+            "is refused unless allow_long_bake=true; past the client timeout Blender "
+            "keeps baking and the next calls wait behind it."
         ),
         hints=OVERWRITING,
         operation="bake_simulation",
@@ -1360,6 +1430,11 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         operation="set_rigid_body_world",
         request=BlenderSetRigidBodyWorldRequest,
         response=BlenderRigidBodyWorldResponse,
+        params={
+            "substeps_per_frame": Param(Optional[WorldSubsteps]),
+            "solver_iterations": Param(Optional[WorldSolverIterations]),
+            "time_scale": Param(Optional[WorldTimeScale]),
+        },
     ),
     # -- Scripting and mesh from data ----------------------------------------
     BlenderTool(
