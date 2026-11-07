@@ -14,6 +14,7 @@ derived from the same source rather than written out.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -411,18 +412,47 @@ def _raising(exc: BaseException) -> Any:
     return operator
 
 
+class _Objects(dict):
+    """bpy.data.objects: looked up by name, iterated over its objects."""
+
+    def __iter__(self) -> Any:
+        return iter(list(self.values()))
+
+
+def _view_layer() -> SimpleNamespace:
+    """A view layer whose only collection is the scene's own, active and visible."""
+    root = SimpleNamespace(
+        collection=SimpleNamespace(
+            name="Scene Collection", library=None, is_editable=True, hide_viewport=False
+        ),
+        children=[],
+        exclude=False,
+        hide_viewport=False,
+    )
+    return SimpleNamespace(
+        objects=SimpleNamespace(active=None),
+        layer_collection=root,
+        active_layer_collection=root,
+    )
+
+
 def _stand_in_bpy() -> SimpleNamespace:
     """Just enough of bpy for the physics tools, with operators that fail like Blender 5.0's."""
     cube = SimpleNamespace(
-        name="Cube", type="MESH", rigid_body=None, select_set=lambda value: None
+        name="Cube",
+        type="MESH",
+        rigid_body=None,
+        select_set=lambda value: None,
+        as_pointer=lambda: 1,
     )
     scene = SimpleNamespace(rigidbody_world=SimpleNamespace(), objects={"Cube": cube})
     return SimpleNamespace(
         app=SimpleNamespace(version=(5, 0, 1), version_string="5.0.1", background=True),
-        data=SimpleNamespace(objects={"Cube": cube}),
+        data=SimpleNamespace(objects=_Objects(Cube=cube)),
         context=SimpleNamespace(
             scene=scene,
-            view_layer=SimpleNamespace(objects=SimpleNamespace(active=None)),
+            view_layer=_view_layer(),
+            temp_override=lambda **members: contextlib.nullcontext(),
         ),
         ops=SimpleNamespace(
             rigidbody=SimpleNamespace(object_add=_raising(RuntimeError(POLL_FAILED))),
@@ -480,20 +510,25 @@ def test_blender_missing_object_is_not_found(
 def test_blender_bpy_failure_without_added_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A bad enum is a TypeError from bpy, whose message already lists the valid values.
+    """An operator's TypeError keeps bpy's message, which says enough.
 
     The wrapper that restated the field type, and re-raised the TypeError as a
-    RuntimeError, is gone. The envelope reports it as the ValidationError it
-    is, with the choices the message lists and the closest one.
+    RuntimeError, is gone. A type Blender does not know never reaches bpy now:
+    the request model lists the valid ones. One an operator still refuses is
+    the ValidationError it is, with the choices the message lists.
     """
     instance = _embedded_blender(monkeypatch, tmp_path)
 
+    refused = _call(instance, "add_blender_force_field", field_type="BOGUS")
     payload = _call(
         instance,
         "add_blender_force_field",
-        field_type="BOGUS",
+        field_type="WIND",
         location=[0.0, 0.0, 0.0],
     )
+
+    assert refused["error_type"] == "ValidationError"
+    assert "'FORCE', 'WIND'" in refused["error"]
 
     message = ENUM_MISSING
     assert payload == {
@@ -514,7 +549,8 @@ def test_blender_bpy_failure_without_added_context(
         },
     }
     assert _records(instance, "add_blender_force_field") == [
-        {"success": False, "error": message}
+        {"success": False, "error": refused["error"]},
+        {"success": False, "error": message},
     ]
 
 
@@ -590,7 +626,12 @@ def test_blender_validation_error(
 
     payload = _call(instance, "list_blender_scene_objects", max_items=0)
 
-    arguments = {"collection_name": None, "include_hidden": False, "max_items": 0}
+    arguments = {
+        "collection_name": None,
+        "include_hidden": False,
+        "max_items": 0,
+        "offset": 0,
+    }
     # The same shape the MCP schema layer reports: one line per field, the
     # fields listed, the input echoed; no pydantic banner or help URL.
     message = "max_items: Input should be greater than or equal to 1"

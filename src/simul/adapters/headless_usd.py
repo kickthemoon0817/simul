@@ -22,7 +22,9 @@ from ..usd import editing
 from ..usd.editing import USDEditError
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
+from ..usd.sandbox import CompositionSandbox
 from ..usd.validation import USDLoadError, check_usd_file, open_root_layer
+from ..utils.paths import SandboxDenied
 
 logger = get_logger(__name__)
 
@@ -76,12 +78,16 @@ class HeadlessUSDSession(LoggerMixin):
             return None
 
     @monitor_performance("headless_session.load_stage")
-    def load_stage_or_raise(self, file_path: Union[str, Path]) -> str:
+    def load_stage_or_raise(
+        self, file_path: Union[str, Path], sandbox: Optional[CompositionSandbox] = None
+    ) -> str:
         """
         Load a USD stage from file, saying why when it cannot.
 
         Args:
             file_path: Path to USD file
+            sandbox: Holds every layer and asset the stage draws on to the
+                file sandbox; None (the CLI) checks nothing beyond the file.
 
         Returns:
             Stage identifier
@@ -92,12 +98,14 @@ class HeadlessUSDSession(LoggerMixin):
                 ``usd.allowed_extensions``, unreadable, empty, over
                 ``usd.max_file_size_mb``) or pxr could not parse it; the
                 error carries pxr's own reason.
+            SandboxDenied: The file's composition reaches outside the sandbox.
         """
         file_path = str(Path(file_path).resolve())
         facts = check_usd_file(file_path, self.settings.usd)
-        # Held while the reader opens the stage, which then finds the layer in
-        # pxr's registry instead of parsing the file a second time.
+        # Held while the reader opens the stage, which then finds these layers
+        # in pxr's registry instead of parsing the files a second time.
         root_layer = open_root_layer(file_path, facts.head)
+        walked = sandbox.check_layers(root_layer) if sandbox is not None else []
 
         stage = self.usd_reader.open_stage(file_path)
         if not stage:
@@ -107,6 +115,14 @@ class HeadlessUSDSession(LoggerMixin):
                 f"pxr parsed the {root_layer.GetFileFormat().formatId} layer but could not "
                 "compose a stage from it; the server log has pxr's diagnostic",
             )
+        if sandbox is not None:
+            try:
+                sandbox.check_stage(stage)
+            except SandboxDenied:
+                # Never hand out, or cache, a stage that read outside files.
+                self.usd_reader.close_stage(file_path)
+                raise
+        del walked
         stage_id = self._generate_stage_id(file_path)
         self._active_stages[stage_id] = stage
         self._bbox_caches[stage_id] = BBoxCache(stage)

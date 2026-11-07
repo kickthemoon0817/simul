@@ -95,6 +95,7 @@ def test_the_choice_lists_are_the_tools_own() -> None:
     from simul.adapters import unreal_runtime
 
     assert set(values("execute_unreal_script", "mode")) == unreal_runtime.UNREAL_EXEC_MODES
+    assert values("set_unreal_actor_visibility", "scope") == unreal_runtime.VISIBILITY_SCOPES
 
 
 def test_choices_never_replace_a_literal_a_parameter_declares() -> None:
@@ -241,6 +242,8 @@ _PROSE_ONLY = {
     ("export_blender_file", "file_path"),
     ("export_simready_usd", "file_path"),
     ("search_prims", "query"),
+    ("set_isaac_material_property", "property_name"),
+    ("set_blender_object_mode", "mode"),
 }
 
 

@@ -909,7 +909,7 @@ class TestMaterials:
         data = {
             "material_path": "/World/Looks/Mat1",
             "property_name": "diffuse_color_constant",
-            "value_set": "[0.5, 0.5, 0.5]",
+            "value_set": [0.5, 0.5, 0.5],
         }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(
@@ -941,9 +941,11 @@ class TestStageAssetOps:
         assert result["total_prims"] == 50
 
     def test_save_isaac_stage(self) -> None:
-        """save_isaac_stage saves the current stage."""
+        """save_isaac_stage asks what it would write, then saves the current stage."""
+        probe = {"stage_url": "/tmp/simul-work/test.usd", "dirty_layers": [], "timeline_stopped": True}
         data = {"file_path": "/tmp/simul-work/test.usd", "saved": True}
-        tools = _make_tools(execute_return=_make_result(data))
+        tools = _make_tools()
+        tools._client.execute.side_effect = [_make_result(probe), _make_result(data)]
         result = asyncio.run(tools.save_isaac_stage())
         assert result["success"] is True
         assert result["saved"] is True

@@ -77,9 +77,8 @@ omniverse://localhost/NVIDIA/Assets/Isaac/4.2/Isaac/Sensors/
 
 ```
 mcp__simul__import_isaac_asset
-  file_path: "omniverse://localhost/NVIDIA/Assets/Isaac/4.2/Isaac/Robots/Franka/franka.usd"
-  prim_path: "/World/Franka"
-  asset_type: "usd"
+  asset_path: "omniverse://localhost/NVIDIA/Assets/Isaac/4.2/Isaac/Robots/Franka/franka.usd"
+  target_path: "/World/Franka"
 ```
 
 ## Troubleshooting Nucleus Access

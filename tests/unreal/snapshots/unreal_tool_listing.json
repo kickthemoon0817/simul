@@ -607,7 +607,7 @@
   {
    "name": "set_unreal_camera_view",
    "title": "Set Unreal Camera View",
-   "description": "Set the editor viewport camera position and rotation.",
+   "description": "Set the editor viewport camera position and rotation and return the camera read back. Each axis of location within 4398046511104 cm (2^42) of the origin and pitch from -90 to 90 degrees, the furthest Unreal takes; a group left out keeps its value.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -705,7 +705,7 @@
   {
    "name": "focus_unreal_on_actor",
    "title": "Focus Unreal On Actor",
-   "description": "Focus the editor viewport camera on a specific actor and select it. With distance 0 the camera looks at the center of the actor's bounds and backs off until they fit a view fov degrees across and aspect_ratio wide per unit of height: by default UE's default 90-degree field of view on the 16:9 of the default capture. Editor Python cannot read the viewport's field of view, so pass fov when it was changed, and aspect_ratio for a capture of another shape. distance reports the distance used, and fit_warning says when an actor without bounds got the default 500 cm. selected reports whether Unreal selected it. While PIE runs, Unreal's editor selects nothing, so the camera moves but selected is false, with pie_active true and a warning.",
+   "description": "Focus the editor viewport camera on a specific actor and make it the whole selection. With distance 0 the camera looks at the center of the actor's bounds and backs off until they fit a view fov degrees across and aspect_ratio wide per unit of height: by default UE's default 90-degree field of view on the 16:9 of the default capture. Editor Python cannot read the viewport's field of view, so pass fov when it was changed, and aspect_ratio for a capture of another shape. distance reports the distance used, and fit_warning says when an actor without bounds got the default 500 cm. selected reports whether Unreal selected it. While PIE runs, Unreal's editor selects nothing, so the camera moves but selected is false, with pie_active true and a warning.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -757,7 +757,7 @@
   {
    "name": "spawn_unreal_actor",
    "title": "Spawn Unreal Actor",
-   "description": "Spawn an actor from a class or asset path.",
+   "description": "Spawn an actor from a class or asset path, with its label, in one undoable editor transaction; the label and transform are read back. Refused: a class Unreal does not let you place (the level's WorldSettings and other per-level singletons, game-framework classes such as GameModeBase or PlayerController, a bare Brush), an abstract class, a map or an actor in a level, and a label Unreal would not take (leading or trailing whitespace, over 1023 characters, 'None').",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -798,7 +798,7 @@
      },
      "label": {
       "default": "",
-      "description": "Optional actor label in the outliner.",
+      "description": "Optional actor label in the outliner: no leading or trailing whitespace, at most 1023 characters, not 'None'.",
       "type": "string"
      }
     },
@@ -825,13 +825,13 @@
   {
    "name": "delete_unreal_actor",
    "title": "Delete Unreal Actor",
-   "description": "Delete an actor from the level. DESTRUCTIVE operation.",
+   "description": "Delete an actor from the level, in one undoable editor transaction. DESTRUCTIVE operation. A path that names no actor of the level open in the editor (or a label) is NotFoundError; the level's WorldSettings, its builder brush and other actors the editor keeps out of the Outliner are refused.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
-      "description": "Full actor path to delete.",
+      "description": "Full actor path, as list_unreal_actors reports it.",
       "type": "string"
      }
     },
@@ -990,7 +990,7 @@
   {
    "name": "call_unreal_actor_function",
    "title": "Call Unreal Actor Function",
-   "description": "Call a BlueprintCallable UFUNCTION on an actor.",
+   "description": "Call a BlueprintCallable UFUNCTION on an actor of the level open in the editor, as one undo step that records the actor and its root component first.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1124,7 +1124,7 @@
   {
    "name": "set_unreal_actor_visibility",
    "title": "Set Unreal Actor Visibility",
-   "description": "Set actor visibility in the Unreal level.",
+   "description": "Show or hide an actor, in one undoable editor transaction, and read every flag back. scope 'editor' is the editor's hide (the Outliner's eye): the level viewport and captures honour it, and it lasts the editor session unless persistent also sets the hidden-at-editor-startup flag saved with the level. scope 'game' is hidden in game, saved with the level: Play In Editor and the packaged game honour it, the level viewport still draws the actor. 'all' (the default) sets both. propagate applies the same to every actor attached under it. actors lists each actor's hidden_in_editor, hidden_in_editor_at_startup and hidden_in_game read back.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1135,12 +1135,27 @@
      },
      "visible": {
       "default": true,
-      "description": "Whether the actor should be visible.",
+      "description": "Show the actor (true) or hide it (false).",
       "type": "boolean"
      },
      "propagate": {
       "default": true,
-      "description": "Propagate to child components/actors.",
+      "description": "Apply the same to every actor attached under it, children of children included; a hidden parent hides none of them.",
+      "type": "boolean"
+     },
+     "scope": {
+      "default": "all",
+      "description": "Which visibility to set: 'editor' (level viewport and captures), 'game' (Play In Editor and the packaged game) or 'all'.",
+      "enum": [
+       "all",
+       "editor",
+       "game"
+      ],
+      "type": "string"
+     },
+     "persistent": {
+      "default": false,
+      "description": "Editor scopes only: also set the hidden-at-editor-startup flag saved with the level, so the editor hiding outlasts a reload. Not while Play In Editor runs.",
       "type": "boolean"
      }
     },

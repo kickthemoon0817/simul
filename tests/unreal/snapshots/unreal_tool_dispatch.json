@@ -1606,7 +1606,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "visible": true,
-      "propagate": true
+      "propagate": true,
+      "scope": "all",
+      "persistent": false
      }
     }
    ],
@@ -1629,7 +1631,9 @@
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "visible": false,
-    "propagate": false
+    "propagate": false,
+    "scope": "editor",
+    "persistent": true
    },
    "envelope": [
     {
@@ -1645,7 +1649,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "visible": false,
-      "propagate": false
+      "propagate": false,
+      "scope": "editor",
+      "persistent": true
      }
     }
    ],
@@ -4443,6 +4449,95 @@
     {
      "success": false,
      "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent, not both"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_visibility",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "scope": "viewport"
+   },
+   "envelope": [],
+   "session": [],
+   "result": {
+    "is_error": true,
+    "payload": {
+     "success": false,
+     "error": "scope: Input should be 'all', 'editor' or 'game'",
+     "error_type": "ValidationError",
+     "details": {
+      "errors": [
+       {
+        "field": "scope",
+        "message": "Input should be 'all', 'editor' or 'game'",
+        "type": "literal_error",
+        "constraint": {
+         "expected": "'all', 'editor' or 'game'"
+        },
+        "input": "viewport"
+       }
+      ],
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "scope": "viewport"
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "scope: Input should be 'all', 'editor' or 'game'"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_visibility",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "scope": "game",
+    "persistent": true
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_visibility",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorVisibilityResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": true,
+    "payload": {
+     "success": false,
+     "error": "persistent applies to the editor's hiding (scope 'editor' or 'all'); hidden in game is always saved with the level",
+     "error_type": "ValidationError",
+     "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "persistent applies to the editor's hiding (scope 'editor' or 'all'); hidden in game is always saved with the level",
+        "type": "value_error"
+       }
+      ],
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "visible": true,
+       "propagate": true,
+       "scope": "game",
+       "persistent": true
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "persistent applies to the editor's hiding (scope 'editor' or 'all'); hidden in game is always saved with the level"
     }
    ]
   },

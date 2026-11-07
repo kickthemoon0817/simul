@@ -204,6 +204,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         "scheme": Choices(("catmull_clark", "loop", "uniform"), enforced=False),
     },
     "simplify_unreal_mesh": {"target_percentage": Bounds(ge=0.0, le=1.0)},
+    "set_unreal_actor_visibility": {"scope": Choices(("all", "editor", "game"))},
     "control_unreal_simulation": {
         "action": Choices(("start", "stop", "pause", "resume", "step")),
     },
@@ -222,6 +223,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     },
     "capture_blender_viewport_sequence": {
         "step": Bounds(ge=1),
+        "max_frames": Bounds(ge=1, le=100),
         "width": Bounds(ge=64, le=4096),
         "height": Bounds(ge=64, le=4096),
         "jpeg_quality": Bounds(ge=1, le=100),

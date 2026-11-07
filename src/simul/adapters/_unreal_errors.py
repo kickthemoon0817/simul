@@ -49,6 +49,20 @@ from ..mcp.error_types import (  # noqa: F401  (re-exported)
     VALIDATION_ERROR,
 )
 
+#: Suffix of the domain types for a change Unreal took but the read-back shows
+#: it did not make (``TransformNotApplied``, ``RenderSettingNotApplied`` and the
+#: actor tools' types below), so a client can match the family.
+NOT_APPLIED_SUFFIX = "NotApplied"
+
+# The actor tools' read-back failures. Each carries ``details.expected`` (what
+# was asked) and ``details.actual`` (what Unreal reads back).
+ATTACHMENT_NOT_APPLIED = "AttachmentNotApplied"
+COMPONENT_NOT_APPLIED = "ComponentNotApplied"
+RENAME_NOT_APPLIED = "RenameNotApplied"
+DELETE_NOT_APPLIED = "DeleteNotApplied"
+VISIBILITY_NOT_APPLIED = "VisibilityNotApplied"
+CAMERA_NOT_APPLIED = "CameraNotApplied"
+
 
 class UnrealError(Exception):
     """A failed Unreal request, named by its ``error_type``.

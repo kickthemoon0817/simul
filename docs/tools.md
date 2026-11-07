@@ -26,8 +26,10 @@ mapping keeps its prefix and is named in `truncated_fields`.
 
 ## Headless USD
 
-No running application needed. File arguments must be inside the sandbox
-(see [configuration.md](configuration.md#file-sandbox)).
+No running application needed. File arguments must be inside the sandbox,
+and so must every sublayer, reference, payload, clip and asset path the file
+draws on: one outside it fails the call with `SandboxError` listing them (see
+[configuration.md](configuration.md#file-sandbox)).
 
 | Group | Tools |
 |---|---|
@@ -73,11 +75,47 @@ No running application needed. File arguments must be inside the sandbox
   depth-first (path, type, depth, child count, API schemas), paged with
   `max_results`/`offset`. `include_properties` adds each prim's authored
   attributes and relationship targets, so a whole robot reads in one call.
+- **Meshes.** `get_mesh_info` is computed with numpy over whole arrays (a
+  million-vertex mesh in about 0.3 s). It reports normals from
+  `primvars:normals` or `normals` (`normals_source`), `uv_sets`, and the
+  materials `UsdShade.MaterialBindingAPI` resolves: the mesh's, then each
+  `materialBind` subset's (also on the subset entry), plus a
+  `physics_material` that carries `PhysicsMaterialAPI`. `surface_area`, `volume` and
+  `bbox` are in the mesh's own space; `volume` is null unless the mesh is
+  closed, `surface_area` null for invalid topology, and `bbox` null without
+  points. Face areas use Newell's method, exact for planar faces, concave
+  ones included. Faces listed in `holeIndices` add no area and leave their
+  edges open. `time_code` reads a deforming mesh, and `points_time_samples`
+  says whether it deforms. A mesh whose points or topology exist only as
+  time samples has nothing to measure at the default time: it comes back
+  `measured: false`, with null topology and geometry (not invalid), its
+  `sampled_time_range` and a `note`. Subset indices are summarised
+  (`index_count` plus the first 16).
+- **Summaries.** `summarize_scene` reports:
+  - `scene_size_meters` next to `scene_size`;
+  - `has_animation` from an authored time range or time samples spanning
+    more than one time (`time_sample_range`), with `duration_seconds` (time
+    codes divided by `timeCodesPerSecond`);
+  - `warnings` for layers whose authored `upAxis` or `metersPerUnit` differs
+    from the stage's (USD rescales and reorients nothing), one entry per
+    mismatch and value with `layer_count` and up to 5 example `layers`;
+    at most 10 groups, then a `MoreUnitMismatches` count;
+  - `materials`, `root_prims` and their counts;
+  - `(typeless)` as the type key of untyped prims.
+
+  Instanced meshes count once per instance and are measured once. Mesh
+  `total_surface_area` and `total_volume` sum each mesh in its own space,
+  before transforms. A deforming mesh with time-sampled points is measured
+  at its first sample and counted in `meshes_measured_at_first_sample`.
+  `layer_count` (here and in `load_usd_file`) counts the file's layer stack,
+  not the session layer, and `load_usd_file`'s `has_animation` follows the
+  same rule as the summary.
 - **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
   lists of rows, asset paths their authored string.
 - **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
   is a `NotFoundError`; a relative, malformed or property path is a
-  `ValidationError`.
+  `ValidationError` with `details.code` `InvalidPrimPath`, as the edit tools
+  report it.
 
 `validate_usd_file` opens the file with pxr, as `load_usd_file` does, and
 keeps no stage. `can_read` says whether pxr opened it (so whether
@@ -261,6 +299,30 @@ Notes:
   need not follow that order. Angular drive targets and revolute limits are in
   degrees. In the joint aspect, an infinite value ("no limit",
   "unbreakable") is null with a `<key>_note`, since JSON has no infinity.
+- `set_isaac_material_property` types a new input the way the shader declares
+  it (texture paths become assets, flags bools, enums ints) and refuses a
+  name that is not an OmniPBR or UsdPreviewSurface input, suggesting the
+  closest ones (`allow_unknown_input=true` overrides).
+- `import_isaac_asset` and `add_isaac_reference` reference USD layers only
+  (convert OBJ, FBX and glTF first). They reference the asset's first root
+  prim when it has no defaultPrim, and undo a reference that composes
+  nothing. An import never merges into an existing prim (it goes to
+  `<target_path>_N`). It corrects an authored metersPerUnit / upAxis
+  mismatch by making `target_path` an Xform with
+  `xformOp:scale:unitsResolve` and `xformOp:rotateX:unitsResolve` and
+  referencing the asset on its child `<target_path>/<asset root name>`
+  (`asset_root_path`), so the asset root's own transform is converted too.
+  A failed import removes every prim it created.
+- `save_isaac_stage` checks an in-place save's files against the write
+  sandbox, needs `overwrite=true` for URL targets, and refuses while the
+  timeline is playing or paused unless `allow_while_playing=true`.
+- `set_isaac_graph_node_values` fails when any attribute fails, still
+  reporting what was set. With script execution disabled, the graph, import
+  and extension tools refuse code-running nodes (ScriptNode,
+  omni.warp.WarpKernel, Replicator script nodes), code attributes,
+  connections into them and the script extensions
+  ([configuration.md](configuration.md#script-execution)).
+  `disable_isaac_extension` fails when the extension stays enabled.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,
   selection, timeline and stage; `get_isaac_ui_window` walks one window's
   widget tree.
@@ -377,6 +439,16 @@ Behaviour worth knowing:
   `error` carries Remote Control's own message, and `details` carries the
   `status`, the `route` and `remote_control_message`. The domain types
   (`PIEActive`, `TransformNotApplied` and the like) are unchanged.
+- A change Unreal took without an error, but which the read-back shows it did
+  not make, fails with an `error_type` ending in `NotApplied`, so a client can
+  match the family by that suffix: `TransformNotApplied`,
+  `RenderSettingNotApplied`, `MaterialParamsNotApplied`, `PhysicsNotApplied`,
+  `PhysicsParamsNotApplied`, and for the actor tools `AttachmentNotApplied`
+  (parenting), `ComponentNotApplied` (a component not added),
+  `RenameNotApplied` (a component name or an actor label not taken),
+  `DeleteNotApplied`, `VisibilityNotApplied` and `CameraNotApplied` (the
+  viewport camera). The actor tools' ones carry `details.expected`, what was
+  asked, and `details.actual`, what Unreal reads back.
 - `batch_unreal_operations` (registered with script execution allowed) sends
   each operation as `RequestId`, `URL`, `Verb`, `Body`, in that order, with a
   unique `RequestId`. Operations without one are numbered. Remote Control
@@ -417,7 +489,7 @@ Behaviour worth knowing:
   Static; those come back as `ValidationError` (itself, a cycle) or
   `InvalidState` (mobility, an actor without a root component) with the reason,
   before anything changes. An attachment Unreal still refuses is an
-  `EngineError`, and its transaction is cancelled.
+  `AttachmentNotApplied`, and its transaction is cancelled.
 - `add_unreal_component` adds an instance component the way the editor's Add
   Component button does (`SubobjectDataSubsystem`): Remote Control refuses
   `AddComponentByClass` on UE 5.7. `component_class` is a native class name
@@ -432,6 +504,61 @@ Behaviour worth knowing:
   class that is not a component and a name already used inside the actor are
   refused first. Unreal adds its usual helpers too, such as a light's editor
   icon (a BillboardComponent).
+- Every actor edit is one undoable editor transaction, with the actors it
+  changes recorded first, so one editor undo reverts that edit and nothing
+  before it: spawn, delete, transform, visibility, parenting, components and
+  `call_unreal_actor_function` (Remote Control's `generateTransaction`, which
+  records the actor and its root component; a function that changes another
+  object records only what it records itself). An edit outside a transaction
+  used to leave the undo history alone, so the next undo reverted the edit
+  before it. An edit that changes nothing, such as showing a visible actor or
+  calling a getter, leaves no undo step: Unreal drops a transaction that
+  records no change.
+- `set_unreal_actor_visibility` sets the visibility `scope` names, on the actor
+  and, with `propagate` (the default), on every actor attached under it, since
+  a hidden parent hides none of its children:
+  - `editor`: the editor's hide, as the Outliner's eye. The level viewport and
+    `capture_unreal_viewport` leave the actor out. It lasts the editor session;
+    with `persistent: true` the hidden-at-editor-startup flag, saved with the
+    level and applied when it loads, is set too (or cleared, to show it). Unreal
+    sets that flag only through its startup commands, which act on the
+    selection, so the actors are selected for it and the selection restored;
+    `persistent` is refused while PIE runs, when the editor selects nothing.
+  - `game`: hidden in game, saved with the level, which Play In Editor and the
+    packaged game honour. The level viewport still draws the actor outside
+    Game View.
+  - `all` (the default): both.
+
+  The reply's `actors` lists each actor's `hidden_in_editor`,
+  `hidden_in_editor_at_startup` and `hidden_in_game` read back, the actor
+  first; one that reads back other than asked fails the call with
+  `VisibilityNotApplied`.
+- `spawn_unreal_actor` refuses a class Unreal does not let you place, and a
+  Blueprint of one: the level's per-level singletons (WorldSettings,
+  LevelScriptActor, WorldDataLayers, the World Partition minimap, the default
+  physics volume, the particle event manager, navigation data) and the
+  game-framework classes the game mode spawns when play starts (GameModeBase,
+  GameStateBase, GameSession, GameNetworkManager, PlayerState, Controller,
+  HUD, PlayerCameraManager), all declared NotPlaceable, which the editor's
+  spawn functions ignore (a second WorldSettings landed in a saved level). It
+  refuses the bare `Brush` class too (volumes spawn), an abstract class, and,
+  before anything loads, a map or a path into one (an actor in a level). A
+  label with leading or trailing whitespace, over 1023 characters or `None` is
+  refused before anything spawns, since Unreal trims or drops it without a
+  word, and the label is read back: one Unreal still does not take removes the
+  actor again (`RenameNotApplied`).
+- `delete_unreal_actor` takes the actor's full path; a label, a missing path or
+  an actor already deleted is `NotFoundError`. The level's WorldSettings, its
+  builder brush and the other actors the editor keeps out of the Outliner are
+  refused with `ValidationError`, as the editor does not let you delete them.
+  The deletion is read back (`DeleteNotApplied` when the actor is still
+  there).
+- `set_unreal_camera_view` takes each axis of `location` within
+  4398046511104 cm (2^42) of the origin and `pitch` from -90 to 90 degrees;
+  Unreal clamps anything beyond without a word, so a value outside is a
+  `ValidationError` and the camera does not move. The reply is the camera
+  read back, location and rotation, also for a group left unchanged; a camera
+  that reads back other than what was set is a `CameraNotApplied`.
 - Actor inspection, physics, materials and PIE start/stop/pause/resume use
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
@@ -611,7 +738,7 @@ Behaviour worth knowing:
   a transient Material Instance Dynamic that copies the material's
   parameters with their layers.
 - `focus_unreal_on_actor` points the level viewport camera at the actor and
-  selects it, reading the selection back: `selected` is false, with a
+  makes it the whole editor selection, reading the selection back: `selected` is false, with a
   `warning`, while PIE runs (below) and for an actor Unreal does not select:
   one hidden in the editor or in a hidden or locked level, a child actor or an
   actor inside a level instance (Unreal selects those only through their
@@ -684,7 +811,9 @@ Behaviour worth knowing:
     physics or collision edit says so in its `warning`. A physics or collision
     edit given the actor's path in the simulation's world (`UEDPIE_<n>_<map>`)
     changes the running copy instead, which is neither undoable nor saved;
-    every other actor tool finds no actor at such a path.
+    every other actor tool finds no actor at such a path, and its error names
+    the editor's path. `set_unreal_actor_visibility` with `persistent` is
+    refused with `PIEActive`, as the editor selects nothing then.
   - `set_unreal_material_params` edits the material instance asset, which the
     running game uses too: an edit made during PIE shows in the game and stays
     after PIE stops.
@@ -729,7 +858,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Group | Tools |
 |---|---|
 | Scene and files | `get_blender_info`, `get_blender_file_info`, `summarize_blender_scene`, `list_blender_scene_objects`, `search_blender_objects`, `open_blender_file`, `save_blender_file`, `import_blender_file`, `export_blender_file` |
-| Objects | `create_blender_object`, `delete_blender_object`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
+| Objects | `create_blender_object`, `delete_blender_object`, `set_blender_object_mode`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
 | Materials and lights | `get_blender_material_info`, `assign_blender_material`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`, `get_blender_rigid_body_world`, `set_blender_rigid_body_world` |
@@ -778,12 +907,51 @@ Behaviour worth knowing:
   child's values become relative to the parent and it moves. A parent that is
   the child itself or one of its descendants is refused (Blender ignores such
   a parent without an error).
+- `create_blender_object` puts the object in the active collection, as
+  Blender's Add menu does. When that collection, or one holding it, is
+  excluded from the view layer, hidden or disabled in viewports, the object
+  goes in the scene's own collection instead, and `warning` says so; the
+  user's active collection stays as it was. The new object is the one the add
+  operator created (an object hidden in the 3D View is not its
+  `context.active_object`), and a failed call removes it again. It stays in
+  Object Mode whatever Blender's "Enter Edit Mode" preference says, and
+  outside Object Mode it is refused before anything is added (embedded mode
+  too, where an add operator would otherwise add to the edited mesh).
+  `set_blender_object_mode` switches an object (the active one by default)
+  into a mode, `OBJECT` by default: the way back for a window left in Edit or
+  Pose Mode, where creating, deleting, importing and the other mode-sensitive
+  tools refuse to run.
+- `delete_blender_object` runs Blender's own Delete on the object alone, the
+  selection untouched: the object leaves the current scene, and stays in the
+  file while another scene links it (`remaining_scenes`, `removed_from_file`).
+  `use_global: true` deletes it from every scene (Delete Globally). The
+  operator also resets a deleted rigid body's cache: removing the object
+  directly left the cache, so after a frame jump another body took the
+  deleted one's cached positions.
+- `list_blender_scene_objects` and `search_blender_objects` return a page:
+  `count` objects from `offset`, `total` matching, and `next_offset` for the
+  next page (`null` after the last; `truncated` says whether more follow). A
+  page stops before its entries pass 30 000 bytes of JSON, so it can hold
+  fewer than `max_items`/`max_results`: the server's 40 KB result budget used
+  to cut a longer list below the count it reported. Each entry's
+  `collection` names a collection holding the object, the scene's own being
+  "Scene Collection". `object_type` matches in any case and must be one of
+  the running Blender's object types.
+- `check_blender_object_bounds` tests the object's world-space bounding box,
+  turned and scaled with the object, against the axis-aligned bounds:
+  `relation` is `inside` (`within_bounds`), `intersecting` (touching counts)
+  or `outside`, and `origin_within_bounds` tests the origin alone, which is
+  all the tool used to test. `bounds_min` must not exceed `bounds_max`.
+- `summarize_blender_scene`'s `collection_names` are the scene's top-level
+  collections. `get_blender_file_info`'s `object_count` counts the current
+  scene's objects, and `file_object_count` the file's.
 - Reads of world-space transforms (object info, distance, bounds, bounding
   box, parenting) evaluate the depsgraph first: in embedded (bpy module) mode
   Blender leaves a transform written by an earlier call out of `matrix_world`
-  until then. An add-on built before `rotation_quaternion` and
-  `keep_transform` still answers calls that leave them at their defaults, with
-  its own behaviour; the newer reply fields then come back `null`.
+  until then. An add-on built before `rotation_quaternion`, `keep_transform`,
+  `offset` and `use_global` still answers calls that leave them at their
+  defaults, with its own behaviour; the newer reply fields then come back
+  `null`.
 - `create_blender_mesh_from_data` checks everything before it creates
   anything: each vertex is exactly `[x, y, z]` finite numbers, each index is
   an integer within the vertex list, no face repeats a vertex or the vertex
@@ -837,7 +1005,34 @@ Behaviour worth knowing:
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
   View, so its captures are renders. The per-mode table is in
-  [blender-attachment.md](blender-attachment.md#capture-feedback).
+  [blender-attachment.md](blender-attachment.md#capture-feedback). `camera_name`
+  captures through another camera without changing the scene camera or the
+  view. `capture_blender_viewport_sequence` writes JPEG files and returns their
+  paths, at most `max_frames` (50, at most 100) per call and no new frame after
+  10 s, with `next_start_frame` to continue.
+- `get_blender_viewport_info` reports, besides the render settings, `view3d`:
+  the attached window's largest 3D View (the one captures use) with its
+  `view_matrix` (world to view), `eye_location`, `view_perspective`, `lens`,
+  `clip_start`/`clip_end`, `shading_type` and, for a camera view,
+  `view_camera`. Without an editor window (embedded `bpy`, `blender -b`) or a 3D
+  View it is `null`, and `view3d_unavailable_reason` says which.
+- `import_blender_file` checks the files an import would read besides the one
+  named against `security.allowed_paths`, where Blender's importer looks for
+  them: a glTF's buffers and images (also in a GLB's JSON), an OBJ's MTL
+  libraries and their texture maps, an FBX's textures, and a USD file's
+  sublayers, references, payloads and asset paths such as textures, following
+  the layers inside the sandbox. An existing file outside the sandbox is refused
+  with `SandboxError` before anything is imported; `details.references_outside`
+  lists those files and `details.referenced_by` the imported file. A reference to
+  a missing file reads nothing and passes. The check follows the importers'
+  fallbacks: an FBX texture's case-insensitive match (Blender's
+  `resolve_ncase`) and its name when it stores no path, an MTL texture's base
+  name beside the MTL, and USD's resolver search paths. The FBX importer's
+  recursive image search (`use_image_search`), which walked the texture's
+  folder and found a same-named image outside the sandbox, is switched off
+  while the sandbox is on, so an FBX texture must be at the path it stores or
+  beside the FBX. USD files are read through pxr, which Blender bundles; without
+  pxr a binary USD file, or a text one that composes other layers, is refused.
 - `set_blender_camera_view` and `get_blender_camera_info` work in world space:
   `location` and an XYZ Euler `rotation_euler` in radians, whatever the
   camera's parent and rotation mode (glTF imports store quaternions).
@@ -1101,6 +1296,59 @@ Behaviour worth knowing:
   rigid body world is refused rather than marked baked with no frames. The bake
   runs on Blender's main thread, stepping every frame, and the scene returns to
   its current frame afterwards.
+- `setup_blender_rigid_body` checks every argument before it changes anything:
+  Blender's body types and collision shapes (COMPOUND included), and its ranges
+  (mass at least 0.001, friction 0 or more, restitution and damping 0-1).
+  Blender itself stored a mass of -5, and the body fell through the ground. It
+  needs a mesh object, where Blender's operator only said `poll() failed`. A
+  failure removes the rigid body or world it added, or restores an existing
+  body's settings, and the user's selection never changes: the operator runs
+  under a context override. `kinematic: true` makes an animated body that
+  follows its keys and pushes simulated ones. `collision_margin`,
+  `collision_collections`, `use_deactivation` and `start_deactivated` change
+  only when given.
+- `add_blender_rigid_body_constraint` needs two different rigid bodies and
+  checks the type and its settings first; a failure leaves no empty behind. The
+  constraint empty is made directly rather than with `empty_add`, which follows
+  the editor's "Align: View" preference and selects the empty. It sits at
+  `location`, midway between the two objects' origins by default. Its local axes
+  are the constraint's: a HINGE turns about local Z, a SLIDER or PISTON moves
+  along local X, a MOTOR drives along and about local X, and GENERIC limits apply
+  per local axis. `axis` turns the empty so that axis points along a world
+  direction. Without it the empty is unrotated, so a HINGE turns about world Z,
+  like a door; a pendulum swinging in the XZ plane needs `axis: [0, 1, 0]`.
+  `limits`, `springs` (GENERIC_SPRING), the `motor_*` settings (MOTOR) and
+  `breaking_threshold` configure it. A MOTOR drives object1 relative to
+  object2: with object1 the anchor, a positive velocity turns or moves object2
+  the negative way along the axis (on Blender 5.0.1, -1.91 rad in 23 frames at
+  +2 rad/s, and -0.91 m at +1 m/s); swap the objects or the sign to reverse it.
+  A MOTOR without a velocity drives nothing, and the reply warns about it. The
+  empty, like a force field, goes where `create_blender_object` puts objects:
+  the active collection, or the scene's collection when the active one (or one
+  holding it) is excluded, hidden or disabled in viewports, or is linked from a
+  library; `warnings` (`warning` for a field) then says so. The reply and `get_blender_constraint_info`
+  report `pivot`, `axis`, `local_axes` (the directions the limits refer to) and
+  the settings.
+- `add_blender_force_field` adds the field with `align: WORLD` and an explicit
+  rotation, so the editor's Align preference no longer turns it toward the 3D
+  View. `direction` points the field's local +Z (where WIND blows, the axis
+  VORTEX turns about, a PLANE's normal), and the reply reports it with
+  `rotation_euler`. The types are Blender's: MAGNET (MAGNETIC is accepted for
+  it), TEXTURE, GUIDE, BOID and FLUID (which Blender then reports as FLUID_FLOW)
+  included. Shape, flow, falloff, maximum distance and noise can be set too.
+  `get_blender_force_field_info` refuses an object whose field type is NONE,
+  such as a collider, whose collision settings live in the same place.
+- `bake_blender_simulation` refuses more than 20 000 frames or 400 000
+  body-frames (frames x simulated objects) unless `allow_long_bake: true`. That
+  is up to about 16 s on Blender 5.0.1, where 1000 bodies x 1000 frames took
+  29.4 s and 401 cubes x 900 frames 14.8 s headless (1000 frames took 8.7 s in
+  the GUI).
+  A bake runs on Blender's main thread and cannot be stopped once it starts.
+  Past the attached-mode client timeout (`BLENDER__CONNECTION_TIMEOUT`, 30 s by
+  default), the call reports a timeout while Blender keeps baking, and the next
+  calls wait behind it and can time out too. Raise the timeout before allowing
+  a long bake; `get_blender_rigid_body_world` shows when it has finished
+  (`rigid_body_cache.is_baked`).
 - `get_blender_physics_state` steps an unbaked simulation from the cache start
   to the current frame before reading the pose (`step_simulation`, default
   true, at most 400 000 frames x bodies), as playback would: an unbaked
