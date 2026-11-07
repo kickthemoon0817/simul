@@ -3544,8 +3544,9 @@ if component.is_simulating_physics() != {target!r}:
             match_mode: exact (a tag equals label), contains (a tag contains
                 label) or regex (label is a Python regular expression searched
                 for in each tag; a repeated group that holds a quantifier or
-                alternatives, as in (\\w+)+, is refused because it can run for
-                hours); every mode ignores case.
+                alternatives, as in (\\w+)+, and three quantifiers in a row that
+                can match the same characters, as in .*.*.*x, are refused because
+                their search can run for seconds to hours); every mode ignores case.
             max_results: Maximum number of actors to return, 1 to 5000.
 
         Returns:
@@ -3558,9 +3559,9 @@ if component.is_simulating_physics() != {target!r}:
 
         Raises:
             ValueError: match_mode is not exact, contains or regex; in regex
-                mode, label is not a valid regular expression or repeats a
-                group that holds a quantifier or alternatives (see
-                ``simul.utils.regex_guard``); or max_results is out of range.
+                mode, label is not a valid regular expression or its search
+                can backtrack for long (see ``simul.utils.regex_guard``); or
+                max_results is out of range.
         """
         modes = ("exact", "contains", "regex")
         if match_mode not in modes:
@@ -3579,10 +3580,11 @@ if component.is_simulating_physics() != {target!r}:
             construct = _exponential_regex_construct(label)
             if construct is not None:
                 raise ValueError(
-                    f"label has {construct}: a failing search for it can freeze "
-                    "the editor for hours, since every way of splitting a tag "
-                    "between the repetitions is tried. Repeat a plain character "
-                    "class instead (\\w+ rather than (\\w+)+), or use contains mode"
+                    f"label has {construct}: a failing search for it tries every "
+                    "way of dividing a tag among those quantifiers, which can freeze "
+                    "the editor for seconds to hours. Use one plain quantifier per "
+                    "stretch of the tag (\\w+ rather than (\\w+)+, .* rather than "
+                    ".*.*), anchor the pattern with ^, or use contains mode"
                 )
         args = {"label": label, "match_mode": match_mode, "max_results": max_results}
         return await self._execute_json_script(

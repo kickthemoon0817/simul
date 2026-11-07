@@ -582,6 +582,9 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             refused = tool("search_blender_objects", name_pattern=r"^(\w+)+_x$")
             assert refused["success"] is False, refused
             assert "repeated group" in refused["error"]
+            # B1-17: froze Blender for 15.6 s over ten 63-character names.
+            refused = tool("search_blender_objects", name_pattern=".*.*.*.*.*.*x")
+            assert "6 quantifiers in a row" in refused["error"], refused
             found = tool("search_blender_objects", name_pattern=r"^Attachment\w+$")
             assert [o["name"] for o in found["objects"]] == ["AttachmentProbe"]
             # The tool lists location as optional; omitting it means the origin.
@@ -907,6 +910,53 @@ def test_recover_from_file_loads_context_loss_and_exit(
             assert printed["output"] == "x" * 4096
             assert printed["output_truncated"] is True
             assert printed["output_total_chars"] == 6001
+            # B1-09: calls sent beside a long script wait their turn instead of
+            # being dropped with a bare Errno 54, and one whose timeout runs out
+            # while it waits is reported as not executed and never runs.
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=12) as pool:
+                slow = pool.submit(
+                    call, "execute_blender_script", script="import time\ntime.sleep(3)"
+                )
+                time.sleep(0.5)
+                quick = [pool.submit(BlenderConnection(settings).get_frame) for _ in range(10)]
+                queued = pool.submit(
+                    call,
+                    "execute_blender_script",
+                    timeout=0.5,
+                    script=(
+                        "never = bpy.data.objects.new('NeverRun', None)\n"
+                        "bpy.context.scene.collection.objects.link(never)"
+                    ),
+                )
+                assert slow.result()["success"] is True
+                assert all("current_frame" in frame.result() for frame in quick)
+                late = queued.result()
+            assert late["error_type"] == "TimeoutError", late
+            assert late["details"]["executed"] is False
+            assert "not executed" in late["error"]
+            assert call("search_blender_objects", name_pattern="^NeverRun$")["count"] == 0
+            # B1-23: a script past its timeout reports timed_out, as in embedded mode.
+            overdue = call(
+                "execute_blender_script", script="import time\ntime.sleep(1.5)", timeout=0.3
+            )
+            assert overdue["timed_out"] is True, overdue
+            assert overdue["details"] == {"executed": True}
+            time.sleep(1.5)
+            # M16: a request of tens of MB is read while it arrives, not cut at 5 s.
+            side = 400
+            vertices = [[x * 0.01, y * 0.01, 0.0] for y in range(side + 1) for x in range(side + 1)]
+            faces = [
+                [y * (side + 1) + x, y * (side + 1) + x + 1, (y + 1) * (side + 1) + x + 1, (y + 1) * (side + 1) + x]
+                for y in range(side)
+                for x in range(side)
+            ]
+            grid = call(
+                "create_blender_mesh_from_data", name="BigGrid", vertices=vertices, faces=faces
+            )
+            assert grid["success"] is True, grid
+            assert call("delete_blender_object", object_name="BigGrid")["success"] is True
             # A bpy operator failure keeps its class across the bridge, and the
             # object the session was acting on rides along as context.
             no_mesh = call("setup_blender_rigid_body", object_name="Camera")

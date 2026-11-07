@@ -8,7 +8,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from ..blender_bridge.protocol import BridgeFiles, BridgeRemoteError, BridgeWire
 from ..config import Settings
@@ -52,6 +52,111 @@ class AttachmentTargetChanged(AttachmentError):
     """The attached process is alive but loaded another file or lost the window/scene."""
 
     error_type = "AttachmentTargetChanged"
+
+
+class BlenderRequestTimeout(TimeoutError):
+    """Blender did not reply in time; ``details["executed"]`` says whether the request ran.
+
+    ``executed`` is False when the bridge provably did not run it, True when it
+    acknowledged starting it, and None for an add-on that does not report starts.
+    """
+
+    error_type = "TimeoutError"
+
+    def __init__(self, message: str, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
+
+
+class BlenderConnectionLost(ConnectionError):
+    """The connection to Blender ended before its reply; ``details`` as for a timeout."""
+
+    error_type = "ConnectionError"
+
+    def __init__(self, message: str, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
+
+
+_OLD_ADDON = (
+    "This add-on does not report when a request starts; rebuild it with "
+    "`simul blender install-bridge` to learn whether an unanswered request ran."
+)
+
+
+def _timed_out(method: str, timeout: float, executed: Optional[bool]) -> BlenderRequestTimeout:
+    """Say whether an unanswered request ran, and whether retrying is safe."""
+    if executed is False:
+        message = (
+            f"Blender did not start {method} within the {timeout:g}s timeout: its main "
+            "thread was busy with earlier requests, a long script or render, or a modal "
+            "dialog. The request was not executed, and Blender refuses it now that its "
+            "deadline has passed, so retrying is safe once Blender is free."
+        )
+    elif executed is True:
+        message = (
+            f"Blender started {method} but did not finish within the {timeout:g}s timeout. "
+            "It keeps running on Blender's main thread and cannot be stopped from Simul; "
+            "its outcome is unknown. No retry was sent: inspect Blender before retrying."
+        )
+    else:
+        message = (
+            f"Blender did not reply to {method} before the {timeout:g}s timeout. An operation "
+            "that already started may still be running; its outcome is unknown. No retry "
+            f"was sent. Inspect Blender before retrying. {_OLD_ADDON}"
+        )
+    return BlenderRequestTimeout(
+        message, {"executed": executed, "method": method, "timeout_seconds": timeout}
+    )
+
+
+def _connection_lost(
+    method: str, cause: BaseException, executed: Optional[bool]
+) -> BlenderConnectionLost:
+    """Say whether a request whose connection ended ran, and whether retrying is safe."""
+    if executed is False:
+        message = (
+            f"The Blender bridge closed the connection before starting {method}, again on "
+            f"each retry until the timeout ({cause}). The request was not executed, so "
+            "retrying is safe; the add-on may be restarting or holding too many requests."
+        )
+    elif executed is True:
+        message = (
+            f"Blender started {method}, but the connection closed before it replied ({cause}); "
+            "the operation may have completed. No retry was sent: inspect Blender before retrying."
+        )
+    else:
+        message = (
+            f"The connection to Blender closed before it replied to {method} ({cause}), so it "
+            "may or may not have run. No retry was sent: inspect Blender before retrying. "
+            f"{_OLD_ADDON}"
+        )
+    return BlenderConnectionLost(message, {"executed": executed, "method": method})
+
+
+def _script_timed_out(timeout: float, executed: Optional[bool]) -> dict[str, Any]:
+    """execute_script's own timeout result, as embedded mode reports it (``timed_out``)."""
+    if executed:
+        state = "It is still running on Blender's main thread, which stays busy until it returns."
+    else:
+        state = (
+            "Whether it started is unknown; if it did, it is still running on Blender's "
+            f"main thread. {_OLD_ADDON}"
+        )
+    return {
+        "output": None,
+        "output_truncated": False,
+        "output_total_chars": 0,
+        "return_value": None,
+        "duration_seconds": round(float(timeout), 4),
+        "timed_out": True,
+        "error": (
+            f"TimeoutError: script did not finish within {timeout:g}s. {state} It cannot be "
+            "stopped from Simul, and its output is discarded; inspect Blender before running "
+            "it again."
+        ),
+        "details": {"executed": executed},
+    }
 
 
 class BlenderConnection:
@@ -119,10 +224,13 @@ class BlenderConnection:
                     raise self._target_changed(attachment, exc) from exc
                 raise
             except TimeoutError as exc:
-                raise TimeoutError(
-                    "Blender did not reply before the timeout. An operation that already started may still be "
-                    "running; its outcome is unknown. No retry was sent. Inspect Blender before retrying."
-                ) from exc
+                executed = getattr(exc, "executed", None)
+                if method == "execute_script" and executed is not False:
+                    # The script exceeded its timeout, as the schema's timed_out says.
+                    return _script_timed_out(timeout, executed)
+                raise _timed_out(method, timeout, executed) from exc
+            except ConnectionError as exc:
+                raise _connection_lost(method, exc, getattr(exc, "executed", None)) from exc
             if method == "execute_script" and result.get("error"):
                 # Also covers add-ons built before the session added the hint itself.
                 result = {**result, "error": add_context_hint(result["error"])}
@@ -252,13 +360,15 @@ class BlenderAttachments:
         self, instance_id: str | None = None, window_id: str | None = None
     ) -> dict[str, Any]:
         """Verify a single explicit target, then atomically persist its identity."""
+        entries = self.instances()
         live = [
-            entry
-            for entry in self.instances()
-            if entry["reachable"] and not entry["background"]
+            entry for entry in entries if entry["reachable"] and not entry["background"]
         ]
         if instance_id is not None:
-            live = [entry for entry in live if entry["instance_id"] == instance_id]
+            chosen = [entry for entry in live if entry["instance_id"] == instance_id]
+            if not chosen:
+                raise RuntimeError(self._no_instance(instance_id, entries))
+            live = chosen
         if not live:
             raise RuntimeError(
                 "No matching GUI Blender bridge. Enable the Simul Blender Bridge add-on in the existing window."
@@ -279,6 +389,27 @@ class BlenderAttachments:
             self.directory / f"instance-{info['instance_id']}.json"
         )
         return self._publish(endpoint, info, windows[0])
+
+    @staticmethod
+    def _no_instance(instance_id: str, entries: list[dict[str, Any]]) -> str:
+        """Explain why ``instance_id`` cannot be attached, naming the instances there are."""
+        entry = next((e for e in entries if e["instance_id"] == instance_id), None)
+        if entry is not None and not entry["reachable"]:
+            return (
+                f"Blender instance {instance_id} does not answer ({entry.get('error')}); it "
+                "exited or its Simul Blender Bridge add-on was disabled."
+            )
+        if entry is not None:
+            return f"Blender instance {instance_id} runs in background mode, with no window to attach."
+        known = [
+            f"{e['instance_id']} (pid {e.get('pid')})" if e["reachable"] else f"{e['instance_id']} (not answering)"
+            for e in entries
+        ]
+        listed = "; known instances: " + ", ".join(known) if known else "; none is running"
+        return (
+            f"No Blender instance has the id {instance_id!r}{listed}. Run `simul blender "
+            "instances`, or call attach_blender_window without instance_id."
+        )
 
     def reattach(self, previous: dict[str, Any]) -> dict[str, Any]:
         """Re-pin the same process after its document changed.

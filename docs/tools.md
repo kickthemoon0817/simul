@@ -330,6 +330,13 @@ Behaviour worth knowing:
   captures, saves, exports, playback and editor-only `control_blender_ui`
   actions record no step. Details:
   [blender-attachment.md](blender-attachment.md#undo-and-unsaved-changes).
+- In attached mode calls sent together wait their turn on Blender's main thread
+  instead of failing. When one gets no answer, its error (`TimeoutError` or
+  `ConnectionError`) says in `details.executed` whether it ran: `false` is safe
+  to retry. A script past its own timeout reports `timed_out: true`, as in
+  embedded mode. Requests up to 32 MiB of JSON are read however long they take
+  to arrive. Details:
+  [blender-attachment.md](blender-attachment.md#concurrent-calls-timeouts-and-large-requests).
 - `open_blender_file` refuses with `UnsavedChangesError` while the open file has
   unsaved changes; save them with `save_blender_file`, or pass
   `discard_unsaved: true`. Headless (embedded) Blender does not track unsaved
@@ -475,11 +482,18 @@ Behaviour worth knowing:
   collection, are not followed, so a camera that only they need is composed
   as well. An add-on built before this report answers without
   `pose_source` and `warning`, and the server returns them as `null`.
-- `search_blender_objects` refuses a `name_pattern` that repeats a group holding
-  a quantifier or alternatives, such as `(\w+)+`: Python's regex search
-  backtracks, and on a long object name such a pattern runs for hours on
-  Blender's main thread. `get_unreal_actor_by_semantic_label` refuses the same
-  patterns in regex mode.
+- `search_blender_objects` refuses a `name_pattern` whose failing search
+  backtracks for long on Blender's main thread, where nothing can stop it: a
+  group holding a quantifier or alternatives that repeats, such as `(\w+)+`
+  (hours on a 40-character name), and three quantifiers in a row that can match
+  the same characters, such as `.*.*.*x`, or four with only such characters
+  between them, such as `.*a.*a.*a.*x`. A failing search tries every way of
+  dividing the name among them: on a 255-character name, Blender 5's limit,
+  three `.*` took 0.1 s and four 6 s, each more about 50 times as long. A
+  pattern anchored with `^` or `\A` may have one more of either, and characters
+  one of them cannot match (`\d+\.\d+`), a quantifier ending the pattern
+  (`.*leg.*`) and possessive quantifiers do not count.
+  `get_unreal_actor_by_semantic_label` refuses the same patterns in regex mode.
 - `execute_blender_script` returns the first `max_output_chars` characters of
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a

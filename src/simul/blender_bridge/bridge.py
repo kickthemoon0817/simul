@@ -1,12 +1,15 @@
 """Run authenticated operations in an explicitly selected Blender window.
 
 The nonblocking socket is polled by an application timer. No worker thread
-touches bpy, and every operation finishes before another can begin.
+touches bpy, and every operation finishes before another can begin: requests
+that arrive together wait their turn, oldest first, one operation per poll so
+that Blender redraws and handles the user's input between them.
 """
 
 from __future__ import annotations
 
 import inspect
+import itertools
 import json
 import logging
 import os
@@ -17,7 +20,7 @@ import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import bpy
 from bpy.app.handlers import persistent
@@ -30,12 +33,29 @@ from .agent_cursor import cursors, hide_annotations, observations
 from .protocol import (
     MAX_MESSAGE_BYTES,
     PROTOCOL_VERSION,
+    START_ACK,
     BridgeFiles,
     BridgeWire,
     protocol_mismatch_message,
 )
 
 logger = logging.getLogger(__name__)
+
+#: Connections held at once, waiting or being answered. A further one is closed
+#: unread, so its request certainly did not run, and a client of an add-on with
+#: START_ACK sends it again.
+MAX_CONNECTIONS = 64
+#: Seconds a connection may go without sending or reading a byte while the
+#: bridge polls. Time Blender's main thread spends elsewhere (an operation, a
+#: render, a modal dialog) does not count: the bridge could not read then.
+IDLE_SECONDS = 10.0
+#: A gap between polls longer than this was Blender being busy, not the client.
+STALL_SECONDS = 0.25
+#: Seconds to keep reading and discarding a refused request's remaining bytes,
+#: so that a client still sending it reads the refusal instead of a reset.
+LINGER_SECONDS = 5.0
+#: Bytes read from one connection per recv call.
+READ_CHUNK = 1 << 20
 
 #: Operations that change the open document, by the MCP tool that calls them.
 #: Each completed call is recorded as one undo step named ``simul: <tool>``.
@@ -54,7 +74,8 @@ UNDO_STEPS: dict[str, str] = {
     "delete_keyframe": "delete_blender_keyframe",
     "delete_object": "delete_blender_object",
     "execute_script": "execute_blender_script",
-    # It leaves the exported objects selected.
+    # It selects the objects it exports while it runs. Should the selection
+    # stay changed, the step records it; otherwise the step costs nothing.
     "export_simready_usd": "export_simready_usd",
     "focus_on_object": "focus_blender_on_object",
     "free_bake": "free_blender_bake",
@@ -146,14 +167,35 @@ class AttachmentTargetChanged(ValueError):
         self.details = details
 
 
+class RequestAbandoned(ConnectionError):
+    """The client disconnected before its request started, so it did not run."""
+
+
 @dataclass
 class PendingConnection:
-    """One bounded, short-lived connection polled on Blender's main thread."""
+    """One connection polled on Blender's main thread, from request to reply.
+
+    Attributes:
+        socket: The accepted, nonblocking socket.
+        expires: Monotonic time at which a connection that is still sending its
+            request, or reading its reply, is dropped; moved on by every byte
+            and by the time Blender's main thread was busy elsewhere.
+        incoming: The request bytes read so far.
+        outgoing: Reply bytes not yet sent.
+        request: The decoded request once its line is complete.
+        ready: Whether ``request`` waits for its turn.
+        order: Arrival order among waiting requests.
+        discarding: A refused request whose remaining bytes are read and dropped.
+    """
 
     socket: socket.socket
     expires: float
     incoming: bytearray = field(default_factory=bytearray)
     outgoing: bytes = b""
+    request: Any = None
+    ready: bool = False
+    order: int = 0
+    discarding: bool = False
 
 
 class BlenderBridge:
@@ -171,6 +213,8 @@ class BlenderBridge:
         self.token = secrets.token_urlsafe(32)
         self.listener: socket.socket | None = None
         self.connections: list[PendingConnection] = []
+        self._arrivals = itertools.count()
+        self._last_poll = 0.0
         # An undo step that waits for the next poll; see _push_undo_step.
         self.deferred_undo_step: str | None = None
         self.discovery_path = self.discovery_dir / f"instance-{self.instance_id}.json"
@@ -183,7 +227,8 @@ class BlenderBridge:
             return
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
-        listener.listen(8)
+        # Requests that arrive while Blender is busy wait in this backlog.
+        listener.listen(socket.SOMAXCONN)
         listener.setblocking(False)
         self.listener = listener
         try:
@@ -196,6 +241,7 @@ class BlenderBridge:
                     "host": "127.0.0.1",
                     "port": listener.getsockname()[1],
                     "token": self.token,
+                    "capabilities": [START_ACK],
                 },
             )
             bpy.app.handlers.load_post.append(self._load_handler)
@@ -220,56 +266,254 @@ class BlenderBridge:
         self.discovery_path.unlink(missing_ok=True)
 
     def poll(self) -> float | None:
-        """Read and execute bounded requests from Blender's main-thread timer."""
+        """Accept, read and answer requests from Blender's main-thread timer.
+
+        Never raises: Blender unregisters a timer whose call raises, which
+        would stop the bridge.
+        """
         if self.listener is None:
             return None
+        try:
+            self._poll_once()
+        except BaseException:
+            logger.exception("Blender bridge poll failed")
+        return 0.01 if self.connections else 0.05
+
+    def _poll_once(self) -> None:
+        stalled = time.monotonic() - self._last_poll
+        if self._last_poll and stalled > STALL_SECONDS:
+            for pending in self.connections:
+                pending.expires += stalled
         if self.deferred_undo_step is not None:
             step, self.deferred_undo_step = self.deferred_undo_step, None
             self._push_undo_step(step, "")
         cursors.prune()
         observations.prune()
-        for _ in range(8):
+        self._accept()
+        for pending in list(self.connections):
+            try:
+                self._progress(pending)
+            except OSError:
+                self._close(pending)
+        # Measured before any operation runs, so that the next poll counts its
+        # time as Blender being busy.
+        self._last_poll = time.monotonic()
+        # Answer the oldest waiting requests until one runs an operation; the
+        # rest wait for the next poll, after Blender has handled its events.
+        while True:
+            waiting = [p for p in self.connections if p.ready]
+            if not waiting or self._answer(min(waiting, key=lambda p: p.order)):
+                break
+
+    def _accept(self) -> None:
+        assert self.listener is not None
+        for _ in range(MAX_CONNECTIONS):
             try:
                 connection, _address = self.listener.accept()
             except BlockingIOError:
-                break
-            connection.setblocking(False)
-            if len(self.connections) >= 8:
+                return
+            except OSError:
+                logger.exception("Blender bridge could not accept a connection")
+                return
+            if len(self.connections) >= MAX_CONNECTIONS:
+                # Unread, so it certainly did not run; an acknowledging client
+                # sends it again.
                 connection.close()
                 continue
-            self.connections.append(PendingConnection(connection, time.monotonic() + 5))
-        for pending in list(self.connections):
-            try:
-                if time.monotonic() > pending.expires:
-                    self._close(pending)
-                    continue
-                if not pending.outgoing:
-                    chunk = pending.socket.recv(65536)
-                    if not chunk:
-                        self._close(pending)
-                        continue
-                    pending.incoming.extend(chunk)
-                    if len(pending.incoming) > MAX_MESSAGE_BYTES:
-                        self._close(pending)
-                        continue
-                    if b"\n" not in pending.incoming:
-                        continue
-                    request = json.loads(pending.incoming.split(b"\n", 1)[0])
-                    pending.outgoing = self._encode_reply(request, self.dispatch(request))
-                    pending.expires = time.monotonic() + 5
-                sent = pending.socket.send(pending.outgoing)
-                pending.outgoing = pending.outgoing[sent:]
-                if not pending.outgoing:
-                    self._close(pending)
-            except BlockingIOError:
-                continue
-            except (OSError, ValueError, TypeError):
-                logger.exception("Blender bridge connection failed")
-                self._close(pending)
-        return 0.01 if self.connections else 0.05
+            connection.setblocking(False)
+            self.connections.append(
+                PendingConnection(connection, time.monotonic() + IDLE_SECONDS)
+            )
 
-    def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Validate identity before invoking a public session operation."""
+    def _progress(self, pending: PendingConnection) -> None:
+        """Move one connection's bytes as far as its socket allows without blocking."""
+        if pending.discarding:
+            self._send(pending)
+            if self._drained(pending) or time.monotonic() > pending.expires:
+                self._close(pending)
+            return
+        if pending.ready:
+            if self._client_gone(pending):
+                # It gave up while the request waited: nothing ran or will.
+                self._close(pending)
+            return
+        if pending.request is None:
+            self._read(pending)
+        else:
+            self._send(pending)
+        if pending in self.connections and time.monotonic() > pending.expires:
+            self._close(pending)
+
+    def _read(self, pending: PendingConnection) -> None:
+        while pending.request is None and not pending.discarding and pending in self.connections:
+            try:
+                chunk = pending.socket.recv(READ_CHUNK)
+            except BlockingIOError:
+                return
+            if not chunk:
+                # Closed before sending a whole request: nothing to run.
+                self._close(pending)
+                return
+            pending.expires = time.monotonic() + IDLE_SECONDS
+            pending.incoming.extend(chunk)
+            if b"\n" in chunk:
+                self._parse(pending)
+            elif len(pending.incoming) > MAX_MESSAGE_BYTES:
+                self._refuse_too_large(pending)
+
+    def _parse(self, pending: PendingConnection) -> None:
+        line, _, _ = bytes(pending.incoming).partition(b"\n")
+        pending.incoming = bytearray()
+        if len(line) + 1 > MAX_MESSAGE_BYTES:
+            self._refuse_too_large(pending)
+            return
+        try:
+            pending.request = json.loads(line)
+        except (ValueError, RecursionError):
+            self._refuse(
+                pending,
+                "InvalidRequest",
+                "Blender bridge request is not valid JSON; it was not executed.",
+                {},
+            )
+            return
+        pending.ready = True
+        pending.order = next(self._arrivals)
+
+    def _answer(self, pending: PendingConnection) -> bool:
+        """Dispatch a waiting request and start sending its reply.
+
+        Returns:
+            Whether it started an operation.
+        """
+        pending.ready = False
+        started = False
+
+        def start() -> None:
+            nonlocal started
+            self._acknowledge_start(pending)
+            started = True
+
+        reply = self.dispatch(pending.request, start)
+        pending.outgoing += self._encode_reply(pending.request, reply)
+        pending.expires = time.monotonic() + IDLE_SECONDS
+        try:
+            self._send(pending)
+        except OSError:
+            self._close(pending)
+        return started
+
+    def _acknowledge_start(self, pending: PendingConnection) -> None:
+        """Confirm the client still waits, and acknowledge the start if it asked.
+
+        Raises:
+            RequestAbandoned: The client is gone or the acknowledgement could
+                not be sent, so the operation must not run.
+        """
+        if self._client_gone(pending):
+            raise RequestAbandoned(
+                "The client disconnected before Blender started the request; it was not executed"
+            )
+        request = pending.request
+        if request.get("ack") is not True:
+            return
+        message = BridgeWire.encode({"request_id": request.get("request_id"), "started": True})
+        try:
+            sent = pending.socket.send(message)
+        except OSError as exc:
+            raise RequestAbandoned(
+                "Blender could not acknowledge the request's start; it was not executed"
+            ) from exc
+        # A few dozen bytes into an empty send buffer go whole; any rest goes
+        # out ahead of the reply.
+        pending.outgoing = message[sent:]
+
+    @staticmethod
+    def _client_gone(pending: PendingConnection) -> bool:
+        try:
+            return pending.socket.recv(1, socket.MSG_PEEK) == b""
+        except BlockingIOError:
+            return False
+        except OSError:
+            return True
+
+    def _send(self, pending: PendingConnection) -> None:
+        """Send what the socket takes; close an answered connection once its reply is out."""
+        while pending.outgoing:
+            try:
+                sent = pending.socket.send(pending.outgoing)
+            except BlockingIOError:
+                return
+            pending.outgoing = pending.outgoing[sent:]
+            pending.expires = time.monotonic() + IDLE_SECONDS
+        if not pending.discarding:
+            self._close(pending)
+
+    @staticmethod
+    def _drained(pending: PendingConnection) -> bool:
+        """Read and drop a refused request's bytes; True once the client closed.
+
+        At most MAX_MESSAGE_BYTES per poll, so that a client that keeps sending
+        cannot hold up the others.
+        """
+        for _ in range(max(1, MAX_MESSAGE_BYTES // READ_CHUNK)):
+            try:
+                chunk = pending.socket.recv(READ_CHUNK)
+            except BlockingIOError:
+                return False
+            if not chunk:
+                return True
+        return False
+
+    def _refuse_too_large(self, pending: PendingConnection) -> None:
+        limit = MAX_MESSAGE_BYTES // 2**20
+        self._refuse(
+            pending,
+            "RequestTooLarge",
+            f"Blender bridge request exceeds {limit} MiB, the most the bridge reads per "
+            "call; it was not executed. Send less per call, for example a large mesh as "
+            "several objects.",
+            {"limit_bytes": MAX_MESSAGE_BYTES},
+        )
+
+    def _refuse(
+        self, pending: PendingConnection, error_type: str, message: str, details: dict[str, Any]
+    ) -> None:
+        """Answer a request the bridge will not run, without resetting the connection.
+
+        Its client may still be sending; closing now would bury the refusal
+        under a connection reset, so the remaining bytes are read and dropped
+        for up to LINGER_SECONDS while the refusal goes out.
+        """
+        pending.incoming = bytearray()
+        pending.request = None
+        pending.discarding = True
+        pending.expires = time.monotonic() + LINGER_SECONDS
+        pending.outgoing = BridgeWire.encode(
+            {
+                "request_id": None,
+                "success": False,
+                "error": f"{error_type}: {message}",
+                "error_type": error_type,
+                "details": {**details, "executed": False},
+            }
+        )
+        self._send(pending)
+
+    def dispatch(
+        self, request: dict[str, Any], on_start: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
+        """Validate identity before invoking a public session operation.
+
+        Args:
+            request: The decoded request.
+            on_start: Called right before the operation runs, after every check
+                that can refuse the request; it may raise to keep it from
+                running (the client left).
+
+        Returns:
+            The reply.
+        """
         request_id = request.get("request_id") if isinstance(request, dict) else None
         try:
             if not isinstance(request, dict):
@@ -294,7 +538,7 @@ class BlenderBridge:
             if request["method"] == "hello":
                 result = self.describe()
             else:
-                result = self._execute(request)
+                result = self._execute(request, on_start)
             return {"request_id": request_id, "success": True, "result": result}
         except BaseException as exc:
             # SystemExit and KeyboardInterrupt too: nothing above this timer
@@ -362,7 +606,18 @@ class BlenderBridge:
             ],
         }
 
-    def _execute(self, request: dict[str, Any]) -> dict[str, Any]:
+    def _execute(
+        self, request: dict[str, Any], on_start: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
+        def start() -> None:
+            # Checked again: the request may have waited behind others.
+            if time.time() > float(request["deadline"]):
+                raise TimeoutError(
+                    "Request expired before execution; no operation was performed"
+                )
+            if on_start is not None:
+                on_start()
+
         target = request["target"]
         if target["document_id"] != self.document_id:
             raise AttachmentTargetChanged(
@@ -427,6 +682,7 @@ class BlenderBridge:
         # Loading a file destroys the window/context; do not restore its stale
         # pointers on exiting a context override.
         if method == "open_blend_file":
+            start()
             return dict(operation(*arguments.args, **arguments.kwargs))
         document_id = self.document_id
         with bpy.context.temp_override(**context):
@@ -454,6 +710,7 @@ class BlenderBridge:
             # validate it for both modes; an odd label here must not cost the
             # capture, so observations.show() rejects it inside the guard below.
             agent_id = arguments.arguments.get("agent_id", "agent")
+            start()
             with hide_annotations() if capturing else nullcontext():
                 result = operation(*arguments.args, **arguments.kwargs)
             if (

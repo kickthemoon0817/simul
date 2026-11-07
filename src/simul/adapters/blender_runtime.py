@@ -746,8 +746,10 @@ class BlenderRuntimeSession:
 
         Args:
             name_pattern: Python regular expression searched for in each object
-                name; a repeated group that holds a quantifier or alternatives,
-                as in (\\w+)+, is refused because it can run for hours.
+                name. Refused because their search can run for seconds to hours: a
+                repeated group that holds a quantifier or alternatives, as in (\\w+)+,
+                and three quantifiers in a row that can match the same characters,
+                as in .*.*.*x (four with only such characters between them).
             object_type: Blender object type filter (MESH, LIGHT, etc.).
             max_results: Maximum number of results.
 
@@ -755,9 +757,8 @@ class BlenderRuntimeSession:
             Dictionary with matched objects and truncation flag.
 
         Raises:
-            ValueError: name_pattern is not a valid regular expression, or
-                repeats a group that holds a quantifier or alternatives (see
-                ``simul.utils.regex_guard``).
+            ValueError: name_pattern is not a valid regular expression, or its
+                search can backtrack for long (see ``simul.utils.regex_guard``).
         """
         compiled_pattern = None
         if name_pattern:
@@ -771,10 +772,12 @@ class BlenderRuntimeSession:
             construct = exponential_regex_construct(name_pattern)
             if construct is not None:
                 raise ValueError(
-                    f"name_pattern has {construct}: a failing search for it can "
-                    "freeze Blender for hours, since every way of splitting an "
-                    "object name between the repetitions is tried. Repeat a plain "
-                    "character class instead (\\w+ rather than (\\w+)+)"
+                    f"name_pattern has {construct}: a failing search for it tries "
+                    "every way of dividing an object name among those quantifiers, "
+                    "which can freeze Blender for seconds to hours. Use one plain "
+                    "quantifier per stretch of the name (\\w+ rather than (\\w+)+, .* "
+                    "rather than .*.*), drop a leading .* (a search tries every "
+                    "position anyway), or anchor the pattern with ^"
                 )
         all_objects = self._resolve_object_source(None)
         matches: List[Dict[str, Any]] = []
@@ -2515,7 +2518,10 @@ class BlenderRuntimeSession:
         Args:
             script: Python source code to execute.
             timeout: Maximum wall-clock seconds to wait for the script;
-                ``None`` waits for it to finish.
+                ``None`` waits for it to finish. In attached mode the wait, time
+                spent behind other calls included, is also capped by
+                BLENDER__CONNECTION_TIMEOUT. Past it the call returns timed_out=true
+                while the script keeps running.
             max_output_chars: Most characters of printed output to return, 1 to 100000
                 (default 32000). Longer output is cut to its first max_output_chars
                 characters with output_truncated=true and output_total_chars set.

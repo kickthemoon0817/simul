@@ -1099,6 +1099,8 @@ class TestObservationTools:
             (r"^(\w+)+_x$", "a quantifier inside a repeated group"),
             (r"(\w+_)*light", "a quantifier inside a repeated group"),
             (r"(a|ab)*c", "alternatives inside a repeated group"),
+            # B1-17: froze Blender for 15.6 s over ten 63-character names.
+            (".*.*.*.*.*.*x", "6 quantifiers in a row that can match the same characters"),
             ("Cube(", "not a valid regular expression"),
         ],
     )

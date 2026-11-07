@@ -1694,8 +1694,9 @@ class BlenderExecuteScriptResponse(BaseModel):
     timed_out: bool = Field(
         False,
         description=(
-            "True when the script exceeded its timeout; it keeps running on a "
-            "background thread and its output is discarded"
+            "True when the script exceeded its timeout; it keeps running (on a "
+            "background thread in embedded mode, on Blender's main thread in attached "
+            "mode) and its output is discarded"
         ),
     )
 

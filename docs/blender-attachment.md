@@ -49,6 +49,8 @@ can omit both selectors. Ambiguous selections fail and require explicit IDs.
 Window IDs are session identities, not OS window titles or coordinates.
 From an MCP client, the `attach_blender_window` tool makes the same selection
 (`instance_id` / `window_id` arguments) and writes the same attachment file.
+An `instance_id` that no running Blender has is refused with the IDs and PIDs
+of the instances there are, and one whose Blender stopped answering says so.
 
 The existing Blender and SimReady MCP tools use this connection. For example,
 `get_blender_info` reports the selected process/window and `create_blender_object`
@@ -315,13 +317,6 @@ with bpy.context.temp_override(window=win, screen=win.screen, scene=win.scene,
 
 After such a script, call `attach_blender_window` before the next tool call.
 
-Blender's application timer polls a nonblocking loopback socket and runs all
-`bpy` work on the main thread. Requests execute sequentially. A long render or
-script can make the GUI temporarily unresponsive. The client timeout limits
-waiting, not execution: an operation already started cannot safely be stopped.
-Its outcome is unknown after a timeout, and Simul never automatically retries it.
-Requests whose deadlines expired before execution are refused.
-
 The transport uses a per-instance token in owner-only discovery/attachment
 files. It accepts loopback connections only. Normal filesystem sandbox settings
 still apply, including to saving an existing file in place. Arbitrary scripting
@@ -333,6 +328,46 @@ simul blender detach
 
 Detaching forgets the selection; Blender stays open with its current scene.
 Disable the add-on in Blender to stop its listener.
+
+## Concurrent calls, timeouts and large requests
+
+Blender's application timer polls a nonblocking loopback socket and runs all
+`bpy` work on the main thread, one operation at a time. Calls sent together,
+for example several parallel tool calls next to a long script, wait their turn
+in arrival order instead of failing; one operation runs per timer tick, so
+Blender redraws and handles the user's input between them. A long render or
+script still makes the GUI unresponsive while it runs, and the calls behind it
+wait. The bridge holds up to 64 connections at once.
+
+The add-on acknowledges a call's start on its connection before running it, and
+runs nothing it has not acknowledged (its discovery record lists the
+`start_ack` capability). So when a call gets no answer, its error says whether
+it ran, in `details.executed`:
+
+| `details.executed` | Meaning | Retry |
+|---|---|---|
+| `false` | Never started: still queued when the timeout (`BLENDER__CONNECTION_TIMEOUT`, or a script's own `timeout`) ran out, or the bridge dropped the connection first. Blender refuses a call once its deadline has passed and never runs one whose client left. | Safe once Blender is free |
+| `true` | Started and still running, or the connection closed after it started; the outcome is unknown. An operation already started cannot safely be stopped. | Inspect Blender first |
+| `null` | An add-on built before the acknowledgement: it may or may not have run. | Inspect Blender first |
+
+A timeout is reported with `error_type: "TimeoutError"`, a closed connection
+with `"ConnectionError"`. Simul itself sends a call again only when it provably
+did not run: a request the bridge closed before acknowledging it (it was
+holding 64 connections, or restarting), or one that was not sent whole, while
+the timeout allows. A call that never started is reported half a second after
+its timeout, the time an acknowledgement sent just before it may take to arrive.
+
+`execute_blender_script` reports a script that started (or, with an older
+add-on, may have) but did not finish within its timeout as embedded mode does:
+`timed_out: true`, `success: false` and an `error` saying it keeps running on
+Blender's main thread, where it cannot be stopped and its output is lost, with
+`details.executed`. A script that never started gets the `TimeoutError` above.
+
+A request may be up to 32 MiB of JSON (a 500 000-face mesh from
+`create_blender_mesh_from_data` is about 27 MB). It is read as fast as it
+arrives; only a connection that sends nothing for 10 seconds while Blender is
+free to read is dropped. A larger request is refused before it is sent, with an
+error that names the limit; send the data in several calls instead.
 
 ## Configuration
 
@@ -364,11 +399,13 @@ constraint, left unmuted, held once the user mutes it, and no longer reported
 once its target is deleted), a Child Of camera
 whose scale placement no longer compounds, a camera disabled in viewports or in
 an excluded collection, whose override check is reported as skipped until it is
-enabled again, refusal of an object-search pattern
-that can backtrack for hours, a force field without a location, JPEG capture
+enabled again, refusal of object-search patterns
+that can backtrack for seconds to hours, a force field without a location, JPEG capture
 of the 3D View in Edit Mode without a camera, a render through a temporary camera,
 explicit script-output truncation, multiple windows, scene/file changes,
-and detachment. A second disposable process checks glTF export and render from a script, the
+and detachment. A second disposable process checks calls queued behind a long
+script, one that timed out while queued never running, a script's `timed_out`,
+a request of several MB, glTF export and render from a script, the
 context-loss recipe after `read_homefile`, recovery through `attach_blender_window`,
 `open_blender_file` re-attachment and its refusal to discard unsaved work unless
 asked, and `AttachmentStale` after the process exits. It always closes the
