@@ -949,7 +949,8 @@ class PrimEditMixin:
                 )))
             """,
         )
-        return await self._execute_json_script(script)
+        # A placement made while paused after a step is reverted on stop.
+        return await self._execute_json_script(script, annotations=("paused_edit",))
 
     @tool_meta(
         name="set_isaac_prim_visibility",
@@ -1121,7 +1122,8 @@ class PrimEditMixin:
                             print(json.dumps(result))
             """,
         )
-        return await self._execute_json_script(script)
+        # An edit made while paused after a step is reverted on stop.
+        return await self._execute_json_script(script, annotations=("paused_edit",))
 
     @tool_meta(
         name="duplicate_isaac_prim",

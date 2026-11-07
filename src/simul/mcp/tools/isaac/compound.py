@@ -217,4 +217,4 @@ class CompoundMixin:
                 print(json.dumps(result))
             """,
         )
-        return await self._execute_json_script(script)
+        return await self._execute_json_script(script, annotations=("paused_edit",))

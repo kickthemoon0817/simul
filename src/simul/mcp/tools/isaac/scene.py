@@ -411,7 +411,10 @@ class SceneInspectionMixin:
             """,
         )
         mode = self._raw_script_transport_mode
-        return await self._execute_json_script(script, transport_mode=mode)
+        # The transform comes from USD, which GPU physics stops updating.
+        return await self._execute_json_script(
+            script, transport_mode=mode, annotations=("usd_readback",)
+        )
 
     async def get_isaac_prim_transform(
         self,
@@ -473,7 +476,9 @@ class SceneInspectionMixin:
             """,
         )
         mode = self._raw_script_transport_mode
-        return await self._execute_json_script(script, transport_mode=mode)
+        return await self._execute_json_script(
+            script, transport_mode=mode, annotations=("usd_readback",)
+        )
 
     @tool_meta(
         name="search_isaac_prims",

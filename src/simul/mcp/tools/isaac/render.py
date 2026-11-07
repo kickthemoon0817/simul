@@ -25,9 +25,13 @@ class RenderMixin:
             "Handles the full replicator pipeline in a single call: creates a render "
             "product, attaches annotators, renders frames, reads numpy data, computes stats "
             "(shape, min, max, mean, rgb_max, rgb_mean, nonzero_pixels for color AOVs), and "
-            "cleans up. Common AOVs: HdrColor, DirectDiffuse, DirectSpecular, "
-            "IndirectDiffuse, Reflections, AmbientOcclusion, Depth, SmoothNormal, normals. "
-            "Use list_isaac_aovs for the registered set."
+            "cleans up. Annotators that return {data, info} (semantic_segmentation, "
+            "instance_segmentation, bounding_box_2d_tight/loose, bounding_box_3d, "
+            "pointcloud) report the array's stats (per-field ranges and a record count for "
+            "bounding boxes) plus an info summary such as idToLabels. Common AOVs: "
+            "HdrColor, DirectDiffuse, DirectSpecular, IndirectDiffuse, Reflections, "
+            "AmbientOcclusion, Depth, SmoothNormal, normals. Use list_isaac_aovs for the "
+            "registered set."
         ),
         read_only=False,
     )
@@ -57,8 +61,11 @@ class RenderMixin:
 
         Returns:
             Dict with per-AOV statistics (shape, dtype, min, max, mean,
-            rgb_max, rgb_mean, nonzero_pixels for color AOVs) and a
-            ``warnings`` list of cleanup problems that did not lose data.
+            rgb_max, rgb_mean, nonzero_pixels for color AOVs; count, fields
+            and field_ranges for structured arrays such as bounding boxes),
+            ``output`` ("array" or "dict") and, for dict-shaped annotators,
+            an ``info`` summary; plus a ``warnings`` list of cleanup problems
+            that did not lose data.
         """
         if len(aov_names) > 16:
             return {"error": "aov_names must not exceed 16 entries", "error_type": "ValueError"}
@@ -120,28 +127,100 @@ class RenderMixin:
                 f = float(v)
                 return None if math.isnan(f) or math.isinf(f) else f
 
+            def _summarize_array(arr):
+                # Structured arrays (bounding_box_2d_tight/loose, bounding_box_3d)
+                # hold one record per object; an empty one means no labelled
+                # object is in view, which is data, not its absence.
+                if arr.dtype.names:
+                    stats = {{
+                        "shape": list(arr.shape),
+                        "dtype": str(arr.dtype),
+                        "count": int(arr.shape[0]) if arr.ndim else int(arr.size),
+                        "fields": list(arr.dtype.names),
+                    }}
+                    ranges = {{}}
+                    for field in arr.dtype.names[:16]:
+                        column = arr[field]
+                        if column.size and np.issubdtype(column.dtype, np.number):
+                            ranges[field] = {{"min": _sf(column.min()), "max": _sf(column.max())}}
+                    stats["field_ranges"] = ranges
+                    return stats
+                if arr.size == 0:
+                    return None
+                stats = {{
+                    "shape": list(arr.shape),
+                    "dtype": str(arr.dtype),
+                    "min": _sf(arr.min()),
+                    "max": _sf(arr.max()),
+                    "mean": _sf(arr.mean()),
+                }}
+                if arr.ndim == 3 and arr.shape[2] >= 3:
+                    rgb = arr[:, :, :3].astype(np.float32)
+                    stats["rgb_max"] = [_sf(rgb[:,:,i].max()) for i in range(3)]
+                    stats["rgb_mean"] = [_sf(rgb[:,:,i].mean()) for i in range(3)]
+                    nonzero = int((rgb.max(axis=2) > 0.001).sum())
+                    stats["nonzero_pixels"] = nonzero
+                    stats["total_pixels"] = int(rgb.shape[0] * rgb.shape[1])
+                return stats
+
+            def _jsonable(value, depth=0):
+                if value is None or isinstance(value, (bool, int, float, str)):
+                    return value
+                if isinstance(value, np.generic):
+                    return value.item()
+                if isinstance(value, np.ndarray):
+                    return {{"shape": list(value.shape), "dtype": str(value.dtype)}}
+                if depth < 2 and isinstance(value, dict):
+                    items = list(value.items())
+                    out = {{str(k): _jsonable(v, depth + 1) for k, v in items[:20]}}
+                    if len(items) > 20:
+                        out["..."] = str(len(items) - 20) + " more"
+                    return out
+                if depth < 2 and isinstance(value, (list, tuple)):
+                    out = [_jsonable(v, depth + 1) for v in value[:20]]
+                    if len(value) > 20:
+                        out.append(str(len(value) - 20) + " more")
+                    return out
+                return str(value)[:200]
+
+            def _summarize_info(info):
+                # The info beside "data": idToLabels for segmentation,
+                # primPaths/bboxIds for bounding boxes, pointRgb/pointNormals
+                # for pointcloud. Arrays become shapes, mappings a sample.
+                summary = {{}}
+                for key, value in list(info.items())[:32]:
+                    if isinstance(value, (dict, list, tuple)):
+                        summary[key] = {{"count": len(value), "sample": _jsonable(value)}}
+                    else:
+                        summary[key] = _jsonable(value)
+                return summary
+
             results = {{}}
             for name, ann in annotators.items():
                 try:
                     data = ann.get_data()
-                    if isinstance(data, np.ndarray) and data.size > 0:
-                        stats = {{
-                            "shape": list(data.shape),
-                            "dtype": str(data.dtype),
-                            "min": _sf(data.min()),
-                            "max": _sf(data.max()),
-                            "mean": _sf(data.mean()),
-                        }}
-                        if data.ndim == 3 and data.shape[2] >= 3:
-                            rgb = data[:, :, :3].astype(np.float32)
-                            stats["rgb_max"] = [_sf(rgb[:,:,i].max()) for i in range(3)]
-                            stats["rgb_mean"] = [_sf(rgb[:,:,i].mean()) for i in range(3)]
-                            nonzero = int((rgb.max(axis=2) > 0.001).sum())
-                            stats["nonzero_pixels"] = nonzero
-                            stats["total_pixels"] = int(rgb.shape[0] * rgb.shape[1])
-                        results[name] = stats
+                    # Annotators such as semantic_segmentation, the
+                    # bounding boxes and pointcloud return {{"data": array,
+                    # "info": {{...}}}} (Isaac Sim's replicator examples read
+                    # sem_data["data"] and sem_data["info"]["idToLabels"]);
+                    # colour and depth AOVs return the array itself.
+                    if isinstance(data, dict):
+                        array = data.get("data")
+                        info = {{k: v for k, v in data.items() if k != "data"}}
+                        if isinstance(info.get("info"), dict) and len(info) == 1:
+                            info = info["info"]
                     else:
+                        array, info = data, {{}}
+                    stats = _summarize_array(array) if isinstance(array, np.ndarray) else None
+                    if stats is None and not info:
                         results[name] = {{"error": "no data or empty array"}}
+                        continue
+                    if stats is None:
+                        stats = {{"data": None if array is None else type(array).__name__}}
+                    stats["output"] = "dict" if isinstance(data, dict) else "array"
+                    if info:
+                        stats["info"] = _summarize_info(info)
+                    results[name] = stats
                 except Exception as e:
                     results[name] = {{"error": str(e)}}
 
@@ -566,9 +645,10 @@ class RenderMixin:
     @tool_meta(
         name="list_isaac_render_vars",
         description=(
-            "List available render variable (AOV) names from SyntheticData and sensor "
-            "types. Use this to discover what render passes and sensor data are available "
-            "in the current session."
+            "List the render-var visualization templates registered with "
+            "omni.syntheticdata (the displays its Synthetic Data menu offers, e.g. "
+            "LdrColorDisplay). For the annotator names read_isaac_aovs accepts, use "
+            "list_isaac_aovs."
         ),
         read_only=True,
         idempotent=True,
@@ -577,14 +657,21 @@ class RenderMixin:
         self, max_results: int = DEFAULT_MAX_RESULTS
     ) -> Dict[str, Any]:
         """
-        List available render variable names from SyntheticData.
+        List the render-var visualization templates SyntheticData registered.
+
+        ``SyntheticData.get_registered_visualization_template_names`` is a
+        static method of omni.syntheticdata, the one its own menu calls. There
+        is no sensor-type listing on that class (an earlier version of this
+        tool called a ``get_sensor_type_names`` that does not exist), so the
+        replicator annotators are listed by list_isaac_aovs instead.
 
         Args:
-            max_results: Maximum names returned per list. The ``*_count``
-                fields still count every registered name.
+            max_results: Maximum names returned. ``render_var_count`` still
+                counts every registered template.
 
         Returns:
-            Dict with render var templates and sensor type names.
+            Dict with ``render_var_templates``, ``render_var_count`` and
+            ``truncated``, or ``syntheticdata_error``.
         """
         max_results = max(1, min(max_results, 1000))
         script = textwrap.dedent(f"""\
@@ -594,14 +681,10 @@ class RenderMixin:
             result = {{}}
             try:
                 import omni.syntheticdata as syn
-                sd = syn.SyntheticData.Get()
-                templates = sorted(sd.get_registered_visualization_template_names())
+                templates = sorted(syn.SyntheticData.get_registered_visualization_template_names())
                 result["render_var_templates"] = templates[:max_results]
                 result["render_var_count"] = len(templates)
-                sensor_types = sorted(sd.get_sensor_type_names())
-                result["sensor_types"] = sensor_types[:max_results]
-                result["sensor_type_count"] = len(sensor_types)
-                result["truncated"] = max(len(templates), len(sensor_types)) > max_results
+                result["truncated"] = len(templates) > max_results
             except Exception as e:
                 result["syntheticdata_error"] = str(e)
 

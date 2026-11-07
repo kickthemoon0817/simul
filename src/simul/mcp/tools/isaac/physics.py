@@ -389,7 +389,8 @@ class PhysicsMixin:
                         "diagonal_inertia": inertia,
                     }}))
         """)
-        return await self._execute_json_script(script)
+        # Velocities come from USD, which GPU physics stops updating.
+        return await self._execute_json_script(script, annotations=("usd_readback",))
 
     @tool_meta(
         name="list_isaac_physics_objects",
