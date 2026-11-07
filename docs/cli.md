@@ -62,10 +62,26 @@ simul server --config /abs/path/config.yaml --log-level DEBUG
 | `--blender-mode` | `embedded` (default, local `bpy`) or `attached` (the window chosen with `simul blender attach`) |
 | `-l, --log-level` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 | `-v, --verbose` | Verbose logging |
+| `--allow-public` | Let `http`/`sse` bind a non-loopback `server.host` (`SERVER__ALLOW_PUBLIC=true`) |
 
 `--backends` also limits the startup probes: backends you did not select are
 neither probed nor built. Isaac Sim is not probed either when its tools are
 skipped (on macOS, or with `ISAAC_SIM__ENABLED=false`); the banner says so.
+
+With `--transport http` or `sse` the server checks every request's `Host`
+and `Origin` headers against loopback, the bound address and
+`server.allowed_hosts` / `allowed_origins` (the DNS-rebinding defense), and
+requires `Authorization: Bearer <token>` when `SERVER__AUTH_TOKEN_FILE` is
+set. A non-loopback `server.host` without `--allow-public` exits 2 with
+`error_type: InsecureTransport` before anything listens. The banner prints the
+listener URL, the guard's host list and whether a token is required. See
+[configuration.md](configuration.md#network-transports-http-and-sse).
+
+```bash
+SERVER__AUTH_TOKEN_FILE=~/.config/simul/server-token simul server --transport http
+SERVER__HOST=0.0.0.0 SERVER__AUTH_TOKEN_FILE=~/.config/simul/server-token \
+  simul server --transport http --allow-public
+```
 
 ### `simul tools`
 

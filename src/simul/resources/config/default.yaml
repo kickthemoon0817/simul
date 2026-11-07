@@ -7,9 +7,20 @@
 # Server Configuration
 server:
   name: "simul"
+  # host and port apply to --transport http / sse only.
   host: "localhost"
   port: 8765
   timeout: 30
+  # A host that is not loopback (0.0.0.0, a LAN address) needs this opt-in,
+  # or `simul server --allow-public`; the server refuses to start otherwise.
+  allow_public: false
+  # DNS-rebinding guard: refuse requests whose Host header is not loopback,
+  # the bound address or allowed_hosts, and browser requests from another origin.
+  host_origin_protection: true
+  allowed_hosts: []
+  allowed_origins: []
+  # Require "Authorization: Bearer <token>". The file must be chmod 600.
+  # auth_token_file: "~/.config/simul/server-token"
 
 # Isaac Sim Configuration
 isaac_sim:

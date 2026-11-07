@@ -35,7 +35,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from simul.cli.output import emit, emit_error, is_json_mode, set_json_mode
+from simul.cli.output import emit, emit_error, fail, is_json_mode, set_json_mode
 from simul.config import Settings, get_settings, load_settings, validate_settings
 from simul.tool_surfaces import THIN_BLENDER_TOOLS, THIN_UNREAL_TOOLS, TOOL_SURFACES
 from simul.logging import setup_logging, get_logger
@@ -427,6 +427,15 @@ def server(
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable verbose logging"
     ),
+    allow_public: bool = typer.Option(
+        False,
+        "--allow-public",
+        help=(
+            "Let --transport http/sse bind a non-loopback server.host (0.0.0.0, a LAN "
+            "address). Set SERVER__AUTH_TOKEN_FILE too: without a token anyone who can "
+            "reach the port can run every tool. Same as SERVER__ALLOW_PUBLIC=true."
+        ),
+    ),
 ) -> None:
     """Start the Simul MCP server.
 
@@ -434,10 +443,15 @@ def server(
     get no connection attempt and no banner line. Isaac Sim tools register
     only on Linux and Windows unless --backends names isaac or
     ISAAC_SIM__ENABLED=true; the banner says when they are skipped.
+
+    The network transports refuse a non-loopback server.host unless
+    --allow-public is passed, check every request's Host and Origin headers
+    (the DNS-rebinding defense), and require a bearer token when
+    SERVER__AUTH_TOKEN_FILE or SERVER__AUTH_TOKEN is set.
     """
     try:
         from simul.mcp.backends import backend_skip_reason
-        from simul.mcp.server import TRANSPORTS
+        from simul.mcp.server import NETWORK_TRANSPORTS, TRANSPORTS
 
         if config:
             settings = load_settings(config)
@@ -465,6 +479,17 @@ def server(
             )
             raise typer.Exit(1)
 
+        if allow_public:
+            settings = _with_section(settings, "server", allow_public=True)
+        http_security = None
+        if transport in NETWORK_TRANSPORTS:
+            from simul.mcp.http_security import HttpSecurityError, resolve_http_security
+
+            try:
+                http_security = resolve_http_security(settings.server)
+            except HttpSecurityError as exc:
+                fail(str(exc), "InsecureTransport", exit_code=2)
+
         setup_logging(settings)
         logger = get_logger(__name__)
 
@@ -476,6 +501,14 @@ def server(
             f"Transport: {transport}",
             f"Backends: {backends_label}",
         ]
+        if http_security is not None:
+            path = "sse" if transport == "sse" else "mcp"
+            shown_host = settings.server.host
+            if ":" in shown_host and not shown_host.startswith("["):
+                shown_host = f"[{shown_host}]"
+            lines.append(f"Listening: http://{escape(shown_host)}:{settings.server.port}/{path}")
+            lines += [escape(line) for line in http_security.describe()]
+            lines += [f"[bold red]WARNING: {escape(warning)}[/bold red]" for warning in http_security.warnings]
         # Probe only what was selected: each probe is a connection attempt or
         # a runtime import that a per-session stdio spawn pays every time.
         if _is_enabled(backend_set, "isaac"):
