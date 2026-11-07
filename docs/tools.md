@@ -444,6 +444,52 @@ Behaviour worth knowing:
   collection, are not followed, so a camera that only they need is composed
   as well. An add-on built before this report answers without
   `pose_source` and `warning`, and the server returns them as `null`.
+- `play_blender_animation` takes `play`, `reverse`, `pause` or `stop`, and
+  repeating a call changes nothing more (`screen.animation_play` on its own
+  toggles playback, so a second `play` used to stop it). `play` and `reverse`
+  start playback in that direction or turn it around; `pause` stops on the
+  current frame; `stop` stops and returns to the frame playback started from,
+  as Esc does in Blender, also after the tool turned it around. The reply
+  reports `is_playing`, `direction`, `changed` (false when playback already ran
+  that way, or was already stopped) and the current `frame`. Blender does not
+  report which way playback runs, so playback that the user or a script
+  started is restarted in the requested direction. Playback needs Blender's
+  event loop: in background mode (`blender -b`, the `bpy` module) `play` and
+  `reverse` are refused rather than reported as playing on a frame that never
+  moves; step frames with `set_blender_frame` or sample them with
+  `get_blender_object_trajectory`.
+- `get_blender_frame` reports `fps` as Blender plays it, `render.fps /
+  render.fps_base` (29.97 for NTSC's 30 / 1.001), and `fps_base` itself.
+  `set_blender_frame_range` takes a one-frame range (start equal to end).
+  Frames Blender would clamp are refused instead: a scene range outside
+  0..1048574, or a current frame outside -1048574..1048574.
+- `insert_blender_keyframe` keys the property's current value, as Blender's I
+  key does, unless `value` gives one: one number for one channel (`index` 0 or
+  more, or a property that is not an array), else one per element. A given
+  value is keyed through the property, so NLA remapping applies, and the
+  property then shows what it showed before unless the key is on the current
+  frame; it follows its new F-curve at the next frame change. `interpolation`
+  sets the key's interpolation (otherwise Blender's choice: the previous key's
+  on a curve with two keys or more, else its preference, Bezier by default)
+  and `keyframe_type` its key type. The reply's `keyframes` give each keyed
+  channel's value, interpolation and type as Blender stored them, and
+  `value_source` says which value was keyed. `get_blender_keyframes` reports
+  `frame_range` in float frames, since a key can sit between frames.
+- `get_blender_object_trajectory` is not read-only: each sample is a frame
+  change, so frame-change handlers run, and an unbaked rigid-body world is
+  stepped through every frame from its cache start, which fills its cache. The
+  frame and subframe current before the call are set again afterwards.
+  `step` is at least 1 and `start_frame` not after `end_frame`. `time` counts
+  seconds from the scene's `frame_start` (`time_origin_frame`) at `fps /
+  fps_base`, and `velocity` is the world location change since the previous
+  sample per second (null for the first). Each point gives the world
+  `location`, `rotation_euler` in `euler_order` (the object's Euler order, XYZ
+  for a quaternion or axis-angle object), each sample the equivalent nearest
+  the previous one, so it stays continuous while the object turns less than
+  half a turn between samples, `rotation_quaternion` (w, x, y, z, its sign kept
+  continuous) and `local_rotation`, the object's own rotation channels as its
+  `rotation_mode` stores them, unwrapped: a joint keyed from 0 to 6 pi reads 6
+  pi there.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
   backtracks, and on a long object name such a pattern runs for hours on

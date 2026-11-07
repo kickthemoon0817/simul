@@ -42,12 +42,19 @@ slotted_versions = pytest.mark.parametrize(
 
 
 class Keyframe:
-    """``bpy.types.Keyframe``: its (frame, value) point."""
+    """``bpy.types.Keyframe``: its (frame, value) point, interpolation and key type.
 
-    __slots__ = ("co",)
+    A new key interpolates as Blender's default preference does, Bezier.
+    """
 
-    def __init__(self, frame: float) -> None:
-        self.co = (frame, 0.0)
+    __slots__ = ("co", "interpolation", "type")
+
+    def __init__(
+        self, frame: float, value: float = 0.0, key_type: str = "KEYFRAME"
+    ) -> None:
+        self.co = [frame, value]
+        self.interpolation = "BEZIER"
+        self.type = key_type
 
 
 class FCurve:
@@ -202,15 +209,28 @@ def slotted_action(version: Version, slots: Dict[ActionSlot, List[FCurve]]) -> A
 
 
 class Object:
-    """``bpy.types.Object``: its animation data and keyframe functions.
+    """``bpy.types.Object``: its animation data, keyable properties and keyframe functions.
 
     ``keyframe_insert`` and ``keyframe_delete`` take their arguments as Blender
     5.0 documents them and, like Blender, report a refused or missing key by
-    returning False. ``keyframe_delete`` removes the keys on the frame from
-    ``fcurves``, the curves Blender keys this object into.
+    returning False. ``keyframe_insert`` keys the property's current value
+    into ``fcurves``, the curves Blender keys this object into, replacing a key
+    on the same frame; ``keyframe_delete`` removes the keys on the frame from
+    them. ``location`` stands for an array property, ``props`` for custom
+    properties (``obj["name"]``) and ``paths`` for the structs ``path_resolve``
+    finds, such as a pose bone.
     """
 
-    __slots__ = ("name", "animation_data", "fcurves", "locked", "calls")
+    __slots__ = (
+        "name",
+        "animation_data",
+        "fcurves",
+        "locked",
+        "calls",
+        "location",
+        "props",
+        "paths",
+    )
 
     def __init__(
         self,
@@ -223,7 +243,35 @@ class Object:
         self.animation_data = animation_data
         self.fcurves = fcurves if fcurves is not None else []
         self.locked = locked
-        self.calls: List[Tuple[str, str, int, float]] = []
+        self.calls: List[Tuple[Any, ...]] = []
+        self.location: List[float] = [0.0, 0.0, 0.0]
+        self.props: Dict[str, Any] = {}
+        self.paths: Dict[str, Any] = {}
+
+    def keys(self) -> List[str]:
+        return list(self.props)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.props[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.props[key] = value
+
+    def path_resolve(self, path: str) -> Any:
+        if path not in self.paths:
+            raise ValueError(f'Object.path_resolve("{path}") could not be resolved')
+        return self.paths[path]
+
+    def _current(self, data_path: str) -> Any:
+        if data_path.startswith('["'):
+            return self.props[data_path[2:-2]]
+        owner_path, _, name = data_path.rpartition(".")
+        owner = self.path_resolve(owner_path) if owner_path else self
+        if not hasattr(owner, name):
+            raise TypeError(
+                f'bpy_struct.keyframe_insert() property "{data_path}" not found'
+            )
+        return getattr(owner, name)
 
     def keyframe_insert(
         self,
@@ -236,8 +284,27 @@ class Object:
         options: Any = frozenset(),
         keytype: str = "KEYFRAME",
     ) -> bool:
-        self.calls.append(("keyframe_insert", data_path, index, frame))
-        return not self.locked
+        self.calls.append(("keyframe_insert", data_path, index, frame, keytype))
+        if self.locked:
+            return False
+        current = self._current(data_path)
+        values = list(current) if isinstance(current, list) else [current]
+        for element in range(len(values)) if index < 0 else [index]:
+            fcurve = next(
+                (
+                    c
+                    for c in self.fcurves
+                    if c.data_path == data_path and c.array_index == element
+                ),
+                None,
+            )
+            if fcurve is None:
+                fcurve = FCurve(data_path, element)
+                self.fcurves.append(fcurve)
+            kept = [k for k in fcurve.keyframe_points if abs(k.co[0] - frame) >= 0.01]
+            key = Keyframe(frame, float(values[element]), keytype)
+            fcurve.keyframe_points = sorted(kept + [key], key=lambda k: k.co[0])
+        return True
 
     def keyframe_delete(
         self,
@@ -290,6 +357,7 @@ def session_on(
     monkeypatch.setitem(sys.modules, "bpy_extras.anim_utils", anim_utils)
     fake_bpy = SimpleNamespace(
         app=SimpleNamespace(version=version),
+        context=SimpleNamespace(scene=SimpleNamespace(frame_current=1)),
         data=SimpleNamespace(objects={obj.name: obj for obj in objects}),
     )
     monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -458,6 +526,18 @@ class TestGetKeyframes:
             ("location", 2, 2, [1, 10]),
         ]
 
+    def test_keys_between_frames_keep_their_frame(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keys at -0.5 and 120.9 were reported as frame_range [0, 120]."""
+        ball = keyed_ball(BLENDER_5_0, FCurve("location", 0, 1, -0.5, 120.9))
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        (channel,) = session.get_keyframes("Ball")["channels"]
+
+        assert channel["frame_range"] == [-0.5, 120.9]
+        assert all(isinstance(frame, float) for frame in channel["frame_range"])
+
     @slotted_versions
     def test_lists_only_the_objects_slot_of_a_shared_action(
         self, monkeypatch: pytest.MonkeyPatch, version: Version
@@ -527,16 +607,201 @@ class TestGetKeyframes:
 
 class TestInsertKeyframe:
     @every_version
-    def test_inserts_through_blender(
+    def test_keys_the_current_value_and_reads_the_key_back(
         self, monkeypatch: pytest.MonkeyPatch, version: Version
     ) -> None:
-        ball = Object("Ball")
+        ball = keyed_ball(version)
+        ball.location = [1.0, 2.0, 3.0]
         session = session_on(monkeypatch, version, ball)
 
         result = session.insert_keyframe("Ball", "location", 10, index=2)
 
-        assert result == {"object_name": "Ball", "data_path": "location", "frame": 10}
-        assert ball.calls == [("keyframe_insert", "location", 2, 10)]
+        assert result == {
+            "object_name": "Ball",
+            "data_path": "location",
+            "frame": 10,
+            "value_source": "current",
+            "keyframes": [
+                {
+                    "array_index": 2,
+                    "value": 3.0,
+                    "interpolation": "BEZIER",
+                    "keyframe_type": "KEYFRAME",
+                }
+            ],
+        }
+        assert ball.calls == [("keyframe_insert", "location", 2, 10, "KEYFRAME")]
+
+    @every_version
+    def test_keys_a_given_value_and_leaves_the_property_as_it_was(
+        self, monkeypatch: pytest.MonkeyPatch, version: Version
+    ) -> None:
+        """Keying a value at another frame keyed the current one: there was no value."""
+        ball = keyed_ball(version)
+        ball.location = [1.0, 2.0, 3.0]
+        session = session_on(monkeypatch, version, ball)
+
+        result = session.insert_keyframe(
+            "Ball", "location", 10, value=[4.0, 5.0, 6.0]
+        )
+
+        assert result["value_source"] == "given"
+        assert [(k["array_index"], k["value"]) for k in result["keyframes"]] == [
+            (0, 4.0),
+            (1, 5.0),
+            (2, 6.0),
+        ]
+        assert channel_summary(session.get_keyframes("Ball")) == [
+            ("location", 0, 1, [10, 10]),
+            ("location", 1, 1, [10, 10]),
+            ("location", 2, 1, [10, 10]),
+        ]
+        # The frame shown is 1: the property still shows its value there.
+        assert ball.location == [1.0, 2.0, 3.0]
+
+    def test_a_given_value_on_the_current_frame_is_what_the_property_shows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        blender_runtime.bpy.context.scene.frame_current = 10
+
+        session.insert_keyframe("Ball", "location", 10, value=[4.0, 5.0, 6.0])
+
+        assert ball.location == [4.0, 5.0, 6.0]
+
+    def test_one_channel_takes_one_number(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0)
+        ball.location = [1.0, 2.0, 3.0]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframe("Ball", "location", 7, index=1, value=-2.5)
+
+        assert [(k["array_index"], k["value"]) for k in result["keyframes"]] == [
+            (1, -2.5)
+        ]
+        assert ball.location == [1.0, 2.0, 3.0]
+
+    def test_sets_interpolation_and_key_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every key came out Bezier, KEYFRAME, whatever the caller needed."""
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframe(
+            "Ball",
+            "location",
+            3,
+            index=0,
+            interpolation="LINEAR",
+            keyframe_type="BREAKDOWN",
+        )
+
+        assert result["keyframes"] == [
+            {
+                "array_index": 0,
+                "value": 0.0,
+                "interpolation": "LINEAR",
+                "keyframe_type": "BREAKDOWN",
+            }
+        ]
+        assert ball.calls == [("keyframe_insert", "location", 0, 3, "BREAKDOWN")]
+        assert ball.fcurves[0].keyframe_points[0].interpolation == "LINEAR"
+
+    @pytest.mark.parametrize(
+        ("index", "value", "message"),
+        [
+            (-1, [1.0, 2.0], "has 3 elements: pass 3 numbers"),
+            (-1, 1.0, "has 3 elements: pass 3 numbers"),
+            (1, [1.0], r"location\[1\] is one channel"),
+            (5, 1.0, "index 5 is out of range"),
+        ],
+        ids=["short-list", "number-for-array", "list-for-channel", "bad-index"],
+    )
+    def test_refuses_a_value_that_does_not_fit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        index: int,
+        value: Any,
+        message: str,
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0)
+        ball.location = [1.0, 2.0, 3.0]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        with pytest.raises(ValueError, match=message):
+            session.insert_keyframe("Ball", "location", 4, index=index, value=value)
+
+        assert ball.calls == []
+        assert ball.location == [1.0, 2.0, 3.0]
+
+    def test_custom_and_pose_bone_properties(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0)
+        ball.props["gear"] = 2
+        bone = SimpleNamespace(rotation_euler=[0.0, 0.0, 0.0])
+        ball.paths['pose.bones["J1"]'] = bone
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        custom = session.insert_keyframe("Ball", '["gear"]', 5, value=3.0)
+        posed = session.insert_keyframe(
+            "Ball", 'pose.bones["J1"].rotation_euler', 5, value=[0.1, 0.2, 0.3]
+        )
+
+        assert [k["value"] for k in custom["keyframes"]] == [3.0]
+        assert [k["value"] for k in posed["keyframes"]] == [0.1, 0.2, 0.3]
+        assert ball.props["gear"] == 2
+        assert bone.rotation_euler == [0.0, 0.0, 0.0]
+        with pytest.raises(ValueError, match="not a whole number"):
+            session.insert_keyframe("Ball", '["gear"]', 6, value=2.5)
+        with pytest.raises(ValueError, match="could not be resolved"):
+            session.insert_keyframe(
+                "Ball", 'pose.bones["J9"].rotation_euler', 6, value=[0, 0, 0]
+            )
+        with pytest.raises(ValueError, match="no custom property 'mass'"):
+            session.insert_keyframe("Ball", '["mass"]', 6, value=1.0)
+
+    def test_a_refused_key_restores_the_given_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0, locked=True)
+        ball.location = [1.0, 2.0, 3.0]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        blender_runtime.bpy.context.scene.frame_current = 4
+
+        with pytest.raises(RuntimeError, match="inserted no keyframe"):
+            session.insert_keyframe("Ball", "location", 4, value=[7.0, 8.0, 9.0])
+
+        assert ball.location == [1.0, 2.0, 3.0]
+
+    def test_refuses_an_unknown_interpolation_or_key_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        with pytest.raises(ValueError, match="Invalid interpolation 'SMOOTH'"):
+            session.insert_keyframe("Ball", "location", 1, interpolation="SMOOTH")
+        with pytest.raises(ValueError, match="Invalid keyframe_type 'KEY'"):
+            session.insert_keyframe("Ball", "location", 1, keyframe_type="KEY")
+        assert ball.calls == []
+
+    def test_says_so_when_the_key_is_not_on_the_frame(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In NLA tweak mode the key lands at the strip's own frame."""
+        ball = Object("Ball")
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframe(
+            "Ball", "location", 10, interpolation="CONSTANT"
+        )
+
+        assert result["keyframes"] == []
+        assert "interpolation was left as Blender set it" in result["warning"]
 
     def test_reports_a_key_blender_refused(
         self, monkeypatch: pytest.MonkeyPatch

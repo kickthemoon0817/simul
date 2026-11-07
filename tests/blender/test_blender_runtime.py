@@ -26,6 +26,7 @@ from tests.fakes import (
     FakeNlaStrip,
     FakeNlaTrack,
     FakeObjectModifier,
+    FakePlayback,
     FakePoseBones,
     FakePropArray,
     FakeTransformObject,
@@ -33,6 +34,7 @@ from tests.fakes import (
     FakeViewLayer,
     axis_angle_matrix,
     euler_matrix,
+    fake_app_handlers,
     matrix_euler,
     matrix_quaternion,
 )
@@ -7181,6 +7183,7 @@ class TestAnimationTools:
         frame_start: int = 1,
         frame_end: int = 250,
         fps: float = 24.0,
+        fps_base: float = 1.0,
         is_playing: bool = False,
         objects: Optional[Dict[str, Any]] = None,
     ) -> SimpleNamespace:
@@ -7192,8 +7195,9 @@ class TestAnimationTools:
             current_frame: Current scene frame.
             frame_start: Animation start frame.
             frame_end: Animation end frame.
-            fps: Frames per second.
-            is_playing: Whether animation is currently playing.
+            fps: render.fps.
+            fps_base: render.fps_base.
+            is_playing: Whether playback that this tool did not start runs.
             objects: Dict of name -> object. Defaults to empty dict.
 
         Returns:
@@ -7202,46 +7206,32 @@ class TestAnimationTools:
         if objects is None:
             objects = {}
 
-        ops_calls: List[Dict[str, Any]] = []
-
-        fake_render = SimpleNamespace(fps=fps)
         fake_scene = SimpleNamespace(
             frame_current=current_frame,
+            frame_subframe=0.0,
             frame_start=frame_start,
             frame_end=frame_end,
-            render=fake_render,
+            render=SimpleNamespace(fps=fps, fps_base=fps_base),
         )
 
-        def frame_set(frame: int) -> None:
+        def frame_set(frame: int, subframe: float = 0.0) -> None:
             fake_scene.frame_current = frame
+            fake_scene.frame_subframe = subframe
 
         fake_scene.frame_set = frame_set
 
-        fake_screen = SimpleNamespace(is_animation_playing=is_playing)
-
-        class FakeScreenOps:
-            @staticmethod
-            def animation_play(**kwargs: Any) -> None:
-                fake_screen.is_animation_playing = True
-                ops_calls.append({"op": "screen.animation_play", **kwargs})
-
-            @staticmethod
-            def animation_cancel(**kwargs: Any) -> None:
-                fake_screen.is_animation_playing = False
-                ops_calls.append({"op": "screen.animation_cancel", **kwargs})
-
-        fake_context = SimpleNamespace(scene=fake_scene, screen=fake_screen)
-        fake_data = SimpleNamespace(objects=objects)
-        fake_app = SimpleNamespace(version=version)
-        fake_ops = SimpleNamespace(screen=FakeScreenOps)
+        handlers = fake_app_handlers()
+        # The screen and bpy.ops.screen, toggling as Blender's operators do.
+        playback = FakePlayback(fake_scene, handlers)
+        playback.is_animation_playing = is_playing
 
         fake_bpy = SimpleNamespace(
-            app=fake_app,
-            context=fake_context,
-            data=fake_data,
-            ops=fake_ops,
+            app=SimpleNamespace(version=version, background=False, handlers=handlers),
+            context=SimpleNamespace(scene=fake_scene, screen=playback),
+            data=SimpleNamespace(objects=objects),
+            ops=SimpleNamespace(screen=playback),
         )
-        fake_bpy._ops_calls = ops_calls  # type: ignore[attr-defined]
+        fake_bpy._ops_calls = playback.calls  # type: ignore[attr-defined]
         return fake_bpy
 
     # -- set_frame -----------------------------------------------------------
@@ -7275,6 +7265,7 @@ class TestAnimationTools:
         assert result["frame_start"] == 1
         assert result["frame_end"] == 100
         assert result["fps"] == 30.0
+        assert result["fps_base"] == 1.0
 
     # -- set_frame_range -----------------------------------------------------
 
@@ -7291,13 +7282,13 @@ class TestAnimationTools:
         assert result["frame_end"] == 200
 
     def test_set_frame_range_invalid(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Setting frame range with start >= end raises ValueError."""
+        """Setting frame range with start after end raises ValueError."""
         fake_bpy = self._make_fake_bpy_with_animation()
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        with pytest.raises(ValueError, match="must be less than"):
+        with pytest.raises(ValueError, match="must not be after"):
             session.set_frame_range(100, 50)
 
     # -- play_animation ------------------------------------------------------
@@ -7313,10 +7304,11 @@ class TestAnimationTools:
 
         assert result["action"] == "play"
         assert result["is_playing"] is True
-        assert fake_bpy._ops_calls[0]["op"] == "screen.animation_play"
+        assert result["direction"] == "forward"
+        assert fake_bpy._ops_calls == [("animation_play", {"reverse": False})]
 
     def test_stop_animation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Stop action cancels animation when playing."""
+        """Stop cancels playback started elsewhere, back to Blender's start frame."""
         fake_bpy = self._make_fake_bpy_with_animation(is_playing=True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -7326,7 +7318,8 @@ class TestAnimationTools:
 
         assert result["action"] == "stop"
         assert result["is_playing"] is False
-        assert fake_bpy._ops_calls[0]["op"] == "screen.animation_cancel"
+        assert result["changed"] is True
+        assert fake_bpy._ops_calls == [("animation_cancel", {"restore_frame": True})]
 
     def test_reverse_animation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Reverse action triggers animation_play with reverse=True."""
@@ -7338,9 +7331,8 @@ class TestAnimationTools:
         result = session.play_animation("reverse")
 
         assert result["action"] == "reverse"
-        call = fake_bpy._ops_calls[0]
-        assert call["op"] == "screen.animation_play"
-        assert call["reverse"] is True
+        assert result["direction"] == "reverse"
+        assert fake_bpy._ops_calls == [("animation_play", {"reverse": True})]
 
     def test_play_animation_invalid_action(
         self, monkeypatch: pytest.MonkeyPatch

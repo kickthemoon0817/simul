@@ -1102,7 +1102,7 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderPlayAnimationRequest\naction\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "1 validation error for BlenderPlayAnimationRequest\naction\n  Input should be 'play', 'reverse', 'pause' or 'stop' [type=literal_error, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
           "error_type": "ValidationError",
           "details": {"input": {"action": {"bogus": 1}}}
         }
@@ -1114,18 +1114,42 @@
         "session_calls": [
           {
             "method": "insert_keyframe",
-            "arguments": {"object_name": "'Cube'", "data_path": "'location'", "frame": "10", "index": "-1"}
+            "arguments": {
+              "object_name": "'Cube'",
+              "data_path": "'location'",
+              "frame": "10",
+              "index": "-1",
+              "value": "None",
+              "interpolation": "None",
+              "keyframe_type": "'KEYFRAME'"
+            }
           }
         ],
         "response": {"checked_against": "BlenderInsertKeyframeResponse"},
         "usage": [{"tool": "insert_blender_keyframe", "success": false}]
       },
       "full": {
-        "arguments": {"object_name": "Cube", "data_path": "location", "frame": 10, "index": 2},
+        "arguments": {
+          "object_name": "Cube",
+          "data_path": "location",
+          "frame": 10,
+          "index": 2,
+          "value": 1.5,
+          "interpolation": "LINEAR",
+          "keyframe_type": "BREAKDOWN"
+        },
         "session_calls": [
           {
             "method": "insert_keyframe",
-            "arguments": {"object_name": "'Cube'", "data_path": "'location'", "frame": "10", "index": "2"}
+            "arguments": {
+              "object_name": "'Cube'",
+              "data_path": "'location'",
+              "frame": "10",
+              "index": "2",
+              "value": "1.5",
+              "interpolation": "'LINEAR'",
+              "keyframe_type": "'BREAKDOWN'"
+            }
           }
         ],
         "response": {"checked_against": "BlenderInsertKeyframeResponse"},
@@ -1139,7 +1163,15 @@
           "error": "1 validation error for BlenderInsertKeyframeRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
           "details": {
-            "input": {"object_name": {"bogus": 1}, "data_path": "location", "frame": 10, "index": -1}
+            "input": {
+              "object_name": {"bogus": 1},
+              "data_path": "location",
+              "frame": 10,
+              "index": -1,
+              "value": null,
+              "interpolation": null,
+              "keyframe_type": "KEYFRAME"
+            }
           }
         }
       }

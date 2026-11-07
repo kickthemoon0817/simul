@@ -4,10 +4,24 @@ from __future__ import annotations
 
 import sys
 from types import ModuleType
+from typing import Iterator
 
 import pytest
 
+from simul.adapters import blender_runtime
 from tests.fakes import fake_anim_utils, fake_mathutils
+
+
+@pytest.fixture(autouse=True)
+def _no_recorded_playback() -> Iterator[None]:
+    """Start each test without a playback that an earlier one's stand-in recorded.
+
+    play_animation keeps what it started in a module-level record, as the one
+    Blender process the add-on lives in would; each test is a new process.
+    """
+    blender_runtime._playback.clear()
+    yield
+    blender_runtime._playback.clear()
 
 
 @pytest.fixture

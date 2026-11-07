@@ -239,6 +239,9 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "data_path": "location",
             "frame": 10,
             "index": 2,
+            "value": 1.5,
+            "interpolation": "LINEAR",
+            "keyframe_type": "BREAKDOWN",
         },
     },
     "delete_blender_keyframe": {

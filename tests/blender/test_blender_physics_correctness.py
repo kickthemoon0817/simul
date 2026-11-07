@@ -22,9 +22,12 @@ class _Matrix:
         self._euler = euler
         self.orders: List[str] = []
 
-    def to_euler(self, order: str) -> List[float]:
+    def to_euler(self, order: str, compatible: Any = None) -> List[float]:
         self.orders.append(order)
         return self._euler
+
+    def to_quaternion(self) -> List[float]:
+        return [1.0, 0.0, 0.0, 0.0]
 
 
 class _Objects(dict):
@@ -58,19 +61,25 @@ def _fake_bpy(
     calls: Dict[str, Any] = {"frames": [], "overrides": [], "ops": []}
     scene = SimpleNamespace(
         frame_current=1,
-        render=SimpleNamespace(fps=10),
+        frame_subframe=0.0,
+        frame_start=1,
+        render=SimpleNamespace(fps=10, fps_base=1.0),
         rigidbody_world=rigidbody_world,
         objects=_Objects({o.name: o for o in objects}),
     )
 
-    def frame_set(frame: int) -> None:
+    def frame_set(frame: int, subframe: float = 0.0) -> None:
         calls["frames"].append(frame)
         scene.frame_current = frame
+        scene.frame_subframe = subframe
 
     scene.frame_set = frame_set
 
     def evaluated_get(obj: Any, depsgraph: Any) -> Any:
-        return SimpleNamespace(matrix_world=evaluated[scene.frame_current])
+        return SimpleNamespace(
+            matrix_world=evaluated[scene.frame_current],
+            rotation_euler=obj.rotation_euler,
+        )
 
     for obj in objects:
         obj.evaluated_get = lambda depsgraph, _obj=obj: evaluated_get(_obj, depsgraph)
@@ -110,7 +119,7 @@ def _fake_bpy(
 
 
 @pytest.fixture
-def install(monkeypatch: pytest.MonkeyPatch) -> Any:
+def install(monkeypatch: pytest.MonkeyPatch, mathutils: Any) -> Any:
     def _install(fake: SimpleNamespace) -> Any:
         monkeypatch.setattr(blender_runtime, "bpy", fake)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)

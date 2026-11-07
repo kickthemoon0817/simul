@@ -110,6 +110,8 @@ from ..schemas.blender import (
     BlenderInfoResponse,
     BlenderInsertKeyframeRequest,
     BlenderInsertKeyframeResponse,
+    BlenderKeyframeInterpolation,
+    BlenderKeyframeType,
     BlenderMaterialInfoRequest,
     BlenderMaterialInfoResponse,
     BlenderMeshInfoRequest,
@@ -120,6 +122,7 @@ from ..schemas.blender import (
     BlenderOpenFileResponse,
     BlenderPlayAnimationRequest,
     BlenderPlayAnimationResponse,
+    BlenderPlaybackAction,
     BlenderSaveFileRequest,
     BlenderSaveFileResponse,
     BlenderSceneObjectsRequest,
@@ -970,14 +973,14 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_frame",
-        description="Get the current frame and animation range.",
+        description="Get the current frame, the animation range and the frame rate (fps / fps_base).",
         hints=READ_ONLY,
         operation="get_frame",
         response=BlenderGetFrameResponse,
     ),
     BlenderTool(
         name="set_blender_frame_range",
-        description="Set the animation frame range.",
+        description="Set the animation frame range; start may equal end for a one-frame range.",
         hints=OVERWRITING,
         operation="set_frame_range",
         request=BlenderSetFrameRangeRequest,
@@ -985,17 +988,29 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="play_blender_animation",
-        description="Control animation playback (play, stop, reverse).",
-        hints=ADDITIVE,
+        description=(
+            "Play, reverse, pause or stop animation playback; repeating a call changes "
+            "nothing more. pause keeps the current frame, stop returns to the frame "
+            "playback started from. Needs Blender's event loop: refused in background mode."
+        ),
+        hints=IDEMPOTENT,
         operation="play_animation",
+        params={"action": Param(BlenderPlaybackAction)},
         request=BlenderPlayAnimationRequest,
         response=BlenderPlayAnimationResponse,
     ),
     BlenderTool(
         name="insert_blender_keyframe",
-        description="Insert a keyframe on an object property.",
+        description=(
+            "Insert a keyframe on an object property: its current value, or value; "
+            "optionally the interpolation and key type."
+        ),
         hints=ADDITIVE,
         operation="insert_keyframe",
+        params={
+            "interpolation": Param(Optional[BlenderKeyframeInterpolation]),
+            "keyframe_type": Param(BlenderKeyframeType),
+        },
         request=BlenderInsertKeyframeRequest,
         response=BlenderInsertKeyframeResponse,
     ),
@@ -1066,8 +1081,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_object_trajectory",
-        description="Sample object position over a frame range.",
-        hints=READ_ONLY,
+        description=(
+            "Sample an object's world pose over a frame range. Not read-only: it steps "
+            "the scene through the frames (frame-change handlers run, an unbaked "
+            "rigid-body cache fills) and restores the current frame afterwards."
+        ),
+        hints=IDEMPOTENT,
         operation="get_object_trajectory",
         request=BlenderGetTrajectoryRequest,
         response=BlenderGetTrajectoryResponse,
