@@ -507,6 +507,21 @@ def test_attach_blender_window_tool_attaches_and_lists_candidates_when_ambiguous
     assert payload["success"] is True and payload["window"]["window_id"] == "second"
 
 
+def test_attach_blender_window_with_no_bridge_is_a_connection_error(
+    settings: Settings, fake_fastmcp: Any
+) -> None:
+    """A bare RuntimeError read as EngineError; nothing answered, so it is a ConnectionError."""
+    server = SimulMCPServer(settings, backends={"blender"})
+    tool = next(t for t in server.mcp.tools if t.name == "attach_blender_window")
+
+    payload = json.loads(asyncio.run(tool.func()).content[0].text)
+
+    assert payload["success"] is False
+    assert payload["error_type"] == "ConnectionError"
+    assert payload["details"] == {"instances": []}
+    assert "No matching GUI Blender bridge" in payload["error"]
+
+
 def test_attach_blender_window_tool_requires_attached_mode(
     monkeypatch: pytest.MonkeyPatch, fake_fastmcp: Any, tmp_path: Path
 ) -> None:

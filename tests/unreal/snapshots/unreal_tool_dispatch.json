@@ -513,7 +513,10 @@
      "arguments": {
       "class_filter": null,
       "tag_filter": null,
-      "max_results": 200
+      "max_results": 200,
+      "offset": 0,
+      "label_filter": null,
+      "include_subclasses": false
      }
     }
    ],
@@ -536,7 +539,10 @@
    "arguments": {
     "class_filter": "StaticMeshActor",
     "tag_filter": "Prop",
-    "max_results": 5
+    "max_results": 5,
+    "offset": 10,
+    "label_filter": "Chair",
+    "include_subclasses": true
    },
    "envelope": [
     {
@@ -552,7 +558,10 @@
      "arguments": {
       "class_filter": "StaticMeshActor",
       "tag_filter": "Prop",
-      "max_results": 5
+      "max_results": 5,
+      "offset": 10,
+      "label_filter": "Chair",
+      "include_subclasses": true
      }
     }
    ],
@@ -596,6 +605,85 @@
     "payload": {
      "success": true,
      "method": "get_actor_info"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_actor_components",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "list_unreal_actor_components",
+     "label": "Unreal",
+     "response_model": "UnrealListActorComponentsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "list_actor_components",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "class_filter": null,
+      "offset": 0,
+      "max_results": 200
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "list_actor_components"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_actor_components",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "class_filter": "PrimitiveComponent",
+    "offset": 2,
+    "max_results": 3
+   },
+   "envelope": [
+    {
+     "tool": "list_unreal_actor_components",
+     "label": "Unreal",
+     "response_model": "UnrealListActorComponentsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "list_actor_components",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "class_filter": "PrimitiveComponent",
+      "offset": 2,
+      "max_results": 3
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "list_actor_components"
     }
    },
    "usage": [
@@ -2903,7 +2991,10 @@
       "root_path": null,
       "max_depth": 10,
       "include_components": false,
-      "class_filter": null
+      "class_filter": null,
+      "include_subclasses": false,
+      "offset": 0,
+      "max_results": 100
      }
     }
    ],
@@ -2927,7 +3018,10 @@
     "root_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "max_depth": 3,
     "include_components": true,
-    "class_filter": "StaticMeshActor"
+    "class_filter": "StaticMeshActor",
+    "include_subclasses": true,
+    "offset": 6,
+    "max_results": 7
    },
    "envelope": [
     {
@@ -2944,7 +3038,10 @@
       "root_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "max_depth": 3,
       "include_components": true,
-      "class_filter": "StaticMeshActor"
+      "class_filter": "StaticMeshActor",
+      "include_subclasses": true,
+      "offset": 6,
+      "max_results": 7
      }
     }
    ],
@@ -3144,7 +3241,8 @@
      "arguments": {
       "label": "chair",
       "match_mode": "exact",
-      "max_results": 100
+      "max_results": 100,
+      "offset": 0
      }
     }
    ],
@@ -3167,7 +3265,8 @@
    "arguments": {
     "label": "chair",
     "match_mode": "contains",
-    "max_results": 9
+    "max_results": 9,
+    "offset": 4
    },
    "envelope": [
     {
@@ -3183,7 +3282,8 @@
      "arguments": {
       "label": "chair",
       "match_mode": "contains",
-      "max_results": 9
+      "max_results": 9,
+      "offset": 4
      }
     }
    ],

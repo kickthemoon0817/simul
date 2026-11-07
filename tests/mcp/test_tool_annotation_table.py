@@ -174,6 +174,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "get_unreal_simulation_status": (RO, True, True),
     "get_unreal_viewport_info": (RO, True, True),
     "import_unreal_usd": (DESTRUCTIVE, False, True),  # replace_existing replaces assets and actors
+    "list_unreal_actor_components": (RO, True, True),
     "list_unreal_actors": (RO, True, True),
     "list_unreal_instances": (RO, True, True),
     "ping_unreal": (RO, True, True),
@@ -257,6 +258,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "setup_blender_rigid_body": (DESTRUCTIVE, True, True),
     "setup_simready_hierarchy": (RW, False, True),
     "summarize_blender_scene": (RO, True, True),
+    "uv_unwrap_blender_mesh": (DESTRUCTIVE, True, True),
     "validate_simready_compliance": (RO, True, True),
     # Server
     "get_tool_usage_stats": (RO, True, False),

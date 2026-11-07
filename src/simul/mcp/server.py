@@ -283,7 +283,10 @@ _SECRET_WORDS = frozenset(
 _NAME_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
 _MASKED = "***"
 # A quoted choice in pydantic's "Input should be 'a', 'b' or 'c'".
-_QUOTED = re.compile(r"'((?:[^'\\]|\\.)*)'")
+_QUOTED = re.compile(r"'([^'\\\n]{0,256})'")
+# Longest text a regex or a closest-match search in the envelope reads: the
+# caller chooses its length, and the envelope runs on the event loop.
+_SCAN_MAX_CHARS: int = 4096
 # The context keys of a pydantic error that state the constraint that failed
 # (not ``actual_length``, ``class_name`` or ``error``, which describe the input
 # or the failure).
@@ -297,7 +300,9 @@ _CONSTRAINT_KEYS = frozenset(
 
 def _names_secret(name: str) -> bool:
     """Whether an argument name, mapping key or settings path names a secret."""
-    return any(word.lower() in _SECRET_WORDS for word in _NAME_WORD.findall(name))
+    return any(
+        word.lower() in _SECRET_WORDS for word in _NAME_WORD.findall(name[:_SCAN_MAX_CHARS])
+    )
 
 
 def _jsonable(value: Any) -> Any:
@@ -309,6 +314,11 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
     return str(value)
+
+
+def _echo_name(name: str, index: int) -> str:
+    """A key or argument name as an echo shows it: a long one by its size, numbered to stay apart."""
+    return name if len(name) <= _ECHO_MAX_CHARS else f"<name {index} of {len(name)} characters>"
 
 
 def _echo_value(field: Optional[str], value: Any) -> Any:
@@ -331,10 +341,11 @@ def _echo_value(field: Optional[str], value: Any) -> Any:
         if isinstance(item, dict):
             entries = list(item.items())
             shown: Dict[str, Any] = {}
-            for key, nested in entries[:_ECHO_MAX_ITEMS]:
+            for index, (key, nested) in enumerate(entries[:_ECHO_MAX_ITEMS]):
                 if budget[0] <= 0:
                     break
-                shown[str(key)] = echo(str(key), nested, depth + 1)
+                name = str(key)
+                shown[_echo_name(name, index)] = echo(name, nested, depth + 1)
             if len(shown) < len(entries):
                 shown["..."] = f"<{len(entries) - len(shown)} more keys, {len(entries)} in all>"
             return shown
@@ -361,8 +372,11 @@ def _suggestion(
     error_type: str, given: Any, constraint: Mapping[str, Any], known_fields: Iterable[str]
 ) -> Optional[str]:
     """Return the closest valid choice or argument name for a misspelt one, or None."""
+    if isinstance(given, str) and len(given) > _ECHO_MAX_CHARS:
+        # Nothing that long is a misspelling of a name.
+        return None
     if error_type in ("literal_error", "enum") and isinstance(given, str):
-        choices = _QUOTED.findall(str(constraint.get("expected", "")))
+        choices = _QUOTED.findall(str(constraint.get("expected", ""))[:_SCAN_MAX_CHARS])
     elif error_type in ("unexpected_keyword_argument", "extra_forbidden") and isinstance(given, str):
         choices = list(known_fields)
     else:
@@ -391,7 +405,10 @@ def _validation_errors(
     errors: List[Dict[str, Any]] = []
     for error in exc.errors(include_url=False):
         location = [str(part) for part in error.get("loc", ())]
-        field = ".".join(location) or None
+        dotted = ".".join(location) or None
+        field = dotted
+        if dotted is not None and len(dotted) > _ECHO_MAX_CHARS:
+            field = f"<{len(dotted)} characters>"
         error_type = str(error.get("type", "value_error"))
         message = str(error.get("msg", ""))
         # pydantic prefixes a validator's own message with "Value error, ".
@@ -412,7 +429,7 @@ def _validation_errors(
                 given_name = location[-1] if location else None
                 suggestion = _suggestion(error_type, given_name, constraint, known)
             else:
-                entry["input"] = _echo_value(field, given)
+                entry["input"] = _echo_value(dotted, given)
                 suggestion = _suggestion(error_type, given, constraint, known)
             if suggestion is not None:
                 entry["suggestion"] = suggestion
@@ -436,7 +453,10 @@ def _echo_arguments(arguments: Mapping[str, Any]) -> Dict[str, Any]:
     """
     entries = list(arguments.items())
     limit = _ECHO_MAX_ITEMS * 2
-    echoed = {str(key): _echo_value(str(key), value) for key, value in entries[:limit]}
+    echoed = {
+        _echo_name(str(key), index): _echo_value(str(key), value)
+        for index, (key, value) in enumerate(entries[:limit])
+    }
     if len(entries) > limit:
         echoed["..."] = f"<{len(entries) - limit} more arguments, {len(entries)} in all>"
     return echoed
@@ -660,6 +680,9 @@ class SimulMCPServer(LoggerMixin):
         # Token buckets keyed by (agent, tool); the per-agent ceiling across
         # every tool uses _GLOBAL_RATE_BUCKET as the tool key.
         self._rate_limiters: Dict[Tuple[str, str], RateLimiter] = {}
+        # Tools that skip the per-tool bucket and spend only the agent's
+        # ceiling; see exempt_from_per_tool_rate_limit.
+        self._per_tool_rate_exempt: Set[str] = set()
         self._rate_limit_enabled = self.settings.security.rate_limiting_enabled
         self._rate_limit_rate = self.settings.security.requests_per_minute / 60.0
         self._rate_limit_burst = self.settings.security.burst_size
@@ -845,6 +868,20 @@ class SimulMCPServer(LoggerMixin):
                 self._watch_session_end(session_id)
         return limiter
 
+    def exempt_from_per_tool_rate_limit(self, tool_names: Iterable[str]) -> None:
+        """Count ``tool_names`` only against each agent's ceiling across all tools.
+
+        For cheap local queries an agent issues once per item while it works
+        through a scene (the headless USD per-prim queries): a per-tool
+        bucket of ``security.requests_per_minute`` with ``burst_size`` refused
+        most of a prim-by-prim inspection, while the per-agent ceiling
+        (``security.global_requests_per_minute``) still stops a runaway loop.
+
+        Args:
+            tool_names: Registered tool names.
+        """
+        self._per_tool_rate_exempt.update(tool_names)
+
     def _sweep_idle_rate_limiters(self) -> None:
         """Drop the buckets that have refilled to their burst size.
 
@@ -950,12 +987,17 @@ class SimulMCPServer(LoggerMixin):
         if not self._rate_limit_enabled or tool_name in _RATE_LIMIT_EXEMPT:
             return None
         agent = agent_id or self._resolve_agent_id(None)
-        tool_bucket = self._get_rate_limiter(tool_name, agent)
+        tool_bucket = (
+            None
+            if tool_name in self._per_tool_rate_exempt
+            else self._get_rate_limiter(tool_name, agent)
+        )
         agent_bucket = self._get_rate_limiter(_GLOBAL_RATE_BUCKET, agent)
-        tool_wait = tool_bucket.seconds_until_available()
+        tool_wait = tool_bucket.seconds_until_available() if tool_bucket is not None else 0.0
         agent_wait = agent_bucket.seconds_until_available()
         if tool_wait <= 0.0 and agent_wait <= 0.0:
-            tool_bucket.acquire()
+            if tool_bucket is not None:
+                tool_bucket.acquire()
             agent_bucket.acquire()
             return None
 

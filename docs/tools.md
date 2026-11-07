@@ -148,7 +148,22 @@ parse error). The checks, in order:
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
 them in `warnings`. `simul usd validate` runs the same checks and exits 1
-when the file is invalid.
+when the file is invalid. A relative `file_path` resolves against
+`security.relative_path_base` (default: the server's working directory), and
+the result's `file_path` is the resolved path. A URL needs an asset resolver
+for its scheme, which usd-core does not ship, so `omniverse://` fails with
+`UnsupportedURL` (see [configuration.md](configuration.md#file-sandbox)).
+
+Every successful response carries `success: true`, like the other backends.
+The pxr work of each call runs on a worker thread, so a slow call does not
+hold up the server. Reads run concurrently, one at a time per stage, and an
+edit (`create_prim`, `update_prim_attributes`, `delete_prim`) runs alone,
+because pxr does not allow a write alongside reads of the same layers. A
+call that cannot start within `server.timeout` seconds (default 30) fails
+with `StageBusy`; retry it. Python cannot stop pxr mid-call, so a call the
+client cancels or times out still finishes in the background and holds its
+stage until it does. Calls on other stages and `validate_usd_file` carry on
+meanwhile.
 
 ### Editing
 
@@ -276,6 +291,54 @@ Notes:
   non-finite floats as `null`.
 - The `mass` and `rigid_body` aspects report an unset centre of mass (the
   schema's `-inf` fallback) as `null` with `center_of_mass_note`.
+- `delete_isaac_prim`, `duplicate_isaac_prim` and `reparent_isaac_prim` edit
+  the stage's edit target, not the root layer, and say what they did. A prim
+  that comes from a referenced asset (every link of an imported robot) or is
+  also defined in another layer can't be removed or moved from this stage:
+  - `delete_isaac_prim` with `mode="auto"` (default) deactivates it instead
+    (`action: "deactivated"`, with the `reason`; local overrides are kept).
+    `mode="remove"` refuses, and `mode="deactivate"` always deactivates.
+  - `duplicate_isaac_prim` copies the spec, arcs included, when the edit
+    target defines the prim. Otherwise it copies the flattened composed
+    result (`method: "flattened_copy"`), and instanceable prims inside stay
+    instanced.
+  - `reparent_isaac_prim` refuses unchanged.
+  
+  Instance proxies are refused by all three. `delete_isaac_prim` also
+  refuses prims marked `no_delete` and prims defined only in the session
+  layer (Kit's `OmniverseKit_*` viewport cameras), which a deactivation would
+  hide by writing into the scene's layer. `reparent_isaac_prim` keeps the
+  world pose (`keep_world_transform=true`) and retargets relationships and
+  connections that point into the moved subtree. Removal and moves go
+  through Kit's undoable `DeletePrims` / `MovePrim` (`destructive=false`)
+  when Kit is there; when Kit declines one, the tool reports
+  `KIT_DECLINED` and changes nothing rather than editing the layer itself.
+  `undoable` reports whether the whole edit is on Kit's undo stack.
+  Refusals are typed: `error_type` is `NotFoundError`, `ValidationError` or
+  `InvalidState`, and `details.code` names the case (`INSTANCE_PROXY`,
+  `DEFINED_ELSEWHERE`, `DESTINATION_EXISTS`, `UNKNOWN_PRIM_TYPE`, ...).
+- The listings (`list_isaac_prims`, `search_isaac_prims`, `get_isaac_subtree`,
+  `query_isaac_typed_prims`) descend into instanceable prims by default,
+  where Isaac assets keep their meshes and colliders; entries there carry
+  `instance_proxy: true` and are read-only. Pass
+  `include_instance_proxies=false` to stop at the instance. Pass
+  `include_inactive=true` to also see deactivated prims (`active: false`).
+  `list_isaac_physics_objects` counts instanced colliders too, and
+  `get_isaac_subtree` takes `max_depth=-1` as unlimited.
+- `create_isaac_prim` refuses a type that isn't a concrete registered schema
+  (`cube` gets a suggestion, `Cube`) and attributes the type's schema doesn't
+  define; a value that can't be set removes the new prim again, with any
+  ancestors the call created (`ancestors_created` lists them on success).
+  `create_isaac_object` checks its vectors before creating anything. When a
+  step fails, `left_on_stage` lists what the earlier steps created.
+- With `security.allow_script_execution` off, the prim tools refuse what
+  would plant code Kit runs (`ScriptExecutionDisabled`): code-carrying
+  attributes (`inputs:script*`, `inputs:codeStr`, Replicator's
+  `inputs:augmentationScript` / `inputs:conditionScript`), a `node:type` that
+  runs code (ScriptNode, omni.warp's WarpKernel, Replicator's OgnAugment and
+  condition-script nodes), any write to such a node, creating one, and
+  duplicating a subtree that holds one. They use the same predicates as the
+  graph tools (`graph.py`).
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
 - `create_isaac_physics_scene` derives a new scene's gravity from the stage:
@@ -411,7 +474,7 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 | Group | Tools |
 |---|---|
 | Engine and scene | `get_unreal_engine_info`, `get_unreal_loaded_map`, `summarize_unreal_scene`, `query_unreal_scene_graph`, `analyze_unreal_scene_for_robotics`, `get_unreal_viewport_info` |
-| Actors | `list_unreal_actors`, `get_unreal_actor_info`, `describe_unreal_object`, `get_unreal_actor_by_semantic_label`, `get_unreal_actor_thumbnail`, `spawn_unreal_actor`, `delete_unreal_actor`, `set_unreal_actor_transform`, `set_unreal_actor_property`, `set_unreal_actor_visibility`, `set_unreal_actor_parent`, `add_unreal_component`, `focus_unreal_on_actor` |
+| Actors | `list_unreal_actors`, `get_unreal_actor_info`, `list_unreal_actor_components`, `describe_unreal_object`, `get_unreal_actor_by_semantic_label`, `get_unreal_actor_thumbnail`, `spawn_unreal_actor`, `delete_unreal_actor`, `set_unreal_actor_transform`, `set_unreal_actor_property`, `set_unreal_actor_visibility`, `set_unreal_actor_parent`, `add_unreal_component`, `focus_unreal_on_actor` |
 | Assets | `search_unreal_assets` |
 | Camera, lights, rendering | `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
 | Materials | `get_unreal_material_info`, `assign_unreal_material`, `create_unreal_material_instance`, `set_unreal_material_params` |
@@ -423,6 +486,39 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 
 Behaviour worth knowing:
 
+- The scene reads go through the editor world, one page at a time.
+  `list_unreal_actors`, `get_unreal_actor_by_semantic_label`,
+  `list_unreal_actor_components` and `query_unreal_scene_graph` count every
+  match (`total`; `total_matches` for the label search) and return the page
+  from `offset`: up to `max_results` entries, stopping earlier rather than go
+  past 30,000 characters, so a reply always fits the 40 KB result budget
+  untrimmed. `count` is what came back, `next_offset` is where the next page
+  starts (`null` at the end), and `truncated` and `hint` say when more is left.
+  At 5,000 actors a page of actors holds about 80, in about 0.2 s.
+  `list_unreal_actors` filters by class (name, as in `StaticMeshActor` or
+  `BP_Door_C`, or path; `include_subclasses` also keeps derived classes, so
+  `Light` keeps point, spot and Blueprint lights), tag and label (text the
+  label contains, ignoring case). A class `include_subclasses` cannot resolve
+  (a Blueprint class is found by its path, or by its name when an actor of
+  that class is in the level) is matched by name only, with a `warning`.
+  Actor entries carry the attachment hierarchy: `parent` (the actor the root
+  component is attached to), `children` (the first 20 attached actors;
+  `get_unreal_actor_info` names 200) and `child_count`.
+- `query_unreal_scene_graph` returns the attachment hierarchy as a tree:
+  the level, whose children are the actors attached to nothing, or the actor
+  at `root_path`, down `max_depth` levels. The page holds the root's
+  children from `offset`, each with its subtree; an actor whose children lie
+  deeper has `children_truncated`, and a subtree too large for one page is
+  drawn shallower and named in `depth_limited` (query it with its actor as
+  `root_path`). `total_actors` and `total_depth` describe the whole tree. A
+  `class_filter` keeps the matching actors and the actors above them, which
+  carry `matches_filter: false`; `include_components` adds each actor's
+  components (name, class, root flag, the component it is attached to).
+- `list_unreal_actor_components` lists an actor's components, editor-only
+  ones included: class, root and editor-only flags, and for scene components
+  the component they are attached to (its path when it belongs to another
+  actor), world location, mobility and visibility; primitive components add
+  their world bounds (box center and half-size, sphere radius, in cm).
 - A failed call names its cause with one `error_type` from the set the
   backends share:
   - `ConnectionError`: nothing answered at the Remote Control endpoint, or
@@ -799,6 +895,7 @@ Behaviour worth knowing:
     loads the parent material and saves the new instance through Unreal's
     editor asset library, which loads, finds and saves no assets during PIE.
   - `list_unreal_actors`, `get_unreal_actor_by_semantic_label`,
+    `query_unreal_scene_graph`, `list_unreal_actor_components`,
     `summarize_unreal_scene`, `analyze_unreal_scene_for_robotics`,
     `get_unreal_actor_info`, `get_unreal_loaded_map` and
     `get_unreal_engine_info` report `pie_active: true` and read the editor
@@ -864,7 +961,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Scene and files | `get_blender_info`, `get_blender_file_info`, `summarize_blender_scene`, `list_blender_scene_objects`, `search_blender_objects`, `open_blender_file`, `save_blender_file`, `import_blender_file`, `export_blender_file` |
 | Objects | `create_blender_object`, `delete_blender_object`, `set_blender_object_mode`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
-| Materials and lights | `get_blender_material_info`, `assign_blender_material`, `set_blender_light_params` |
+| Materials and lights | `get_blender_material_info`, `assign_blender_material`, `uv_unwrap_blender_mesh`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`, `get_blender_rigid_body_world`, `set_blender_rigid_body_world` |
 | Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `delete_blender_keyframe`, `get_blender_keyframes`, `get_blender_object_trajectory` |
 | Camera and viewport | `get_blender_camera_info`, `set_blender_camera_view`, `get_blender_viewport_info`, `focus_blender_on_object`, `capture_blender_viewport`, `capture_blender_viewport_sequence` |
@@ -1005,6 +1102,96 @@ Behaviour worth knowing:
   whose render settings differ (`show_render`, Subdivision `render_levels`).
   An object Blender does not evaluate (outside the view layer) has null
   evaluated counts.
+- `assign_blender_material` reuses the material named `material_name` when it
+  exists, so repeating a call changes nothing more (it used to create
+  `name.001` each time); `reuse_existing: false` creates a new one. Shading
+  arguments left out keep the material's own values, so an existing or
+  imported material can be assigned as it is. By default the material replaces
+  the object's: it goes into slot 0 and every face uses slot 0 (a second
+  material used to land in a slot no face used, so the USD kept the first).
+  `slot_index` sets one slot (the slot count appends one) and leaves the faces
+  alone; `face_indices` assigns the material to those faces through its slot,
+  or a new one. `link: "OBJECT"` puts the material in this object's slot
+  instead of the mesh's, but which faces use which slot, and how many slots
+  there are, belong to the mesh. So on mesh data that other objects share,
+  link OBJECT may change only an existing slot's material: assigning faces or
+  adding a slot is refused (`details.code: "shared_data"`, naming the other
+  objects) unless `single_user: true` gives this object its own copy of the
+  mesh first, which the reply reports. That copy needs the object, and its
+  data, in Object Mode: Blender 5.0.1 ignores a new data block for an object in
+  Edit Mode without an error. With link DATA the change is meant for every
+  object sharing the mesh, and the reply names them. `single_user` also makes
+  library-linked data local; a library-linked object is refused.
+  `base_color` is RGB or RGBA in 0-1: the alpha sets the Principled BSDF's
+  Alpha (exported as USD `opacity`) and, below 1,
+  `surface_render_method: BLENDED`. Image files can drive Base Color, Metallic
+  and Roughness, and Normal through a Normal Map node; a new texture replaces
+  the nodes of the old one. Data maps are read Non-Color; a base colour keeps
+  the colour space Blender loads the file in (sRGB for an 8-bit image, linear
+  for an EXR or other float image). An image of the same file already read
+  the way the input needs is reused, so repeating a call adds no datablock.
+  An image already in the file is never changed, since other materials may
+  read it: when every datablock of the file reads the other way, the input
+  gets one of its own (`albedo.png.001`). A texture replaced behind Reroute
+  nodes takes the Reroutes and its old nodes with it. Textures pass the filesystem sandbox; a missing file is
+  a `NotFoundError` and a file Blender cannot read as an image a
+  `ValidationError`. Textures need UV coordinates (`uv_unwrap_blender_mesh`);
+  a mesh without a UV map gets a warning, and so does a replaced material left
+  with no users (Blender discards it when the file is saved and reopened).
+  Everything is checked before the scene changes, and a failure removes the
+  material, slot, mesh copy and images the call made. Writing face indices
+  needs Object Mode, also of any other object editing the same mesh. On
+  Blender 5.0 the tool never touches the deprecated `Material.use_nodes`.
+  Blender's USD exporter writes UsdPreviewSurface materials only: SimReady's
+  `shader_type: OmniPBR` is recorded as metadata, not produced.
+- `get_blender_material_info` reports the Principled BSDF that feeds the
+  active Material Output. An input a link drives reads `null` in
+  `principled_params` (its own value is unused) and appears in
+  `linked_inputs` with the source node and socket and, for an image texture,
+  also behind a Normal Map node, the image's path, colour space and whether it
+  is packed. Reroute nodes are followed to the node behind them; a muted link
+  drives nothing, so its input reports its own value. `nodes` lists at most
+  `max_nodes` (default 50), those feeding the output first; `node_count`
+  counts the whole tree.
+- `uv_unwrap_blender_mesh` generates UVs for every face, hidden ones
+  included: `SMART_PROJECT` (islands split where faces meet at more than
+  `angle_limit`, 66 degrees by default, packed with `island_margin`) or
+  `CUBE_PROJECT` (`cube_size`). It writes `uv_map_name`, created when missing,
+  else the active UV map, else a new `UVMap`. The active UV map stays what it
+  was (a mesh's first UV map becomes the active and render one, as Blender
+  makes it); the reply's `render_uv_map` is the map image textures read and USD
+  export names `st`, with a warning when it is not the one written. The UV
+  operators need Edit Mode, so the object briefly becomes the active, only
+  selected one and its hidden faces are shown; the mesh's selection and hidden
+  faces, the object selection and the active object are restored, and a
+  failure removes a UV map the call created. The object and Blender must be in
+  Object Mode; a hidden object and library-linked data are refused.
+- The material, light and UV tools refuse bad arguments with `error_type`
+  `ValidationError` (or `NotFoundError` for a missing material or texture
+  file) and a stable `details.code`, such as `shared_data`, `out_of_range`,
+  `setting_not_for_light_type`, `wrong_mode` or `linked_from_library`.
+- These calls need a Blender add-on built for bridge protocol 11 or later:
+  assignment now replaces where it appended, so an older add-on is refused
+  with the rebuild instructions rather than silently appending a slot no face
+  uses.
+- `set_blender_light_params` checks each setting against the light's type
+  (after `light_type`, when given): `shadow_soft_size` is the radius of POINT
+  and SPOT lights, `spot_size` and `spot_blend` are SPOT's, `angle` is a sun's
+  softness, and `shape`, `size` and `size_y` (RECTANGLE and ELLIPSE) are an
+  area light's. A setting of another type is refused instead of ignored, a
+  value outside Blender's limits is refused instead of clamped, and energy
+  may not be negative. Nothing changes unless every value is valid, and the
+  reply reports every setting of the light's type as stored. Light data shared
+  by several objects is reported. Blender 5.0.1's USD exporter writes a point
+  or spot light as a SphereLight whose `radius` is `shadow_soft_size` (a
+  spot's cone as `shaping:cone:angle`, half of `spot_size` in degrees, and
+  `spot_blend` as its softness), a sun as a DistantLight whose `angle` is half
+  of the sun's `angle` in degrees, and an area light as a RectLight of
+  `size` x `size_y` (`size` x `size` for SQUARE) or a DiskLight of radius
+  `size` / 2.
+- Not covered by granular tools yet (use `execute_blender_script`): smooth
+  or flat shading and custom normals, and UV coordinates given with
+  `create_blender_mesh_from_data`.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
@@ -1405,14 +1592,26 @@ and it is sent with `isError: true`. `error_type` is always one of the names
 below (`simul.mcp.error_types`): seven classes that mean the same on every
 backend, and domain types where a backend says more than a class would.
 Nothing else reaches a client. A library's or Python's exception name
-(`ClientConnectorError`, `ConnectionResetError`, `KeyError`, an
-`AttributeError` raised inside the engine) is mapped onto its family and kept
-in `details.exception_type`: a name with `Timeout` in it is a `TimeoutError`;
-`Connection*`, `BrokenPipeError` and `OSError` are a `ConnectionError`;
+(`ClientConnectorError`, `ConnectionResetError`, `KeyError`) is mapped onto
+its family and kept in `details.exception_type`: a name with `Timeout` in it
+is a `TimeoutError`; `Connection*` and `BrokenPipeError` a `ConnectionError`;
 `*NotFound*`, `FileNotFoundError`, `KeyError` and `LookupError` a
 `NotFoundError`; `ValueError`, `TypeError`, `JSONDecodeError`, `Invalid*` and
 `*ValidationError` a `ValidationError`; `PermissionError` a
-`PermissionDenied`; anything else an `EngineError`.
+`PermissionDenied`; anything else (`OSError`, `RuntimeError`, `ImportError`,
+`ModuleNotFoundError`) an `EngineError`.
+
+An exception raised by code running inside Isaac Sim is the engine's,
+whatever its name: a tool's own script that raises (a `TypeError` from a
+changed Kit API, an `OSError` from a full disk, a `ModuleNotFoundError` for a
+removed `omni.isaac.*` module) is an `EngineError`, and an agent's
+`execute_isaac_script` that raises is a `ScriptError`, both naming it in
+`details.exception_type`. Only the transports' own failures keep a class of
+their own: the bridge's refusals (`StageUnavailable` is `InvalidState`,
+`UnsafeExecutionDisabled` is `ScriptExecutionDisabled`, `PrimNotFound` is
+`NotFoundError`, `RequestTimeout` is `TimeoutError`), an empty reply
+(`ConnectionError`), a reply that is not JSON (`BridgeProtocolError`) and a
+script the bridge stopped at its timeout (`TimeoutError`).
 
 | `error_type` | Meaning | What to do |
 |---|---|---|
@@ -1434,7 +1633,7 @@ Domain types of the server:
 | `SessionRequired` | The tool keeps per-client state and the request has no client identity |
 | `PermissionDenied` | The caller may not act on what it named: another agent's claim, a file the process may not read or write |
 | `ScriptExecutionDisabled` | `security.allow_script_execution` is off; the arbitrary-code tools (`execute_isaac_script`, ...) answer this instead of an unknown-tool error |
-| `PayloadTooLarge` | A script or request is larger than the transport accepts |
+| `PayloadTooLarge` | A script, request or reply is larger than the transport accepts |
 
 Domain types of the engines:
 
@@ -1444,7 +1643,7 @@ Domain types of the engines:
 | `AuthenticationError` | The engine refused the credentials (python_server token, Remote Control passphrase) |
 | `UnsupportedOperation` | The backend or its mode cannot do this (`attach_blender_window` outside attached mode) |
 | `InvalidState` | Not possible in the current state (nothing claimed to release, a folder that already holds the import) |
-| `ScriptError` | An agent's script raised inside the engine; `details.exception_type` names what it raised, `details.traceback` where |
+| `ScriptError` | An agent's script raised inside the engine, whatever it raised (an `OSError` or a `ConnectionRefusedError` of its own included); `details.exception_type` names it, `details.traceback` says where |
 | `EmptyOutput` | The engine's script printed nothing where the tool expected its reply |
 | `InvalidAssetType` | The asset is not of the kind the tool needs |
 | `UnsupportedFormat` | The file format is not one the tool reads or writes |
@@ -1460,10 +1659,11 @@ Domain types of the engines:
 | `IncompatibleBody` | The Unreal body cannot simulate as asked; `details.problems` says why |
 | `EditorExited` | The Unreal editor exited while `simul unreal setup` waited for it |
 | `BridgeUnavailable` | The Isaac Sim bridge extension the tool needs is not configured |
-| `BridgeProtocolError` | A bridge (Isaac Sim's, Blender's) answered outside its protocol: another version, a malformed or unmatched reply; the request may have run |
+| `BridgeProtocolError` | A transport (Isaac Sim's bridge or stock socket, Blender's bridge) answered outside its protocol: another version, a reply that is not JSON, malformed or unmatched; the request may have run |
 | `ResponseEncodingError` | Blender's bridge could not encode the result; the operation may have run |
 | `AttachmentError`, `AttachmentStale`, `AttachmentTargetChanged` | The attached Blender window could not be used, its process went away, or it loaded another file |
 | `UnsavedChangesError` | Blender refuses to replace a file with unsaved changes without the flag |
+| `KeyframesPartlyInserted` | Blender refused a key part way through a batch; the keys before it stay, and `details` gives how many went in and the one refused |
 | `LoadError` | A headless USD file could not be opened; `details.reason` says why |
 | `StageBusy` | A headless USD stage is serving a call that cannot run beside this one; retry shortly |
 | `ComputationError` | A headless USD computation failed |
@@ -1487,7 +1687,9 @@ secret is echoed as `***`: an argument, a mapping key or a settings path, at
 any depth (`token`, `password`, `passphrase`, `passwd`, `pwd`, `secret`, `key`,
 `api_key`, `auth`, `authorization`, `credential`, `cookie`, `bearer`, `jwt`,
 `pin`; `access_key`, `apiKey`, `/persistent/auth_token`, but not `author` or
-`keyframe`).
+`keyframe`). `error` and each `details.errors` message are cut at 2 000
+characters (`"... <38042 more characters>"`), so a message that quotes a long
+argument stays small too.
 
 Arguments that do not fit the input schema are refused before the tool runs,
 but through the same envelope as every other failure: the call spends a

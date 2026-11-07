@@ -124,7 +124,9 @@ class TestExecuteJsonScript:
         )
         result = asyncio.run(tools.get_isaac_stage_info())
         assert result["success"] is False
-        assert result["error_type"] == "NameError"
+        # Raised by the tool's own script inside Kit: the engine's failure.
+        assert result["error_type"] == "EngineError"
+        assert result["details"]["exception_type"] == "NameError"
         assert "not defined" in result["error"]
 
     def test_script_failure_includes_traceback(self) -> None:

@@ -1,5 +1,7 @@
 """OmniGraph tools for Isaac Sim."""
 
+import inspect
+import re
 import textwrap
 from typing import Any, Dict, Optional
 
@@ -23,18 +25,22 @@ from .._meta import tool_meta
 # the guard is on the nodes and their code attributes, not only on enabling
 # extensions. This is the one definition of "script-capable": the graph,
 # stage and prim tools all ask these predicates (server side) or embed
-# script_guard_source() (Kit side). The matching is deliberately broad:
-# refusing a harmless node costs one call, admitting a code node costs the
-# setting.
+# script_guard_source() (Kit side), which carries the same functions.
+#
+# Names are matched by word, not by substring: a name splits at separators
+# (. : _ -) and camelCase boundaries, and a word matches a hint when it starts
+# with it. So codeStr (code|str), augmentationScript and scriptnode match,
+# while usdTimecode (usd|timecode), robot_description (robot|description)
+# and omniscripting do not. Over Isaac Sim's shipped node types this flags
+# exactly the five code-running types in the deny-list and their code inputs
+# (tests/isaac/data/shipped_node_types.json pins it).
 # ---------------------------------------------------------------------------
 
-# Any node type or extension whose name contains this is treated as
-# code-running. Kept as the single-hint name earlier callers import.
+# Kept for callers that import the single hint.
 SCRIPT_CAPABLE_NODE_HINT = "script"
 
-# Case-insensitive fragments of a node type or extension name that mark it
-# code-running: ScriptNode, the omni.warp kernel nodes.
-SCRIPT_CAPABLE_NODE_HINTS: tuple[str, ...] = ("script", "warp")
+# Word prefixes that mark a node type or extension name as code-running.
+SCRIPT_CAPABLE_NODE_HINTS: tuple[str, ...] = ("script",)
 
 # Code-running node types, compared without case as the full type ID or its
 # last dotted segment, whatever their names say.
@@ -48,19 +54,48 @@ SCRIPT_CAPABLE_NODE_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# Case-insensitive fragments of an attribute name that mark it as carrying
-# code: inputs:script / scriptPath, *Script (Replicator's augmentation and
-# condition scripts), WarpKernel's inputs:codeStr / codeFile / codeProvider.
+# Word prefixes that mark an attribute as carrying code: inputs:script /
+# scriptPath, *Script (Replicator's augmentation and condition scripts),
+# WarpKernel's inputs:codeStr / codeFile / codeProvider.
 CODE_ATTRIBUTE_HINTS: tuple[str, ...] = ("script", "code")
 
-# Extensions that run Python attached to the stage, besides any whose name
-# contains one of SCRIPT_CAPABLE_NODE_HINTS.
+# Extensions that run Python attached to the stage, besides any whose name has
+# a word starting with one of SCRIPT_CAPABLE_NODE_HINTS. omni.warp ships
+# WarpKernel; its library, omni.warp.core, does not run stage code.
 SCRIPT_EXTENSIONS: frozenset[str] = frozenset(
     {"omni.graph.scriptnode", "omni.kit.scripting", "omni.warp"}
 )
 
-_DENIED_TYPES_LOWER = frozenset(name.lower() for name in SCRIPT_CAPABLE_NODE_TYPES)
-_DENIED_SEGMENTS_LOWER = frozenset(name.rsplit(".", 1)[-1] for name in _DENIED_TYPES_LOWER)
+# The names the shared functions read, as they are also named inside a
+# generated script (see script_guard_source).
+SCRIPT_GUARD_TYPES: tuple[str, ...] = tuple(sorted(name.lower() for name in SCRIPT_CAPABLE_NODE_TYPES))
+SCRIPT_GUARD_SEGMENTS: tuple[str, ...] = tuple(sorted({name.rsplit(".", 1)[-1] for name in SCRIPT_GUARD_TYPES}))
+SCRIPT_GUARD_HINTS = SCRIPT_CAPABLE_NODE_HINTS
+_GUARD_WORD_PATTERN = r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+"
+_GUARD_WORD = re.compile(_GUARD_WORD_PATTERN)
+
+
+# The three functions below run both here and inside Kit: script_guard_source()
+# embeds their source, so they may use only re, _GUARD_WORD and the
+# SCRIPT_GUARD_* constants.
+def _guard_words(text: Any) -> list[str]:
+    """Split a name into lower-case words at separator and camelCase boundaries."""
+    return [word.lower() for word in _GUARD_WORD.findall(str(text or ""))]
+
+
+def _guard_has_word(text: Any, prefixes: Any) -> bool:
+    """Return True when a word of ``text`` starts with one of ``prefixes``."""
+    return any(word.startswith(prefix) for word in _guard_words(text) for prefix in prefixes)
+
+
+def _script_capable_type(type_name: Any) -> bool:
+    """Return True for a code-running node type (deny-list or a script word)."""
+    lowered = str(type_name or "").strip().lower()
+    return (
+        lowered in SCRIPT_GUARD_TYPES
+        or lowered.rsplit(".", 1)[-1] in SCRIPT_GUARD_SEGMENTS
+        or _guard_has_word(type_name, SCRIPT_GUARD_HINTS)
+    )
 
 
 def is_script_capable_node_type(type_name: str) -> bool:
@@ -72,14 +107,10 @@ def is_script_capable_node_type(type_name: str) -> bool:
 
     Returns:
         Whether creating or editing a node of this type amounts to running
-        agent-authored code.
+        agent-authored code: a type in ``SCRIPT_CAPABLE_NODE_TYPES`` (by full
+        ID or last segment) or one with a word starting with "script".
     """
-    lowered = (type_name or "").strip().lower()
-    return (
-        any(hint in lowered for hint in SCRIPT_CAPABLE_NODE_HINTS)
-        or lowered in _DENIED_TYPES_LOWER
-        or lowered.rsplit(".", 1)[-1] in _DENIED_SEGMENTS_LOWER
-    )
+    return _script_capable_type(type_name)
 
 
 def is_script_attribute(name: str) -> bool:
@@ -92,10 +123,10 @@ def is_script_attribute(name: str) -> bool:
             the prim path is matched.
 
     Returns:
-        Whether writing this attribute can change the Python a node runs.
+        Whether a word of the name starts with "script" or "code"
+        (``inputs:usdTimecode`` does not).
     """
-    lowered = (name or "").strip().lower().rsplit(".", 1)[-1]
-    return any(hint in lowered for hint in CODE_ATTRIBUTE_HINTS)
+    return _guard_has_word(str(name or "").rsplit(".", 1)[-1], CODE_ATTRIBUTE_HINTS)
 
 
 def is_script_extension(extension_id: str) -> bool:
@@ -106,10 +137,12 @@ def is_script_extension(extension_id: str) -> bool:
             (``omni.graph.scriptnode-1.50.0+107.3.0``).
 
     Returns:
-        Whether enabling it is refused while script execution is off.
+        Whether enabling it is refused while script execution is off: one of
+        ``SCRIPT_EXTENSIONS`` or a name with a word starting with "script"
+        (``omni.isaac.robot_description_editor`` is not).
     """
-    bare = extension_bare_name(extension_id).lower()
-    return bare in SCRIPT_EXTENSIONS or any(hint in bare for hint in SCRIPT_CAPABLE_NODE_HINTS)
+    bare = extension_bare_name(extension_id)
+    return bare.lower() in SCRIPT_EXTENSIONS or _guard_has_word(bare, SCRIPT_CAPABLE_NODE_HINTS)
 
 
 def extension_bare_name(extension_id: str) -> str:
@@ -127,20 +160,12 @@ def extension_bare_name(extension_id: str) -> str:
     return (extension_id or "").strip().split("-", 1)[0]
 
 
-# Kit-side half of the guard, for generated scripts that see prims rather than
-# names. Defines _script_capable_type(type_name), _script_capable_prim(prim)
-# and _script_capable_prims_under(prim, limit); needs the constants
-# script_guard_source() prepends. Inactive prims and instance proxies are
-# included: activating one later must not slip a code node past the check.
+# Kit-side prim checks, for generated scripts that see prims rather than
+# names. Defines _script_capable_prim(prim) and
+# _script_capable_prims_under(prim, limit) on top of the shared functions.
+# Inactive prims and instance proxies are included: activating one later must
+# not slip a code node past the check.
 SCRIPT_GUARD_CORE = """\
-    def _script_capable_type(type_name):
-        lowered = str(type_name or "").strip().lower()
-        return (
-            any(hint in lowered for hint in SCRIPT_GUARD_HINTS)
-            or lowered in SCRIPT_GUARD_TYPES
-            or lowered.rsplit(".", 1)[-1] in SCRIPT_GUARD_SEGMENTS
-        )
-
     def _script_capable_prim(prim):
         attr = prim.GetAttribute("node:type")
         return bool(attr and attr.IsValid() and _script_capable_type(attr.Get()))
@@ -159,19 +184,30 @@ SCRIPT_GUARD_CORE = """\
 
 
 def script_guard_source() -> str:
-    """Return ``SCRIPT_GUARD_CORE`` with the constants it reads, as script source.
+    """Return the Kit-side guard, with the constants and rules it reads, as source.
 
     Embed it in a generated script (``_compose_script`` fragment) to check
-    prims inside Kit with the same rule ``is_script_capable_node_type``
-    applies to names.
+    prims inside Kit with the same functions ``is_script_capable_node_type``
+    runs here. It defines ``_script_capable_type(type_name)``,
+    ``_script_capable_prim(prim)`` and ``_script_capable_prims_under(prim,
+    limit=20)``.
 
     Returns:
         Python source defining the guard functions.
     """
+    shared = "\n\n".join(
+        inspect.getsource(function)
+        for function in (_guard_words, _guard_has_word, _script_capable_type)
+    )
     return (
-        f"SCRIPT_GUARD_HINTS = {_pyval(SCRIPT_CAPABLE_NODE_HINTS)}\n"
-        f"SCRIPT_GUARD_TYPES = {_pyval(sorted(_DENIED_TYPES_LOWER))}\n"
-        f"SCRIPT_GUARD_SEGMENTS = {_pyval(sorted(_DENIED_SEGMENTS_LOWER))}\n"
+        "import re\n"
+        "from typing import Any\n"
+        f"SCRIPT_GUARD_TYPES = {_pyval(SCRIPT_GUARD_TYPES)}\n"
+        f"SCRIPT_GUARD_SEGMENTS = {_pyval(SCRIPT_GUARD_SEGMENTS)}\n"
+        f"SCRIPT_GUARD_HINTS = {_pyval(SCRIPT_GUARD_HINTS)}\n"
+        f"_GUARD_WORD = re.compile({_pyval(_GUARD_WORD_PATTERN)})\n\n"
+        + shared
+        + "\n\n"
         + textwrap.dedent(SCRIPT_GUARD_CORE)
     )
 
@@ -334,7 +370,7 @@ class OmniGraphMixin:
             "isaacsim.core.nodes.IsaacArticulationController. With "
             "security.allow_script_execution off, node types that run Python given as data "
             "(ScriptNode, omni.warp.WarpKernel, Replicator's augmentation and condition nodes, "
-            "and any type with 'script' or 'warp' in its name) are refused."
+            "and any type with a word starting with 'script') are refused."
         ),
         read_only=False,
     )
@@ -396,7 +432,7 @@ class OmniGraphMixin:
             "an outputs: attribute, target is an inputs: attribute. Example: connect "
             "'/World/Graph/OnTick.outputs:tick' to '/World/Graph/Controller.inputs:execIn'. "
             "With security.allow_script_execution off, a connection into a code attribute "
-            "(any name containing script or code) or into a script-capable node is refused: "
+            "(a name with a word starting with script or code) or into a script-capable node is refused: "
             "it would rewrite the code that node runs."
         ),
         read_only=False,
@@ -473,7 +509,7 @@ class OmniGraphMixin:
             "attribute names first. Every attribute is attempted; the call fails "
             "(success=false) when any of them failed, with the ones that were set under "
             "'applied' and the failures under 'errors'. With security.allow_script_execution "
-            "off, code attributes (any name containing script or code) and any write to a "
+            "off, code attributes (a name with a word starting with script or code) and any write to a "
             "script-capable node (ScriptNode, omni.warp.WarpKernel, ...) are refused."
         ),
         read_only=False,

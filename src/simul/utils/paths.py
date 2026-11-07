@@ -6,16 +6,23 @@ them: a rule enforced in one caller is not a policy, it is a convention that the
 next caller forgets.
 
 Local paths are normalised before the containment test — expand ``$VARS``,
-expand ``~``, resolve relative paths against the project root — and the result
-must sit under an allowed root. Strings shaped like ``<scheme>://...`` are URLs,
-never project-relative paths: ``file://`` URLs are converted to a local path and
-checked like one, every other scheme is admitted only when it is on the scheme
-allowlist for the requested access.
+expand ``~``, resolve a relative path against the relative-path base — and the
+result must sit under an allowed root. Strings shaped like ``<scheme>://...``
+are URLs, never relative paths: ``file://`` URLs are converted to a local path
+and checked like one, every other scheme is admitted only when it is on the
+scheme allowlist for the requested access.
 
-The project root is the source checkout when simul runs from one. A wheel
-install has no such root: relative allowlist entries such as ``examples`` name
-nothing there and are dropped, and relative paths passed to tools resolve
-against the working directory instead.
+Two bases, for two kinds of relative path:
+
+- A relative path a tool receives resolves against the relative-path base:
+  ``security.relative_path_base`` when set, otherwise the directory the
+  server was started in. Over stdio that is the directory the client launched
+  it from, so ``scenes/robot.usda`` means what the client means by it. A policy
+  built directly (not from settings) without a base keeps the project root.
+- A relative entry of ``security.allowed_paths`` is configuration naming a
+  directory of the source checkout (the defaults ``examples`` and
+  ``tests/data``), so it resolves against the project root. A wheel install has
+  no such root: those entries name nothing there and are dropped.
 """
 
 from __future__ import annotations
@@ -247,14 +254,25 @@ class PathPolicy:
         project_root: Optional[Path] = None,
         allowed_url_schemes: Iterable[str] = DEFAULT_ALLOWED_URL_SCHEMES,
         allowed_write_url_schemes: Iterable[str] = DEFAULT_ALLOWED_WRITE_URL_SCHEMES,
+        relative_base: Optional[Path] = None,
     ) -> None:
         self._enabled = enabled
         self._project_root: Optional[Path] = project_root or find_checkout_root()
+        # Where a relative tool path resolves; None keeps the project root
+        # (or the working directory without one), as policies built directly do.
+        self._relative_base: Optional[Path] = (
+            self._absolute(Path(os.path.expandvars(str(relative_base))).expanduser(), Path.cwd())
+            if relative_base is not None
+            else None
+        )
         self._allowed_roots: List[Path] = []
         # Roots inside a world-writable directory (the default /tmp/simul-work),
         # resolved root -> the path as configured. Another local user can create
         # or plant those, so each use re-checks them (see _root_problem).
         self._shared_roots: Dict[Path, Path] = {}
+        # Each root as resolved and as configured, for the lexical containment
+        # test a denial uses before it follows any symlink (see denial_details).
+        self._lexical_roots: List[Path] = []
         for allowed_path in allowed_paths:
             if self._project_root is None and not Path(os.path.expandvars(allowed_path)).expanduser().is_absolute():
                 _LOGGER.info(
@@ -262,9 +280,11 @@ class PathPolicy:
                     allowed_path,
                 )
                 continue
-            root = self.resolve(allowed_path)
+            # A relative entry is configuration naming a checkout directory.
+            root = self._normalise(allowed_path, self._project_root or Path.cwd())
             self._allowed_roots.append(root)
             lexical = self._lexical(allowed_path)
+            self._lexical_roots.extend((root, lexical))
             if _inside_world_writable_directory(lexical) or _inside_world_writable_directory(root):
                 self._shared_roots[root] = lexical
         self._allowed_url_schemes: Tuple[str, ...] = tuple(
@@ -280,19 +300,25 @@ class PathPolicy:
     ) -> "PathPolicy":
         """Build the policy described by a Settings object.
 
+        Relative tool paths resolve against ``security.relative_path_base``,
+        or the working directory when it is unset.
+
         Args:
             settings: Settings whose ``security`` section configures the policy.
-            project_root: Root that relative paths resolve against.
+            project_root: Root that relative ``allowed_paths`` entries resolve
+                against; defaults to the source checkout.
 
         Returns:
             The configured policy.
         """
+        base = settings.security.relative_path_base
         return cls(
             enabled=settings.security.sandbox_enabled,
             allowed_paths=settings.security.allowed_paths,
             project_root=project_root,
             allowed_url_schemes=settings.security.allowed_url_schemes,
             allowed_write_url_schemes=settings.security.allowed_write_url_schemes,
+            relative_base=Path(base) if base else Path.cwd(),
         )
 
     @property
@@ -302,6 +328,11 @@ class PathPolicy:
     @property
     def allowed_roots(self) -> List[Path]:
         return list(self._allowed_roots)
+
+    @property
+    def relative_base(self) -> Path:
+        """The directory a relative tool path resolves against."""
+        return self._relative_base or self._project_root or Path.cwd()
 
     @property
     def allowed_url_schemes(self) -> Tuple[str, ...]:
@@ -447,8 +478,29 @@ class PathPolicy:
                 return problem
         return None
 
+    def _absolute_lexical(self, path_str: str) -> Optional[Path]:
+        """A local path or ``file://`` URL made absolute as ``resolve`` does, symlinks not followed.
+
+        Returns:
+            The normalised absolute path, or None for a URL that names no local path.
+        """
+        scheme = self.url_scheme(path_str)
+        if scheme == "file":
+            try:
+                expanded = self._file_url_to_path(path_str)
+            except ValueError:
+                return None
+        elif scheme is not None:
+            return None
+        else:
+            expanded = os.path.expandvars(path_str)
+        candidate = Path(expanded).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.relative_base / candidate
+        return Path(os.path.normpath(candidate))
+
     def _lexical(self, path_str: str) -> Path:
-        """Return ``path_str`` made absolute as ``resolve`` does, without following symlinks."""
+        """Return an ``allowed_paths`` entry made absolute, without following symlinks."""
         candidate = Path(os.path.expandvars(path_str)).expanduser()
         if not candidate.is_absolute():
             candidate = (self._project_root or Path.cwd()) / candidate
@@ -499,7 +551,8 @@ class PathPolicy:
         URLs are converted to the local path they name.
 
         Args:
-            path_str: Local path or ``file://`` URL.
+            path_str: Local path or ``file://`` URL. A relative path resolves
+                against ``relative_base``.
 
         Returns:
             The absolute, symlink-resolved path.
@@ -507,6 +560,10 @@ class PathPolicy:
         Raises:
             ValueError: If ``path_str`` is a URL with a non-``file`` scheme.
         """
+        return self._normalise(path_str, self.relative_base)
+
+    def _normalise(self, path_str: str, base: Path) -> Path:
+        """``resolve`` with an explicit base for a relative path."""
         scheme = self.url_scheme(path_str)
         if scheme == "file":
             expanded = self._file_url_to_path(path_str)
@@ -514,9 +571,12 @@ class PathPolicy:
             raise ValueError(f"Not a filesystem path: {path_str}")
         else:
             expanded = os.path.expandvars(path_str)
-        candidate = Path(expanded).expanduser()
+        return self._absolute(Path(expanded).expanduser(), base)
+
+    @staticmethod
+    def _absolute(candidate: Path, base: Path) -> Path:
         if not candidate.is_absolute():
-            candidate = (self._project_root or Path.cwd()) / candidate
+            candidate = base / candidate
         try:
             return candidate.resolve()
         except Exception:
@@ -530,7 +590,13 @@ class PathPolicy:
             write: Whether the refused access was a write.
 
         Returns:
-            The refused path, the allowed roots and URL schemes, and a hint.
+            The refused path as given; for a local path, ``absolute_path`` (made
+            absolute without following symlinks), ``relative_to`` (the base a
+            relative path resolved against) and, only when the path sits inside
+            an allowed root, ``resolved_path`` (symlinks followed: where a link
+            inside the sandbox leads); the allowed roots and URL schemes, and a
+            hint. A path outside the sandbox is never followed, so a denial
+            cannot be used to read where symlinks elsewhere on disk point.
         """
         schemes = self._allowed_write_url_schemes if write else self._allowed_url_schemes
         access = "write" if write else "read"
@@ -546,13 +612,24 @@ class PathPolicy:
                 f"{access} access. Widen the sandbox with security.allowed_paths / "
                 f"security.allowed_write_url_schemes."
             )
-        return {
-            "file_path": path_str,
-            "access": access,
-            "allowed_roots": [str(root) for root in self._allowed_roots],
-            "allowed_url_schemes": list(schemes),
-            "hint": hint,
-        }
+        details: Dict[str, Any] = {"file_path": path_str}
+        absolute = self._absolute_lexical(path_str) if path_str else None
+        if absolute is not None:
+            details["absolute_path"] = str(absolute)
+            if any(self._is_relative_to(absolute, root) for root in self._lexical_roots):
+                details["resolved_path"] = str(self.resolve(path_str))
+            expanded = os.path.expanduser(os.path.expandvars(path_str))
+            if self.url_scheme(path_str) is None and not os.path.isabs(expanded):
+                details["relative_to"] = str(self.relative_base)
+        details.update(
+            {
+                "access": access,
+                "allowed_roots": [str(root) for root in self._allowed_roots],
+                "allowed_url_schemes": list(schemes),
+                "hint": hint,
+            }
+        )
+        return details
 
     def writable_root(self) -> Optional[Path]:
         """Return the first allowed root this process can create files under.

@@ -23,10 +23,11 @@ from __future__ import annotations
 import types
 import typing
 from dataclasses import dataclass
-from typing import Annotated, Any, Dict, Literal, Mapping, Optional, Tuple, Union
+from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Tuple, Union
 
 import annotated_types
 from pydantic import BaseModel, Field
+from pydantic.fields import FieldInfo
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,9 @@ USD_MAX_ARRAY_PREVIEW = 10_000
 USD_MAX_SEARCH_LIMIT = 5000
 USD_MAX_SUBTREE_LIMIT = 1000
 UNREAL_MAX_ASPECT_RATIO = 16384.0
+#: The largest page an Unreal read returns, and the deepest scene graph.
+UNREAL_MAX_PAGE = 5000
+UNREAL_MAX_SCENE_DEPTH = 64
 UNREAL_MIN_FOV_DEGREES = 0.001
 
 PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
@@ -183,8 +187,21 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         "fov": Bounds(ge=UNREAL_MIN_FOV_DEGREES, lt=180.0),
         "aspect_ratio": Bounds(ge=1.0 / UNREAL_MAX_ASPECT_RATIO, le=UNREAL_MAX_ASPECT_RATIO),
     },
+    # The page the editor-side reads take (``_check_page``) and the scene
+    # graph's depth.
+    "list_unreal_actors": {"max_results": Bounds(ge=1, le=UNREAL_MAX_PAGE), "offset": _OFFSET},
+    "list_unreal_actor_components": {
+        "max_results": Bounds(ge=1, le=UNREAL_MAX_PAGE),
+        "offset": _OFFSET,
+    },
+    "query_unreal_scene_graph": {
+        "max_depth": Bounds(ge=1, le=UNREAL_MAX_SCENE_DEPTH),
+        "max_results": Bounds(ge=1, le=UNREAL_MAX_PAGE),
+        "offset": _OFFSET,
+    },
     "get_unreal_actor_by_semantic_label": {
-        "max_results": Bounds(ge=1, le=5000),
+        "max_results": Bounds(ge=1, le=UNREAL_MAX_PAGE),
+        "offset": _OFFSET,
         "match_mode": Choices(("exact", "contains", "regex")),
     },
     # Advertised only: the request model refuses another mode, through the
@@ -337,6 +354,13 @@ def from_request_model(
         return annotation
     advertised, _ = _optional_of(_base(annotation))
     modelled, _ = _optional_of(field.annotation)
+    # A field typed with an annotated alias (``Optional[ColorFactor]``) keeps
+    # its bounds in the alias, not in the field's own metadata.
+    carried: List[Any] = []
+    while typing.get_origin(modelled) is Annotated:
+        modelled, *extras = typing.get_args(modelled)
+        for extra in extras:
+            carried.extend(extra.metadata if isinstance(extra, FieldInfo) else [extra])
     if typing.get_origin(modelled) is Literal and advertised is str:
         values = typing.get_args(modelled)
         if not all(isinstance(value, str) for value in values):
@@ -344,7 +368,7 @@ def from_request_model(
         annotation = apply(annotation, Choices(tuple(values)))
     elif not _same_type(modelled, advertised):
         return annotation
-    metadata = [m for m in field.metadata if isinstance(m, _COPIED_METADATA)]
+    metadata = [m for m in [*carried, *field.metadata] if isinstance(m, _COPIED_METADATA)]
     if not metadata:
         return annotation
     return Annotated[(annotation, *metadata)]

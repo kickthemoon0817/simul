@@ -84,7 +84,7 @@ PERMISSION_DENIED = "PermissionDenied"
 #: are not available.
 SCRIPT_EXECUTION_DISABLED = "ScriptExecutionDisabled"
 
-#: A script or request is larger than the transport accepts.
+#: A script, request or reply is larger than the transport accepts.
 PAYLOAD_TOO_LARGE = "PayloadTooLarge"
 
 # -- Domain types: shared by the engines ---------------------------------------
@@ -175,6 +175,10 @@ ATTACHMENT_TARGET_CHANGED = "AttachmentTargetChanged"
 #: Blender refuses to replace a file with unsaved changes without the flag.
 UNSAVED_CHANGES = "UnsavedChangesError"
 
+#: Blender refused a key part way through a batch; the keys before it stay
+#: (``details`` gives how many went in and the one refused).
+KEYFRAMES_PARTLY_INSERTED = "KeyframesPartlyInserted"
+
 #: A headless USD file could not be opened; ``details.reason`` says why.
 LOAD_ERROR = "LoadError"
 
@@ -242,6 +246,7 @@ DOMAIN_TYPES: Tuple[str, ...] = (
     ATTACHMENT_STALE,
     ATTACHMENT_TARGET_CHANGED,
     UNSAVED_CHANGES,
+    KEYFRAMES_PARTLY_INSERTED,
     LOAD_ERROR,
     STAGE_BUSY,
     COMPUTATION_ERROR,
@@ -275,9 +280,50 @@ _ALIASES: Dict[str, str] = {
     "KeyError": NOT_FOUND_ERROR,
     "LookupError": NOT_FOUND_ERROR,
     "IndexError": NOT_FOUND_ERROR,
+    # A module the engine's Python lacks (Isaac Sim 6.0 dropped the
+    # omni.isaac.* shims): the engine's, not a name the caller got wrong.
+    "ImportError": ENGINE_ERROR,
+    "ModuleNotFoundError": ENGINE_ERROR,
+    # asyncio's, about a future: not the caller's input, though "Invalid*".
+    "InvalidStateError": ENGINE_ERROR,
     # A reply that would not decode: the engine's output, not the caller's.
     "UnicodeDecodeError": ENGINE_ERROR,
     "UnicodeError": ENGINE_ERROR,
+}
+
+#: The failure names the khemoo.simul Isaac bridge extension and the Isaac
+#: socket client report for a request they refused or could not carry, which
+#: are not an exception the engine's code raised (``BridgeResponse.failure``
+#: in the bridge, the client's ``ScriptResult.error_name`` markers).
+ISAAC_TRANSPORT_FAILURES: Dict[str, str] = {
+    # The bridge extension
+    "AuthenticationError": AUTHENTICATION_ERROR,
+    "ExtensionNotReady": CONNECTION_ERROR,
+    "RequestReadTimeout": CONNECTION_ERROR,
+    "RequestTimeout": TIMEOUT_ERROR,
+    "ResponseTooLarge": PAYLOAD_TOO_LARGE,
+    "UnknownAction": UNSUPPORTED_OPERATION,
+    "UnsafeExecutionDisabled": SCRIPT_EXECUTION_DISABLED,
+    "StageUnavailable": INVALID_STATE,
+    "PrimNotFound": NOT_FOUND_ERROR,
+    "PrimNotXformable": VALIDATION_ERROR,
+    "InvalidRequest": VALIDATION_ERROR,
+    "InvalidRootPath": VALIDATION_ERROR,
+    "InvalidAspect": VALIDATION_ERROR,
+    "InvalidSearchType": VALIDATION_ERROR,
+    "InvalidSimulationCommand": VALIDATION_ERROR,
+    # The socket client
+    "EmptyResponse": CONNECTION_ERROR,
+    "ScriptTooLargeForSocket": PAYLOAD_TOO_LARGE,
+    "UnknownError": ENGINE_ERROR,
+}
+
+# Names that mean a transport failure only when the client says it produced
+# them (``ScriptResult.transport_failure``); raised by a script, they are the
+# script's: a reply that is not JSON, a script the bridge stopped at its timeout.
+_ISAAC_TRANSPORT_MARKERS: Dict[str, str] = {
+    "JSONDecodeError": BRIDGE_PROTOCOL_ERROR,
+    "ScriptInterrupted": TIMEOUT_ERROR,
 }
 
 _FILE_NOT_FOUND_ERRNOS = frozenset({errno.ENOENT})
@@ -301,6 +347,12 @@ _CONNECTION_ERRNOS = frozenset(
     if code is not None
 )
 
+#: Longest ``error`` (and ``details.errors[].message``) an envelope carries;
+#: a message that repeats a long argument is cut, saying how much was left out.
+MAX_MESSAGE_CHARS = 2000
+# Longest exception name kept in ``details.exception_type``.
+_MAX_NAME_CHARS = 128
+
 _EMPTY_MESSAGES = {
     TIMEOUT_ERROR: "The engine did not answer in time; the operation may still be running.",
     CONNECTION_ERROR: "The connection to the engine failed before it answered.",
@@ -309,11 +361,17 @@ _DEFAULT_MESSAGE = "The operation failed without a message."
 
 # bpy's message for an enum property set to a value it does not have:
 #   bpy_struct: item.type = val: enum "BOXX" not found in ('BOX', 'SPHERE')
+# Anchored on the literal ``enum "``, with bounded runs, so a long message
+# costs one linear scan; the field is looked for only in the few characters
+# before the match (``_BPY_FIELD``). A leading optional ``[\w.]*`` group
+# backtracked quadratically on a long run of word characters.
 _BPY_ENUM = re.compile(
-    r"(?:(?P<field>[A-Za-z_][\w.]*)\s*=\s*\w+:\s*)?"
-    r'enum\s+"(?P<given>[^"]*)"\s+not\s+found\s+in\s+\((?P<choices>[^)]*)\)'
+    r'enum\s{1,8}"(?P<given>[^"\n]{0,256})"\s{1,8}not\s{1,8}found\s{1,8}in\s{1,8}'
+    r"\((?P<choices>[^)\n]{0,4096})\)"
 )
-_QUOTED = re.compile(r"'((?:[^'\\]|\\.)*)'")
+_BPY_FIELD = re.compile(r"(?P<field>[A-Za-z_][\w.]{0,127})\s{0,8}=\s{0,8}\w{1,64}:\s{0,8}$")
+_BPY_FIELD_WINDOW = 200
+_QUOTED = re.compile(r"'([^'\\\n]{0,256})'")
 
 
 def is_known(name: Optional[str]) -> bool:
@@ -327,10 +385,11 @@ def family_of(name: str) -> str:
     By exact name first (``PermissionError`` is ``PermissionDenied``,
     ``BridgeResponseProtocolError`` a ``BridgeProtocolError``), then by
     family: a name with ``Timeout`` in it is a ``TimeoutError``; one with
-    ``Connection``, ``BrokenPipe`` or ``OSError`` a ``ConnectionError``; one
-    with ``NotFound`` a ``NotFoundError``; ``ValueError``, ``TypeError``,
+    ``Connection`` or ``BrokenPipe`` a ``ConnectionError``; one with
+    ``NotFound`` a ``NotFoundError``; ``ValueError``, ``TypeError``,
     ``JSONDecodeError``, ``Invalid*`` and ``*ValidationError`` a
-    ``ValidationError``. Anything else is an ``EngineError``.
+    ``ValidationError``. Anything else (``OSError``, ``RuntimeError``,
+    ``ImportError``) is an ``EngineError``.
 
     Args:
         name: An exception or error name; a known one is returned unchanged.
@@ -341,7 +400,9 @@ def family_of(name: str) -> str:
         return _ALIASES[name]
     if "Timeout" in name:
         return TIMEOUT_ERROR
-    if "Connection" in name or "BrokenPipe" in name or name.endswith("OSError"):
+    # Not OSError by name: relayed from the engine (a full disk inside Kit or
+    # Blender), it is the engine's failure, not a connection that broke.
+    if "Connection" in name or "BrokenPipe" in name:
         return CONNECTION_ERROR
     if "NotFound" in name:
         return NOT_FOUND_ERROR
@@ -352,6 +413,55 @@ def family_of(name: str) -> str:
     ):
         return VALIDATION_ERROR
     return ENGINE_ERROR
+
+
+def is_mapped(name: str) -> bool:
+    """Whether ``name`` is in the vocabulary or a name the module maps on purpose."""
+    return (
+        is_known(name)
+        or name in _ALIASES
+        or name in ISAAC_TRANSPORT_FAILURES
+        or name in _ISAAC_TRANSPORT_MARKERS
+    )
+
+
+def engine_failure_type(
+    name: str, *, transport_failure: bool = False, raised: str = ENGINE_ERROR
+) -> str:
+    """Return the vocabulary type of a failure an Isaac Sim transport reported.
+
+    The bridge's and the socket client's own failure names
+    (``ISAAC_TRANSPORT_FAILURES``) map onto their types. Any other name is an
+    exception the engine's code raised, a script inside Kit: a ``TypeError``
+    or an ``OSError`` there is the engine's failure, not the caller's input
+    or a broken connection, so it is ``raised`` (``EngineError`` for a tool's
+    own script, ``ScriptError`` for an agent's), whatever its spelling. Only
+    a failure the client marks as its own (``transport_failure``) is read by
+    its name: a reply that is not JSON is a ``BridgeProtocolError``, a script
+    the bridge stopped at its timeout a ``TimeoutError``.
+
+    Args:
+        name: The failure name the transport reported.
+        transport_failure: The client produced the failure itself.
+        raised: The type of an exception the engine's code raised.
+    """
+    if name in ISAAC_TRANSPORT_FAILURES:
+        return ISAAC_TRANSPORT_FAILURES[name]
+    if transport_failure:
+        return _ISAAC_TRANSPORT_MARKERS.get(name) or family_of(name)
+    return raised
+
+
+def bounded_message(message: str) -> str:
+    """Return ``message`` cut to ``MAX_MESSAGE_CHARS``, saying how much was left out."""
+    if len(message) <= MAX_MESSAGE_CHARS:
+        return message
+    return f"{message[:MAX_MESSAGE_CHARS]}... <{len(message) - MAX_MESSAGE_CHARS} more characters>"
+
+
+def _bounded_name(name: str) -> str:
+    """An exception name as ``details.exception_type`` keeps it."""
+    return name if len(name) <= _MAX_NAME_CHARS else f"{name[:_MAX_NAME_CHARS]}..."
 
 
 def canonical_error_type(name: Optional[str]) -> Optional[str]:
@@ -388,7 +498,11 @@ def classify_exception(exc: BaseException) -> str:
             return _ALIASES[name]
     if isinstance(exc, ConnectionError):
         return CONNECTION_ERROR
-    if isinstance(exc, OSError) and exc.errno is not None:
+    if type(exc) is OSError and exc.errno is None:
+        # Raised here, not relayed: asyncio's "Multiple exceptions: ..." when
+        # no address of a host would connect.
+        return CONNECTION_ERROR
+    if isinstance(exc, OSError):
         if exc.errno in _CONNECTION_ERRNOS:
             return CONNECTION_ERROR
         if exc.errno in _FILE_NOT_FOUND_ERRNOS:
@@ -422,7 +536,7 @@ def exception_fields(exc: BaseException) -> Dict[str, Any]:
     details = dict(details) if isinstance(details, dict) else {}
     original = exception_type_name(exc)
     if original != error_type:
-        details.setdefault("exception_type", original)
+        details.setdefault("exception_type", _bounded_name(original))
     return {"error_type": error_type, "details": details or None}
 
 
@@ -434,14 +548,18 @@ def errors_from_message(message: str) -> List[Dict[str, Any]]:
     choices, the ``input`` given and the closest choice as ``suggestion``.
 
     Args:
-        message: The error message.
+        message: The error message; only its first ``MAX_MESSAGE_CHARS`` are
+            read, and kept.
     """
+    message = bounded_message(message)
     entry: Dict[str, Any] = {"field": None, "message": message, "type": "value_error"}
-    match = _BPY_ENUM.search(message)
+    match = _BPY_ENUM.search(message, 0, MAX_MESSAGE_CHARS)
     if match is not None:
         choices = _QUOTED.findall(match.group("choices"))
         given = match.group("given")
-        field = match.group("field")
+        before = message[max(0, match.start() - _BPY_FIELD_WINDOW):match.start()]
+        named = _BPY_FIELD.search(before)
+        field = named.group("field") if named is not None else None
         entry.update(
             field=field.rsplit(".", 1)[-1] if field else None,
             type="enum",
@@ -458,7 +576,8 @@ def normalize_error_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Give a failed payload a type in the vocabulary and a message (in place).
 
     A name outside the vocabulary becomes the type of its family, with the
-    original kept as ``details.exception_type``. A failure without any
+    original kept as ``details.exception_type``. ``error`` and each
+    ``details.errors`` message are cut to ``MAX_MESSAGE_CHARS``. A failure without any
     ``error_type`` gets one: ``ConnectionError`` when the payload says the
     engine is not reachable (``reachable`` or ``connected`` false),
     ``EngineError`` otherwise. A ``ValidationError`` without
@@ -480,7 +599,7 @@ def normalize_error_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     elif not is_known(current):
         details = payload.get("details")
         details = dict(details) if isinstance(details, dict) else {}
-        details.setdefault("exception_type", current)
+        details.setdefault("exception_type", _bounded_name(current))
         payload["details"] = details
         payload["error_type"] = family_of(current)
     if payload["error_type"] == VALIDATION_ERROR:
@@ -511,4 +630,11 @@ def normalize_error_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             or stated
             or _EMPTY_MESSAGES.get(payload["error_type"], _DEFAULT_MESSAGE)
         )
+    if isinstance(payload["error"], str):
+        payload["error"] = bounded_message(payload["error"])
+    details = payload.get("details")
+    if isinstance(details, dict) and isinstance(details.get("errors"), list):
+        for entry in details["errors"]:
+            if isinstance(entry, dict) and isinstance(entry.get("message"), str):
+                entry["message"] = bounded_message(entry["message"])
     return payload

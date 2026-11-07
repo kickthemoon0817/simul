@@ -12,7 +12,6 @@ from typing import Any, Callable
 
 from ..blender_bridge.protocol import BridgeFiles, BridgeRemoteError, BridgeWire
 from ..config import Settings
-from ..resources import find_checkout_root
 from ..utils.discovery import DiscoveryDir
 from ..utils.errors import ScriptExecutionDisabled
 from ..utils.paths import PathPolicy, SandboxDenied
@@ -53,6 +52,16 @@ class AttachmentTargetChanged(AttachmentError):
     """The attached process is alive but loaded another file or lost the window/scene."""
 
     error_type = "AttachmentTargetChanged"
+
+
+class NoBlenderBridge(AttachmentError):
+    """No GUI Blender with the bridge add-on answers: there is nothing to attach to.
+
+    A RuntimeError like the rest of the family; its ``error_type`` is the
+    ``ConnectionError`` of an engine that is not reachable.
+    """
+
+    error_type = "ConnectionError"
 
 
 class BlenderConnection:
@@ -99,7 +108,9 @@ class BlenderConnection:
                 "path_policy": {
                     "enabled": policy.enabled,
                     "allowed_paths": [str(p) for p in policy.allowed_roots],
-                    "project_root": str(find_checkout_root() or Path.cwd()),
+                    # The add-on resolves a relative path against this, as
+                    # the server's own policy does.
+                    "project_root": str(policy.relative_base),
                     "allowed_url_schemes": policy.allowed_url_schemes,
                     "allowed_write_url_schemes": policy.allowed_write_url_schemes,
                 },
@@ -263,7 +274,7 @@ class BlenderAttachments:
         if instance_id is not None:
             live = [entry for entry in live if entry["instance_id"] == instance_id]
         if not live:
-            raise RuntimeError(
+            raise NoBlenderBridge(
                 "No matching GUI Blender bridge. Enable the Simul Blender Bridge add-on in the existing window."
             )
         if len(live) != 1:
@@ -312,7 +323,7 @@ class BlenderAttachments:
             latest["document_id"] != info["document_id"]
             or selected not in latest["windows"]
         ):
-            raise RuntimeError(
+            raise AttachmentTargetChanged(
                 "Blender changed while attaching; inspect instances and attach again"
             )
         target = {"document_id": info["document_id"], **selected}

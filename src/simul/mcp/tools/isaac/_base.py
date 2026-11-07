@@ -209,20 +209,40 @@ class IsaacScriptBase(LoggerMixin):
         ).model_dump()
 
     @staticmethod
-    def _script_failure(result: ScriptResult) -> Dict[str, Any]:
-        """Return the error envelope for a script that raised inside Isaac Sim.
+    def _script_failure(
+        result: ScriptResult, raised: str = error_types.ENGINE_ERROR
+    ) -> Dict[str, Any]:
+        """Return the error envelope for a script that failed in or on the way to Isaac Sim.
+
+        A failure of the transport (``error_types.ISAAC_TRANSPORT_FAILURES``, or
+        one the client marks as its own) has its type. An exception the script
+        raised inside Kit is ``raised`` whatever its name: a ``TypeError`` or
+        an ``OSError`` there is the engine's failure (or the agent's script's),
+        not the caller's arguments or a broken connection.
 
         Args:
             result: A ScriptResult whose ``success`` is False.
+            raised: The type of an exception the script raised:
+                ``EngineError`` for a tool's own script, ``ScriptError`` for
+                an agent's.
 
         Returns:
-            An ErrorResponse dict carrying the remote exception name, message
-            and traceback.
+            An ErrorResponse dict carrying the message, the traceback and the
+            name the transport reported as ``details.exception_type``.
         """
+        name = result.error_name or "UnknownError"
+        error_type = error_types.engine_failure_type(
+            name, transport_failure=result.transport_failure, raised=raised
+        )
+        details: Dict[str, Any] = {}
+        if result.traceback:
+            details["traceback"] = result.traceback
+        if name != error_type:
+            details["exception_type"] = name
         return ErrorResponse(
             error=result.error_value or "Script execution failed",
-            error_type=result.error_name or "RuntimeError",
-            details={"traceback": result.traceback} if result.traceback else None,
+            error_type=error_type,
+            details=details or None,
         ).model_dump()
 
     @staticmethod
@@ -250,10 +270,21 @@ class IsaacScriptBase(LoggerMixin):
             return apply_success_from_error(result_payload)
 
         error = response.get("error", {})
+        if not isinstance(error, dict):
+            error = {}
+        # The bridge's own refusals keep their meaning; the name of an
+        # exception its handler raised is the engine's failure.
+        name = str(error.get("name") or "BridgeError")
+        error_type = error_types.engine_failure_type(name)
+        details: Dict[str, Any] = {}
+        if error.get("traceback"):
+            details["traceback"] = error.get("traceback")
+        if name != error_type:
+            details["exception_type"] = name
         return ErrorResponse(
             error=str(error.get("message", "Bridge request failed")),
-            error_type=str(error.get("name", "BridgeError")),
-            details={"traceback": error.get("traceback")} if error.get("traceback") else None,
+            error_type=error_type,
+            details=details or None,
         ).model_dump()
 
     def _heavy_script_timeout(self) -> float:

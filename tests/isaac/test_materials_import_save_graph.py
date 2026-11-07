@@ -421,7 +421,12 @@ def test_add_reference_corrects_units_in_place_only_without_root_transform_ops(
     )
 
     assert result["success"] is True and result["units"]["applied"] is applied
-    if not applied:
+    if applied:
+        assert "warning" not in result
+    else:
+        # Asked for and declined: said at the top level, not only in the notes.
+        assert "correct_units was not applied" in result["warning"]
+        assert "import_isaac_asset" in result["warning"]
         assert any("import_isaac_asset" in note for note in result["units"]["notes"])
         assert not stage.GetPrimAtPath("/World/Ref").HasAttribute("xformOp:scale:unitsResolve")
 
@@ -844,7 +849,7 @@ def test_an_ordinary_connection_still_goes_through(monkeypatch: pytest.MonkeyPat
     [
         ("inputs:script", True), ("inputs:scriptPath", True), ("inputs:codeStr", True),
         ("inputs:CODEFILE", True), ("inputs:augmentationScript", True),
-        ("inputs:sourceCode", True), ("inputs:conditionScript", True),
+        ("inputs:sourceCode", True), ("inputs:conditionScript", True), ("inputs:usdTimecode", False),
         ("/World/G/script.inputs:value", False), ("inputs:value", False), ("outputs:sum", False),
     ],
 )
@@ -858,7 +863,8 @@ def test_code_attribute_predicate(name: str, expected: bool) -> None:
         ("omni.graph.scriptnode.ScriptNode", True), ("omni.warp.WarpKernel", True),
         ("OMNI.WARP.WARPKERNEL", True), ("omni.replicator.core.OgnAugmentCPU", True),
         ("omni.replicator.core.OgnConditionScript", True), ("some.ext.WarpKernel", True),
-        ("my.ext.WarpSolver", True),
+        ("my.ext.WarpSolver", False), ("omni.warp.WarpClothSimulate", False),
+        ("omni.graph.nodes.ReadPrimAttribute", False),
         ("omni.graph.nodes.Add", False), ("omni.graph.action.OnPlaybackTick", False),
     ],
 )

@@ -631,7 +631,7 @@ def test_a_missing_object_reaches_the_server_as_not_found(
     bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The add-on relayed the class name, so a missing object read as ValueError."""
-    from simul.adapters.blender_runtime import BlenderNotFoundError
+    from simul.adapters.blender_runtime import NotFoundError
     from simul.blender_bridge.protocol import BridgeRemoteError
     from simul.mcp.error_types import exception_fields
 
@@ -640,7 +640,7 @@ def test_a_missing_object_reaches_the_server_as_not_found(
             pass
 
         def get_frame(self) -> Dict[str, Any]:
-            raise BlenderNotFoundError("Object not found: Cube")
+            raise NotFoundError("Object not found: Cube", "object_not_found", object_name="Cube")
 
     monkeypatch.setattr(bridge_module, "BlenderRuntimeSession", Session)
     bridge = _bridge(bridge_module, tmp_path)
@@ -649,7 +649,10 @@ def test_a_missing_object_reaches_the_server_as_not_found(
     assert reply["success"] is False
     assert reply["error_type"] == "NotFoundError"
     remote = BridgeRemoteError(reply["error"], reply["error_type"], reply["details"])
-    assert exception_fields(remote) == {"error_type": "NotFoundError", "details": None}
+    assert exception_fields(remote) == {
+        "error_type": "NotFoundError",
+        "details": {"code": "object_not_found", "object_name": "Cube"},
+    }
 
 
 def test_a_disabled_script_is_script_execution_disabled_over_the_bridge(

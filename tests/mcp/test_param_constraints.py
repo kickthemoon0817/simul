@@ -244,6 +244,7 @@ _PROSE_ONLY = {
     ("search_prims", "query"),
     ("set_isaac_material_property", "property_name"),
     ("set_blender_object_mode", "mode"),
+    ("assign_blender_material", "object_name"),
 }
 
 
