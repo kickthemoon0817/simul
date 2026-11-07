@@ -6,11 +6,37 @@ from typing import Any, Dict, Optional
 from ...schemas.common import ErrorResponse
 from ._shared import (
     BULK_GEOMETRY_ATTRIBUTES,
+    TRAVERSAL_PREDICATE_CORE,
     XFORM_READ_CORE,
     _compose_script,
     _pyval,
 )
 from .._meta import DeprecatedAlias, tool_meta
+
+
+def _bridge_listing_stands(result: Optional[Dict[str, Any]], offset: int) -> bool:
+    """Whether a bridge listing answers the request, or the script path must.
+
+    A bridge published before paging drops the offset, so its answer only
+    stands for the first page. One published before the traversal flags
+    ignores them and walks with the default predicate (no instance proxies,
+    no inactive prims), which it shows by not echoing them back. A failure
+    stands either way: the script path would fail the same way.
+
+    Args:
+        result: What ``_execute_bridge_action`` returned.
+        offset: The requested page offset.
+
+    Returns:
+        True when ``result`` is the answer to return.
+    """
+    if result is None:
+        return False
+    if result.get("success") is False:
+        return True
+    if offset and "offset" not in result:
+        return False
+    return "include_instance_proxies" in result
 
 
 # Prefix for every generated script that counts prims. get_isaac_scene_summary
@@ -116,7 +142,10 @@ class SceneInspectionMixin:
         name="list_isaac_prims",
         description=(
             "Browse prims under root_path with a depth limit and an optional prim type "
-            "filter. Paged (max_results/offset)."
+            "filter. Descends into instanceable prims (entries there carry "
+            "instance_proxy=true; robot assets keep their meshes and colliders there) "
+            "unless include_instance_proxies=false; include_inactive=true also lists "
+            "deactivated prims with active=false. Paged (max_results/offset)."
         ),
         read_only=True,
         idempotent=True,
@@ -129,6 +158,8 @@ class SceneInspectionMixin:
         max_depth: int = 5,
         max_results: int = 100,
         offset: int = 0,
+        include_instance_proxies: bool = True,
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         """
         List prims in the current Isaac Sim stage with optional filtering.
@@ -142,6 +173,11 @@ class SceneInspectionMixin:
                 to [1, 1000]; the effective cap is reported as applied_limit.
             offset: Number of matching prims to skip before the page starts;
                 pass the previous page's next_offset to continue.
+            include_instance_proxies: Descend into instanceable prims. Their
+                contents are instance proxies: listed with
+                ``instance_proxy: true``, readable but not editable in place.
+            include_inactive: Also list deactivated prims (``active: false``).
+                Their children are not composed, so none are listed.
 
         Returns:
             Dict with a page of prim entries (path, type, name, active).
@@ -159,20 +195,26 @@ class SceneInspectionMixin:
                 # the two above; sending it keeps the cap honoured there.
                 "max_items": max_results,
                 "offset": offset,
+                "include_instance_proxies": include_instance_proxies,
+                "include_inactive": include_inactive,
             },
         )
-        # That older bridge also drops the offset, so its answer only stands
-        # for the first page; later pages fall through to the script path.
-        if bridge_result is not None and (offset == 0 or "offset" in bridge_result):
-            return bridge_result
+        if _bridge_listing_stands(bridge_result, offset):
+            return bridge_result  # type: ignore[return-value]
 
         _root_path = _pyval(root_path)
         _prim_type = _pyval(prim_type or "")
-        script = textwrap.dedent(f"""\
+        _proxies = _pyval(bool(include_instance_proxies))
+        _inactive = _pyval(bool(include_inactive))
+        _predicate = f"_traversal_predicate({_proxies}, {_inactive})"
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Usd
-
+            """,
+            TRAVERSAL_PREDICATE_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -193,7 +235,7 @@ class SceneInspectionMixin:
                     # continue skips emitting a prim but still descends its
                     # subtree, so the depth limit bounded the output and not the
                     # work. Prune instead.
-                    prim_iter = iter(Usd.PrimRange(root))
+                    prim_iter = iter(Usd.PrimRange(root, {_predicate}))
                     for p in prim_iter:
                         path_str = str(p.GetPath())
                         depth = len(path_str.rstrip("/").split("/")) - root_depth
@@ -210,16 +252,21 @@ class SceneInspectionMixin:
                         if len(prims) >= max_n:
                             truncated = True
                             break
-                        prims.append({{
+                        entry = {{
                             "path": path_str,
                             "type": ptype,
                             "name": p.GetName(),
                             "active": p.IsActive(),
-                        }})
+                        }}
+                        if p.IsInstanceProxy():
+                            entry["instance_proxy"] = True
+                        prims.append(entry)
                     print(json.dumps({{
                         "root_path": {_root_path},
                         "type_filter": type_filter or None,
                         "max_depth": max_d,
+                        "include_instance_proxies": {_proxies},
+                        "include_inactive": {_inactive},
                         "count": len(prims),
                         "offset": offset,
                         "applied_limit": max_n,
@@ -227,7 +274,8 @@ class SceneInspectionMixin:
                         "next_offset": offset + len(prims) if truncated else None,
                         "prims": prims,
                     }}))
-        """)
+            """,
+        )
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
@@ -437,7 +485,10 @@ class SceneInspectionMixin:
         description=(
             "Search the whole hierarchy below root_path for prims whose type name equals "
             "query (search_type='type') or whose name contains query (search_type='name'). "
-            "Paged (max_results/offset)."
+            "Searches inside instanceable prims too (matches there carry "
+            "instance_proxy=true) unless include_instance_proxies=false; "
+            "include_inactive=true also matches deactivated prims (active=false). Paged "
+            "(max_results/offset)."
         ),
         read_only=True,
         idempotent=True,
@@ -449,6 +500,8 @@ class SceneInspectionMixin:
         root_path: str = "/",
         max_results: int = 100,
         offset: int = 0,
+        include_instance_proxies: bool = True,
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         """
         Search for prims by type name or name substring.
@@ -465,6 +518,11 @@ class SceneInspectionMixin:
                 applied_limit.
             offset: Number of matches to skip before the page starts; pass
                 the previous page's next_offset to continue.
+            include_instance_proxies: Search inside instanceable prims, where
+                Isaac robot assets keep their meshes and colliders. Matches
+                there carry ``instance_proxy: true``.
+            include_inactive: Also match deactivated prims, which carry
+                ``active: false``.
 
         Returns:
             Dict with a page of matching prim paths and types.
@@ -485,21 +543,26 @@ class SceneInspectionMixin:
                 "root_path": root_path,
                 "max_results": max_results,
                 "offset": offset,
+                "include_instance_proxies": include_instance_proxies,
+                "include_inactive": include_inactive,
             },
         )
-        # A bridge published before paging drops the offset, so its answer
-        # only stands for the first page; later pages use the script path.
-        if bridge_result is not None and (offset == 0 or "offset" in bridge_result):
-            return bridge_result
+        if _bridge_listing_stands(bridge_result, offset):
+            return bridge_result  # type: ignore[return-value]
 
         _root_path = _pyval(root_path)
         _search_type = _pyval(search_type)
         _query = _pyval(query)
-        script = textwrap.dedent(f"""\
+        _proxies = _pyval(bool(include_instance_proxies))
+        _inactive = _pyval(bool(include_inactive))
+        script = _compose_script(
+            """\
             import json, re
             import omni.usd
             from pxr import Usd
-
+            """,
+            TRAVERSAL_PREDICATE_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -515,7 +578,7 @@ class SceneInspectionMixin:
                     offset = {offset}
                     matched = 0
                     truncated = False
-                    for p in Usd.PrimRange(root):
+                    for p in Usd.PrimRange(root, _traversal_predicate({_proxies}, {_inactive})):
                         if search_type == "type":
                             hit = p.GetTypeName() == query
                         elif search_type == "name":
@@ -530,11 +593,18 @@ class SceneInspectionMixin:
                         if len(matches) >= max_r:
                             truncated = True
                             break
-                        matches.append({{"path": str(p.GetPath()), "type": p.GetTypeName(), "name": p.GetName()}})
+                        entry = {{"path": str(p.GetPath()), "type": p.GetTypeName(), "name": p.GetName()}}
+                        if p.IsInstanceProxy():
+                            entry["instance_proxy"] = True
+                        if not p.IsActive():
+                            entry["active"] = False
+                        matches.append(entry)
                     print(json.dumps({{
                         "search_type": search_type,
                         "query": query,
                         "root_path": {_root_path},
+                        "include_instance_proxies": {_proxies},
+                        "include_inactive": {_inactive},
                         "count": len(matches),
                         "offset": offset,
                         "applied_limit": max_r,
@@ -542,7 +612,8 @@ class SceneInspectionMixin:
                         "next_offset": offset + len(matches) if truncated else None,
                         "matches": matches,
                     }}))
-        """)
+            """,
+        )
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
