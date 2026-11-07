@@ -1026,8 +1026,13 @@ Behaviour worth knowing:
   direction. Without it the empty is unrotated, so a HINGE turns about world Z,
   like a door; a pendulum swinging in the XZ plane needs `axis: [0, 1, 0]`.
   `limits`, `springs` (GENERIC_SPRING), the `motor_*` settings (MOTOR) and
-  `breaking_threshold` configure it. A MOTOR without a velocity drives nothing,
-  and the reply warns about it. The reply and `get_blender_constraint_info`
+  `breaking_threshold` configure it. A MOTOR drives object1 relative to
+  object2: with object1 the anchor, a positive velocity turns or moves object2
+  the negative way along the axis (on Blender 5.0.1, -1.91 rad in 23 frames at
+  +2 rad/s, and -0.91 m at +1 m/s); swap the objects or the sign to reverse it.
+  A MOTOR without a velocity drives nothing, and the reply warns about it. The
+  empty goes into the active collection, or into the scene's collection when
+  the active one is linked from a library, excluded or disabled in viewports. The reply and `get_blender_constraint_info`
   report `pivot`, `axis`, `local_axes` (the directions the limits refer to) and
   the settings.
 - `add_blender_force_field` adds the field with `align: WORLD` and an explicit

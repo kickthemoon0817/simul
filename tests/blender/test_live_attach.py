@@ -998,17 +998,21 @@ def test_recover_from_file_loads_context_loss_and_exit(
             assert printed["output"] == "x" * 4096
             assert printed["output_truncated"] is True
             assert printed["output_total_chars"] == 6001
-            # A bpy operator failure keeps its class across the bridge, and the
-            # object the session was acting on rides along as context.
+            # A refusal keeps its class across the bridge. A camera is refused
+            # before Blender's operator runs, which only said "poll() failed",
+            # and it leaves no rigid body world behind.
             no_mesh = call("setup_blender_rigid_body", object_name="Camera")
-            assert no_mesh["error_type"] == "RuntimeError", no_mesh
-            assert "Failed to add rigid body to 'Camera'" in no_mesh["error"]
-            assert "rigidbody.object_add.poll() failed" in no_mesh["error"]
+            assert no_mesh["error_type"] == "ValueError", no_mesh
+            assert "need a mesh object, and 'Camera' is a CAMERA" in no_mesh["error"]
+            world = call("get_blender_rigid_body_world")
+            assert world["success"] is True and world["exists"] is False, world
+            # An unknown field type never reaches Blender: the request model
+            # lists the types its effector_add takes.
             bad_enum = call(
                 "add_blender_force_field", field_type="BOGUS", location=[0.0, 0.0, 0.0]
             )
-            assert bad_enum["error_type"] == "TypeError", bad_enum
-            assert 'enum "BOGUS" not found' in bad_enum["error"]
+            assert bad_enum["error_type"] == "ValidationError", bad_enum
+            assert "'FORCE', 'WIND'" in bad_enum["error"]
 
             # Keyframes round trip. Blender 4.4+ keeps an action's F-curves per
             # action slot; get_blender_keyframes failed on 5.0, which removed

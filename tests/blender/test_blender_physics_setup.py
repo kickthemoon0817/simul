@@ -70,6 +70,12 @@ class FakeObject(SimpleNamespace):
     def evaluated_get(self, depsgraph: Any) -> Any:
         return SimpleNamespace(matrix_world=_Matrix(self.location, self.rotation_euler))
 
+    def select_set(self, value: bool) -> None:
+        self.selected = value
+
+    def as_pointer(self) -> int:
+        return id(self)
+
 
 def _object(
     name: str, kind: str = "MESH", location: Any = (0.0, 0.0, 0.0)
@@ -83,8 +89,51 @@ def _object(
         rigid_body=None,
         rigid_body_constraint=None,
         field=None,
+        selected=False,
+        users_collection=[],
     )
 
+
+class FakeObjects(dict):
+    """bpy.data.objects: iterates over the objects, and makes and removes them."""
+
+    def __init__(self, blender: "FakeBlender") -> None:
+        super().__init__()
+        self._blender = blender
+
+    def __iter__(self) -> Iterator[Any]:  # type: ignore[override]
+        return iter(list(self.values()))
+
+    def new(self, name: str, data: Any) -> FakeObject:
+        return self._blender._new_object(name, data)
+
+    def remove(self, obj: FakeObject, do_unlink: bool = False) -> None:
+        self._blender._remove_object(obj, do_unlink)
+
+
+class FakeCollection(SimpleNamespace):
+    """A collection that refuses links when it comes from a library, as Blender's does."""
+
+    def __init__(self, name: str, blender: "FakeBlender", library: Any = None) -> None:
+        super().__init__(
+            name=name, library=library, is_editable=library is None, hide_viewport=False
+        )
+        self.objects = SimpleNamespace(link=lambda obj: self._link(blender, obj))
+
+    def _link(self, blender: "FakeBlender", obj: FakeObject) -> None:
+        if self.library is not None:
+            raise RuntimeError(
+                f"Error: Could not (un)link the object '{obj.name}' because the "
+                f"collection '{self.name}' is linked"
+            )
+        obj.users_collection = [self]
+        blender.orphans.pop(obj.name, None)
+        blender.add(obj)
+
+
+#: RigidBodyConstraint's limit and spring axes (Blender 5.0.1).
+LIMIT_AXES = ("lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z")
+SPRING_AXES = ("x", "y", "z", "ang_x", "ang_y", "ang_z")
 
 #: Blender 5.0.1's RigidBodyObject.collision_shape items.
 BLENDER_SHAPES = (
@@ -143,7 +192,7 @@ def _constraint(kind: str) -> SimpleNamespace:
         "motor_lin_target_velocity": 1.0,
         "motor_lin_max_impulse": 1.0,
     }
-    for key in Session._LIMIT_AXES:
+    for key in LIMIT_AXES:
         settings.update(
             {
                 f"use_limit_{key}": False,
@@ -151,7 +200,7 @@ def _constraint(kind: str) -> SimpleNamespace:
                 f"limit_{key}_upper": 1.0,
             }
         )
-    for key in Session._SPRING_AXES:
+    for key in SPRING_AXES:
         settings.update(
             {
                 f"use_spring_{key}": False,
@@ -167,18 +216,28 @@ class FakeBlender:
 
     def __init__(self) -> None:
         self.calls: List[Any] = []
-        self.objects: Dict[str, FakeObject] = {}
+        self.objects = FakeObjects(self)
         self.world: Optional[SimpleNamespace] = None
         self.fail: Dict[str, BaseException] = {}
+        #: The rotation an add operator gives an object without align='WORLD':
+        #: the 3D View's, as with the "Align: View" preference.
+        self.view_rotation = (1.1, 0.0, 0.8)
+        #: Whether an add operator makes its object the context's active object;
+        #: in the GUI it does not when the active collection is disabled in viewports.
+        self.reports_active_object = True
+        #: Objects effector_add makes, for an operator that misbehaves.
+        self.effector_objects = 1
         self._overrides: List[Dict[str, Any]] = []
+        self.scene_collection = FakeCollection("Scene Collection", self)
         self.view_layer = SimpleNamespace(
             objects=SimpleNamespace(active=None),
             active_layer_collection=SimpleNamespace(
-                collection=SimpleNamespace(objects=SimpleNamespace(link=self._link))
+                collection=self.scene_collection, exclude=False, hide_viewport=False
             ),
         )
         self.scene = SimpleNamespace(
             name="Scene",
+            collection=self.scene_collection,
             frame_start=1,
             frame_end=250,
             frame_current=1,
@@ -193,9 +252,7 @@ class FakeBlender:
             temp_override=self._temp_override,
             evaluated_depsgraph_get=lambda: None,
         )
-        self.data = SimpleNamespace(
-            objects=SimpleNamespace(new=self._new_object, remove=self._remove_object)
-        )
+        self.data = SimpleNamespace(objects=self.objects)
         self.app = SimpleNamespace(
             version=(5, 0, 1), version_string="5.0.1", background=True
         )
@@ -213,7 +270,8 @@ class FakeBlender:
                 ),
             ),
             object=SimpleNamespace(
-                effector_add=self._op("object.effector_add", self._effector_add)
+                effector_add=self._op("object.effector_add", self._effector_add),
+                empty_add=self._op("object.empty_add", self._empty_add),
             ),
             ptcache=SimpleNamespace(
                 bake_from_cache=self._op(
@@ -229,6 +287,14 @@ class FakeBlender:
         self.objects[obj.name] = obj
         self.scene.objects.append(obj)
         return obj
+
+    def selection(self) -> Any:
+        """What the user would see selected, and the active object."""
+        active = self.view_layer.objects.active
+        return (
+            sorted(o.name for o in self.objects.values() if o.selected),
+            active.name if active is not None else None,
+        )
 
     def body(
         self, name: str, kind: str = "ACTIVE", location: Any = (0.0, 0.0, 0.0)
@@ -266,6 +332,23 @@ class FakeBlender:
     def _override(self, member: str) -> Any:
         return self._overrides[-1][member]
 
+    def _context_object(self) -> Any:
+        """The operator's object: the override's, else the active object, as in Blender."""
+        for members in reversed(self._overrides):
+            if "object" in members:
+                return members["object"]
+        return self.view_layer.objects.active
+
+    def _make_active(self, obj: FakeObject) -> None:
+        """What an add operator does: put the new object in the active collection,
+        select only it and make it active."""
+        obj.users_collection = [self.view_layer.active_layer_collection.collection]
+        for other in self.objects.values():
+            other.selected = False
+        obj.selected = True
+        self.view_layer.objects.active = obj
+        self.context.active_object = obj if self.reports_active_object else None
+
     def _world_add(self) -> None:
         self.world = SimpleNamespace(
             enabled=True,
@@ -283,7 +366,7 @@ class FakeBlender:
         self.scene.rigidbody_world = None
 
     def _object_add(self, type: str) -> None:
-        obj = self._override("object")
+        obj = self._context_object()
         if obj.type != "MESH":
             raise RuntimeError(
                 "Operator bpy.ops.rigidbody.object_add.poll() failed, context is incorrect"
@@ -295,7 +378,7 @@ class FakeBlender:
             obj.rigid_body.type = type
 
     def _object_remove(self) -> None:
-        obj = self._override("object")
+        obj = self._context_object()
         obj.rigid_body = None
         self.world.collection.all_objects.remove(obj)
 
@@ -311,10 +394,16 @@ class FakeBlender:
         self.world.constraints.all_objects.remove(empty)
 
     def _effector_add(
-        self, type: str, align: str, location: Any, rotation: Any
+        self,
+        type: str,
+        location: Any = (0.0, 0.0, 0.0),
+        align: str = "PREFERENCE",
+        rotation: Any = (0.0, 0.0, 0.0),
     ) -> None:
-        obj = self.add(_object("Field", "EMPTY", location))
-        obj.rotation_euler = tuple(rotation)
+        if self.effector_objects == 0:
+            return
+        obj = self.add(_object(self._free_name("Field"), "EMPTY", location))
+        obj.rotation_euler = tuple(rotation) if align == "WORLD" else self.view_rotation
         obj.field = SimpleNamespace(
             type="FLUID_FLOW" if type == "FLUID" else type,
             strength=1.0,
@@ -326,46 +415,76 @@ class FakeBlender:
             distance_max=0.0,
             noise=0.0,
         )
-        self.context.active_object = obj
+        for _ in range(self.effector_objects - 1):
+            self.add(_object(self._free_name("Extra"), "EMPTY"))
+        self._make_active(obj)
+
+    def _empty_add(
+        self,
+        location: Any = (0.0, 0.0, 0.0),
+        align: str = "PREFERENCE",
+        rotation: Any = (0.0, 0.0, 0.0),
+    ) -> None:
+        obj = self.add(_object(self._free_name("Empty"), "EMPTY", location))
+        obj.rotation_euler = tuple(rotation) if align == "WORLD" else self.view_rotation
+        self._make_active(obj)
 
     def _bake_from_cache(self) -> None:
         self._override("point_cache").is_baked = True
 
     # -- data ------------------------------------------------------------------
 
-    def _new_object(self, name: str, data: Any) -> FakeObject:
+    def _free_name(self, name: str) -> str:
         # Blender numbers a name that is taken: RBC_A_B.001.
-        taken, base, number = set(self.objects), name, 0
+        taken, base, number = set(self.objects.keys()) | set(self.orphans), name, 0
         while name in taken:
             number += 1
             name = f"{base}.{number:03d}"
-        obj = _object(name, "EMPTY")
-        self.calls.append(("data.objects.new", {"name": name}))
-        return obj
+        return name
 
-    def _link(self, obj: FakeObject) -> None:
-        self.add(obj)
+    #: Objects made in bpy.data but linked into no collection (0 users).
+    orphans: Dict[str, FakeObject] = {}
+
+    def _new_object(self, name: str, data: Any) -> FakeObject:
+        obj = _object(self._free_name(name), "EMPTY")
+        self.orphans[obj.name] = obj
+        self.calls.append(("data.objects.new", {"name": obj.name}))
+        return obj
 
     def _remove_object(self, obj: FakeObject, do_unlink: bool = False) -> None:
         self.calls.append(("data.objects.remove", {"name": obj.name}))
-        del self.objects[obj.name]
-        self.scene.objects.remove(obj)
+        self.orphans.pop(obj.name, None)
+        if obj.name in self.objects:
+            del self.objects[obj.name]
+            self.scene.objects.remove(obj)
 
 
 @pytest.fixture
 def blender(monkeypatch: pytest.MonkeyPatch) -> Any:
     fake = FakeBlender()
+    fake.orphans = {}
     monkeypatch.setattr(blender_runtime, "bpy", fake)
     monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
     session = Session(scene_scope=True, path_policy=object())
 
     def lookup(name: str) -> Any:
-        if name not in fake.objects:
+        found = [obj for obj in fake.objects.values() if obj.name == name]
+        if not found:
             raise ValueError(f"Object not found: {name}")
-        return fake.objects[name]
+        return found[0]
 
     session._get_object_or_raise = lookup  # type: ignore[method-assign]
     return fake, session
+
+
+def names(fake: FakeBlender) -> List[str]:
+    """The names of the objects in the scene, as they are now."""
+    return sorted(obj.name for obj in fake.objects.values())
+
+
+def named(fake: FakeBlender, name: str) -> FakeObject:
+    (found,) = [obj for obj in fake.objects.values() if obj.name == name]
+    return found
 
 
 def _operators(fake: FakeBlender) -> List[str]:
@@ -429,8 +548,10 @@ def test_a_failure_after_the_operator_removes_the_new_body_and_world(
 ) -> None:
     fake, session = blender
     cube = fake.add(_object("Cube"))
+    # Let a shape Blender refuses past the session's check, so the failure
+    # comes after the operator added the body.
     monkeypatch.setattr(
-        Session, "_COLLISION_SHAPES", Session._COLLISION_SHAPES + ("BOXX",)
+        Session, "_COLLISION_SHAPES", BLENDER_SHAPES + ("BOXX",), raising=False
     )
 
     with pytest.raises(TypeError, match='enum "BOXX" not found'):
@@ -450,8 +571,10 @@ def test_a_failed_resetup_restores_the_earlier_settings(
     fake, session = blender
     cube = fake.add(_object("Cube"))
     session.setup_rigid_body("Cube", mass=3.0, collision_shape="SPHERE")
+    # Let a shape Blender refuses past the session's check, so the failure
+    # comes after the operator added the body.
     monkeypatch.setattr(
-        Session, "_COLLISION_SHAPES", Session._COLLISION_SHAPES + ("BOXX",)
+        Session, "_COLLISION_SHAPES", BLENDER_SHAPES + ("BOXX",), raising=False
     )
 
     with pytest.raises(TypeError):
@@ -549,7 +672,7 @@ def test_a_bad_constraint_type_leaves_nothing_behind(blender: Any) -> None:
     with pytest.raises(ValueError, match="Invalid constraint_type 'HINGEE'"):
         session.add_rigid_body_constraint("HINGEE", "A", "B")
 
-    assert sorted(fake.objects) == ["A", "B"]
+    assert names(fake) == ["A", "B"]
     assert fake.calls == []
 
 
@@ -570,7 +693,7 @@ def test_a_constraint_needs_two_distinct_rigid_bodies(
     with pytest.raises(ValueError, match=message):
         session.add_rigid_body_constraint("FIXED", first, second)
 
-    assert sorted(fake.objects) == ["A", "Plain"]
+    assert names(fake) == ["A", "Plain"]
     assert fake.calls == []
 
 
@@ -586,7 +709,7 @@ def test_a_failed_constraint_removes_its_empty_and_restores_the_active_object(
     with pytest.raises(RuntimeError, match="context is incorrect"):
         session.add_rigid_body_constraint("HINGE", "A", "B")
 
-    assert sorted(fake.objects) == ["A", "B"]
+    assert names(fake) == ["A", "B"]
     assert fake.view_layer.objects.active is a
     assert "data.objects.remove" in _operators(fake)
 
@@ -603,7 +726,7 @@ def test_the_pivot_defaults_to_midway_and_the_axis_turns_the_empty(
         "HINGE", "Pivot", "Bob", axis=[0.0, 2.0, 0.0]
     )
 
-    empty = fake.objects[result["constraint_name"]]
+    empty = named(fake, result["constraint_name"])
     assert empty.location == (1.0, 0.0, 5.0)
     assert result["pivot"] == [1.0, 0.0, 5.0]
     # The hinge turns about local Z, now world +Y.
@@ -695,7 +818,7 @@ def test_constraint_settings_that_do_not_fit_the_type_are_refused(
             constraint_type=kind, object1_name="A", object2_name="B", **arguments
         )
 
-    assert sorted(fake.objects) == ["A", "B"]
+    assert names(fake) == ["A", "B"]
 
 
 def test_constraint_request_refuses_the_same_object_twice() -> None:
@@ -786,7 +909,18 @@ def test_an_unknown_force_field_type_is_refused(blender: Any) -> None:
 def test_force_field_info_refuses_a_collider(blender: Any) -> None:
     fake, session = blender
     cube = fake.add(_object("Cube"))
-    cube.field = SimpleNamespace(type="NONE")
+    # What a Collision modifier leaves: field settings with no field type.
+    cube.field = SimpleNamespace(
+        type="NONE",
+        strength=1.0,
+        shape="POINT",
+        flow=0.0,
+        falloff_type="SPHERE",
+        falloff_power=0.0,
+        use_max_distance=False,
+        distance_max=0.0,
+        noise=0.0,
+    )
 
     with pytest.raises(ValueError, match="no force field"):
         session.get_force_field_info("Cube")
@@ -881,3 +1015,110 @@ def test_a_small_bake_runs_without_confirmation(blender: Any) -> None:
     assert BlenderBakeSimulationRequest(
         frame_start=1, frame_end=2, allow_long_bake=True
     ).allow_long_bake
+
+
+# -- review of #322: what the operators leave behind ----------------------------
+
+
+def test_a_force_field_is_found_when_blender_reports_no_active_object(
+    blender: Any,
+) -> None:
+    """In the GUI an add into a collection disabled in viewports leaves active_object None."""
+    fake, session = blender
+    fake.reports_active_object = False
+
+    result = session.add_force_field("WIND", name="Gust")
+
+    (field,) = fake.objects.values()
+    assert result["name"] == field.name == "Gust"
+    assert field.field.strength == 1.0
+
+
+@pytest.mark.parametrize("made", [0, 2])
+def test_an_effector_add_that_makes_no_single_object_leaves_nothing(
+    blender: Any, made: int
+) -> None:
+    fake, session = blender
+    fake.effector_objects = made
+
+    with pytest.raises(RuntimeError, match=f"created {made} objects, not one"):
+        session.add_force_field("WIND")
+
+    assert names(fake) == []
+
+
+def test_a_force_field_ignores_the_align_view_preference(blender: Any) -> None:
+    fake, session = blender
+
+    result = session.add_force_field("WIND")
+
+    assert named(fake, result["name"]).rotation_euler == (0.0, 0.0, 0.0)
+    assert result["direction"] == pytest.approx([0.0, 0.0, 1.0])
+    assert fake.calls[-1][1].get("align") == "WORLD"
+
+
+def test_a_constraint_empty_ignores_the_align_view_preference_and_the_selection(
+    blender: Any,
+) -> None:
+    fake, session = blender
+    a = fake.body("A")
+    fake.body("B", location=(2.0, 0.0, 0.0))
+    a.selected = True
+    fake.view_layer.objects.active = a
+
+    result = session.add_rigid_body_constraint("FIXED", "A", "B")
+
+    empty = named(fake, result["constraint_name"])
+    assert empty.rotation_euler == (0.0, 0.0, 0.0)
+    assert empty.location == (1.0, 0.0, 0.0)
+    assert fake.selection() == (["A"], "A")
+
+
+def test_a_constraint_with_a_linked_active_collection_goes_to_the_scene_collection(
+    blender: Any,
+) -> None:
+    """Blender refuses to link into a library collection; that used to orphan the empty."""
+    fake, session = blender
+    fake.body("A")
+    fake.body("B", location=(2.0, 0.0, 0.0))
+    linked = FakeCollection("LibCol", fake, library="lib.blend")
+    fake.view_layer.active_layer_collection.collection = linked
+
+    result = session.add_rigid_body_constraint("FIXED", "A", "B")
+
+    empty = named(fake, result["constraint_name"])
+    assert empty.users_collection == [fake.scene_collection]
+    assert fake.orphans == {}
+
+
+@pytest.mark.parametrize("setting", ["exclude", "hide_viewport"])
+def test_a_constraint_skips_an_active_collection_the_view_layer_hides(
+    blender: Any, setting: str
+) -> None:
+    fake, session = blender
+    fake.body("A")
+    fake.body("B", location=(2.0, 0.0, 0.0))
+    hidden = FakeCollection("Hidden", fake)
+    layer = fake.view_layer.active_layer_collection
+    layer.collection = hidden
+    setattr(layer, setting, True)
+
+    result = session.add_rigid_body_constraint("FIXED", "A", "B")
+
+    assert named(fake, result["constraint_name"]).users_collection == [
+        fake.scene_collection
+    ]
+
+
+def test_a_failed_link_leaves_no_orphan_empty(blender: Any) -> None:
+    fake, session = blender
+    fake.body("A")
+    fake.body("B", location=(2.0, 0.0, 0.0))
+    fake.scene_collection.library = "lib.blend"  # nothing to link into
+    fake.view_layer.active_layer_collection.collection = fake.scene_collection
+
+    with pytest.raises(RuntimeError, match="is linked"):
+        session.add_rigid_body_constraint("FIXED", "A", "B")
+
+    assert fake.orphans == {}
+    assert names(fake) == ["A", "B"]

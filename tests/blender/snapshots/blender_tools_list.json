@@ -1377,7 +1377,7 @@
           "motor_angular_velocity": {
             "anyOf": [{"type": "number"}, {"type": "null"}],
             "default": null,
-            "description": "MOTOR only: target angular velocity about local X, rad/s."
+            "description": "MOTOR only: target angular velocity about local X, rad/s. Blender drives object1 relative to object2, so with object1 the anchor a positive velocity turns object2 the negative way about the axis (-1.91 rad in 23 frames at +2 rad/s on Blender 5.0.1); swap the objects or the sign to reverse it."
           },
           "motor_angular_max_impulse": {
             "anyOf": [{"minimum": 0.0, "type": "number"}, {"type": "null"}],
@@ -1387,7 +1387,7 @@
           "motor_linear_velocity": {
             "anyOf": [{"type": "number"}, {"type": "null"}],
             "default": null,
-            "description": "MOTOR only: target velocity along local X, m/s."
+            "description": "MOTOR only: target velocity along local X, m/s, with the same convention: with object1 the anchor, object2 moves against the sign (-0.91 m in 23 frames at +1 m/s)."
           },
           "motor_linear_max_impulse": {
             "anyOf": [{"minimum": 0.0, "type": "number"}, {"type": "null"}],

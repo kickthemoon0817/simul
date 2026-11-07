@@ -3923,11 +3923,25 @@ class BlenderRuntimeSession:
 
         # align='WORLD' and an explicit rotation: without them the operator
         # follows the user's "Align: View" preference and turns the field to
-        # the 3D View.
+        # the 3D View. The new object is found by what the operator added:
+        # context.active_object is None in the GUI when the active collection
+        # is disabled in viewports, though the field was created.
+        existing = {obj.as_pointer() for obj in blender_module.data.objects}
         blender_module.ops.object.effector_add(
             type=field_type, align="WORLD", location=loc, rotation=rotation
         )
-        field_obj = blender_module.context.active_object
+        created = [
+            obj
+            for obj in blender_module.data.objects
+            if obj.as_pointer() not in existing
+        ]
+        if len(created) != 1:
+            for obj in created:
+                blender_module.data.objects.remove(obj, do_unlink=True)
+            raise RuntimeError(
+                f"Adding a {field_type} force field created {len(created)} objects, not one"
+            )
+        field_obj = created[0]
         try:
             if name:
                 field_obj.name = name
@@ -4020,10 +4034,15 @@ class BlenderRuntimeSession:
             springs: GENERIC_SPRING only: springs by local axis (x, y, z,
                 ang_x, ang_y, ang_z), each {"stiffness": ..., "damping": ...}.
             motor_angular_velocity: MOTOR only: target angular velocity about
-                local X, rad/s.
+                local X, rad/s. Blender drives object1 relative to object2, so
+                with object1 the anchor a positive velocity turns object2 the
+                negative way about the axis (-1.91 rad in 23 frames at +2 rad/s
+                on Blender 5.0.1); swap the objects or the sign to reverse it.
             motor_angular_max_impulse: MOTOR only: most impulse the angular
                 motor applies per step (Blender's default 1).
-            motor_linear_velocity: MOTOR only: target velocity along local X, m/s.
+            motor_linear_velocity: MOTOR only: target velocity along local X,
+                m/s, with the same convention: with object1 the anchor, object2
+                moves against the sign (-0.91 m in 23 frames at +1 m/s).
             motor_linear_max_impulse: MOTOR only: most impulse the linear motor
                 applies per step (Blender's default 1).
             breaking_threshold: Impulse that breaks the constraint; omitted, it
@@ -4081,15 +4100,18 @@ class BlenderRuntimeSession:
         # A new empty, not empty_add: that operator follows the user's
         # "Align: View" preference and selects the empty.
         view_layer = blender_module.context.view_layer
+        collection = self._constraint_collection(scene, view_layer)
         empty = blender_module.data.objects.new(
             f"RBC_{object1_name}_{object2_name}", None
         )
-        view_layer.active_layer_collection.collection.objects.link(empty)
         empty.location = pivot
         empty.rotation_mode = "XYZ"
         empty.rotation_euler = rotation
         previous_active = view_layer.objects.active
         try:
+            # Inside the try: a failed link (a linked collection) must not leave
+            # the empty behind with no users.
+            collection.objects.link(empty)
             # constraint_add acts on the view layer's active object, whatever
             # the context override says.
             view_layer.objects.active = empty
@@ -5231,6 +5253,28 @@ class BlenderRuntimeSession:
         values = [float(matrix[row][column]) for row in range(3)]
         size = math.sqrt(sum(v * v for v in values)) or 1.0
         return [v / size for v in values]
+
+    @staticmethod
+    def _constraint_collection(scene: Any, view_layer: Any) -> Any:
+        """Where a constraint empty goes: the active collection, or the scene's own.
+
+        The active collection is used when the empty can live there and the
+        view layer shows it: not linked from a library (Blender refuses to
+        link into it), not excluded, and not disabled in viewports
+        (constraint_add then finds no active object). Otherwise the empty goes
+        into the scene's collection; it simulates from either, since the rigid
+        body world reads its constraints collection.
+        """
+        layer = view_layer.active_layer_collection
+        collection = layer.collection
+        usable = (
+            getattr(collection, "library", None) is None
+            and getattr(collection, "is_editable", True)
+            and not getattr(layer, "exclude", False)
+            and not getattr(layer, "hide_viewport", False)
+            and not getattr(collection, "hide_viewport", False)
+        )
+        return collection if usable else scene.collection
 
     @staticmethod
     def _rigid_body_snapshot(rb: Any) -> Optional[Dict[str, Any]]:
