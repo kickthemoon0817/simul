@@ -2327,9 +2327,9 @@ class BlenderRuntimeSession:
         """
         Get force field properties from a field object.
 
-        An object whose field type is NONE has no force field: a Collision
-        modifier keeps its settings in the same place, so a collider alone
-        reports one.
+        An object whose field type is NONE has no force field and is refused:
+        Blender keeps collision settings in the same structure, so a
+        collision-only object used to be reported as a field of type NONE.
 
         Args:
             object_name: Name of the force field object.
