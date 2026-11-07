@@ -28,6 +28,7 @@ from ..schemas.usd import (
     PrimSearchRequest,
     PrimSearchResponse,
     PrimUpdateRequest,
+    Purpose,
     SceneSummaryRequest,
     SceneSummaryResponse,
     StageInfo,
@@ -40,6 +41,23 @@ from ._helpers import with_param_descriptions
 if TYPE_CHECKING:
     from ..adapters.headless_usd import HeadlessUSDSession
     from ..server import SimulMCPServer
+
+
+def _loaded_stage(session: "HeadlessUSDSession", stage_id: str) -> Any:
+    """Return the stage ``load_usd_file`` registered as ``stage_id``.
+
+    Raises:
+        USDLookupError: No stage is loaded under that id.
+    """
+    from ...usd.lookup import USDLookupError
+
+    stage = session.get_stage(stage_id)
+    if stage is None:
+        raise USDLookupError(
+            f"Stage not loaded: {stage_id!r}. Load the file with load_usd_file "
+            "and pass the stage_id it returns."
+        )
+    return stage
 
 
 def register_usd_tools(server: "SimulMCPServer") -> None:
@@ -522,7 +540,17 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="get_bounding_box",
-        description="Get bounding box for a prim or entire stage.",
+        description=(
+            "Get the bounding box of a prim (with its descendants) or of the whole "
+            "stage, as USD's BBoxCache computes it: every transform applies and "
+            "instances are followed. Only geometry whose purpose is in "
+            "include_purposes counts; the default, default and render, is what "
+            "renderers and simulators see, so proxy and guide geometry (often "
+            "collision shapes) is left out unless asked for. Nothing boundable is "
+            "a successful result with has_geometry false and bbox null, never a "
+            "guessed box; excluded_purposes_with_geometry then says whether "
+            "widening include_purposes would find some."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
@@ -530,15 +558,25 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     )
     @with_param_descriptions()
     async def get_bounding_box(
-        stage_id: str, prim_path: Optional[str] = None, world_space: bool = True
+        stage_id: str,
+        prim_path: Optional[str] = None,
+        world_space: bool = True,
+        include_purposes: Optional[List[Purpose]] = None,
+        time_code: Optional[float] = None,
     ) -> ToolResult:
         """
         Get bounding box for a prim or entire stage.
 
         Args:
             stage_id: Stage identifier
-            prim_path: Prim path (None for stage bbox)
-            world_space: Compute in world space
+            prim_path: Absolute prim path; None (or "/") bounds the whole stage
+            world_space: True for world coordinates; False for the prim's own
+                space, where its descendants' transforms apply but its own and
+                its ancestors' do not
+            include_purposes: Purposes whose geometry counts, any of default,
+                render, proxy, guide; None for default and render
+            time_code: Time code to evaluate animated transforms and points at;
+                None for the default (unanimated) value
 
         Returns:
             Bounding box information or error
@@ -550,28 +588,46 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 stage_id=stage_id,
                 prim_path=prim_path,
                 world_space=world_space,
-                time_code=None,
+                time_code=time_code,
+                include_purposes=include_purposes,
             )
             if isinstance(input_data, dict):
                 return input_data
 
-            if input_data.prim_path:
-                bbox_dict = session.get_prim_bbox(
-                    input_data.stage_id, input_data.prim_path, input_data.world_space
+            from ...usd.bbox import describe_bounds
+            from ...usd.lookup import lookup_prim
+
+            stage = _loaded_stage(session, input_data.stage_id)
+            prim = (
+                lookup_prim(stage, input_data.prim_path) if input_data.prim_path else None
+            )
+            bounds = describe_bounds(
+                stage,
+                prim,
+                world_space=input_data.world_space,
+                purposes=input_data.include_purposes,
+                time_code=input_data.time_code,
+            )
+            message = None
+            if not bounds["has_geometry"]:
+                target = input_data.prim_path or "the stage"
+                message = (
+                    f"No boundable geometry with purpose "
+                    f"{'/'.join(bounds['included_purposes'])} at or below {target}."
                 )
-            else:
-                bbox_dict = session.get_stage_bbox(input_data.stage_id)
-            if not bbox_dict:
-                return ErrorResponse(
-                    error="Could not compute bounding box",
-                    error_type="ComputationError",
-                ).model_dump()
+                if bounds["excluded_purposes_with_geometry"]:
+                    message += (
+                        " Geometry with purpose "
+                        f"{'/'.join(bounds['excluded_purposes_with_geometry'])} is "
+                        "there; add it to include_purposes to bound it."
+                    )
             return BBoxResponse(
                 success=True,
                 stage_id=input_data.stage_id,
                 prim_path=input_data.prim_path,
-                bbox=BoundingBox(**bbox_dict),
                 world_space=input_data.world_space,
+                message=message,
+                **bounds,
             ).model_dump()
 
         return await server._exec_backend(
@@ -580,7 +636,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "USD",
             BBoxResponse,
             _bbox,
-            params={"stage_id": stage_id, "prim_path": prim_path},
+            params={
+                "stage_id": stage_id,
+                "prim_path": prim_path,
+                "include_purposes": include_purposes,
+                "time_code": time_code,
+            },
         )
 
     @server.mcp.tool(

@@ -10,7 +10,17 @@ it. The environment always wins.
    Point at your own copy with `simul server --config FILE` or the
    `CONFIG_FILE` environment variable. Copy the packaged file as a starting
    point; `simul validate-config FILE` checks it.
-2. **`.env` in the working directory**, then the process environment.
+2. **The `.env` file `SIMUL_ENV_FILE` names**, if any, then the process
+   environment.
+
+simul never reads a `.env` from the working directory. MCP clients start the
+server in your project, so a cloned repository's `.env` could otherwise widen
+the file sandbox, re-enable script execution or move the HTTP bind. To keep
+settings in a file, name it explicitly, for example
+`SIMUL_ENV_FILE=~/.config/simul/simul.env` in the MCP client's server entry;
+a name that points at no file stops the command. When the working directory
+has a `.env` that sets simul variables, simul logs a warning naming them and
+ignores the file.
 
 The packaged YAML is the reference for every key and its default. This page
 covers the model and the settings people change most; it does not repeat the
@@ -75,6 +85,60 @@ bridge on port 8229. Raw scripts and every generated tool script still run
 over the stock Python socket on 8226, so that flag is not a security
 boundary.
 
+### Network transports (HTTP and SSE)
+
+Over stdio (the default) only the MCP client that started the server can talk
+to it. `simul server --transport http` (or `sse`) opens a listener on
+`server.host`:`server.port`, and every tool, `execute_*_script` included, is
+then one request away from whoever can reach it. Three callers are
+considered:
+
+- **A web page you open.** A page can send requests to
+  `http://127.0.0.1:8765`, and through DNS rebinding (its own host name
+  re-pointed at `127.0.0.1`) read the answers. The Host/Origin guard refuses
+  a request whose `Host` header is not `localhost`, `127.0.0.1`, `::1`, the
+  bound address or an entry of `server.allowed_hosts` (HTTP 421), and a
+  browser request whose `Origin` is not same-origin, loopback or an entry of
+  `server.allowed_origins` (HTTP 403). MCP clients send no `Origin` and are
+  unaffected. The guard is on by default; `SERVER__HOST_ORIGIN_PROTECTION=false`
+  removes it and the server warns at startup.
+- **Another machine.** A `server.host` that is not loopback (`0.0.0.0`, a LAN
+  address, a host name) needs `simul server --allow-public` or
+  `SERVER__ALLOW_PUBLIC=true`; without it the server exits 2 with
+  `InsecureTransport` before it listens. A public bind without a bearer token
+  starts with a red warning: the guard checks headers, it does not
+  authenticate anyone. Clients that reach the server by a DNS name need that
+  name in `SERVER__ALLOWED_HOSTS='["simul.lan"]'`.
+- **Another local user.** Loopback is shared by every account on the machine.
+  A bearer token makes every request carry `Authorization: Bearer <token>`
+  (HTTP 401 otherwise).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SERVER__HOST` / `SERVER__PORT` | `localhost` / `8765` | Listener address |
+| `SERVER__ALLOW_PUBLIC` | `false` | Permit a non-loopback `SERVER__HOST` (`--allow-public`) |
+| `SERVER__HOST_ORIGIN_PROTECTION` | `true` | The DNS-rebinding guard described above |
+| `SERVER__ALLOWED_HOSTS` | `[]` | Extra `Host` names (port ignored, `*` wildcards) |
+| `SERVER__ALLOWED_ORIGINS` | `[]` | Extra browser origins, `scheme://host[:port]` |
+| `SERVER__AUTH_TOKEN_FILE` | unset | File whose first line is the bearer token; must be `chmod 600` |
+| `SERVER__AUTH_TOKEN` | unset | The token itself; prefer the file, which keeps it out of the environment |
+
+A token has at least 16 characters. Create one and point the server at it:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))" > ~/.config/simul/server-token
+chmod 600 ~/.config/simul/server-token
+SERVER__AUTH_TOKEN_FILE=~/.config/simul/server-token simul server --transport http
+```
+
+Clients then send the header, for example
+`claude mcp add --transport http simul http://localhost:8765/mcp --header "Authorization: Bearer <token>"`.
+Every client presenting the token is the same authenticated user, so clients
+on the sessionless protocol share one session (see
+[Multi-agent claims](#multi-agent-claims)). The token, the bind host and the
+other settings here cannot come from a working-directory `.env`; see
+[Where settings come from](#where-settings-come-from).
+
 ### File sandbox
 
 MCP tools that read or write files only accept paths under
@@ -85,6 +149,20 @@ schemes in `allowed_url_schemes` (reads, default `omniverse`) and
 `allowed_write_url_schemes` (writes, default none). Set
 `SECURITY__ALLOWED_PATHS='["/abs/project","/tmp/simul-work"]'` to widen it.
 The `simul` CLI is operated by you and is not sandboxed.
+
+An allowed root inside a world-writable directory, such as the default
+`/tmp/simul-work`, must belong to you. Any local user can create a directory
+in `/tmp` first and read or plant what agents write there, so before the
+first write simul creates a missing root with mode `0700`, and it refuses a
+root there (and every path under it) that another user owns, that group or
+others can write, or whose world-writable parent lacks the sticky bit. The
+refusal is a `SandboxError` whose `details` carry `untrusted_root` and
+`reason`. Roots elsewhere are not inspected. If Isaac Sim or another engine
+runs as a different user and has to write into the root, configure a
+directory you share with it on purpose instead.
+
+Every allowed root admits reads and writes alike, so in a source checkout
+`examples/` and `tests/data/` are writable by the tools too.
 
 ### Refusals
 
@@ -165,7 +243,9 @@ default Isaac instance and finds every live claim held by someone else.
 `release_isaac_instance` refuse it with `SessionRequired`, and all such
 clients share one rate-limit budget. Connect agents that need their own
 instance or claim with the handshake (for example `fastmcp.Client(url,
-mode="legacy")`) or over stdio.
+mode="legacy")`) or over stdio. With a [bearer token](#network-transports-http-and-sse)
+configured, sessionless clients are authenticated, and since they all present
+the same token they share one session instead of having none.
 
 When a handshake session ends, the server drops what it kept for it (its
 instance switch, bindings and rate-limit buckets) and marks its claims
