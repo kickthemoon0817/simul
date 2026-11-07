@@ -99,6 +99,8 @@ def _fake_bpy(
         data=SimpleNamespace(objects=scene.objects),
         context=SimpleNamespace(
             scene=scene,
+            # Object Mode: no active object, so the export changes no mode.
+            view_layer=SimpleNamespace(name="ViewLayer", objects=SimpleNamespace(active=None)),
             temp_override=temp_override,
             evaluated_depsgraph_get=lambda: "depsgraph",
         ),

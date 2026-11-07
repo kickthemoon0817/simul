@@ -30,7 +30,7 @@ No running application needed. File arguments must be inside the sandbox
 | Group | Tools |
 |---|---|
 | Load and validate | `load_usd_file`, `validate_usd_file` |
-| Query | `get_prim_info`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
+| Query | `get_prim_info`, `get_prim_subtree`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
 | Edit | `create_prim`, `delete_prim`, `update_prim_attributes` |
 
 - **Bounds.** `get_bounding_box`, and the bounds in `get_prim_info` and
@@ -53,11 +53,62 @@ No running application needed. File arguments must be inside the sandbox
   elements (default 16, up to 10000), so a million-point mesh costs a few
   KB; `attribute_filter` takes glob patterns, `time_code` reads animated
   values.
+- **Traversal and counts.** Every listing walks the composed stage with one
+  rule: active, defined, loaded, non-abstract prims, plus the instance
+  proxies inside instanceable prims. So `load_usd_file`'s `total_prims`,
+  `summarize_scene`'s `total_prims` and a match-everything `search_prims`
+  agree, and an instance's children are counted.
+- **Search.** `search_prims` matches `by_name`, `by_path`, `by_type` or
+  `by_api_schema`; `match` is `auto`, `exact`, `substring`, `glob` or `regex`,
+  and names compare case-insensitively unless `case_sensitive`. With `auto`,
+  a registered type matches its schema family (`PhysicsJoint` finds every
+  joint, `Gprim` every geometric primitive), and an API schema matches its
+  multiple-apply instances (`PhysicsDriveAPI` finds `PhysicsDriveAPI:angular`).
+  `root_path` limits the search and `include_instance_proxies: false` skips
+  instances. Results are pages: `offset`/`limit` (default 200, up to 5000),
+  with `total_matches`, `truncated` and `next_offset`.
+- **Subtrees.** `get_prim_subtree` lists a prim and its descendants
+  depth-first (path, type, depth, child count, API schemas), paged with
+  `max_results`/`offset`. `include_properties` adds each prim's authored
+  attributes and relationship targets, so a whole robot reads in one call.
 - **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
   lists of rows, asset paths their authored string.
 - **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
   is a `NotFoundError`; a relative, malformed or property path is a
   `ValidationError`.
+
+`validate_usd_file` opens the file with pxr, as `load_usd_file` does, and
+keeps no stage. `can_read` says whether pxr opened it (so whether
+`load_usd_file` can); `is_valid` additionally needs no issue of severity
+`error`. Each issue carries `severity`, a stable `code`, pxr's `message`, its
+`source` (`simul` or the pxr validator) and a `location` (`layer`,
+`prim_path`, `property_path`, `asset_path`, or `line` and `column` for a
+parse error). The checks, in order:
+
+- Access, shared with the loader: the file exists, is a regular file, has an
+  extension from `usd.allowed_extensions`, is readable by the server process,
+  is not empty and fits `usd.max_file_size_mb` (`FileNotFound`, `NotAFile`,
+  `UnsupportedExtension`, `PermissionDenied`, `EmptyFile`, `FileTooLarge`).
+- Parsing: pxr's own reason (`ParseError` with line and column,
+  `CorruptFile` for crate or usdz damage, `UnknownFormat`), with a hint when
+  the bytes do not match the extension (text in a `.usdc`).
+- Composition: `MissingSublayer`, `MissingReference`, `MissingPayload`,
+  `UnresolvedPrimPath`, and pxr's `UnresolvableDependency` for other asset
+  paths such as textures.
+- Stage metadata: a dangling defaultPrim is an error; an unset defaultPrim,
+  upAxis or metersPerUnit is a warning, since consumers fall back to Y up and
+  centimeters.
+- Physics: `NestedRigidBody` (without `resetXformStack`) and
+  `InvertedJointLimits`, plus pxr's UsdPhysics validators (dangling joint
+  bodies, nested articulation roots, invalid mass and inertia).
+- pxr's UsdValidation validators, listed in `validators`; the usdz package
+  rules (alignment, compression, file types) run only for a `.usdz`.
+
+`load_usd_file` fails with `error_type: LoadError` and `details.reason` set
+to the same access or parsing code, with pxr's message in `error`. A stage
+that opens with missing sublayers, references or payloads loads, and lists
+them in `warnings`. `simul usd validate` runs the same checks and exits 1
+when the file is invalid.
 
 ## Isaac Sim
 
@@ -86,10 +137,35 @@ Registered by default only on Linux and Windows, where Isaac Sim runs
 
 Notes:
 
-- `get_isaac_prim_detail` reads one aspect of a prim per call: `info`,
-  `transform`, `ancestors`, `relationships`, `variants`, `bounding_box`,
-  `mesh`, `light`, `material`, `rigid_body`, `collision`, `joint`, `mass`,
-  `animation`.
+- `get_isaac_prim_detail` reads one or more aspects of a prim per call:
+  `info`, `transform`, `ancestors`, `relationships`, `variants`,
+  `bounding_box`, `mesh`, `light`, `material`, `rigid_body`, `collision`,
+  `joint`, `mass`, `animation`.
+- Poses (the `transform` aspect, `info`'s transform, `get_isaac_camera_info`
+  and the reply of `set_isaac_prim_transform`) are factored out of the
+  composed matrix, so rotation and scale stay right under scaled parents and
+  for matrix ops. Each carries `space` plus `local` and `world` blocks with
+  `translation`, `rotation_quat` (`[w, x, y, z]`), `rotation_euler_xyz`
+  (degrees, the order `set_isaac_prim_transform` takes) and `scale`;
+  `sheared: true` marks a rotated prim under a non-uniform scale, where no
+  rotation and per-axis scale reproduce the matrix exactly.
+- `set_isaac_prim_transform` takes local values (relative to the parent). A
+  prim whose stack holds a matrix op (`xformOp:transform`) is converted to
+  the equivalent translate/orient/scale stack first; a sheared matrix is
+  refused. An op with time samples is refused unless `time_code` names the
+  sample to write, and an animated rotate op the XYZ rotation would replace
+  is refused outright.
+- `set_isaac_prim_attribute` converts the JSON value to the attribute's type:
+  quaternions (`xformOp:orient`, `physics:localRot0`) as `[w, x, y, z]`,
+  matrices as rows or a flat row-major list, arrays as lists.
+- `query_isaac_typed_prims` resolves `type_name` through the schema registry
+  (`UsdPhysics.RevoluteJoint`, `PhysicsRevoluteJoint`,
+  `UsdPhysics.RigidBodyAPI`, any `pxr` module) and refuses a name that
+  resolves to nothing. Values come back as JSON; arrays longer than
+  `max_array_elements` (default 16) come back as a length summary, and
+  non-finite floats as `null`.
+- The `mass` and `rigid_body` aspects report an unset centre of mass (the
+  schema's `-inf` fallback) as `null` with `center_of_mass_note`.
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,
@@ -144,6 +220,81 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 
 Behaviour worth knowing:
 
+- A failed call names its cause with one `error_type` from the set the
+  backends share:
+  - `ConnectionError`: nothing answered at the Remote Control endpoint, or
+    the editor closed the connection without answering (it may have crashed).
+  - `TimeoutError`: no answer within `UNREAL__TIMEOUT`. A script or a change
+    may still be running in the editor, and Remote Control cannot cancel it,
+    so check the editor's state before retrying.
+  - `EngineError`: Remote Control answered with HTTP 5xx.
+  - `ValidationError`: Remote Control refused the request as made (HTTP 400),
+    for example a read-only, `EditConst` or protected property, or a value of
+    the wrong type.
+  - `NotFoundError`: the object, property, function or console variable
+    named does not exist, whether Remote Control (HTTP 404, or a 400 saying
+    so) or a tool's editor script reports it.
+  - `InstanceBusy`: the editor was saving or collecting garbage.
+  - `AuthenticationError`: Remote Control refused this client (HTTP 401).
+
+  `error` carries Remote Control's own message, and `details` carries the
+  `status`, the `route` and `remote_control_message`. The domain types
+  (`PIEActive`, `TransformNotApplied` and the like) are unchanged.
+- `batch_unreal_operations` (registered with script execution allowed) sends
+  each operation as `RequestId`, `URL`, `Verb`, `Body`, in that order, with a
+  unique `RequestId`. Operations without one are numbered. Remote Control
+  hands each `Body` to the last `RequestId` before it, so an operation
+  without one, a repeated one or one written after its `Body` would run with
+  another operation's body. A malformed batch is refused with
+  `ValidationError` before anything is sent: at most 100 operations, `/remote/`
+  routes only and no batch inside a batch, with `Verb` one of GET, PUT, POST,
+  PATCH or DELETE. Every batch carries a `Passphrase` header, a placeholder
+  when `UNREAL__PASSPHRASE` is unset. UE 5.7's batch route reads that header
+  unchecked and aborts the editor without it; Remote Control ignores the value
+  unless it enforces passphrases. A failed operation's result also has
+  `error` and `error_type`.
+- `set_unreal_render_settings` sets one existing numeric `r.*` or `sg.*`
+  console variable and reads it back: `applied` is true only when it holds the
+  value afterwards, with `value` and `previous_value` as Unreal formats them
+  (`true`/`false` for a bool). A name Unreal has no variable for fails with
+  `NotFoundError`, and nothing is run. A value Unreal did not take fails with
+  `RenderSettingNotApplied`. That covers a read-only variable, such as
+  `r.RayTracing`, which only startup configuration sets, and one Unreal limits
+  or rounds. Post-process settings live on PostProcessVolume actors, not in
+  console variables, and this tool does not change them.
+- The actor tools take an actor's full object path, as `list_unreal_actors`
+  reports it, in the level open in the editor. A path that names no live actor
+  there fails with `NotFoundError`, `Actor not found: <path>` and why: nothing
+  is at that path, the actor was deleted (Unreal keeps a deleted actor in memory, empty,
+  until garbage collection), or it belongs to another map, loaded or not, or to
+  the running game during PIE. The actor is looked up among the objects already
+  loaded, so simul never loads a map that is not open: a lookup that loaded one
+  used to edit that map unseen and leave it dirty for the next Save All.
+- `set_unreal_actor_parent` attaches the actor to `parent_path`, or detaches it
+  with `detach: true` and an empty `parent_path`; one of the two is required.
+  The actor keeps its world location, rotation and scale, the change is one
+  undoable transaction, and the parent is read back: `parent_path` is the
+  parent afterwards (null once detached), with `previous_parent_path` and
+  `changed`. Unreal refuses, without a reason, to attach an actor to itself or
+  under one of its own children, or a Static actor under a parent that is not
+  Static; those come back as `ValidationError` (itself, a cycle) or
+  `InvalidState` (mobility, an actor without a root component) with the reason,
+  before anything changes. An attachment Unreal still refuses is an
+  `EngineError`, and its transaction is cancelled.
+- `add_unreal_component` adds an instance component the way the editor's Add
+  Component button does (`SubobjectDataSubsystem`): Remote Control refuses
+  `AddComponentByClass` on UE 5.7. `component_class` is a native class name
+  (`PointLightComponent`) or a class path (`/Script/Engine.PointLightComponent`,
+  a Blueprint component's `/Game/BP_Lamp.BP_Lamp_C`); a path into a map's
+  package is refused before anything loads. A scene component attaches under
+  `parent_component` (by name) or the root component, and becomes the root of
+  an actor without one; other components take no parent. The add and the name
+  are one undoable transaction, and the reply is read back from the actor:
+  `component_path`, `component_name`, `component_class`, `parent_component` and
+  `is_root`. An abstract class (Unreal adds one and fires an engine ensure), a
+  class that is not a component and a name already used inside the actor are
+  refused first. Unreal adds its usual helpers too, such as a light's editor
+  icon (a BillboardComponent).
 - Actor inspection, physics, materials and PIE start/stop/pause/resume use
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
@@ -327,12 +478,13 @@ Behaviour worth knowing:
     of actors missing simple collision, as `null`, since Unreal does not
     report mesh collision during PIE.
   - Editing actors already in the level by path (transform, lights, collision,
-    physics settings, visibility, materials) keeps working and changes the
-    editor world, which the running simulation does not see: it takes effect
-    the next time the simulation starts, and a physics or collision edit says
-    so in its `warning`. A physics or collision edit given the actor's path
-    in the simulation's world (`UEDPIE_<n>_<map>`) changes the running copy
-    instead, which is neither undoable nor saved.
+    physics settings, visibility, materials, parenting, components) keeps
+    working and changes the editor world, which the running simulation does
+    not see: it takes effect the next time the simulation starts, and a
+    physics or collision edit says so in its `warning`. A physics or collision
+    edit given the actor's path in the simulation's world (`UEDPIE_<n>_<map>`)
+    changes the running copy instead, which is neither undoable nor saved;
+    every other actor tool finds no actor at such a path.
   - `set_unreal_material_params` edits the material instance asset, which the
     running game uses too: an edit made during PIE shows in the game and stays
     after PIE stops.
@@ -399,6 +551,39 @@ Behaviour worth knowing:
   unsaved changes; save them with `save_blender_file`, or pass
   `discard_unsaved: true`. Headless (embedded) Blender does not track unsaved
   changes, so there it opens without the check.
+- `get_blender_object_info` reports an object's own transform (`location`,
+  `rotation_euler`, `scale`: relative to its parent and before constraints, as
+  Blender's Location, Rotation and Scale fields show them) and where it is in
+  the scene (`world_location`, `world_rotation_euler`,
+  `world_rotation_quaternion`, `world_scale`, and the exact `matrix_world`).
+  A turned child of a parent with non-uniform scale has a sheared world
+  matrix that no rotation and scale rebuild; the world rotation is then the
+  rotation nearest it (its polar decomposition), the parent's rotation times
+  the child's, where Blender's `decompose()` and `to_euler()` were 0.19 and
+  0.15 rad off for a glTF link under a parent scaled 0.5 on Z. It also
+  reports `rotation_mode`, the rotation as Blender stores it in that mode
+  (`rotation_in_mode`) and as a quaternion (`rotation_quaternion`). Euler
+  angles are in XYZ order throughout, whatever the object's rotation mode.
+- `set_blender_object_transform` writes the object's own transform:
+  `location` relative to its parent, and `rotation_euler` (XYZ) or
+  `rotation_quaternion` (`[w, x, y, z]`, normalized), converted to the
+  object's rotation mode, which is kept. Blender reads only the property of
+  that mode, so a plain `rotation_euler` write left a glTF import's
+  quaternion nodes unturned. `control_blender_ui`'s `set_property` of
+  `rotation_euler` converts the same way.
+- `set_blender_object_parent` keeps the child's world transform, as Blender's
+  Parent > Object (Keep Transform) does: the parent inverse cancels the
+  parent's transform, and a child without a previous parent keeps its own
+  values. `keep_transform: false` clears the parent inverse instead, so the
+  child's values become relative to the parent and it moves. A parent that is
+  the child itself or one of its descendants is refused (Blender ignores such
+  a parent without an error).
+- Reads of world-space transforms (object info, distance, bounds, bounding
+  box, parenting) evaluate the depsgraph first: in embedded (bpy module) mode
+  Blender leaves a transform written by an earlier call out of `matrix_world`
+  until then. An add-on built before `rotation_quaternion` and
+  `keep_transform` still answers calls that leave them at their defaults, with
+  its own behaviour; the newer reply fields then come back `null`.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
@@ -540,6 +725,44 @@ Behaviour worth knowing:
   collection, are not followed, so a camera that only they need is composed
   as well. An add-on built before this report answers without
   `pose_source` and `warning`, and the server returns them as `null`.
+- `export_blender_file` writes `file_path` exactly. The path must end in the
+  format's extension (`.obj`, `.fbx`, `.glb`/`.gltf`, `.usd`/`.usda`/`.usdc`/`.usdz`,
+  `.stl`, `.ply`); anything else is refused before Blender runs, as Blender's glTF
+  exporter would otherwise swap the extension (a `model.gltf` exported as GLB
+  used to overwrite `model.glb`). For GLTF the extension picks the layout: `.glb`
+  is GLB, `.gltf` is `GLTF_SEPARATE` (a `.bin` and textures beside it);
+  `gltf_format: "GLTF_EMBEDDED"` writes one `.gltf` with its data inline. The
+  reply's `files_written` lists every file the export created or changed in
+  that folder (and its `textures/` or newly created subfolders), `file_path`
+  first. An existing `.bin` or `.mtl` beside the file that the file being
+  replaced does not refer to is not overwritten unless
+  `overwrite_companion_files: true`; texture files a `GLTF_SEPARATE` export
+  writes replace files of the same name. Missing folders are created for every
+  format.
+- What to export: the whole scene by default, `selected_only` (an error when
+  nothing is selected, instead of an empty file), `object_names` or
+  `collection_name` (selected for the export, the previous selection restored
+  afterwards; a hidden object or one outside the view layer is refused, since
+  the exporter would leave it out). Children are not added to `object_names`.
+- Defaults that changed: `apply_modifiers` is on for every format (glTF used to
+  export the cage without its modifiers; USD always applies them, so `false` is
+  an error there), and `export_animation` is on for glTF, FBX and USD, also for
+  USD, whose exporter leaves animation out by default. `frame_start`/`frame_end`
+  set the scene's frame range for the export and restore it. FBX, OBJ, STL and
+  PLY take `axis_forward`/`axis_up` (together, on different axes) and
+  `global_scale`; USD takes `usd_up_axis` (`Y` rotates the scene to Y-up),
+  `meters_per_unit` (Blender 4.4+; the root is scaled so objects keep their
+  size) and `root_prim_path` (`""` for none). An option that does not apply to
+  the format, or that this Blender's exporter lacks, is an error rather than
+  ignored. `exporter_options` reports the operator properties that were set.
+  Edit, Pose and paint modes are left for the export, so unsaved mesh edits are
+  included, and entered again afterwards.
+- `import_blender_file` takes `scale`, about the world origin: OBJ, FBX, STL
+  and PLY pass it to Blender's importer; glTF (no importer option) and USD
+  (Blender 5.0.1's importer ignored it for USD files Blender wrote) scale the
+  imported root objects, and `warning` names roots whose transform is animated.
+  `save_blender_file` accepts only `.blend` paths, since the saved file becomes
+  the open document.
 - `export_simready_usd` writes an asset a simulator reads, not just Blender's
   geometry. After Blender's USD exporter runs, the export authors from each
   object's `simready_` metadata (`apply_simready_metadata`):
@@ -583,11 +806,13 @@ Behaviour worth knowing:
   lights and cameras; `include_lights_and_cameras: true` keeps those and the
   World's dome light. An empty `object_names` is refused. When validation finds
   an error, nothing is written and the call fails with `SimReadyValidationFailed`
-  and the issues, unless `force: true`. The export leaves Edit Mode for the
-  export (so unsaved mesh edits are written) and enters it again, and restores
-  the selection and active object. Blender writes next to the destination and
-  the authored layer replaces the file only at the end; a `.usdz` is packaged
-  from a `.usdc` with its textures. With `embed_metadata` (the default) the
+  and the issues, unless `force: true`. Like `export_blender_file`, it writes
+  `file_path` exactly (a missing folder is created) and lists `files_written`,
+  applies modifiers, leaves Edit, Pose and paint modes for the export (so
+  unsaved mesh edits are written) and enters them again, and restores the
+  selection; a SimReady asset is static, so animation is left out. Blender
+  writes next to the destination and the authored layer replaces the file only
+  at the end; a `.usdz` is packaged from a `.usdc` with its textures. With `embed_metadata` (the default) the
   `simready_` properties stay as `userProperties` attributes too, and Blender's
   USD import reads them back as custom properties. The importer names an object
   merged with its single mesh after the mesh, and imports the `Looks` and

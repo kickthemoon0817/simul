@@ -694,3 +694,23 @@ def test_the_addon_bundles_the_usd_authoring_module(tmp_path: Path) -> None:
         check=True,
     )
     assert completed.stdout.strip() == "simul_blender_bridge.adapters.simready_usd"
+
+
+def test_the_file_is_written_exactly_at_file_path_in_a_new_folder(scene: Any) -> None:
+    path = scene.out / "assets" / "robot" / "robot.usda"
+
+    result = scene.session.export_simready_usd(str(path), object_names=["robot"])
+
+    assert result["file_path"] == str(path)
+    assert result["files_written"] == [str(path)]
+    assert sorted(p.name for p in path.parent.iterdir()) == ["robot.usda"]
+
+
+def test_a_failed_export_removes_the_folder_it_created(scene: Any) -> None:
+    folder = scene.out / "new_folder"
+    scene.fake.supported.discard("selected_objects_only")
+
+    with pytest.raises(ValueError, match="selected_only is not supported"):
+        scene.session.export_simready_usd(str(folder / "robot.usda"), object_names=["robot"])
+
+    assert not folder.exists()

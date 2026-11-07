@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
 from simul.mcp.schemas.blender_ui import BlenderUIRequest
@@ -134,6 +135,28 @@ def test_property_write_does_not_require_unique_editor(ui: tuple) -> None:
             "set_property", target="location", value=[4, 5, 6], area_id="old"
         )
     assert bpy.context.active_object.location == [1, 2, 3]
+
+
+@pytest.mark.parametrize("mode", ["QUATERNION", "AXIS_ANGLE", "ZXY", "XYZ"])
+def test_rotation_write_turns_the_object_whatever_its_rotation_mode(
+    ui: tuple, mathutils: Any, mode: str
+) -> None:
+    """It wrote rotation_euler, which Blender ignores on a glTF node (QUATERNION)."""
+    from tests.fakes import FakeTransformObject, FakeVector, euler_matrix
+
+    module, bpy, _ = ui
+    obj = FakeTransformObject("Robot_Root", rotation_mode=mode)
+    obj.rotation_axis_angle = FakeVector((0.0, 0.0, 1.0, 0.0))
+    obj.is_editable = True  # type: ignore[attr-defined]
+    bpy.context.active_object = obj
+    turn = [0.3, -0.4, 1.2]
+
+    result = module.control_ui("set_property", target="rotation_euler", value=turn)
+
+    rotation = np.asarray(obj.matrix_world.rows)[:3, :3]
+    assert np.allclose(rotation, euler_matrix(turn, "XYZ"), atol=1e-9)
+    assert obj.rotation_mode == mode
+    assert result["value"] == pytest.approx(turn, abs=1e-9)
 
 
 @pytest.mark.parametrize(
