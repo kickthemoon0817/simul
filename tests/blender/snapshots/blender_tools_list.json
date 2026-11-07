@@ -1745,7 +1745,7 @@
     "validate_simready_compliance": {
       "name": "validate_simready_compliance",
       "title": "Validate Simready Compliance",
-      "description": "Validate what export_simready_usd would export against the SimReady Robotics-Prop rules and Isaac Sim's asset checks; any error makes it non-compliant. Errors: an asset root that is not the identity, a skewed rigid body, no material, no semantic label on a mesh or an exported object above it, invalid stored values, a rigid body without mass, without a collider or nested in another, degenerate faces. Warnings: names, sizes and units, scaled parts, an empty slot faces use, missing colliders, UVs, n-gons. Filter by severity and page with offset/limit (next_offset).",
+      "description": "Validate the Blender objects export_simready_usd would export against the SimReady Robotics-Prop rules and Isaac Sim's asset checks; any error makes them non-compliant. Errors: an asset root that is not the identity, a skewed rigid body, no material, no semantic label on a mesh or an exported object above it, invalid stored values, a rigid body without mass, without a collider or nested in another, degenerate faces. Warnings: names, sizes and units, scaled parts, an empty slot faces use, missing colliders, UVs, n-gons. Filter by severity and page with offset/limit (next_offset).",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
