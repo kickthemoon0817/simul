@@ -124,7 +124,7 @@ variable, so Blender must see the same `SIMUL_HOME` as the server (or set
 | `ISAAC_SIM__ENABLED` | `auto` | Register the Isaac Sim tools: `auto` on Linux and Windows only (elsewhere when `--backends` names `isaac`), `true` on any OS, `false` never; see [isaac-sim.md](isaac-sim.md#platforms) |
 | `ISAAC_SIM__SOCKET_PORT` / `ISAAC_SIM__BRIDGE_PORT` | `8226` / `8229` | Isaac Sim transports |
 | `ISAAC_SIM__SOCKET_PROTOCOL` | `auto` | `python_server` (6.0+) or `vscode` (5.x) skips the one-time probe |
-| `ISAAC_SIM__SOCKET_AUTH_TOKEN` | unset | Token for a 6.0 python_server started with `--auth-token` |
+| `ISAAC_SIM__SOCKET_AUTH_TOKEN` | unset | Token for a 6.0 python_server started with `--auth-token`; also sent to the bridge, which then requires it ([security model](isaac-sim.md#security-model)) |
 | `ISAAC_SIM__BRIDGE_FAILURE_THRESHOLD` / `ISAAC_SIM__BRIDGE_COOLDOWN_SECONDS` | `3` / `30` | Bridge circuit breaker; see [isaac-sim.md](isaac-sim.md#transports) |
 | `UNREAL__HOST` / `UNREAL__PORT` | `localhost` / `30010` | Remote Control endpoint |
 | `UNREAL__TOOL_SURFACE` | `thin` | `full` registers every granular Unreal tool (`--unreal-tools` overrides) |
@@ -154,9 +154,10 @@ dispatchers, and `simul isaac exec` / `simul unreal exec` return a
 This is the only switch that removes the agent-authored code surface. The
 Isaac bridge extension's `allow_unsafe_execution` setting (and
 `simul isaac bridge-set-unsafe`) only gates raw scripts sent over the
-bridge on port 8229. Raw scripts and every generated tool script still run
-over the stock Python socket on 8226, so that flag is not a security
-boundary.
+bridge on port 8229. The bridge refuses such a script without running it,
+and simul then sends it, like every generated tool script, to the stock
+Python socket on 8226 when that socket is enabled, so that flag is not a
+security boundary.
 
 ### Network transports (HTTP and SSE)
 
