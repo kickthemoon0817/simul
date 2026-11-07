@@ -26,7 +26,10 @@ The ZIP contains the shared Blender operations and filesystem policy plus a
 standard-library transport. It does not install FastMCP, Pydantic, or other
 server dependencies into Blender. After upgrading Simul, rebuild and reinstall
 the ZIP. Restart Blender before attaching again so all loaded bridge modules
-use the new version; Simul does not restart the editor automatically.
+use the new version; Simul does not restart the editor automatically. A server
+and an add-on that speak different bridge protocols refuse each other with the
+`install-bridge` fix instead of misreading a call; protocol 5 is the first that
+records agent edits as undo steps.
 
 ## Select and verify the target
 
@@ -58,6 +61,50 @@ For an MCP client configuration, add `--blender-mode attached` to the server
 arguments, or set `BLENDER__MODE=attached` in the server environment. Restart
 the MCP server if it was already running in embedded mode. Subsequent explicit
 `attach`/`detach` commands take effect on its next tool call without restarting it.
+
+## Undo and unsaved changes
+
+Each tool call that changes the open document is one step in Blender's undo
+history, named after the tool: `simul: create_blender_object`,
+`simul: execute_blender_script`, `simul: control_blender_ui (set_property)`.
+Recording the step also marks the file modified, as Blender's own operators do.
+So after an agent edit:
+
+- `get_blender_info` and `get_blender_file_info` report `is_dirty: true`, and
+  quitting Blender asks whether to save;
+- the user's Ctrl+Z (Edit > Undo) takes back the last agent operation only,
+  Ctrl+Shift+Z redoes it, and Edit > Undo History lists each one.
+
+Reads (`get_*`, `list_*`, `search_*`, `summarize_*`, `check_*`,
+`validate_simready_compliance`), captures, `save_blender_file`,
+`export_blender_file`, `play_blender_animation` and the `control_blender_ui`
+actions that change only the editor (`inspect`, `observe`, `move_cursor`,
+`clear_cursor`, `open_menu`, `set_tool`, `show_properties`,
+`isolate_workspace`) record no step and leave the modified flag alone.
+`select_object` and `set_property` are steps, as Blender's own selection and
+property edits are. A call that fails records nothing, except
+`execute_blender_script`, which is a step even when the script raises, since it
+may have changed data first. A script that loads a file is a step in the new
+file's history, so what it did after the load can be undone and counts as
+unsaved. In Edit Mode a step holds only the edited mesh, as Blender's own steps
+there do. Blender keeps 32 steps by default (Preferences > System > Undo Steps);
+older ones fall off the history whoever made them.
+
+`open_blender_file` refuses with `error_type: "UnsavedChangesError"` while the
+open file has unsaved changes, the agent's or the user's, since opening another
+file discards them. Save first with `save_blender_file` (with a `file_path` for
+a file that was never saved), or call `open_blender_file` again with
+`discard_unsaved: true` to discard them. A script that loads a file itself
+(`bpy.ops.wm.open_mainfile` in `execute_blender_script`) is not checked. In
+embedded mode Blender has no window and does not track unsaved changes: it
+reports a session that never loaded a file as modified and later edits as
+unmodified, so there `open_blender_file` opens without the check.
+
+`execute_blender_script` reports anything the script raises in `error`, with
+the output printed before it, `SystemExit` from `sys.exit()` and
+`KeyboardInterrupt` included. Raised past the bridge, `sys.exit()` ended the
+user's Blender: Blender prints an exception that escapes a timer with
+`PyErr_Print`, which exits the process on `SystemExit`.
 
 ## Named agent controls
 
@@ -307,7 +354,10 @@ For a custom discovery directory, set the matching directory in both environment
 
 The GUI integration test runs in a new disposable process and never uses an
 existing user's editor. It checks preservation of unsaved work, main-thread
-execution, named UI actions with scripting disabled, object editing, a world-space
+execution, a script's `sys.exit()` leaving Blender running, named UI actions
+with scripting disabled, object editing, agent edits as undo steps that the
+user's undo and redo take back one at a time and that make quitting ask to
+save, a world-space
 bounding box, camera focus that keeps the whole object in the frame and clip range
 (a 60 m cube included, and a camera parented to a moved rig with a quaternion
 rotation), world-space camera placement, a camera whose Track To constraint
@@ -322,8 +372,9 @@ of the 3D View in Edit Mode without a camera, a render through a temporary camer
 explicit script-output truncation, multiple windows, scene/file changes,
 and detachment. A second disposable process checks glTF export and render from a script, the
 context-loss recipe after `read_homefile`, recovery through `attach_blender_window`,
-`open_blender_file` re-attachment, and `AttachmentStale` after the process exits.
-It always closes the process it started.
+`open_blender_file` re-attachment and its refusal to discard unsaved work unless
+asked, and `AttachmentStale` after the process exits. It always closes the
+process it started.
 
 ```sh
 pytest tests/blender --no-cov

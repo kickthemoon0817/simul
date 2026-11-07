@@ -227,6 +227,28 @@ _IMAGE_FORMAT_FIELDS = (
 )
 
 
+class UnsavedChangesError(RuntimeError):
+    """Opening a file would discard the open file's unsaved changes.
+
+    Its class name is the ``error_type`` clients see, and ``details`` name the
+    open file (None when it was never saved).
+    """
+
+    def __init__(self, open_file: Optional[str], requested: str) -> None:
+        where = f"'{open_file}'" if open_file else "(never saved)"
+        save = (
+            "save_blender_file"
+            if open_file
+            else "save_blender_file with a file_path, since it was never saved,"
+        )
+        super().__init__(
+            f"The open file {where} has unsaved changes, which opening '{requested}' "
+            f"would discard. Save them first with {save} and open the file again, or "
+            "call open_blender_file with discard_unsaved=true to discard them."
+        )
+        self.details = {"blend_file_path": open_file, "is_dirty": True}
+
+
 def add_context_hint(error: Optional[str]) -> Optional[str]:
     """Append the context-override recipe to a missing ``bpy.context`` member error.
 
@@ -235,6 +257,29 @@ def add_context_hint(error: Optional[str]) -> Optional[str]:
     if not error or _CONTEXT_MEMBER_ERROR not in error or CONTEXT_OVERRIDE_HINT in error:
         return error
     return f"{error}. {CONTEXT_OVERRIDE_HINT}"
+
+
+def _script_error(exc: BaseException) -> Optional[str]:
+    """Describe what an ``execute_script`` script raised, for its ``error`` field.
+
+    Args:
+        exc: Anything the script raised, ``SystemExit`` and
+            ``KeyboardInterrupt`` included.
+
+    Returns:
+        ``<class>: <message>``, with the context-override recipe for a missing
+        ``bpy.context`` member and what happened for an exit or interrupt.
+    """
+    if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+        name = type(exc).__name__
+        error = f"{name}: {exc}" if str(exc) else name
+        if isinstance(exc, SystemExit):
+            return (
+                f"{error}. The script called sys.exit() or exit(), which ends only the "
+                "script here: the lines after it did not run, and Blender keeps running."
+            )
+        return f"{error}. The script was interrupted; the lines after it did not run."
+    return add_context_hint(f"{type(exc).__name__}: {exc}")
 
 
 def script_output_prefix(output: str, max_chars: int) -> str:
@@ -1615,12 +1660,22 @@ class BlenderRuntimeSession:
 
     _SUPPORTED_FORMATS: Tuple[str, ...] = ("OBJ", "FBX", "GLTF", "USD", "STL", "PLY")
 
-    def open_blend_file(self, file_path: str) -> Dict[str, Any]:
+    def open_blend_file(
+        self, file_path: str, discard_unsaved: bool = False
+    ) -> Dict[str, Any]:
         """
         Open a .blend file, replacing the current scene.
 
+        Refuses while the open file has unsaved changes, which opening would
+        discard, unless ``discard_unsaved`` is true. Only Blender with a window
+        tracks them: headless Blender (embedded mode) reports a session that
+        never loaded a file as modified and later edits as unmodified, so it
+        opens without the check.
+
         Args:
             file_path: Absolute path to the .blend file.
+            discard_unsaved: Open even though the current file has unsaved changes,
+                which are then lost. To keep them, save first with save_blender_file.
 
         Returns:
             Dict with file_path and object_count.
@@ -1629,6 +1684,8 @@ class BlenderRuntimeSession:
             PermissionError: If the path is outside the sandbox policy.
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is not a .blend file.
+            UnsavedChangesError: If the open file has unsaved changes and
+                ``discard_unsaved`` is false.
         """
         file_path = self._deny_outside_sandbox(file_path)
         if not os.path.isfile(file_path):
@@ -1637,6 +1694,12 @@ class BlenderRuntimeSession:
             raise ValueError(f"Not a .blend file: {file_path}")
 
         blender_module: Any = bpy
+        if (
+            not discard_unsaved
+            and not getattr(blender_module.app, "background", False)
+            and blender_module.data.is_dirty
+        ):
+            raise UnsavedChangesError(blender_module.data.filepath or None, file_path)
         _bpy_op(
             f"Failed to open .blend file '{file_path}'",
             blender_module.ops.wm.open_mainfile,
@@ -3779,6 +3842,10 @@ class BlenderRuntimeSession:
         ``output_total_chars`` gives the full length, so a truncated JSON dump
         is not mistaken for a script bug.
 
+        Whatever the script raises is reported in *error*, with the output
+        printed before it; that includes ``SystemExit`` from ``sys.exit()``,
+        which ends only the script, never Blender.
+
         With a ``timeout`` the script runs on a worker thread and this call
         returns a structured error once the budget is spent. Python offers
         no safe way to kill that thread, so the script keeps running in the
@@ -3842,12 +3909,15 @@ class BlenderRuntimeSession:
             try:
                 with contextlib.redirect_stdout(stdout_capture):
                     exec(script, namespace)  # noqa: S102
-            except Exception as exc:
+            except BaseException as exc:
+                # SystemExit and KeyboardInterrupt are the script's errors too:
+                # raised past here, sys.exit() would end Blender (or the MCP
+                # server in embedded mode), not the script.
                 return {
                     **_captured_output(),
                     "return_value": None,
                     "duration_seconds": round(time.monotonic() - start, 4),
-                    "error": add_context_hint(f"{type(exc).__name__}: {exc}"),
+                    "error": _script_error(exc),
                 }
             elapsed = time.monotonic() - start
             return_value: Optional[str] = None
