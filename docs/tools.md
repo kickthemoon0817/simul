@@ -12,6 +12,16 @@ Every tool returns a JSON object. Failures carry `success: false` and an
 error type such as `NotRunning`, `RefusedOperation` or
 `UnsupportedOperation`.
 
+Results are strict JSON: a non-finite float is sent as the string
+`"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token. Each result
+is held to a 40 KB budget by trimming its largest top-level list, with
+`truncated` and a `truncation` notice. When that list is a page, its
+`next_offset` (and a `count` or `returned` that counted the page) are
+rewritten to match the items kept, so following `next_offset` skips
+nothing. Above a 400 KB hard limit the field carrying the excess is cut at
+any depth: a string becomes a `truncated_field` marker, and a list or
+mapping keeps its prefix and is named in `truncated_fields`.
+
 ## Headless USD
 
 No running application needed. File arguments must be inside the sandbox
@@ -22,6 +32,32 @@ No running application needed. File arguments must be inside the sandbox
 | Load and validate | `load_usd_file`, `validate_usd_file` |
 | Query | `get_prim_info`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
 | Edit | `create_prim`, `delete_prim`, `update_prim_attributes` |
+
+- **Bounds.** `get_bounding_box`, and the bounds in `get_prim_info` and
+  `summarize_scene`, are USD's own `UsdGeom.BBoxCache` bounds: every
+  transform applies and instances are followed. Only geometry whose purpose
+  is in `include_purposes` counts; the default, `default` and `render`, is
+  what renderers and simulators see, so `proxy` and `guide` geometry (often
+  collision shapes) needs `include_purposes` to be bounded. A prim with
+  nothing boundable is a successful result with `has_geometry: false` and
+  `bbox: null`, never a guessed box; `excluded_purposes_with_geometry` then
+  names the purposes left out that do hold geometry. `world_space: false`
+  bounds the prim in its own space (its descendants' transforms apply, its
+  own does not), and `time_code` evaluates animated transforms.
+- **Prim info.** `get_prim_info` returns each attribute as
+  `{type, value, authored}` (`authored: false` is a schema fallback), each
+  relationship as `{targets, authored}`, applied API schemas, and metadata:
+  specifier, instanceable, composition arcs with `resolved`, variant sets
+  and selections, the layers holding opinions, and other authored metadata.
+  An array attribute carries its `length` and first `array_preview`
+  elements (default 16, up to 10000), so a million-point mesh costs a few
+  KB; `attribute_filter` takes glob patterns, `time_code` reads animated
+  values.
+- **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
+  lists of rows, asset paths their authored string.
+- **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
+  is a `NotFoundError`; a relative, malformed or property path is a
+  `ValidationError`.
 
 ## Isaac Sim
 
@@ -87,6 +123,12 @@ Notes:
 - `execute_isaac_script` scripts should follow the scripting reference served
   as the `simul://isaac-sim/skills` resource. Isaac Sim 6.0 deprecates
   `isaacsim.core.{api,prims,utils}` and removes the `omni.isaac.*` shims.
+- `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
+  return `ClaimStoreError` when the claim could not be saved. Calling
+  `claim_isaac_instance` again with the same `agent_id` after a reconnect or
+  a server restart takes the orphaned claim over; `release_isaac_instance`
+  with that `agent_id` releases it. See
+  [configuration.md](configuration.md#multi-agent-claims).
 
 ## Unreal Engine
 
@@ -328,6 +370,16 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 
 Behaviour worth knowing:
 
+- In attached mode each call that changes the document is one Blender undo
+  step named `simul: <tool>`, and marks the file modified: the user's Ctrl+Z
+  takes back the last agent operation only, and quitting asks to save. Reads,
+  captures, saves, exports, playback and editor-only `control_blender_ui`
+  actions record no step. Details:
+  [blender-attachment.md](blender-attachment.md#undo-and-unsaved-changes).
+- `open_blender_file` refuses with `UnsavedChangesError` while the open file has
+  unsaved changes; save them with `save_blender_file`, or pass
+  `discard_unsaved: true`. Headless (embedded) Blender does not track unsaved
+  changes, so there it opens without the check.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
@@ -484,7 +536,9 @@ Behaviour worth knowing:
   per control or other non-ASCII character and 12 per emoji. So output is also
   cut at 300 000 bytes of JSON, which printable ASCII never reaches but heavily
   non-ASCII output can, with the same report. Write larger results to a file
-  and return its path.
+  and return its path. Anything the script raises, `SystemExit` from
+  `sys.exit()` and `KeyboardInterrupt` included, comes back in `error`; it
+  never ends Blender.
 
 ## Server
 
