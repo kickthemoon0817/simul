@@ -312,12 +312,18 @@ print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}
 # side of it, and a CineCamera's debug focus plane, 100 m across at the focus
 # distance (1 km by default), which turning the plane off only hides. It never
 # visits those not attached under their actor's root, such as the spare icon a
-# SkyLight or a PlanarReflection leaves at the world origin. The box is then
+# SkyLight or a PlanarReflection leaves at the world origin. Its Focus also
+# ignores every shape (a box, sphere or capsule component); a shape whose
+# collision is turned off, which collides and overlaps with nothing, is left
+# out as well, editor-only or not. The influence sphere of a
+# SphereReflectionCapture (30 m in radius by default) and the boxes of a
+# BoxReflectionCapture are such shapes, which Unreal does not make editor-only;
+# a trigger's shape collides (the Trigger profile). The box is then
 # drawn around the bounds of the other primitive components, provided
 # GetActorBounds is the box around all of them: GetActorBounds is virtual, and
 # an actor reporting other bounds, such as a level instance (its level's
 # content) or a NavLinkProxy (its links), keeps them, as does an actor with
-# nothing but such components. A component that is not editor-only always
+# nothing but such components. Any other component that is not editor-only
 # counts, such as a trigger box's collision shape, which the editor's Focus
 # ignores.
 # While Play In Editor (or Simulate) runs nothing is selected: Unreal's editor
@@ -331,6 +337,9 @@ FOCUS_ACTOR = ACTOR_HELPERS + EDITOR_WORLD + """
 import math
 
 def left_out_by_editor_focus(component, root):
+    if (isinstance(component, unreal.ShapeComponent)
+            and component.get_collision_enabled() == unreal.CollisionEnabled.NO_COLLISION):
+        return True
     if not component.get_editor_property("is_editor_only"):
         return False
     if component.get_ignore_bounds_for_editor_focus():
