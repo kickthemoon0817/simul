@@ -175,9 +175,14 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "rotation_euler": [0.1, 0.2, 0.3],
             "scale": [2, 2, 2],
         },
+        "quaternion": {
+            "object_name": "Cube",
+            "rotation_quaternion": [0.5, 0.5, 0.5, 0.5],
+        },
     },
     "set_blender_object_parent": {
-        "minimal": {"child_name": "Wheel", "parent_name": "Car"}
+        "minimal": {"child_name": "Wheel", "parent_name": "Car"},
+        "full": {"child_name": "Wheel", "parent_name": "Car", "keep_transform": False},
     },
     "clear_blender_object_parent": {
         "minimal": {"object_name": "Wheel"},
@@ -223,14 +228,37 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "open_blender_file": {"minimal": {"file_path": "/tmp/scene.blend"}},
     "save_blender_file": {"minimal": {}, "full": {"file_path": "/tmp/out.blend"}},
     "import_blender_file": {
-        "minimal": {"file_path": "/tmp/model.obj", "file_format": "OBJ"}
+        "minimal": {"file_path": "/tmp/model.obj", "file_format": "OBJ"},
+        "full": {"file_path": "/tmp/model.obj", "file_format": "OBJ", "scale": 0.01},
     },
     "export_blender_file": {
         "minimal": {"file_path": "/tmp/out.glb", "file_format": "GLTF"},
         "full": {
-            "file_path": "/tmp/out.glb",
+            "file_path": "/tmp/out.fbx",
+            "file_format": "FBX",
+            "object_names": ["Cube", "Sphere"],
+            "apply_modifiers": False,
+            "export_animation": False,
+            "axis_forward": "-Y",
+            "axis_up": "Z",
+            "global_scale": 0.01,
+            "overwrite_companion_files": True,
+        },
+        "selected": {
+            "file_path": "/tmp/out.gltf",
             "file_format": "GLTF",
             "selected_only": True,
+            "gltf_format": "GLTF_EMBEDDED",
+            "frame_start": 10,
+            "frame_end": 20,
+        },
+        "usd": {
+            "file_path": "/tmp/out.usda",
+            "file_format": "USD",
+            "collection_name": "Props",
+            "usd_up_axis": "Y",
+            "meters_per_unit": 0.01,
+            "root_prim_path": "/World",
         },
     },
     "get_blender_file_info": {"minimal": {}},
