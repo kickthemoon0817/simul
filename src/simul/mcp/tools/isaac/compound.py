@@ -12,6 +12,7 @@ from ._shared import (
     DEFINE_PRIM_CORE,
     SET_MASS_PROPERTIES_CORE,
     SET_PRIM_TRANSFORM_CORE,
+    XFORM_READ_CORE,
     FloatList,
     _compose_script,
     _pyval,
@@ -152,6 +153,7 @@ class CompoundMixin:
             from pxr import Usd, UsdGeom, UsdPhysics, UsdShade, Sdf, Gf
             """,
             DEFINE_PRIM_CORE,
+            XFORM_READ_CORE,
             SET_PRIM_TRANSFORM_CORE,
             APPLY_RIGID_BODY_CORE,
             APPLY_COLLISION_CORE,
