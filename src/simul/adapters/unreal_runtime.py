@@ -43,6 +43,8 @@ from ._unreal_errors import (
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_scripts import (
     ACTOR_HELPERS,
+    ADD_COMPONENT,
+    ASSIGN_MATERIAL,
     CREATE_MATERIAL_INSTANCE,
     EDITOR_WORLD,
     ENABLE_PHYSICS,
@@ -57,6 +59,7 @@ from ._unreal_scripts import (
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
     SCENE_SUMMARY,
+    SET_ACTOR_PARENT,
     SET_ACTOR_TRANSFORM,
     SET_COLLISION,
     SET_LIGHT_PARAMS,
@@ -103,6 +106,25 @@ PHYSICS_MAX_MASS_KG = 1e9
 #: velocity by 1 / (1 + dt * damping) each step, so a body this damped stops
 #: within one 120 Hz step, as it would with any larger damping.
 PHYSICS_MAX_DAMPING = 1e6
+
+#: Most assets ``search_assets`` returns per call. Remote Control's asset
+#: search sizes its result array to the limit it is sent, so a negative limit
+#: crashed the editor ("Trying to resize TArray to an invalid size of
+#: 4294967295", UE 5.7.4).
+MAX_ASSET_SEARCH_RESULTS = 1000
+
+#: The content root of the project. Assets elsewhere (``/Engine``, a plugin's
+#: mount point) are shared by every project using that engine or plugin, so the
+#: material tools write there only when told to (``allow_engine_content``).
+PROJECT_CONTENT_ROOT = "/Game"
+
+#: Where ``create_material_instance`` files an instance of a parent outside
+#: ``/Game`` when no ``save_path`` is given.
+DEFAULT_MATERIAL_FOLDER = "/Game/Materials"
+
+# Characters Unreal does not allow in a folder name (INVALID_LONGPACKAGE_CHARACTERS,
+# UE 5.7); an object name's are _INVALID_OBJECT_NAME_CHARACTERS, below.
+_INVALID_FOLDER_CHARACTERS = frozenset("\\:*?\"<>|' ,.&!~\n\r\t@#")
 
 # UE's FMD5 hex output is lowercase. Accept either case from configured
 # input and normalize. Anything that isn't a clean 32-char hex digest is
@@ -569,6 +591,32 @@ def _vector3(name: str, value: Any, axes: str) -> List[float]:
     raise ValueError(f"{name} must be three finite numbers [{axes}], got {value!r}")
 
 
+#: Characters Unreal refuses in an object name (INVALID_OBJECTNAME_CHARACTERS, UE 5.7).
+_INVALID_OBJECT_NAME_CHARACTERS = "\"' ,/.:|&!~\n\r\t@#(){}[]=;^%$`"
+
+#: Longest object name Unreal keeps: an FName holds fewer than NAME_SIZE (1024) characters.
+_MAX_OBJECT_NAME_LENGTH = 1023
+
+
+def _object_name_error(name: str, value: str) -> Optional[str]:
+    """Why ``value`` cannot name an Unreal object, such as a component, or None.
+
+    Args:
+        name: Parameter name, used in the message.
+        value: The proposed object name.
+    """
+    if not value:
+        return f"{name} must not be empty"
+    if len(value) > _MAX_OBJECT_NAME_LENGTH:
+        return f"{name} is {len(value)} characters long; Unreal keeps at most {_MAX_OBJECT_NAME_LENGTH}"
+    invalid = "".join(sorted({c for c in value if c in _INVALID_OBJECT_NAME_CHARACTERS}))
+    if invalid:
+        return f"{name} {value!r} has characters Unreal refuses in an object name: {invalid!r}"
+    if value.lower() == "none":
+        return f"{name} cannot be 'None', which Unreal reserves for no name"
+    return None
+
+
 def _rotator_quaternion(rotation: Sequence[float]) -> Tuple[float, float, float, float]:
     """Quaternion (x, y, z, w) of a [pitch, yaw, roll] rotator in degrees.
 
@@ -688,6 +736,55 @@ def _material_parameter_values(
     if not values and not problems:
         problems.append("No parameters given: pass at least one scalar, vector or texture parameter")
     return values, refused, problems
+
+
+def _content_folder_problem(folder: str) -> Optional[str]:
+    """Why ``folder`` is not a content folder path Unreal can create, or None.
+
+    A folder is ``/<root>/<name>/...``: absolute, each name non-empty and free
+    of the characters Unreal refuses in a package path. ``.`` and ``..`` are
+    refused rather than resolved: Unreal does not resolve them either, and
+    sanitized ``/Game/../Engine`` into a folder named ``__`` under ``/Game``.
+
+    Args:
+        folder: The folder path, without a trailing slash.
+
+    Returns:
+        The problem, or None for a usable folder.
+    """
+    if not folder.startswith("/"):
+        return f"{folder!r} is not a content folder path such as /Game/Materials"
+    names = folder[1:].split("/")
+    for name in names:
+        if name in ("", ".", ".."):
+            return f"{folder!r} has an empty, '.' or '..' folder name; Unreal does not resolve them"
+        bad = sorted(set(name) & _INVALID_FOLDER_CHARACTERS)
+        if bad:
+            return f"{folder!r} has characters Unreal does not allow in a folder name: {''.join(bad)!r}"
+    return None
+
+
+def _in_project_content(path: str) -> bool:
+    """Whether a content path is under ``/Game``, the project's own content."""
+    return path == PROJECT_CONTENT_ROOT or path.startswith(PROJECT_CONTENT_ROOT + "/")
+
+
+def _outside_project_refusal(path: str, action: str, hint: str) -> Dict[str, Any]:
+    """The SandboxError envelope of a write to content outside ``/Game``."""
+    return {
+        "success": False,
+        "error_type": "SandboxError",
+        "error": (
+            f"Refused to {action} {path}: it is engine or plugin content, outside the project's "
+            f"{PROJECT_CONTENT_ROOT} folder, and every project using that engine or plugin shares it"
+        ),
+        "details": {"content_path": path, "allowed_root": PROJECT_CONTENT_ROOT, "hint": hint},
+    }
+
+
+def _sanitized_object_name(name: str) -> str:
+    """``name`` as Unreal names an asset after it (ObjectTools::SanitizeObjectName)."""
+    return "".join("_" if char in _INVALID_OBJECT_NAME_CHARACTERS else char for char in name)
 
 
 class UnrealRuntimeSession(LoggerMixin):
@@ -1374,6 +1471,7 @@ class UnrealRuntimeSession(LoggerMixin):
         object_path: str,
         function_name: str,
         parameters: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Call a UObject function via ``PUT /remote/object/call``.
@@ -1382,6 +1480,7 @@ class UnrealRuntimeSession(LoggerMixin):
             object_path: Full UObject path (actor, CDO, subsystem).
             function_name: Blueprint-visible function name.
             parameters: Optional function parameters.
+            timeout: Seconds to wait for the answer; None waits ``unreal.timeout``.
 
         Returns:
             Parsed JSON response dictionary.
@@ -1392,12 +1491,13 @@ class UnrealRuntimeSession(LoggerMixin):
         }
         if parameters:
             body["parameters"] = parameters
-        return await self._http_put("/remote/object/call", body)
+        return await self._http_put("/remote/object/call", body, timeout_override=timeout)
 
     async def _execute_python(
         self,
         code: str,
         mode: str = "ExecuteFile",
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Execute Python code inside UE5 via ``PythonScriptLibrary``.
@@ -1407,19 +1507,16 @@ class UnrealRuntimeSession(LoggerMixin):
             mode: ``EvaluateStatement`` (single expression, returns value),
                   ``ExecuteFile`` (multi-line, captures print/log),
                   ``ExecuteStatement`` (single statement).
+            timeout: Seconds to wait for the script; None waits ``unreal.timeout``.
 
         Returns:
             Dictionary with ``CommandResult``, ``LogOutput``, ``ReturnValue``.
         """
-        return await self._call_function(
-            "/Script/PythonScriptPlugin.Default__PythonScriptLibrary",
-            "ExecutePythonCommandEx",
-            {
-                "PythonCommand": code,
-                "ExecutionMode": mode,
-                "FileExecutionScope": "Public",
-            },
-        )
+        parameters = {"PythonCommand": code, "ExecutionMode": mode, "FileExecutionScope": "Public"}
+        library = "/Script/PythonScriptPlugin.Default__PythonScriptLibrary"
+        if timeout is None:
+            return await self._call_function(library, "ExecutePythonCommandEx", parameters)
+        return await self._call_function(library, "ExecutePythonCommandEx", parameters, timeout=timeout)
 
     async def _execute_json_script(
         self,
@@ -1427,6 +1524,7 @@ class UnrealRuntimeSession(LoggerMixin):
         *,
         failure_log_level: int = logging.ERROR,
         expected_errors: Sequence[str] = (),
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Run a fixed tool script and preserve failures as error envelopes.
 
@@ -1445,8 +1543,10 @@ class UnrealRuntimeSession(LoggerMixin):
                 either way.
             expected_errors: Further ``error_type`` values the script reports
                 for a request it refused as asked.
+            timeout: Seconds to wait for the script; None waits ``unreal.timeout``.
         """
-        result = self._parse_python_json(await self._execute_python(code))
+        raw = await (self._execute_python(code) if timeout is None else self._execute_python(code, timeout=timeout))
+        result = self._parse_python_json(raw)
         not_found = script_not_found(str(result.get("error") or ""))
         if not_found is not None:
             self.logger.info("Unreal refused the request (%s): %s", NOT_FOUND_ERROR, not_found)
@@ -1503,10 +1603,11 @@ class UnrealRuntimeSession(LoggerMixin):
         """Run a GeometryScript body against actors resolved by path.
 
         Each keyword binds a script variable to ``actor_at(path)`` from
-        ``ACTOR_HELPERS`` -- a direct object load instead of a scan over every
-        level actor. ``body`` is the mesh op's block, indented one level; it
-        is dedented here. A missing actor raises inside the editor and comes
-        back as a ``ScriptError`` envelope. With ``pie_action`` (a body that
+        ``ACTOR_HELPERS`` -- a lookup among loaded objects instead of a scan
+        over every level actor, which never loads a map. ``body`` is the mesh
+        op's block, indented one level; it is dedented here. A path that names
+        no live actor of the editor world raises SimulNotFound inside the
+        editor and comes back as an error envelope. With ``pie_action`` (a body that
         spawns actors), the body runs only while Play In Editor is stopped
         and the call is otherwise refused as PIEActive (``_outside_pie``).
         """
@@ -1797,10 +1898,16 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
         return await self._execute_json_script(code)
 
     async def get_actor_info(self, actor_path: str) -> Dict[str, Any]:
-        """Read an actor's world transform, components, tags and visibility, and ``pie_active``."""
+        """Read an actor's world transform, components, tags and visibility, and ``pie_active``.
+
+        Returns:
+            The actor's info. A not-found error naming the path when it names
+            no live actor of the level open in the editor: nothing there, an
+            actor already deleted, or one of a map that is not open, which
+            is never loaded (``_unreal_scripts.ACTOR_HELPERS``' ``actor_at``).
+        """
         return await self._execute_json_script(
             ACTOR_HELPERS
-            + EDITOR_WORLD
             + f"\nprint(json.dumps(dict(actor_info(actor_at({actor_path!r})), pie_active=pie_active())))"
         )
 
@@ -1818,11 +1925,25 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
             query: Search query string.
             class_names: Filter by UClass names.
             package_paths: Package path prefixes to search within.
-            max_results: Maximum number of results.
+            max_results: Maximum number of results, from 1 to
+                ``MAX_ASSET_SEARCH_RESULTS`` (1000).
 
         Returns:
-            Dictionary with ``assets`` list, ``count``, ``truncated``.
+            Dictionary with ``assets`` list, ``count``, ``truncated``, or a
+            ``ValidationError`` envelope, sent to no editor, when
+            ``max_results`` is out of range: Remote Control sizes its result
+            array to the limit, and -1 crashed the editor.
         """
+        if (
+            isinstance(max_results, bool)
+            or not isinstance(max_results, int)
+            or not 1 <= max_results <= MAX_ASSET_SEARCH_RESULTS
+        ):
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": f"max_results must be an integer from 1 to {MAX_ASSET_SEARCH_RESULTS}, got {max_results!r}",
+            }
         body: Dict[str, Any] = {
             "Query": query,
             "Limit": max_results,
@@ -2357,8 +2478,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             select (hidden in the editor or in a hidden or locked level, a
             child actor or an actor inside a level instance, or any actor
             while the editor mode or a selection lock prevents selection). A
-            ``ScriptError`` envelope when the actor cannot be found, before
-            the camera moves.
+            not-found error, before the camera moves, when the path names no
+            live actor of the level open in the editor (an actor deleted, or
+            one of a map that is not open, which is never loaded).
 
         Raises:
             ValueError: ``fov`` is under 0.001 degrees or not under 180, or
@@ -2668,89 +2790,113 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         self,
         actor_path: str,
         parent_path: Optional[str] = None,
+        detach: bool = False,
     ) -> Dict[str, Any]:
         """
-        Attach an actor to a parent actor or detach it.
+        Attach an actor to a parent actor, or detach it from its parent.
 
-        Calls the actor's ``K2_AttachToActor`` UFUNCTION, or without a parent
-        ``K2_DetachFromActor``, via Remote Control, keeping the world
-        transform either way.
+        One editor script (``_unreal_scripts.SET_ACTOR_PARENT``) attaches with
+        ``attach_to_actor`` (``K2_AttachToActor``) or detaches with
+        ``detach_from_actor``, keeping the world transform, in one undoable
+        transaction, and reads the parent back. Exactly one of
+        ``parent_path`` and ``detach`` is given. Unreal refuses to attach an
+        actor to itself, to an actor attached under it, or a Static actor
+        under a parent that is not Static, and returns False without a
+        reason; those are refused first, each with its reason.
 
         Args:
-            actor_path: Child actor path.
-            parent_path: Parent actor path (None to detach).
+            actor_path: Full path of the actor to attach or detach.
+            parent_path: Full path of the actor to attach it to.
+            detach: Detach the actor from its parent, keeping its world
+                transform. An actor with no parent is left as it is.
 
         Returns:
-            Dictionary with actor_path, parent_path.
+            Dictionary with actor_path, parent_path (the parent read back;
+            None once detached), previous_parent_path and changed (whether
+            the parent changed). A ``ValidationError`` envelope when neither or
+            both of parent_path and detach are given, for the actor itself as
+            its parent and for a cycle; ``InvalidState`` for an actor without
+            a root component or a Static child under a parent that is not
+            Static; a not-found error for an actor or parent path that names
+            no live actor of the level open in the editor; ``EngineError``
+            when Unreal still did not attach or detach it.
         """
-        if parent_path:
-            body: Dict[str, Any] = {
-                "objectPath": actor_path,
-                "functionName": "K2_AttachToActor",
-                "parameters": {
-                    "ParentActor": parent_path,
-                    "SocketName": "None",
-                    "LocationRule": "KeepWorld",
-                    "RotationRule": "KeepWorld",
-                },
+        if bool(parent_path) == bool(detach):
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": (
+                    "Pass parent_path to attach the actor, or detach=True to detach it from its parent"
+                    + (", not both" if detach else "")
+                ),
             }
-        else:
-            body = {
-                "objectPath": actor_path,
-                "functionName": "K2_DetachFromActor",
-                "parameters": {
-                    "LocationRule": "KeepWorld",
-                    "RotationRule": "KeepWorld",
-                },
-            }
-        await self._http_put("/remote/object/call", body)
-
-        return {
-            "actor_path": actor_path,
-            "parent_path": parent_path,
-        }
+        args = {"actor_path": actor_path, "parent_path": None if detach else parent_path}
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + SET_ACTOR_PARENT,
+            expected_errors=("NotFoundError", "ValidationError", "InvalidState"),
+        )
 
     async def add_component(
         self,
         actor_path: str,
         component_class: str,
         component_name: Optional[str] = None,
+        parent_component: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Add a component to an actor.
+        Add an instance component to an actor in the level.
 
-        Uses ``AddComponentByClass`` UFUNCTION via Remote Control.
+        One editor script (``_unreal_scripts.ADD_COMPONENT``) adds it the way
+        the editor's Add Component button does, through
+        ``SubobjectDataSubsystem.add_new_subobject`` (Remote Control refuses
+        ``AddComponentByClass`` on UE 5.7), names it, in one undoable
+        transaction, and reads it back from the actor. A scene component is
+        attached under ``parent_component`` or the root component, and
+        becomes the root of an actor without one.
 
         Args:
-            actor_path: Full actor path.
-            component_class: Component class name.
-            component_name: Optional name for the component.
+            actor_path: Full path of the actor.
+            component_class: A native component class name
+                (``PointLightComponent``) or a class path
+                (``/Script/Engine.PointLightComponent``, a Blueprint
+                component's ``/Game/BP_Lamp.BP_Lamp_C`` or its
+                ``/Game/BP_Lamp.BP_Lamp``). Abstract classes are refused.
+            component_name: Name of the new component, unique inside the
+                actor; None lets Unreal name it after its class.
+            parent_component: Name of the actor's scene component to attach
+                the new one under; None attaches it under the root component.
+                Only for a scene component.
 
         Returns:
-            Dictionary with actor_path, component_path, component_class.
+            Dictionary with actor_path, component_path, component_name,
+            component_class (the class read back), parent_component (the
+            component it is attached under, None for a component that is not
+            a scene component or became the root) and is_root. A
+            ``ValidationError`` envelope for an invalid or taken name, a
+            class that is abstract or not a component class, or a
+            parent_component for a component that takes none; a not-found
+            error for a class, parent component or actor that is not there;
+            ``EngineError`` when Unreal adds or names nothing.
         """
-        body: Dict[str, Any] = {
-            "objectPath": actor_path,
-            "functionName": "AddComponentByClass",
-            "parameters": {
-                "Class": f"/Script/Engine.{component_class}",
-                "bManualAttachment": False,
-                "RelativeTransform": {
-                    "Rotation": {"X": 0, "Y": 0, "Z": 0, "W": 1},
-                    "Translation": {"X": 0, "Y": 0, "Z": 0},
-                    "Scale3D": {"X": 1, "Y": 1, "Z": 1},
-                },
-                "bDeferredFinish": False,
-            },
-        }
-        data = await self._http_put("/remote/object/call", body)
-        component_path = data.get("ReturnValue", "")
-
-        return {
+        problem = None
+        if not component_class.strip():
+            problem = "component_class must name a component class"
+        elif component_name is not None:
+            problem = _object_name_error("component_name", component_name)
+        if problem is None and parent_component is not None:
+            problem = _object_name_error("parent_component", parent_component)
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
+        args = {
             "actor_path": actor_path,
-            "component_path": component_path,
-            "component_class": component_class,
+            "component_class": component_class.strip(),
+            "component_name": component_name,
+            "parent_component": parent_component,
         }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + ADD_COMPONENT,
+            expected_errors=("NotFoundError", "ValidationError"),
+        )
 
     async def set_actor_visibility(
         self,
@@ -2835,6 +2981,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         scalar_params: Optional[Dict[str, float]] = None,
         vector_params: Optional[Dict[str, list]] = None,
         texture_params: Optional[Dict[str, str]] = None,
+        allow_engine_content: bool = False,
     ) -> Dict[str, Any]:
         """
         Set parameters on a Material Instance Constant and read them back.
@@ -2850,7 +2997,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         does. A name only the material's Material Layers have is refused:
         Unreal's Python API writes parameters by name, and the global override
         it would add reads back as set while the layer stays as it was. The
-        instance is left unsaved.
+        instance is left unsaved. An instance outside ``/Game`` is refused
+        unless ``allow_engine_content`` is set: engine and plugin content is
+        shared by every project using that engine or plugin, and an edit to
+        /Engine/BasicShapes/BasicShapeMaterial_Inst left it dirty.
 
         Args:
             material_path: Material Instance asset path.
@@ -2858,6 +3008,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             vector_params: Vector parameter name to [r, g, b] or [r, g, b, a];
                 alpha defaults to 1.
             texture_params: Texture parameter name to texture asset path.
+            allow_engine_content: Also edit an instance outside the project's
+                /Game folder (engine or plugin content).
 
         Returns:
             Dictionary with material_path (the instance's object path),
@@ -2875,8 +3027,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             different after the write (not_applied names each; the values in
             applied were written and stay written, as for lights). An error
             envelope without them when the path loads nothing
-            (``NotFoundError``) or is not a Material Instance Constant
-            (``InvalidAssetType``).
+            (``NotFoundError``), is not a Material Instance Constant
+            (``InvalidAssetType``) or is outside /Game without
+            ``allow_engine_content`` (``SandboxError``).
         """
         values, refused, problems = _material_parameter_values(scalar_params, vector_params, texture_params)
         if problems:
@@ -2889,10 +3042,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "applied": {},
                 "not_applied": refused,
             }
-        args = {"path": material_path, "values": values}
+        args = {"path": material_path, "values": values, "allow_engine_content": bool(allow_engine_content)}
         return await self._execute_json_script(
             f"args = {args!r}\n" + SET_MATERIAL_PARAMS,
-            expected_errors=("NotFoundError", "InvalidAssetType", "ValidationError", "MaterialParamsNotApplied"),
+            expected_errors=(
+                "NotFoundError",
+                "InvalidAssetType",
+                "ValidationError",
+                "MaterialParamsNotApplied",
+                "SandboxError",
+            ),
         )
 
     async def create_material_instance(
@@ -2900,30 +3059,52 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         parent_path: str,
         instance_name: str,
         save_path: str = "",
+        allow_engine_content: bool = False,
     ) -> Dict[str, Any]:
         """
         Create a Material Instance Constant from a parent material.
 
         Uses ``MaterialInstanceConstantFactoryNew`` through ``AssetTools`` and
-        sets the parent, then saves the new asset.
+        sets the parent, then saves the new asset. It is written under the
+        project's /Game folder: without ``save_path``, next to a parent in
+        /Game, else in /Game/Materials. A folder outside /Game is refused
+        unless ``allow_engine_content`` is set: an instance of an /Engine
+        parent used to be saved into the shared engine install
+        (Engine/Content/BasicShapes).
 
         Args:
             parent_path: Parent material (or material instance) asset path.
             instance_name: Name for the new MIC.
-            save_path: Content-relative save directory (auto if empty).
+            save_path: Content folder to save it in, such as /Game/Materials;
+                empty picks the parent's folder when that is under /Game, else
+                /Game/Materials.
+            allow_engine_content: Also write to a folder outside /Game (engine
+                or plugin content, shared by every project using it).
 
         Returns:
-            Dictionary with instance_path, parent_path, or a ``ScriptError``
-            envelope when the parent is missing, the destination exists or
-            the asset could not be created, or a ``PIEActive`` envelope while
-            Play In Editor runs, when Unreal's EditorAssetLibrary loads,
-            finds and saves no assets.
+            Dictionary with instance_path, parent_path and class_name, or a
+            ``ScriptError`` envelope when the parent is missing, the
+            destination exists or the asset could not be created, a
+            ``PIEActive`` envelope while Play In Editor runs, when Unreal's
+            EditorAssetLibrary loads, finds and saves no assets, a
+            ``ValidationError`` envelope for a folder or name Unreal cannot
+            use and a ``SandboxError`` envelope for a folder outside /Game.
         """
         if not save_path:
-            # Derive save path from parent: /Game/Materials/M_Base -> /Game/Materials/
-            parts = parent_path.rsplit("/", 1)
-            save_path = parts[0] if len(parts) > 1 else "/Game"
+            # Next to a parent in /Game: /Game/Materials/M_Base -> /Game/Materials.
+            parent_folder = parent_path.rsplit("/", 1)[0] if "/" in parent_path else ""
+            save_path = parent_folder if _in_project_content(parent_folder) else DEFAULT_MATERIAL_FOLDER
         save_path = save_path.rstrip("/")
+        problem = _content_folder_problem(save_path) or _object_name_error("instance_name", instance_name)
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
+        if not allow_engine_content and not _in_project_content(save_path):
+            return _outside_project_refusal(
+                save_path,
+                "create a material instance in",
+                "Pass a save_path under /Game, such as /Game/Materials, or allow_engine_content=true "
+                "to write to the shared folder",
+            )
         args = {"parent": parent_path, "name": instance_name, "folder": save_path}
         code = f"args = {args!r}\n" + CREATE_MATERIAL_INSTANCE
         return await self._execute_json_script(code)
@@ -2937,8 +3118,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Assign a material to a mesh component's material slot.
 
-        Uses ``PUT /remote/object/property`` to set ``OverrideMaterials``
-        on the actor's first StaticMeshComponent.
+        Runs in one undoable editor transaction that records the component
+        first, which also marks its level (or, in a World Partition level, the
+        actor's package) dirty, so saving keeps the assignment, and reads the
+        slot back. ``MeshComponent.set_material`` alone, which the tool used
+        to call, recorded and dirtied nothing: a save kept nothing, a reload
+        reverted it and Undo did not undo it (observed on UE 5.7.4). The actor
+        must be in the level being edited; a path in another map is refused
+        without loading that map.
 
         Args:
             actor_path: Target actor path.
@@ -2946,26 +3133,25 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             slot_index: Material slot index (default 0).
 
         Returns:
-            Dictionary with actor_path, material_path, slot_index.
+            Dictionary with actor_path, component_path, material_path (the
+            assigned material's object path), slot_index and
+            previous_material_path (what the slot rendered with before). An
+            error envelope when the actor is not in the level being edited
+            (``Actor not found``), the material path names no material
+            (``NotFoundError``), the slot is out of range
+            (``ValidationError``) or the slot reads back a different material
+            (``MaterialNotApplied``).
         """
-
-        code = f"""
-material = unreal.load_asset({material_path!r})
-if material is None or not isinstance(material, unreal.MaterialInterface):
-    raise ValueError("Material not found: " + {material_path!r})
-if not 0 <= {slot_index!r} < component.get_num_materials():
-    raise ValueError("Material slot out of range")
-component.set_material({slot_index!r}, material)
-"""
-        return await self._component_operation(
-            actor_path,
-            code,
-            {
-                "actor_path": actor_path,
-                "material_path": material_path,
-                "slot_index": slot_index,
-            },
-            mesh=True,
+        if isinstance(slot_index, bool) or not isinstance(slot_index, int):
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": f"slot_index must be an integer, got {slot_index!r}",
+            }
+        args = {"actor_path": actor_path, "material_path": material_path, "slot_index": slot_index}
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + ASSIGN_MATERIAL,
+            expected_errors=("NotFoundError", "ValidationError"),
         )
 
     async def set_light_params(
@@ -3508,22 +3694,85 @@ component.set_material({slot_index!r}, material)
     # Phase 6: USD / SimReady Bridge
     # ------------------------------------------------------------------
 
+    def _import_export_timeout(self) -> float:
+        """Seconds the import and export tools wait: ``unreal.import_export_timeout``, at least ``timeout``."""
+        return float(max(self.timeout, self.settings.unreal.import_export_timeout))
+
+    async def _run_import_export(
+        self, code: str, work: str, expected_errors: Sequence[str] = ()
+    ) -> Dict[str, Any]:
+        """Run an import or export script with ``unreal.import_export_timeout``.
+
+        Remote Control cannot cancel a script it stopped waiting for, so a
+        timeout is reported as work that may still finish: the first USD
+        export of an editor session took 26-40 s against the 30 s default and
+        came back as a bare TimeoutError while its files were still written
+        (observed on UE 5.7.4).
+
+        Args:
+            code: The script.
+            work: What the script does, completing "... may still complete":
+                "the export to /tmp/x.usda".
+            expected_errors: ``error_type`` values the script reports for a
+                request it refused as asked.
+
+        Returns:
+            The script's result, or a ``TimeoutError`` envelope.
+        """
+        timeout = self._import_export_timeout()
+        try:
+            return await self._execute_json_script(code, expected_errors=expected_errors, timeout=timeout)
+        except asyncio.TimeoutError:
+            self.logger.warning("Unreal did not answer within %gs; %s may still complete", timeout, work)
+            return {
+                "success": False,
+                "error_type": "TimeoutError",
+                "error": (
+                    f"Unreal did not answer within {timeout:g} s, but the editor keeps running the script, "
+                    f"so {work} may still complete. Check the result before retrying: a retry runs it again."
+                ),
+                "details": {
+                    "timeout_seconds": timeout,
+                    "hint": "Raise UNREAL__IMPORT_EXPORT_TIMEOUT (unreal.import_export_timeout) for large files "
+                    "or levels.",
+                },
+            }
+
     async def import_usd(
         self,
         usd_path: str,
         destination_path: str = "/Game/Imports",
         import_options: Optional[Dict[str, Any]] = None,
+        replace_existing: bool = False,
     ) -> Dict[str, Any]:
         """
         Import a USD file with the optional USDImporter plugin.
+
+        The assets go to ``<destination_path>/<file name>`` and, with
+        import_actors, the actors to the level being edited. Without
+        ``replace_existing`` the import is refused when that folder already
+        holds assets, and existing actors are kept (new ones are added beside
+        them): Unreal's USD importer otherwise replaces both, an earlier
+        import's actors and customized assets included. The options are set
+        without saving them to the project's config, where the editor's own
+        import dialog would read them. The call waits
+        ``unreal.import_export_timeout``.
 
         Args:
             usd_path: Path to the USD file on disk.
             destination_path: Content browser destination.
             import_options: Interchange pipeline options.
+            replace_existing: Replace the assets in the destination folder and
+                the level's actors from an earlier import of this file.
 
         Returns:
-            Dict with imported_assets, actor_paths, warnings.
+            Dict with imported_assets, actor_paths (actors added to the level),
+            removed_actor_paths (actors the import replaced) and warnings, or
+            an error envelope: ``InvalidState`` when the folder already holds
+            assets and ``replace_existing`` is false (nothing is imported),
+            ``NotFoundError`` for a file the editor host does not have,
+            ``EngineError`` when the importer produced nothing, ``PIEActive``,
+            ``PluginUnavailable`` and ``TimeoutError``.
 
         Raises:
             SandboxDenied: If ``usd_path`` is outside the sandbox.
@@ -3534,6 +3783,8 @@ component.set_material({slot_index!r}, material)
             "/"
         ):
             raise ValueError("destination_path must be a /Game/ content directory")
+        if type(replace_existing) is not bool:
+            raise ValueError("replace_existing must be true or false")
         options = import_options or {}
         allowed = {
             "import_actors",
@@ -3546,8 +3797,18 @@ component.set_material({slot_index!r}, material)
             raise ValueError(
                 f"import_options accepts boolean values for: {sorted(allowed)}"
             )
-        args = {"path": usd_path, "destination": destination_path, "options": options}
-        return await self._execute_json_script(f"args = {args!r}\n" + USD_IMPORT)
+        args = {
+            "path": usd_path,
+            "destination": destination_path.rstrip("/"),
+            "name": _sanitized_object_name(Path(usd_path).stem),
+            "options": options,
+            "replace": replace_existing,
+        }
+        return await self._run_import_export(
+            f"args = {args!r}\n" + USD_IMPORT,
+            f"the import of {usd_path}",
+            expected_errors=("NotFoundError", "InvalidState", "PluginUnavailable"),
+        )
 
     async def export_usd(
         self,
@@ -3558,13 +3819,26 @@ component.set_material({slot_index!r}, material)
         """
         Export selected actors with the optional USDImporter plugin.
 
+        Every actor must be in the level being edited; a path in another map
+        is refused without loading that map. The actors exported are read
+        back from the written stage: Unreal's exporter leaves out what it does
+        not export (editor helpers such as WorldSettings or PlayerStart)
+        without an error, and an export that wrote none of them fails. The
+        call waits ``unreal.import_export_timeout``, since the first USD
+        export of an editor session loads the USD Python modules (25-40 s).
+
         Args:
             actor_paths: Actor paths to export.
             output_path: Output USD file path.
             export_options: Export pipeline options.
 
         Returns:
-            Dict with output_path, actors_exported, file_size_bytes.
+            Dict with output_path, actors_exported (the actors the stage has a
+            prim for), exported_prims (each one's actor_path and prim_path),
+            skipped_actors (the actors it has none for) and file_size_bytes,
+            or an error envelope: ``EngineError`` when Unreal exported nothing
+            or failed, ``PIEActive``, ``PluginUnavailable`` and
+            ``TimeoutError``.
 
         Raises:
             SandboxDenied: If ``output_path`` is outside the sandbox.
@@ -3582,8 +3856,10 @@ component.set_material({slot_index!r}, material)
                 f"export_options accepts boolean values for: {sorted(allowed)}"
             )
         args = {"path": output_path, "actors": actor_paths, "options": options}
-        return await self._execute_json_script(
-            ACTOR_HELPERS + f"\nargs = {args!r}\n" + USD_EXPORT
+        return await self._run_import_export(
+            f"args = {args!r}\n" + USD_EXPORT,
+            f"the export to {output_path}",
+            expected_errors=("PluginUnavailable",),
         )
 
     async def convert_to_simready(

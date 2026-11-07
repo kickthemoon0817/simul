@@ -19,6 +19,9 @@ version: 0.1.0
 | Add rigid body | `add_isaac_rigid_body` |
 | Add collision | `add_isaac_collision` |
 | Physics material | `set_isaac_physics_material` |
+| Physics rate, solver settings | `configure_isaac_physics_scene` |
+| Joint drives and limits | `set_isaac_joint_drive`, `set_isaac_joint_limits` |
+| Robot joints in order | `list_isaac_articulations` |
 | Start/stop sim | `start_isaac_simulation`, `stop_isaac_simulation` |
 | Query scene | `get_isaac_scene_summary`, `get_isaac_prim_detail` with `aspects=["info"]` |
 
