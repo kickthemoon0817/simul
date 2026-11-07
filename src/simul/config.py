@@ -32,6 +32,7 @@ from pydantic_settings import (
 
 from .resources import find_checkout_root, resource_filesystem_path
 from .tool_surfaces import THIN_BLENDER_TOOLS, THIN_UNREAL_TOOLS, describe_tools
+from .utils.paths import STATE_DIR_VARIABLE, default_state_path, state_dir
 
 _CHECKOUT_ROOT: Optional[Path] = find_checkout_root()
 _DEFAULT_CONFIG_FILE: Path = resource_filesystem_path("config", "default.yaml")
@@ -432,9 +433,13 @@ class BlenderConfig(BaseModel):
     mode: Literal["embedded", "attached"] = Field(
         default="embedded", description="Use local bpy or an explicitly attached Blender window"
     )
-    discovery_dir: str = Field(default="~/.simul/blender", description="Local Blender bridge discovery directory")
+    discovery_dir: str = Field(
+        default_factory=lambda: default_state_path("blender"),
+        description="Local Blender bridge discovery directory (default $SIMUL_HOME/blender, else ~/.simul/blender)",
+    )
     attachment_path: str = Field(
-        default="~/.simul/blender/attachment.json", description="Target written by simul blender attach"
+        default_factory=lambda: default_state_path("blender", "attachment.json"),
+        description="Target written by simul blender attach (default under the state directory)",
     )
     connection_timeout: float = Field(default=30.0, gt=0, le=3600)
     binary_path: Optional[str] = Field(
@@ -482,7 +487,8 @@ class UnrealConfig(BaseModel):
         "endpoint", description="Use configured host/port or the explicitly attached editor"
     )
     attachment_path: str = Field(
-        "~/.simul/unreal/attachment.json", description="Saved editor/map/viewport selection"
+        default_factory=lambda: default_state_path("unreal", "attachment.json"),
+        description="Saved editor/map/viewport selection (default under the state directory)",
     )
 
     enabled: bool = Field(default=True, description="Enable Unreal Engine runtime tools")
@@ -612,7 +618,10 @@ class LoggingConfig(BaseModel):
     level: str = Field(default="INFO", description="Log level")
     format: str = Field(default="detailed", description="Log format")
     file_enabled: bool = Field(default=True, description="Enable file logging")
-    file_path: str = Field(default="~/.simul/logs/simul.log", description="Log file path")
+    file_path: str = Field(
+        default_factory=lambda: default_state_path("logs", "simul.log"),
+        description="Log file path (default $SIMUL_HOME/logs/simul.log, else ~/.simul/logs/simul.log)",
+    )
     console_enabled: bool = Field(default=True, description="Enable console logging")
     console_colored: bool = Field(
         default=True, description="Enable colored console output"
@@ -643,7 +652,7 @@ class LoggingConfig(BaseModel):
         description="Write a per-tool-call audit JSONL file alongside main logs.",
     )
     audit_path: str = Field(
-        default="~/.simul/logs/audit.jsonl",
+        default_factory=lambda: default_state_path("logs", "audit.jsonl"),
         description="Destination of the per-tool-call audit JSONL stream.",
     )
     structured_enabled: bool = Field(
@@ -1383,6 +1392,8 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
     env = dict(os.environ)
     if _CHECKOUT_ROOT is not None:
         env.setdefault("PROJECT_ROOT", str(_CHECKOUT_ROOT))
+    # ``${SIMUL_HOME}`` in a YAML value is the state directory, set or not.
+    env.setdefault(STATE_DIR_VARIABLE, str(state_dir()))
     raw = _expand_placeholders(config_data, env)
 
     payload: Dict[str, Any] = {}
@@ -1663,17 +1674,18 @@ def validate_settings(settings: Settings) -> List[str]:
     errors: List[str] = []
     relative_root = _CHECKOUT_ROOT or Path.cwd()
 
-    # Validate log file directory
+    # Validate the log file directory without creating it: validating a
+    # config is not a reason to write anything.
     if settings.logging.file_enabled:
         log_path = Path(settings.logging.file_path).expanduser()
         if not log_path.is_absolute():
             log_path = relative_root / log_path
         log_dir = log_path.parent
-        if not log_dir.exists():
-            try:
-                log_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                errors.append(f"Cannot create log directory {log_dir}: {e}")
+        existing = log_dir
+        while not existing.exists() and existing.parent != existing:
+            existing = existing.parent
+        if not existing.is_dir() or not os.access(existing, os.W_OK | os.X_OK):
+            errors.append(f"Cannot write the log directory {log_dir}: {existing} is not a writable directory")
 
     # Validate allowed paths exist. Relative entries only name something inside a
     # source checkout; the sandbox policy drops them everywhere else.

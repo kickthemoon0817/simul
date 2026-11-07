@@ -72,8 +72,9 @@ isaac_sim:
 blender:
   enabled: true
   mode: embedded  # attached controls the existing window selected by `simul blender attach`
-  discovery_dir: "~/.simul/blender"
-  attachment_path: "~/.simul/blender/attachment.json"
+  # State files default under the state directory ($SIMUL_HOME, else ~/.simul).
+  # discovery_dir: "${SIMUL_HOME}/blender"
+  # attachment_path: "${SIMUL_HOME}/blender/attachment.json"
   connection_timeout: 30.0
   max_scene_objects: 200
 
@@ -109,7 +110,8 @@ logging:
   # File logging
   file:
     enabled: true
-    path: "~/.simul/logs/simul.log"
+    # Default: $SIMUL_HOME/logs/simul.log, else ~/.simul/logs/simul.log
+    # path: "${SIMUL_HOME}/logs/simul.log"
     # Suffix filenames with the process PID so concurrent servers do not interleave
     per_instance: false
     # Daily rotations kept by the timed handler
@@ -123,7 +125,8 @@ logging:
   # Per-tool-call audit JSONL stream
   audit:
     enabled: true
-    path: "~/.simul/logs/audit.jsonl"
+    # Default: $SIMUL_HOME/logs/audit.jsonl, else ~/.simul/logs/audit.jsonl
+    # path: "${SIMUL_HOME}/logs/audit.jsonl"
 
   # Structured JSON copy of every log record (simul.json)
   structured:
@@ -172,4 +175,4 @@ security:
 # Unreal connection: endpoint uses host/port; attached uses simul unreal attach.
 unreal:
   mode: endpoint
-  attachment_path: "~/.simul/unreal/attachment.json"
+  # attachment_path: "${SIMUL_HOME}/unreal/attachment.json"   # default under the state directory

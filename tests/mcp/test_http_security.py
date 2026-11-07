@@ -208,7 +208,7 @@ class TestRun:
 
         asyncio.run(instance.run("stdio"))
 
-        assert instance.mcp.run_calls == [{"transport": "stdio"}]
+        assert instance.mcp.run_calls == [{"transport": "stdio", "show_banner": False}]
 
 
 class TestCli:

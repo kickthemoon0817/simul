@@ -75,6 +75,15 @@ simul server --config /abs/path/config.yaml --log-level DEBUG
 neither probed nor built. Isaac Sim is not probed either when its tools are
 skipped (on macOS, or with `ISAAC_SIM__ENABLED=false`); the banner says so.
 
+The server prints simul's banner on stderr; FastMCP's own banner, and the
+PyPI update check that came with it, are off. MCP clients see simul's version
+in `serverInfo.version`, the same one `simul version` prints. SIGTERM stops
+the server the way Ctrl-C does, over stdio and HTTP alike: the adapters are
+closed (`Simul 3D MCP Server shut down` in the log) and the process exits 0.
+State (logs, usage log, sessions) goes under `$SIMUL_HOME` (default
+`~/.simul`), created on first write; see
+[configuration.md](configuration.md#state-directory-simul_home).
+
 With `--transport http` or `sse` the server checks every request's `Host`
 and `Origin` headers against loopback, the bound address and
 `server.allowed_hosts` / `allowed_origins` (the DNS-rebinding defense), and
@@ -209,7 +218,7 @@ locally.
 
 | Command | Purpose |
 |---|---|
-| `install-bridge [--output PATH]` | Build the add-on ZIP (default `~/.simul/blender/simul_blender_bridge.zip`) |
+| `install-bridge [--output PATH]` | Build the add-on ZIP (default `$SIMUL_HOME/blender/simul_blender_bridge.zip`, `SIMUL_HOME` defaulting to `~/.simul`) |
 | `instances` | Bridge-enabled Blender processes, window IDs, files, scenes and unsaved state |
 | `attach [--instance ID] [--window ID]` | Select a window; IDs are required only when the choice is ambiguous |
 | `status` | Verify the saved attachment against the running process |

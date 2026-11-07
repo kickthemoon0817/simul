@@ -18,9 +18,12 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from ..utils.paths import state_dir
+
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SESSION_DIR = Path.home() / ".simul" / "sessions"
+# Under $SIMUL_HOME (default ~/.simul); created on the first write, not here.
+_DEFAULT_SESSION_DIR = state_dir() / "sessions"
 CLAIM_TTL_SECONDS = 120.0
 _STOPWORDS = frozenset({
     "a", "an", "the", "and", "or", "for", "in", "on", "to", "of",
@@ -41,7 +44,6 @@ class InstanceSession:
     def __init__(self, port: int, session_dir: Path | None = None) -> None:
         self._port = port
         self._dir = session_dir or _DEFAULT_SESSION_DIR
-        self._dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._file = self._dir / f"{port}.json"
 
     def _read(self) -> list[dict[str, Any]]:
@@ -66,8 +68,9 @@ class InstanceSession:
         return active
 
     def _write(self, sessions: list[dict[str, Any]]) -> None:
-        """Persist session list to disk."""
+        """Persist session list to disk, creating the session directory on first use."""
         try:
+            self._dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             with open(
                 os.open(self._file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
                 "w", encoding="utf-8",
@@ -185,7 +188,6 @@ class SessionManager:
 
     def __init__(self, session_dir: Path | None = None) -> None:
         self._dir = session_dir or _DEFAULT_SESSION_DIR
-        self._dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def get_instance_session(self, port: int) -> InstanceSession:
         """

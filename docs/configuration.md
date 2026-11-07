@@ -85,13 +85,42 @@ its value is a JSON object, which then sets that section's fields
 used by `simul isaac launch` and `install-bridge`; the YAML default for
 `isaac_sim.path` reads it.
 
+## State directory: `SIMUL_HOME`
+
+simul keeps its state in one directory: `$SIMUL_HOME` when set, otherwise
+`~/.simul`. Each of these defaults to a path under it and moves with it,
+unless you configure that path yourself:
+
+| What | Path under the state directory | Setting |
+|---|---|---|
+| Text log, error and debug logs | `logs/simul.log`, `logs/simul_errors.log`, ... | `LOGGING__FILE_PATH` |
+| Audit stream | `logs/audit.jsonl` | `LOGGING__AUDIT_PATH` |
+| Tool usage log (`simul stats`, `get_tool_usage_stats`) | `logs/tool_usage.jsonl` | none |
+| Isaac Sim session and claim records | `sessions/<port>.json` | none |
+| Blender discovery files and the attachment | `blender/`, `blender/attachment.json` | `BLENDER__DISCOVERY_DIR`, `BLENDER__ATTACHMENT_PATH` |
+| `simul blender install-bridge` ZIP | `blender/simul_blender_bridge.zip` | `--output` |
+| Unreal attachment | `unreal/attachment.json` | `UNREAL__ATTACHMENT_PATH` |
+| FastMCP's data directory | `fastmcp/` | `FASTMCP_HOME` |
+
+Directories are created when something is first written there, with mode
+`0700`. Commands that only read (`simul tools`, `info`, `validate-config`,
+`logs paths`) create nothing, and a server whose home directory is read-only
+still starts: point `SIMUL_HOME` at a writable directory and everything lands
+there. The variable is read when a process starts, so set it in the MCP
+client's server entry or your shell, not in a config file. A YAML value may
+use `${SIMUL_HOME}`, which expands to the state directory whether or not the
+variable is set. The Blender add-on finds discovery files through the same
+variable, so Blender must see the same `SIMUL_HOME` as the server (or set
+`SIMUL_BLENDER_DISCOVERY_DIR` in Blender's environment and
+`BLENDER__DISCOVERY_DIR` for the server).
+
 ## Common settings
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `LOGGING__LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `LOGGING__FILE_PATH` | `~/.simul/logs/simul.log` | Text log (rotated daily, 14 days kept) |
-| `LOGGING__AUDIT_PATH` | `~/.simul/logs/audit.jsonl` | One JSON line per tool call |
+| `LOGGING__FILE_PATH` | `$SIMUL_HOME/logs/simul.log` (`~/.simul/...`) | Text log (rotated daily, 14 days kept) |
+| `LOGGING__AUDIT_PATH` | `$SIMUL_HOME/logs/audit.jsonl` (`~/.simul/...`) | One JSON line per tool call |
 | `ISAAC_SIM__ENABLED` | `auto` | Register the Isaac Sim tools: `auto` on Linux and Windows only (elsewhere when `--backends` names `isaac`), `true` on any OS, `false` never; see [isaac-sim.md](isaac-sim.md#platforms) |
 | `ISAAC_SIM__SOCKET_PORT` / `ISAAC_SIM__BRIDGE_PORT` | `8226` / `8229` | Isaac Sim transports |
 | `ISAAC_SIM__SOCKET_PROTOCOL` | `auto` | `python_server` (6.0+) or `vscode` (5.x) skips the one-time probe |
