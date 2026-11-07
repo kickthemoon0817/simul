@@ -12,7 +12,7 @@ This skill teaches you how to load, inspect, analyze, and modify USD files using
 
 | Tool set | When to use | Identifier |
 |---|---|---|
-| `load_usd_file`, `get_prim_info`, `search_prims`, `get_mesh_info`, `get_bounding_box`, `summarize_scene`, `create_prim`, `update_prim_attributes`, `delete_prim` | Offline/headless USD file analysis and editing | `stage_id` |
+| `load_usd_file`, `get_prim_info`, `search_prims`, `get_mesh_info`, `get_bounding_box`, `summarize_scene`, `create_prim`, `update_prim_attributes`, `delete_prim`, `list_usd_stages`, `save_usd_stage`, `export_usd_stage`, `reload_usd_stage`, `unload_usd_stage` | Offline/headless USD file analysis, editing and saving | `stage_id` |
 | `get_isaac_prim_detail` (aspects: info, mesh, ...), `search_isaac_prims`, etc. | Live Isaac Sim scene (running instance) | prim path only |
 
 **Never mix these two sets.** If Isaac Sim is not running, use the headless tools with `stage_id`. If Isaac Sim is running with a stage open, use the Isaac tools (names containing `isaac`, such as `get_isaac_prim_detail`).
@@ -191,7 +191,12 @@ error names the prim, each rejected attribute and the reason.
   reference cannot be deleted from the root layer; deactivate it with
   `attributes: {"active": false}` instead.
 
-**Note:** Modifications via these tools write back to the loaded stage. To persist changes to disk, the stage must be saved — use `execute_isaac_script` with `stage.Export(path)` if Isaac Sim is running, or be aware that headless modifications may require a separate save step depending on server configuration.
+**Saving:** edits stay in memory until you write them, and are lost when the server exits.
+
+- `save_usd_stage` (`stage_id`) writes the edits back to the stage's own file. It refuses a `.usdz`, and a file that changed on disk since it was loaded unless `overwrite_external_changes: true`.
+- `export_usd_stage` (`stage_id`, `file_path`, optional `flatten`, `overwrite`) writes a new `.usda`/`.usdc`/`.usd`/`.usdz`.
+- `list_usd_stages` shows which stages have unsaved edits.
+- `reload_usd_stage` / `unload_usd_stage` take `discard_unsaved: true` to drop edits.
 
 ## Common Analysis Workflows
 
@@ -230,6 +235,6 @@ error names the prim, each rejected attribute and the reason.
 
 - **Using headless tools on a live stage**: Do not use `get_prim_info` (headless) when Isaac Sim is running and you want live data — use `get_isaac_prim_detail` with `aspects=["info"]` instead.
 - **Forgetting `stage_id`**: Every headless call requires the `stage_id` from `load_usd_file`. Calling `get_prim_info` without it will fail.
-- **Stage ID is session-scoped**: The `stage_id` is not persistent across tool sessions. If the session resets, call `load_usd_file` again.
+- **Stage ID is session-scoped**: A `stage_id` belongs to the MCP session that loaded it (other sessions get `NotFoundError`) and does not survive a server restart. If the session resets, call `load_usd_file` again, after saving any edits you need with `save_usd_stage` or `export_usd_stage`.
 - **Large scenes**: `summarize_scene` with `include_meshes: true` on a scene with thousands of meshes can be slow. Use `include_meshes: false` for a quick overview first.
 - **`by_name` is substring match**: `search_prims` with `by_name: "link"` will match `base_link`, `arm_link_1`, etc. Use more specific queries to narrow results.

@@ -31,7 +31,15 @@ from ..schemas.usd import (
     Purpose,
     SceneSummaryRequest,
     SceneSummaryResponse,
+    StageDiscardRequest,
+    StageExportRequest,
+    StageExportResponse,
     StageInfo,
+    StageListResponse,
+    StageReloadResponse,
+    StageSaveRequest,
+    StageSaveResponse,
+    StageUnloadResponse,
     USDFileInfo,
     USDFileRequest,
     USDValidateRequest,
@@ -82,10 +90,19 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     """Register USD-related tools."""
     from ...usd.editing import USDEditError
 
+    # Stages belong to the MCP session that loaded them (see HeadlessUSDSession).
+    adapter = server.headless_adapter
+    if adapter is not None and hasattr(adapter, "set_owner_resolver"):
+        adapter.set_owner_resolver(server._get_request_session_id)
+
     @server.mcp.tool(
         name="load_usd_file",
         description=(
-            "Load a USD file and return stage information. "
+            "Load a USD file into a stage private to this MCP session and return stage "
+            "information. Loading the same file again returns the same stage while it has "
+            "no unsaved edits and its files are unchanged on disk; otherwise a fresh stage "
+            "is read from disk, rereading changed sublayers and references. Edits stay in "
+            "memory until save_usd_stage or export_usd_stage writes them. "
             "Paths: sandbox (security.allowed_paths)."
         ),
         annotations=server._tool_annotations(
@@ -111,9 +128,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if isinstance(input_data, dict):
                 return input_data
 
-            stage_id = session.load_stage(
-                server._path_policy.authorize(input_data.file_path)
-            )
+            try:
+                stage_id = session.load_stage(
+                    server._path_policy.authorize(input_data.file_path)
+                )
+            except USDEditError as exc:
+                return _edit_error("load_usd_file", exc)
             stage_info = session.get_stage_info(stage_id) if stage_id else None
             if not stage_id or stage_info is None:
                 return ErrorResponse(
@@ -842,4 +862,277 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             SceneSummaryResponse,
             _summarize,
             params={"stage_id": stage_id, "include_meshes": include_meshes, "format": format},
+        )
+
+    @server.mcp.tool(
+        name="list_usd_stages",
+        description=(
+            "List the USD stages this MCP session has loaded: each one's stage_id, file, "
+            "whether it has unsaved edits, and which of its files changed on disk since it "
+            "was read. Stages are private to the session that loaded them, and edits live "
+            "in memory until save_usd_stage or export_usd_stage writes them."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=False
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def list_usd_stages() -> ToolResult:
+        """
+        List the loaded USD stages.
+
+        Returns:
+            The stages with their unsaved and on-disk state
+        """
+
+        def _list(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            stages = [session.stage_status(stage_id) for stage_id in session.list_stages()]
+            return StageListResponse(success=True, stages=stages, count=len(stages)).model_dump()
+
+        return await server._exec_backend(
+            "list_usd_stages", server.headless_adapter, "USD", StageListResponse, _list, params={}
+        )
+
+    @server.mcp.tool(
+        name="save_usd_stage",
+        description=(
+            "Save a stage's edits to its own file: the root layer, which every edit "
+            "targets. Paths: sandbox (security.allowed_paths); the file must be writable "
+            "there. Refuses a .usdz root (use export_usd_stage) and a file that changed on "
+            "disk after the stage read it, unless overwrite_external_changes=true. A stage "
+            "with no unsaved edits writes nothing. Reports the files written."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=False, destructive=True
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def save_usd_stage(
+        stage_id: str, overwrite_external_changes: bool = False
+    ) -> ToolResult:
+        """
+        Save a USD stage in place.
+
+        Args:
+            stage_id: Stage identifier returned by load_usd_file
+            overwrite_external_changes: Save even though the file changed on disk after
+                the stage read it, replacing those changes
+
+        Returns:
+            The files written, or error
+        """
+
+        def _save(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(
+                StageSaveRequest,
+                stage_id=stage_id,
+                overwrite_external_changes=overwrite_external_changes,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                server._path_policy.authorize(
+                    session.stage_file_path(input_data.stage_id), write=True
+                )
+                result = session.save_stage(
+                    input_data.stage_id,
+                    overwrite_external_changes=input_data.overwrite_external_changes,
+                )
+            except USDEditError as exc:
+                return _edit_error("save_usd_stage", exc)
+            message = (
+                f"Saved {result['file_path']}"
+                if result["saved"]
+                else f"No unsaved edits; {result['file_path']} was not written"
+            )
+            return StageSaveResponse(success=True, message=message, **result).model_dump()
+
+        return await server._exec_backend(
+            "save_usd_stage",
+            server.headless_adapter,
+            "USD",
+            StageSaveResponse,
+            _save,
+            params={
+                "stage_id": stage_id,
+                "overwrite_external_changes": overwrite_external_changes,
+            },
+        )
+
+    @server.mcp.tool(
+        name="export_usd_stage",
+        description=(
+            "Write a stage to a new file: .usda, .usdc, .usd, or .usdz (packaged with the "
+            "files it depends on). flatten=true writes the composed stage as one layer; "
+            "otherwise the root layer is written with its sublayers, references and "
+            "payloads kept as composition arcs and relative asset paths re-anchored to the "
+            "new location. Refuses an existing file unless overwrite=true. The stage stays "
+            "bound to its own file and keeps its unsaved state. "
+            "Paths: sandbox (security.allowed_paths)."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=False, destructive=True
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def export_usd_stage(
+        stage_id: str, file_path: str, flatten: bool = False, overwrite: bool = False
+    ) -> ToolResult:
+        """
+        Export a USD stage to a new file.
+
+        Args:
+            stage_id: Stage identifier returned by load_usd_file
+            file_path: Destination file; its extension (.usda, .usdc, .usd, .usdz) picks
+                the format, and its directory must exist
+            flatten: Write the composed stage (all layers and arcs) as a single layer
+            overwrite: Replace the destination if it already exists
+
+        Returns:
+            The file written, or error
+        """
+
+        def _export(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(
+                StageExportRequest,
+                stage_id=stage_id,
+                file_path=file_path,
+                flatten=flatten,
+                overwrite=overwrite,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            destination = server._path_policy.authorize(input_data.file_path, write=True)
+            try:
+                result = session.export_stage(
+                    input_data.stage_id,
+                    destination,
+                    flatten=input_data.flatten,
+                    overwrite=input_data.overwrite,
+                )
+            except USDEditError as exc:
+                return _edit_error("export_usd_stage", exc)
+            how = "flattened " if result["flatten"] else ""
+            message = f"Wrote {how}{result['format']} file {result['file_path']}"
+            return StageExportResponse(success=True, message=message, **result).model_dump()
+
+        return await server._exec_backend(
+            "export_usd_stage",
+            server.headless_adapter,
+            "USD",
+            StageExportResponse,
+            _export,
+            params={
+                "stage_id": stage_id,
+                "file_path": file_path,
+                "flatten": flatten,
+                "overwrite": overwrite,
+            },
+        )
+
+    @server.mcp.tool(
+        name="reload_usd_stage",
+        description=(
+            "Reread a stage from disk: its root file, and any sublayer or referenced file "
+            "that changed. Use it after the files were edited outside this server, or to "
+            "drop edits. Refuses a stage with unsaved edits unless discard_unsaved=true."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=False, destructive=True
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def reload_usd_stage(stage_id: str, discard_unsaved: bool = False) -> ToolResult:
+        """
+        Reload a USD stage from disk.
+
+        Args:
+            stage_id: Stage identifier returned by load_usd_file
+            discard_unsaved: Reload even though the stage has unsaved edits, which are lost
+
+        Returns:
+            The files reread, or error
+        """
+
+        def _reload(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(
+                StageDiscardRequest, stage_id=stage_id, discard_unsaved=discard_unsaved
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                result = session.reload_stage(
+                    input_data.stage_id, discard_unsaved=input_data.discard_unsaved
+                )
+            except USDEditError as exc:
+                return _edit_error("reload_usd_stage", exc)
+            dropped = "; unsaved edits were discarded" if result["discarded_unsaved"] else ""
+            message = f"Reloaded {result['file_path']}{dropped}"
+            return StageReloadResponse(success=True, message=message, **result).model_dump()
+
+        return await server._exec_backend(
+            "reload_usd_stage",
+            server.headless_adapter,
+            "USD",
+            StageReloadResponse,
+            _reload,
+            params={"stage_id": stage_id, "discard_unsaved": discard_unsaved},
+        )
+
+    @server.mcp.tool(
+        name="unload_usd_stage",
+        description=(
+            "Close a loaded stage and free its memory; its stage_id stops working. "
+            "Refuses a stage with unsaved edits unless discard_unsaved=true."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=False, destructive=True
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def unload_usd_stage(stage_id: str, discard_unsaved: bool = False) -> ToolResult:
+        """
+        Unload a USD stage.
+
+        Args:
+            stage_id: Stage identifier returned by load_usd_file
+            discard_unsaved: Unload even though the stage has unsaved edits, which are lost
+
+        Returns:
+            Confirmation, or error
+        """
+
+        def _unload(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(
+                StageDiscardRequest, stage_id=stage_id, discard_unsaved=discard_unsaved
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                dirty = session.stage_status(input_data.stage_id)["has_unsaved_changes"]
+                session.unload_stage(
+                    input_data.stage_id, discard_unsaved=input_data.discard_unsaved
+                )
+            except USDEditError as exc:
+                return _edit_error("unload_usd_stage", exc)
+            dropped = "; unsaved edits were discarded" if dirty else ""
+            return StageUnloadResponse(
+                success=True,
+                stage_id=input_data.stage_id,
+                discarded_unsaved=dirty,
+                message=f"Unloaded stage {input_data.stage_id}{dropped}",
+            ).model_dump()
+
+        return await server._exec_backend(
+            "unload_usd_stage",
+            server.headless_adapter,
+            "USD",
+            StageUnloadResponse,
+            _unload,
+            params={"stage_id": stage_id, "discard_unsaved": discard_unsaved},
         )

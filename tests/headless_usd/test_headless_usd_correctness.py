@@ -152,7 +152,7 @@ class TestUnloadReload:
         stage_id = session.load_stage(file_path)
         assert session.create_prim(stage_id, "/Unsaved", "Xform")
 
-        assert session.unload_stage(stage_id)
+        assert session.unload_stage(stage_id, discard_unsaved=True)
         reloaded_id = session.load_stage(file_path)
 
         reloaded = session.get_stage(reloaded_id)

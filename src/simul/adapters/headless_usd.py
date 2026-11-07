@@ -8,9 +8,12 @@ processing without GUI or simulation capabilities.
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Union
+import os
+import secrets
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
 
 from ..usd._pxr import Gf, Usd, UsdGeom, UsdShade
 
@@ -18,12 +21,34 @@ from ..logging import get_logger, LoggerMixin
 from ..utils.timing import monitor_performance
 from ..config import Settings, get_settings
 from ..usd import USDReader, BBoxCache, MeshOperations, SceneSummarizer
-from ..usd import editing
+from ..usd import editing, stage_files
 from ..usd.editing import USDEditError
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
 
 logger = get_logger(__name__)
+
+# A session that keeps loading without unloading is refused past this many stages.
+MAX_STAGES_PER_OWNER = 32
+SAVE_FAILED = editing.SAVE_FAILED
+INVALID_FILE_PATH = editing.INVALID_FILE_PATH
+
+
+@dataclass
+class _StageRecord:
+    """What the session knows about one loaded stage besides the stage itself.
+
+    Attributes:
+        file_path: Resolved path of the root file.
+        owner: The MCP session that loaded the stage (None outside MCP, and
+            for anonymous sessionless HTTP requests).
+        mtimes: Modification time of each file the stage composes, as of
+            the load, the last reload or the last save.
+    """
+
+    file_path: str
+    owner: Optional[str]
+    mtimes: Dict[str, Optional[int]] = field(default_factory=dict)
 
 
 class HeadlessUSDSession(LoggerMixin):
@@ -32,6 +57,14 @@ class HeadlessUSDSession(LoggerMixin):
 
     Provides USD file loading, analysis, and manipulation capabilities
     using only the pxr library.
+
+    Stage model: every load opens the file into its own stage with a root
+    layer no other stage shares (``stage_files.open_private_stage``), and
+    edits go only to that root layer, so unsaved edits never leak into
+    another stage. A stage belongs to the MCP session that loaded it and is
+    invisible to every other session. Loading a file the session already
+    holds a clean, current stage for returns that stage; otherwise (unsaved
+    edits, or the file changed on disk) a fresh stage is opened from disk.
     """
 
     def __init__(self, settings: Optional[Settings] = None):
@@ -48,22 +81,51 @@ class HeadlessUSDSession(LoggerMixin):
 
         self._active_stages: Dict[str, Usd.Stage] = {}
         self._bbox_caches: Dict[str, BBoxCache] = {}
-        # Resolved file path each stage was opened from, so unload can evict
-        # the matching USDReader cache entry.
-        self._stage_paths: Dict[str, str] = {}
+        self._stage_records: Dict[str, _StageRecord] = {}
+        # Names the MCP session a call belongs to; the registration installs
+        # the server's resolver. Outside MCP every caller is the same owner.
+        self._owner_resolver: Callable[[], Optional[str]] = lambda: None
 
         self.logger.info("Headless USD session initialized")
+
+    def set_owner_resolver(self, resolver: Callable[[], Optional[str]]) -> None:
+        """
+        Install the function that names the MCP session of the current call.
+
+        Args:
+            resolver: Returns the calling session's id, or None
+        """
+        self._owner_resolver = resolver
+
+    def _owner(self) -> Optional[str]:
+        try:
+            return self._owner_resolver()
+        except Exception:
+            return None
+
+    def _owned_ids(self) -> List[str]:
+        owner = self._owner()
+        return [stage_id for stage_id, record in self._stage_records.items() if record.owner == owner]
 
     @monitor_performance("headless_session.load_stage")
     def load_stage(self, file_path: Union[str, Path]) -> Optional[str]:
         """
         Load a USD stage from file.
 
+        Returns the caller's existing stage for the file when it has no
+        unsaved edits and no file it composes changed on disk; otherwise
+        opens a new stage from disk, rereading any changed sublayer or
+        referenced file first.
+
         Args:
             file_path: Path to USD file
 
         Returns:
             Stage identifier or None if failed
+
+        Raises:
+            USDEditError: The caller already holds ``MAX_STAGES_PER_OWNER``
+                stages.
         """
         file_path = str(Path(file_path).resolve())
 
@@ -71,55 +133,81 @@ class HeadlessUSDSession(LoggerMixin):
         if not self._validate_usd_file(file_path):
             return None
 
-        try:
-            stage = self.usd_reader.open_stage(file_path)
-            if stage:
-                stage_id = self._generate_stage_id(file_path)
-                self._active_stages[stage_id] = stage
-                self._bbox_caches[stage_id] = BBoxCache(stage)
-                self._stage_paths[stage_id] = file_path
-
-                self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
+        owner = self._owner()
+        for stage_id in self._owned_ids():
+            record = self._stage_records[stage_id]
+            stage = self._active_stages[stage_id]
+            if (
+                record.file_path == file_path
+                and not stage.GetRootLayer().dirty
+                and not stage_files.changed_files(stage, record.mtimes)
+            ):
+                self.logger.info(f"Reusing clean USD stage {stage_id} for {file_path}")
                 return stage_id
-            else:
-                self.logger.error(f"Failed to load USD stage: {file_path}")
-                return None
+        owned = self._owned_ids()
+        if len(owned) >= MAX_STAGES_PER_OWNER:
+            raise USDEditError(
+                editing.REFUSED,
+                f"This session already holds {len(owned)} loaded stages, the limit. Unload stages it "
+                "no longer needs with unload_usd_stage (list_usd_stages shows them) and load again.",
+                limit=MAX_STAGES_PER_OWNER,
+                loaded_stages=owned,
+            )
 
+        try:
+            stage, _ = stage_files.open_private_stage(file_path)
+            reloaded = stage_files.refresh_shared_layers(stage)
+            if reloaded:
+                self.logger.info(f"Reread changed files for {file_path}: {reloaded}")
         except Exception as e:
             self.logger.error(f"Error loading USD stage {file_path}: {e}")
             return None
 
-    def unload_stage(self, stage_id: str) -> bool:
+        stage_id = self._generate_stage_id(file_path)
+        self._active_stages[stage_id] = stage
+        self._bbox_caches[stage_id] = BBoxCache(stage)
+        self._stage_records[stage_id] = _StageRecord(
+            file_path=file_path, owner=owner, mtimes=stage_files.file_mtimes(stage)
+        )
+        self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
+        return stage_id
+
+    def _owned_stage(self, stage_id: str) -> Tuple[Usd.Stage, _StageRecord]:
+        stage = self.require_stage(stage_id)
+        return stage, self._stage_records[stage_id]
+
+    def unload_stage(self, stage_id: str, discard_unsaved: bool = False) -> bool:
         """
         Unload a USD stage.
 
         Args:
             stage_id: Stage identifier
+            discard_unsaved: Unload even though the stage has unsaved edits
 
         Returns:
-            True if successfully unloaded
+            True if unloaded, False when the caller holds no such stage
+
+        Raises:
+            USDEditError: The stage has unsaved edits and ``discard_unsaved``
+                is False.
         """
-        try:
-            if stage_id in self._active_stages:
-                del self._active_stages[stage_id]
-                if stage_id in self._bbox_caches:
-                    del self._bbox_caches[stage_id]
-                # Evict the reader's cached Usd.Stage too; otherwise the next
-                # load_stage of the same file hands back this in-memory stage,
-                # unsaved edits included, instead of re-reading the file.
-                file_path = self._stage_paths.pop(stage_id, None)
-                if file_path is not None:
-                    self.usd_reader.close_stage(file_path)
-
-                self.logger.info(f"Unloaded USD stage: {stage_id}")
-                return True
-            else:
-                self.logger.warning(f"Stage not found: {stage_id}")
-                return False
-
-        except Exception as e:
-            self.logger.error(f"Error unloading stage {stage_id}: {e}")
+        stage = self.get_stage(stage_id)
+        if stage is None:
+            self.logger.warning(f"Stage not found: {stage_id}")
             return False
+        if stage.GetRootLayer().dirty and not discard_unsaved:
+            raise USDEditError(
+                editing.REFUSED,
+                f"Stage {stage_id} has unsaved edits. Save them with save_usd_stage or "
+                "export_usd_stage, or pass discard_unsaved=true to drop them.",
+                stage_id=stage_id,
+                override="discard_unsaved",
+            )
+        del self._active_stages[stage_id]
+        self._bbox_caches.pop(stage_id, None)
+        self._stage_records.pop(stage_id, None)
+        self.logger.info(f"Unloaded USD stage: {stage_id}")
+        return True
 
     def get_stage(self, stage_id: str) -> Optional[Usd.Stage]:
         """
@@ -129,9 +217,15 @@ class HeadlessUSDSession(LoggerMixin):
             stage_id: Stage identifier
 
         Returns:
-            USD Stage or None if not found
+            USD Stage, or None if not found or loaded by another MCP session
         """
-        return self._active_stages.get(stage_id)
+        stage = self._active_stages.get(stage_id)
+        if stage is None:
+            return None
+        record = self._stage_records.get(stage_id)
+        if record is not None and record.owner != self._owner():
+            return None
+        return stage
 
     def require_stage(self, stage_id: str) -> Usd.Stage:
         """
@@ -158,12 +252,220 @@ class HeadlessUSDSession(LoggerMixin):
 
     def list_stages(self) -> List[str]:
         """
-        List all loaded stages.
+        List the stages the calling MCP session has loaded.
 
         Returns:
             List of stage identifiers
         """
-        return list(self._active_stages.keys())
+        return self._owned_ids()
+
+    def stage_file_path(self, stage_id: str) -> str:
+        """
+        The resolved root file of a loaded stage.
+
+        Raises:
+            USDEditError: No such stage for the caller.
+        """
+        return self._owned_stage(stage_id)[1].file_path
+
+    def stage_status(self, stage_id: str) -> Dict[str, Any]:
+        """
+        Report a stage's file, unsaved state and the files changed on disk since it was read.
+
+        Args:
+            stage_id: Stage identifier
+
+        Returns:
+            ``stage_id``, ``file_path``, ``has_unsaved_changes`` and
+            ``changed_on_disk`` (real paths)
+
+        Raises:
+            USDEditError: No such stage for the caller.
+        """
+        stage, record = self._owned_stage(stage_id)
+        return {
+            "stage_id": stage_id,
+            "file_path": record.file_path,
+            "has_unsaved_changes": bool(stage.GetRootLayer().dirty),
+            "changed_on_disk": stage_files.changed_files(stage, record.mtimes),
+        }
+
+    def save_stage(self, stage_id: str, overwrite_external_changes: bool = False) -> Dict[str, Any]:
+        """
+        Save the stage's edit target (its root layer) to its own file.
+
+        Args:
+            stage_id: Stage identifier
+            overwrite_external_changes: Save even though the file changed
+                on disk after the stage read it
+
+        Returns:
+            ``stage_id``, ``file_path``, ``saved`` and ``files_written``
+            (``path`` and ``bytes`` per file)
+
+        Raises:
+            USDEditError: The save was refused or failed.
+        """
+        stage, record = self._owned_stage(stage_id)
+        root = stage.GetRootLayer()
+        path = record.file_path
+        if Path(path).suffix.lower() == ".usdz":
+            raise USDEditError(
+                editing.UNSUPPORTED,
+                f"{path} is a .usdz package, which cannot be saved in place. Write the edits to a "
+                "new file with export_usd_stage instead.",
+                stage_id=stage_id,
+                file_path=path,
+            )
+        if not root.dirty:
+            return {"stage_id": stage_id, "file_path": path, "saved": False, "files_written": []}
+        if path in stage_files.changed_files(stage, {path: record.mtimes.get(path)}) and not (
+            overwrite_external_changes
+        ):
+            raise USDEditError(
+                editing.REFUSED,
+                f"{path} changed on disk after this stage read it; saving would overwrite those "
+                "changes. Export the edits to a new file with export_usd_stage, reload the stage with "
+                "reload_usd_stage (discarding the edits), or pass overwrite_external_changes=true.",
+                stage_id=stage_id,
+                file_path=path,
+                override="overwrite_external_changes",
+            )
+        try:
+            saved = root.Save()
+        except Exception as exc:
+            raise USDEditError(
+                SAVE_FAILED, f"Saving {path} failed: {editing.tf_error_reason(exc)}", file_path=path
+            ) from exc
+        if not saved:
+            raise USDEditError(SAVE_FAILED, f"Saving {path} failed.", file_path=path)
+        record.mtimes = stage_files.file_mtimes(stage)
+        self.logger.info(f"Saved USD stage {stage_id} to {path}")
+        return {
+            "stage_id": stage_id,
+            "file_path": path,
+            "saved": True,
+            "files_written": [{"path": path, "bytes": os.path.getsize(path)}],
+        }
+
+    def export_stage(
+        self, stage_id: str, file_path: str, flatten: bool = False, overwrite: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Write the stage to a new file, as its root layer or flattened.
+
+        The stage stays bound to its own file; its unsaved state does not
+        change.
+
+        Args:
+            stage_id: Stage identifier
+            file_path: Destination; the extension picks the format (.usda,
+                .usdc, .usd or .usdz)
+            flatten: Write the composed stage as one layer
+            overwrite: Replace an existing file
+
+        Returns:
+            ``stage_id``, ``file_path``, ``format``, ``flatten``,
+            ``files_written`` and ``rewritten_asset_paths``
+
+        Raises:
+            USDEditError: The export was refused or failed.
+        """
+        stage, record = self._owned_stage(stage_id)
+        destination = str(Path(file_path).resolve())
+        suffix = Path(destination).suffix.lower()
+        if suffix not in stage_files.EXPORT_FORMATS:
+            raise USDEditError(
+                INVALID_FILE_PATH,
+                f"Cannot export to {destination}: the extension must be one of "
+                f"{', '.join(stage_files.EXPORT_FORMATS)}.",
+                file_path=destination,
+            )
+        if destination == record.file_path:
+            raise USDEditError(
+                editing.REFUSED,
+                f"{destination} is the stage's own file; save it with save_usd_stage instead.",
+                file_path=destination,
+            )
+        if not os.path.isdir(os.path.dirname(destination)):
+            raise USDEditError(
+                INVALID_FILE_PATH,
+                f"Cannot export to {destination}: the directory {os.path.dirname(destination)} does not exist.",
+                file_path=destination,
+            )
+        if os.path.exists(destination) and not overwrite:
+            raise USDEditError(
+                editing.REFUSED,
+                f"Refusing to overwrite existing file {destination}. Pass overwrite=true to replace it.",
+                file_path=destination,
+                override="overwrite",
+            )
+        try:
+            result = stage_files.export_stage(stage, destination, flatten=flatten)
+        except Exception as exc:
+            raise USDEditError(
+                SAVE_FAILED,
+                f"Exporting {stage_id} to {destination} failed: {editing.tf_error_reason(exc)}",
+                file_path=destination,
+            ) from exc
+        self.logger.info(f"Exported USD stage {stage_id} to {destination} (flatten={flatten})")
+        return {
+            "stage_id": stage_id,
+            "file_path": destination,
+            "format": suffix.lstrip("."),
+            "flatten": flatten,
+            "files_written": [{"path": destination, "bytes": os.path.getsize(destination)}],
+            "rewritten_asset_paths": result["rewritten_asset_paths"],
+        }
+
+    def reload_stage(self, stage_id: str, discard_unsaved: bool = False) -> Dict[str, Any]:
+        """
+        Reread the stage from disk: its root file and every composed file that changed.
+
+        Args:
+            stage_id: Stage identifier
+            discard_unsaved: Reload even though the stage has unsaved edits,
+                which are lost
+
+        Returns:
+            ``stage_id``, ``file_path``, ``discarded_unsaved`` and
+            ``reloaded_files``
+
+        Raises:
+            USDEditError: The stage has unsaved edits and ``discard_unsaved``
+                is False, or the reload failed.
+        """
+        stage, record = self._owned_stage(stage_id)
+        root = stage.GetRootLayer()
+        dirty = bool(root.dirty)
+        if dirty and not discard_unsaved:
+            raise USDEditError(
+                editing.REFUSED,
+                f"Stage {stage_id} has unsaved edits, which a reload would discard. Save or export "
+                "them first, or pass discard_unsaved=true.",
+                stage_id=stage_id,
+                override="discard_unsaved",
+            )
+        changed = stage_files.changed_files(stage, record.mtimes)
+        try:
+            root.Reload(True)
+            reloaded = stage_files.refresh_shared_layers(stage)
+        except Exception as exc:
+            raise USDEditError(
+                SAVE_FAILED,
+                f"Reloading {record.file_path} failed: {editing.tf_error_reason(exc)}",
+                file_path=record.file_path,
+            ) from exc
+        self._invalidate_bbox_cache(stage_id)
+        record.mtimes = stage_files.file_mtimes(stage)
+        reloaded_files = sorted(set(changed) | set(reloaded) | {record.file_path})
+        self.logger.info(f"Reloaded USD stage {stage_id} (discarded unsaved edits: {dirty})")
+        return {
+            "stage_id": stage_id,
+            "file_path": record.file_path,
+            "discarded_unsaved": dirty,
+            "reloaded_files": reloaded_files,
+        }
 
     @monitor_performance("headless_session.get_stage_info")
     def get_stage_info(self, stage_id: str) -> Optional[USDStageInfo]:
@@ -469,7 +771,7 @@ class HeadlessUSDSession(LoggerMixin):
         Returns:
             Bounding box dictionary or None
         """
-        bbox_cache = self._bbox_caches.get(stage_id)
+        bbox_cache = self._bbox_caches.get(stage_id) if self.get_stage(stage_id) else None
         if bbox_cache:
             bbox = bbox_cache.get_stage_bbox()
             if bbox:
@@ -542,18 +844,15 @@ class HeadlessUSDSession(LoggerMixin):
         return True
 
     def _generate_stage_id(self, file_path: str) -> str:
-        """Generate a unique stage identifier."""
-        import hashlib
-        path_hash = hashlib.md5(file_path.encode()).hexdigest()[:8]
-        filename = Path(file_path).stem
-        return f"{filename}_{path_hash}"
+        """Generate a stage identifier: the file's stem and a random, unguessable suffix."""
+        return f"{Path(file_path).stem}_{secrets.token_hex(6)}"
 
     def cleanup(self) -> None:
         """Clean up all resources."""
         try:
             self._active_stages.clear()
             self._bbox_caches.clear()
-            self._stage_paths.clear()
+            self._stage_records.clear()
             self.usd_reader.clear_cache()
             self.logger.info("Headless USD session cleaned up")
         except Exception as e:
@@ -597,6 +896,10 @@ class HeadlessUSDAdapter(LoggerMixin):
     def close(self) -> None:
         """Release every loaded stage and cached reader state."""
         self._session.cleanup()
+
+    def set_owner_resolver(self, resolver: Callable[[], Optional[str]]) -> None:
+        """Scope stages to the MCP session ``resolver`` names for each call."""
+        self._session.set_owner_resolver(resolver)
 
     def is_available(self) -> bool:
         """

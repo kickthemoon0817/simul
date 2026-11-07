@@ -58,6 +58,11 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "create_prim": (DESTRUCTIVE, False, False),  # redefine_existing re-types a prim
     "update_prim_attributes": (DESTRUCTIVE, True, False),
     "delete_prim": (DESTRUCTIVE, False, False),
+    "list_usd_stages": (RO, True, False),
+    "save_usd_stage": (DESTRUCTIVE, True, False),  # overwrites the stage's own file
+    "export_usd_stage": (DESTRUCTIVE, False, False),  # overwrite=true replaces a file
+    "reload_usd_stage": (DESTRUCTIVE, True, False),  # discard_unsaved drops edits
+    "unload_usd_stage": (DESTRUCTIVE, False, False),
     # Unreal
     "unreal_health_check": (RO, True, True),
     "capture_unreal_viewport": (RW, False, True),  # writes a screenshot file

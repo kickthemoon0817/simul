@@ -17,7 +17,7 @@ update_prim_attributes(stage_id="abc123", prim_path="...", attributes={...})
 delete_prim(stage_id="abc123", prim_path="/World/OldPrim")
 ```
 
-**Session scope:** The `stage_id` is valid for the duration of the current tool session. If the session resets, call `load_usd_file` again to get a new handle.
+**Session scope:** The `stage_id` belongs to the MCP session that loaded it and lasts until `unload_usd_stage` or a server restart. Edits are in memory only; write them with `save_usd_stage` (in place) or `export_usd_stage` (new file). If the session resets, call `load_usd_file` again to get a new handle.
 
 ## Prim Type Filters for search_prims
 
