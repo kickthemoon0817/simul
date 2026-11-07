@@ -318,6 +318,16 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 
 Behaviour worth knowing:
 
+- In attached mode each call that changes the document is one Blender undo
+  step named `simul: <tool>`, and marks the file modified: the user's Ctrl+Z
+  takes back the last agent operation only, and quitting asks to save. Reads,
+  captures, saves, exports, playback and editor-only `control_blender_ui`
+  actions record no step. Details:
+  [blender-attachment.md](blender-attachment.md#undo-and-unsaved-changes).
+- `open_blender_file` refuses with `UnsavedChangesError` while the open file has
+  unsaved changes; save them with `save_blender_file`, or pass
+  `discard_unsaved: true`. Headless (embedded) Blender does not track unsaved
+  changes, so there it opens without the check.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
@@ -474,7 +484,9 @@ Behaviour worth knowing:
   per control or other non-ASCII character and 12 per emoji. So output is also
   cut at 300 000 bytes of JSON, which printable ASCII never reaches but heavily
   non-ASCII output can, with the same report. Write larger results to a file
-  and return its path.
+  and return its path. Anything the script raises, `SystemExit` from
+  `sys.exit()` and `KeyboardInterrupt` included, comes back in `error`; it
+  never ends Blender.
 
 ## Server
 
