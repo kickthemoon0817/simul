@@ -195,7 +195,15 @@ class TestTransports:
         asyncio.run(instance.run("http"))
 
         assert instance.mcp.run_calls == [
-            {"transport": "http", "host": instance.settings.server.host, "port": instance.settings.server.port}
+            {
+                "transport": "http",
+                "host": instance.settings.server.host,
+                "port": instance.settings.server.port,
+                # The DNS-rebinding guard is on by default (tests/mcp/test_http_security.py).
+                "host_origin_protection": True,
+                "allowed_hosts": ["localhost", "127.0.0.1", "::1"],
+                "allowed_origins": [],
+            }
         ]
 
     def test_stdio_transport_takes_no_address(self, fake_fastmcp: Any) -> None:

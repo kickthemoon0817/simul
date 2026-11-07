@@ -263,6 +263,13 @@ none of the transports authenticate by default:
   same host; cross-host Isaac is not supported.
 - `SECURITY__ALLOW_SCRIPT_EXECUTION=false` removes the arbitrary-code tools
   from the MCP server. See [docs/configuration.md](docs/configuration.md#security).
+- `simul server --transport http` (or `sse`) listens on loopback, refuses
+  requests whose `Host` or `Origin` header names another site (the
+  DNS-rebinding defense), binds another interface only with `--allow-public`,
+  and requires a bearer token when `SERVER__AUTH_TOKEN_FILE` is set. See
+  [docs/configuration.md](docs/configuration.md#network-transports-http-and-sse).
+- simul does not read a `.env` from the working directory, so a cloned
+  project cannot change its settings; name a file with `SIMUL_ENV_FILE`.
 
 To report a vulnerability, use GitHub's private
 [Report a vulnerability](https://github.com/kickthemoon0817/simul/security/advisories/new)
