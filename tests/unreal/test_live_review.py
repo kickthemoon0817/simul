@@ -994,8 +994,11 @@ SPAWN_FOCUS_ACTORS = """
 import unreal, json
 subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 cube = unreal.load_asset('/Engine/BasicShapes/Cube')
-def tagged(actor, scale=1.0):
-    actor.set_actor_scale3d(unreal.Vector(scale, scale, scale))
+def tagged(actor, scale=None):
+    # A BoxReflectionCapture's scale is the size of its influence box, so the
+    # spawn scale is kept unless one is given.
+    if scale is not None:
+        actor.set_actor_scale3d(unreal.Vector(scale, scale, scale))
     actor.set_editor_property('tags', [unreal.Name('simul_review_focus')])
     return actor.get_path_name()
 def cine_camera(y, *focus_plane):
@@ -1024,6 +1027,10 @@ print(json.dumps({
     'cine_plane_off': tagged(cine_camera(24000, True, False)),
     # A SkyLight, which leaves a spare editor icon at the world origin.
     'sky_light': tagged(subsystem.spawn_actor_from_class(unreal.SkyLight, unreal.Vector(0, 27000, 200))),
+    # Reflection captures, whose influence shapes collide with nothing.
+    'sphere_capture': tagged(
+        subsystem.spawn_actor_from_class(unreal.SphereReflectionCapture, unreal.Vector(0, 30000, 200))),
+    'box_capture': tagged(subsystem.spawn_actor_from_class(unreal.BoxReflectionCapture, unreal.Vector(0, 33000, 200))),
 }))
 """
 
@@ -1034,9 +1041,11 @@ print(json.dumps({'origin': [origin.x, origin.y, origin.z], 'extent': [extent.x,
 """
 
 
-def _in_default_view(focused, bounds):
+def _in_default_view(focused, bounds, fov=90.0, aspect=16.0 / 9.0):
     """The nearest depth of the box's corners seen from the camera read back, and
-    the largest share of UE's default view (90 degrees across, 16:9) they reach."""
+    the largest share of the view they reach: by default UE's default view, 90
+    degrees across, on 16:9."""
+    half_width = math.tan(math.radians(fov) / 2)
     pitch, yaw = (math.radians(angle) for angle in focused["camera_rotation"][:2])
     axes = (
         (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch)),
@@ -1051,18 +1060,22 @@ def _in_default_view(focused, bounds):
         ]
         depth, across, up = (sum(a * b for a, b in zip(offset, axis)) for axis in axes)
         nearest = min(nearest, depth)
-        reach = max(reach, abs(across) / depth, abs(up) / depth / (9.0 / 16.0)) if depth > 0 else math.inf
+        if depth <= 0:
+            reach = math.inf
+        else:
+            reach = max(reach, abs(across) / depth / half_width, abs(up) / depth / (half_width / aspect))
     return nearest, reach
 
 
 def test_focus_distance_0_fits_the_actor_and_an_explicit_distance_looks_at_its_location():
     """Distance 0 put the camera a fixed 500 cm from the actor: inside a 20 m
     cube, and a 10 cm cube was a speck. Now it fits the actor's bounds in UE's
-    default view, looking at their center, and frames a camera by its mesh,
-    not by the frustum the editor draws for it or a CineCamera's debug focus
-    plane, and a SkyLight by its icon, not by the spare one it leaves at the
-    world origin; an actor without bounds keeps the 500 cm and says so, and
-    an explicit distance looks at the actor's location as before."""
+    default view, or in the view given, looking at their center, and frames a
+    camera by its mesh, not by the frustum the editor draws for it or a
+    CineCamera's debug focus plane, a SkyLight by its icon, not by the spare
+    one it leaves at the world origin, and a reflection capture by its icon,
+    not by its influence shapes; an actor without bounds keeps the 500 cm and
+    says so, and an explicit distance looks at the actor's location as before."""
 
     async def run():
         client = session()
@@ -1109,6 +1122,27 @@ def test_focus_distance_0_fits_the_actor_and_an_explicit_distance_looks_at_its_l
             d = sky_light["distance"]
             assert d < 1000.0 and "fit_warning" not in sky_light, sky_light
             assert sky_light["camera_location"] == pytest.approx((-d, 27000.0, 200.0 + d / 2)), sky_light
+
+            # A reflection capture's influence shapes, a 30 m sphere around a
+            # SphereReflectionCapture, collide with nothing; they stretched its bounds,
+            # and the fit now leaves them out and frames the capture by its icon.
+            for name, y, influence in (("sphere_capture", 30000.0, 3000.0), ("box_capture", 33000.0, 1000.0)):
+                shapes = await client._execute_json_script(f"args = {{'path': {spawned[name]!r}}}\n" + ACTOR_BOUNDS)
+                assert max(shapes["extent"]) >= influence, (name, shapes)
+                focused = await client.focus_on_actor(spawned[name])
+                d = focused["distance"]
+                assert d < 500.0 and "fit_warning" not in focused, (name, focused)
+                assert focused["camera_location"] == pytest.approx((-d, y, 200.0 + d / 2)), (name, focused)
+
+            # A view of another field of view and shape, 60 degrees across and 2.4 times
+            # as wide as tall, crops the 20 m cube framed for the default view; given
+            # that view, the fit backs off until the cube fits it.
+            bounds = await client._execute_json_script(f"args = {{'path': {spawned['large']!r}}}\n" + ACTOR_BOUNDS)
+            default = await client.focus_on_actor(spawned["large"])
+            assert _in_default_view(default, bounds, 60.0, 2.4)[1] > 1.0, (default, bounds)
+            given = await client.focus_on_actor(spawned["large"], fov=60.0, aspect_ratio=2.4)
+            nearest, reach = _in_default_view(given, bounds, 60.0, 2.4)
+            assert nearest > 10.0 and 0.4 < reach <= 1.0, (given, bounds)
 
             no_mesh = await client.focus_on_actor(spawned["no_mesh"])
             assert no_mesh["distance"] == 500.0 and "no bounds" in no_mesh["fit_warning"], no_mesh

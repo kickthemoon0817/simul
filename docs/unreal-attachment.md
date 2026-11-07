@@ -113,9 +113,13 @@ simul unreal control set_game_view --enabled
 ```
 
 `status` and `control` always use the saved attachment. To make other existing CLI
-operations use it as well, set `UNREAL__MODE=attached`. Existing MCP tools also use
-the selected endpoint when the server runs with `--unreal-mode attached`.
-The default `endpoint` mode continues to use host/port configuration.
+operations use it as well, set `UNREAL__MODE=attached`. They then refuse `--host`
+and `--port`, which name an endpoint attached mode never dials: the command exits 2
+with `InvalidArgument` before contacting anything, as the JSON envelope under
+`--json` and as a message on stderr otherwise. To work on another editor, attach
+it. Existing MCP tools also use the selected endpoint when the server runs with
+`--unreal-mode attached`. The default `endpoint` mode continues to use host/port
+configuration.
 
 ## Visible agent cursors
 

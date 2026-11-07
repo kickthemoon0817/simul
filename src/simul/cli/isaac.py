@@ -32,6 +32,8 @@ from simul.adapters.isaac_install import (
 )
 from simul.adapters.isaac_runtime import IsaacRuntimeAdapter
 from simul.cli.output import (
+    PORT_NUMBER,
+    TIMEOUT_SECONDS,
     console,
     emit,
     exit_if_failed,
@@ -113,13 +115,15 @@ def _parse_script_result(result: Any) -> Dict[str, Any]:
     return {"parsed": parsed}
 
 
-# Common host/port/timeout options
+# Common host/port/timeout options. A bad port or timeout exits 2 while the
+# command line is parsed (PORT_NUMBER, TIMEOUT_SECONDS).
 _host_opt = typer.Option(None, "--host", "-H", help="Isaac Sim host")
-_port_opt = typer.Option(None, "--port", "-p", help="Isaac Sim port")
+_port_opt = typer.Option(None, "--port", "-p", click_type=PORT_NUMBER, help="Isaac Sim port")
 _timeout_opt = typer.Option(
     None,
     "--timeout",
     "-t",
+    click_type=TIMEOUT_SECONDS,
     help="Timeout in seconds (defaults to isaac_sim.socket_timeout)",
 )
 
@@ -313,11 +317,13 @@ def launch(
     socket_port: Optional[int] = typer.Option(
         None,
         "--socket-port",
+        click_type=PORT_NUMBER,
         help="Port for the stock Python socket server. Defaults to isaac_sim.socket_port (8226).",
     ),
     bridge_port: Optional[int] = typer.Option(
         None,
         "--bridge-port",
+        click_type=PORT_NUMBER,
         help="Port for the khemoo.simul bridge. Defaults to isaac_sim.bridge_port (8229).",
     ),
     auth_token: Optional[str] = typer.Option(
@@ -347,7 +353,7 @@ def launch(
         help="With --generate-auth-token, also print the token once (stderr, or auth_token in JSON).",
     ),
     wait_timeout: float = typer.Option(
-        180.0, "--wait-timeout", help="Seconds to wait for a transport to answer."
+        180.0, "--wait-timeout", click_type=TIMEOUT_SECONDS, help="Seconds to wait for a transport to answer."
     ),
     poll_interval: float = typer.Option(
         2.0, "--poll-interval", help="Seconds between readiness probes."
@@ -1636,7 +1642,9 @@ def enable_extension(
     if result.get("enabled"):
         console.print(f"[green]Enabled[/green] {extension_id} (v{result.get('version', '?')})")
     else:
-        console.print(f"[yellow]Warning:[/yellow] {extension_id} may not have been enabled — check with list-extensions")
+        console.print(
+            f"[yellow]Warning:[/yellow] {extension_id} may not have been enabled — check with list-extensions"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1690,7 +1698,9 @@ def get_carb_settings(
 # ---------------------------------------------------------------------------
 @app.command("set-carb-settings")
 def set_carb_settings(
-    assignments: List[str] = typer.Argument(..., help="Key=value pairs (e.g. /rtx/fog/enabled=true /rtx/fog/fogEndDist=200.0)"),
+    assignments: List[str] = typer.Argument(
+        ..., help="Key=value pairs (e.g. /rtx/fog/enabled=true /rtx/fog/fogEndDist=200.0)"
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:

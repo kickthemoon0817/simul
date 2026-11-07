@@ -11,6 +11,13 @@ commands and their parameters, run `simul commands` (always JSON).
   so piping into `jq` or another program needs no flag.
 - The command exits non-zero when the result has `success: false`. That is a
   domain result, not a crash: read the JSON payload.
+- Exit 1 means the operation failed; exit 2 means a bad invocation, refused
+  before anything is contacted. Every port option (`-p/--port`,
+  `--socket-port`, `--bridge-port`, `--websocket-port`) takes an integer from
+  1 to 65535, and every timeout option (`-t/--timeout`, `--wait-timeout`) a
+  finite number of seconds greater than 0. Any other value exits 2 with
+  `error_type: InvalidArgument`: the JSON envelope under `--json`, a message
+  on stderr otherwise.
 
 ```bash
 simul --json info
@@ -139,7 +146,10 @@ bad invocation, and sends nothing to Isaac Sim when:
 ## `simul unreal`
 
 Commands accept `-H/--host` and `-p/--port` for the Remote Control endpoint
-(default `localhost:30010`).
+(default `localhost:30010`). With `UNREAL__MODE=attached`, the commands that talk
+to the editor act on the attached one, and `--host`/`--port` exit 2 with
+`InvalidArgument`; `instances`, `attach` and `setup --port` take them in either
+mode.
 
 | Command | Purpose |
 |---|---|
