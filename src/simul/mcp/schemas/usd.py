@@ -10,9 +10,37 @@ Purpose = Literal["default", "render", "proxy", "guide"]
 
 DEFAULT_BBOX_PURPOSES: List[Purpose] = ["default", "render"]
 
-# Mirrors simul.usd.values; kept here so the schema module imports no pxr.
+SearchType = Literal["by_name", "by_path", "by_type", "by_api_schema"]
+
+MatchMode = Literal["auto", "exact", "substring", "glob", "regex"]
+
+SummaryFormat = Literal["json", "text"]
+
+# Mirror simul.usd.values and simul.usd.search; kept here so the schema
+# module imports no pxr.
 DEFAULT_ARRAY_PREVIEW = 16
 MAX_ARRAY_PREVIEW = 10_000
+DEFAULT_SEARCH_LIMIT = 200
+MAX_SEARCH_LIMIT = 5000
+DEFAULT_SUBTREE_LIMIT = 150
+MAX_SUBTREE_LIMIT = 1000
+
+
+class USDIssue(BaseModel):
+    """One problem found in a USD file."""
+
+    severity: str = Field(..., description="error, warning or info")
+    code: str = Field(
+        ..., description="Stable identifier, e.g. ParseError, MissingReference, NestedArticulation"
+    )
+    message: str = Field(..., description="What is wrong, in pxr's words where pxr reported it")
+    source: str = Field(
+        "simul", description="simul, or the pxr validator that reported the issue"
+    )
+    location: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Where it is, as known: layer, prim_path, property_path, asset_path, line, column",
+    )
 
 
 class USDFileInfo(BaseModel):
@@ -20,9 +48,30 @@ class USDFileInfo(BaseModel):
 
     file_path: str = Field(..., description="Path to USD file")
     file_size: int = Field(..., description="File size in bytes")
-    format: str = Field(..., description="USD file format (usd, usda, usdc, usdz)")
-    is_valid: bool = Field(..., description="Whether file is valid USD")
-    can_read: bool = Field(..., description="Whether file is readable")
+    format: str = Field(..., description="File extension (usd, usda, usdc, usdz)")
+    is_valid: bool = Field(
+        ..., description="pxr opened the file and no issue has severity error"
+    )
+    can_read: bool = Field(
+        ..., description="pxr opened the file, so load_usd_file can load it"
+    )
+    layer_format: Optional[str] = Field(
+        None, description="Format pxr read the root layer as (usda, usdc, usdz)"
+    )
+    default_prim: Optional[str] = Field(None, description="Default prim path, when valid")
+    up_axis: Optional[str] = Field(None, description="Stage up axis (authored or fallback)")
+    meters_per_unit: Optional[float] = Field(
+        None, description="Stage meters per unit (authored or fallback)"
+    )
+    error_count: int = Field(0, description="Issues with severity error")
+    warning_count: int = Field(0, description="Issues with severity warning")
+    info_count: int = Field(0, description="Issues with severity info")
+    issues: List[USDIssue] = Field(
+        default_factory=list, description="Problems found, errors first"
+    )
+    validators: List[str] = Field(
+        default_factory=list, description="pxr UsdValidation validators that ran"
+    )
 
 
 class USDFileRequest(BaseModel):
@@ -53,6 +102,13 @@ class StageInfo(BaseModel):
     has_animation: bool = Field(..., description="Whether stage has animation")
     layer_count: int = Field(..., description="Number of layers")
     default_prim: Optional[str] = Field(None, description="Default prim path")
+    warnings: List[USDIssue] = Field(
+        default_factory=list,
+        description=(
+            "Problems the stage loaded despite: missing sublayers, references or "
+            "payloads, unresolved reference prim paths"
+        ),
+    )
 
 
 class PrimInfo(BaseModel):
@@ -234,15 +290,7 @@ class SceneSummaryRequest(BaseModel):
     include_meshes: bool = Field(True, description="Include detailed mesh information")
     include_materials: bool = Field(True, description="Include material information")
     max_depth: int = Field(5, description="Maximum hierarchy depth", ge=1, le=10)
-    format: str = Field("json", description="Output format (json, text)")
-
-    @field_validator("format")
-    @classmethod
-    def validate_format(cls, v: str) -> str:
-        valid_formats = ["json", "text"]
-        if v not in valid_formats:
-            raise ValueError(f"Format must be one of {valid_formats}")
-        return v
+    format: SummaryFormat = Field("json", description="Output format (json, text)")
 
 
 class SceneSummaryResponse(BaseModel):
@@ -259,28 +307,95 @@ class PrimSearchRequest(BaseModel):
     """Request to search for prims."""
 
     stage_id: str = Field(..., description="Stage identifier")
-    search_type: str = Field(..., description="Search type (by_type, by_name)")
+    search_type: SearchType = Field(..., description="What the query is matched against")
     query: str = Field(..., description="Search query")
-    exact_match: bool = Field(False, description="Use exact matching (for name search)")
+    exact_match: bool = Field(
+        False, description="Shorthand for match='exact' (kept for older callers)"
+    )
+    match: MatchMode = Field("auto", description="How the query is matched")
+    case_sensitive: bool = Field(False, description="Compare case-sensitively")
+    root_path: Optional[str] = Field(None, description="Search only under this prim")
+    include_instance_proxies: bool = Field(True, description="Look inside instances")
+    offset: int = Field(0, ge=0, description="Matches to skip")
+    limit: int = Field(
+        DEFAULT_SEARCH_LIMIT, ge=1, le=MAX_SEARCH_LIMIT, description="Matches to return"
+    )
 
-    @field_validator("search_type")
+    @field_validator("query")
     @classmethod
-    def validate_search_type(cls, v: str) -> str:
-        valid_types = ["by_type", "by_name"]
-        if v not in valid_types:
-            raise ValueError(f"Search type must be one of {valid_types}")
+    def validate_query(cls, v: str, info: Any) -> str:
+        if not v and info.data.get("search_type") in ("by_type", "by_api_schema"):
+            raise ValueError("query must name a type or API schema")
         return v
 
 
 class PrimSearchResponse(BaseModel):
-    """Response from prim search."""
+    """Response from prim search: one page of the matches."""
 
     success: bool = Field(..., description="Whether search was successful")
     stage_id: str = Field(..., description="Stage identifier")
     search_type: str = Field(..., description="Search type used")
     query: str = Field(..., description="Search query")
-    results: List[str] = Field(..., description="List of matching prim paths")
-    count: int = Field(..., description="Number of results")
+    match: str = Field("auto", description="Match mode used")
+    case_sensitive: bool = Field(False, description="Whether case mattered")
+    root_path: Optional[str] = Field(None, description="Prim the search was limited to")
+    include_instance_proxies: bool = Field(True, description="Whether instances were searched")
+    results: List[str] = Field(..., description="Matching prim paths in this page, traversal order")
+    count: int = Field(..., description="Matches in this page")
+    total_matches: int = Field(0, description="Matches in the whole search")
+    searched: int = Field(0, description="Prims the search visited")
+    offset: int = Field(0, description="Matches skipped before this page")
+    limit: int = Field(DEFAULT_SEARCH_LIMIT, description="Page size applied")
+    truncated: bool = Field(False, description="More matches follow this page")
+    next_offset: Optional[int] = Field(
+        None, description="offset of the next page; None when this is the last"
+    )
+    notes: List[str] = Field(default_factory=list, description="How the query was interpreted")
+    error: Optional[str] = Field(None, description="Error message if failed")
+
+
+class PrimSubtreeRequest(BaseModel):
+    """Request for a subtree listing."""
+
+    stage_id: str = Field(..., description="Stage identifier", min_length=1)
+    root_path: str = Field("/", description="Subtree root", min_length=1)
+    max_depth: int = Field(5, ge=0, le=64, description="Deepest level listed below the root")
+    max_results: int = Field(
+        DEFAULT_SUBTREE_LIMIT, ge=1, le=MAX_SUBTREE_LIMIT, description="Prims per page"
+    )
+    offset: int = Field(0, ge=0, description="Prims to skip")
+    include_instance_proxies: bool = Field(True, description="Descend into instances")
+    include_properties: bool = Field(False, description="Add authored attributes and relationships")
+    attribute_filter: Optional[List[str]] = Field(
+        None, description="Glob patterns limiting the properties added"
+    )
+    array_preview: int = Field(
+        4, ge=0, le=MAX_ARRAY_PREVIEW, description="Leading array elements to include"
+    )
+
+
+class PrimSubtreeResponse(BaseModel):
+    """One page of a subtree listing."""
+
+    success: bool = Field(True, description="Whether the listing succeeded")
+    stage_id: str = Field(..., description="Stage identifier")
+    root_path: str = Field(..., description="Subtree root")
+    max_depth: int = Field(..., description="Deepest level listed")
+    prims: List[Dict[str, Any]] = Field(
+        ...,
+        description=(
+            "path, name, type, depth, child_count, api_schemas (kind, is_instance, "
+            "is_instance_proxy when set; attributes and relationships when asked)"
+        ),
+    )
+    count: int = Field(..., description="Prims in this page")
+    total: int = Field(..., description="Prims in the subtree up to max_depth")
+    offset: int = Field(0, description="Prims skipped before this page")
+    limit: int = Field(DEFAULT_SUBTREE_LIMIT, description="Page size applied")
+    truncated: bool = Field(False, description="More prims follow this page")
+    next_offset: Optional[int] = Field(
+        None, description="offset of the next page; None when this is the last"
+    )
     error: Optional[str] = Field(None, description="Error message if failed")
 
 
@@ -348,6 +463,7 @@ class BBoxResponse(BaseModel):
 
 
 __all__ = [
+    "USDIssue",
     "USDFileInfo",
     "USDFileRequest",
     "USDValidateRequest",
@@ -365,6 +481,8 @@ __all__ = [
     "SceneSummaryResponse",
     "PrimSearchRequest",
     "PrimSearchResponse",
+    "PrimSubtreeRequest",
+    "PrimSubtreeResponse",
     "BBoxRequest",
     "BBoxResponse",
 ]

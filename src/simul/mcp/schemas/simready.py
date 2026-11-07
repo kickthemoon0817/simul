@@ -457,6 +457,13 @@ class SimReadyExportResponse(BaseModel):
         None, description="Error message when success is False"
     )
     file_path: str = Field(..., description="Written file path")
+    files_written: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Every file the export created or changed in file_path's folder and its "
+            "texture subfolders, file_path first"
+        ),
+    )
     object_count: int = Field(..., description="Number of objects written")
     default_prim: Optional[str] = Field(
         None, description="The asset root, the stage's default prim"
