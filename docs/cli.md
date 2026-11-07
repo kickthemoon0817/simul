@@ -174,7 +174,7 @@ mode.
 | `instances [--no-scan]`, `attach [--viewport KEY]`, `status`, `detach` | Discover editors (the `list_unreal_instances` payload) and select an existing editor, map and level viewport. See [unreal-attachment.md](unreal-attachment.md) |
 | `control ACTION [...]` | Named editor controls on the attached editor (`inspect`, `select_actor`, `set_property`, `move_cursor`, ...) |
 | `health`, `info`, `scene`, `map` | Inspection |
-| `list-actors [--class] [--tag] [-n]`, `actor-info`, `search`, `scene-graph` | Scene queries |
+| `list-actors [--class] [--tag] [-n]`, `actor-info`, `search [--class] [--package] [-n] [--offset]`, `scene-graph` | Scene and asset queries |
 | `spawn PATH [--location x,y,z] [--rotation p,y,r] [--label]` (an Actor class path or an asset path), `delete`, `set-transform ACTOR [--location x,y,z] [--rotation p,y,r] [--scale x,y,z]` (an option left out keeps its value), `set-property`, `set-visibility` | Edit actors |
 | `sim ACTION`, `sim-status` | Play-In-Editor: `start`, `stop`, `pause`, `resume`, `step` |
 | `capture [OUTPUT] [--width] [--height] [--format png\|jpeg]` | Viewport screenshot |

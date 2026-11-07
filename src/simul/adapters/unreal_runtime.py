@@ -44,6 +44,8 @@ from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_scripts import (
     ACTOR_HELPERS,
     ADD_COMPONENT,
+    ASSET_IMPORT,
+    ASSET_SEARCH,
     ASSIGN_MATERIAL,
     CREATE_MATERIAL_INSTANCE,
     EDITOR_WORLD,
@@ -58,6 +60,7 @@ from ._unreal_scripts import (
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
+    SAVE_ASSETS,
     SCENE_SUMMARY,
     SET_ACTOR_PARENT,
     SET_ACTOR_TRANSFORM,
@@ -121,6 +124,58 @@ PROJECT_CONTENT_ROOT = "/Game"
 #: Where ``create_material_instance`` files an instance of a parent outside
 #: ``/Game`` when no ``save_path`` is given.
 DEFAULT_MATERIAL_FOLDER = "/Game/Materials"
+
+#: File types ``import_asset`` imports through Interchange (UE 5.7's
+#: translators for them; USD has its own importer, ``import_usd``).
+ASSET_IMPORT_EXTENSIONS: Tuple[str, ...] = (".fbx", ".gltf", ".glb", ".obj")
+
+#: The boolean USD import options, by UsdStageImportOptions property name (UE 5.7).
+USD_IMPORT_BOOLEAN_OPTIONS: Tuple[str, ...] = (
+    "import_actors",
+    "import_geometry",
+    "import_materials",
+    "import_skeletal_animations",
+    "import_level_sequences",
+    "import_groom_assets",
+    "import_sparse_volume_textures",
+    "import_sounds",
+    "import_only_used_materials",
+    "use_prim_kinds_for_collapsing",
+    "merge_identical_material_slots",
+    "share_assets_for_identical_prims",
+    "prim_path_folder_structure",
+    "interpret_lods",
+)
+
+#: USD's model kinds and their EUsdDefaultKind bits (UE 5.7), for ``kinds_to_collapse``.
+USD_KINDS: Dict[str, int] = {"model": 1, "component": 2, "group": 4, "assembly": 8, "subcomponent": 16}
+
+#: EUsdCollisionType names (UE 5.7), for ``fallback_collision_type``: the
+#: collision of a mesh whose prim has no physics schema. ``none`` uses the
+#: render triangles as collision (no simple shapes).
+USD_COLLISION_TYPES: Tuple[str, ...] = (
+    "none",
+    "convex_decomposition",
+    "convex_hull",
+    "sphere",
+    "cube",
+    "mesh_simplification",
+    "capsule",
+    "custom_mesh",
+)
+
+#: ``up_axis`` values and their EUsdUpAxis names.
+_USD_UP_AXES: Dict[str, str] = {"y": "Y_AXIS", "z": "Z_AXIS"}
+
+#: Every option ``import_usd`` takes.
+USD_IMPORT_OPTIONS: Tuple[str, ...] = USD_IMPORT_BOOLEAN_OPTIONS + (
+    "kinds_to_collapse",
+    "fallback_collision_type",
+    "nanite_triangle_threshold",
+    "prims_to_import",
+    "meters_per_unit",
+    "up_axis",
+)
 
 # Characters Unreal does not allow in a folder name (INVALID_LONGPACKAGE_CHARACTERS,
 # UE 5.7); an object name's are _INVALID_OBJECT_NAME_CHARACTERS, below.
@@ -361,6 +416,48 @@ PASSPHRASE_REFUSED_ERROR = (
     "Remote Control refused the request (HTTP 401): set UNREAL__PASSPHRASE "
     "to the editor's passphrase"
 )
+
+#: What the attachment guard raises when the editor, map or viewport a session
+#: is attached to changed (``_unreal_attach_scripts`` ``verify`` and the
+#: active-viewport check ``_guard_attachment`` adds). It ran in the editor
+#: ahead of the tool's own script and came back as that script's traceback,
+#: typed ScriptError (or RuntimeError for a Remote Control call).
+_ATTACHMENT_REFUSAL = re.compile(
+    r"Unreal attachment changed \([a-z_]+\); run simul unreal attach again"
+    r"|Attached viewport is unavailable; run simul unreal attach again"
+    r"|This operation uses the active viewport; activate the attached viewport first"
+)
+
+#: The ``error_type`` of an attachment refusal: the editor is not in the state
+#: the attachment expects.
+ATTACHMENT_REFUSED = "InvalidState"
+
+
+def _attachment_refusal(failure: str) -> Optional[Dict[str, Any]]:
+    """The InvalidState envelope of an attachment guard refusal in ``failure``, or None."""
+    match = _ATTACHMENT_REFUSAL.search(failure)
+    if match is None:
+        return None
+    return {
+        "success": False,
+        "error_type": ATTACHMENT_REFUSED,
+        "error": match.group(0),
+        "details": {
+            "reason": "attachment_changed",
+            "hint": "Nothing was run. Run simul unreal attach again (or activate the attached viewport), then retry.",
+        },
+    }
+
+
+class UnrealAttachmentRefused(RuntimeError):
+    """The attached editor, map or viewport changed; named InvalidState in the envelope."""
+
+    error_type = ATTACHMENT_REFUSED
+
+    def __init__(self, envelope: Dict[str, Any]) -> None:
+        super().__init__(envelope["error"])
+        self.details = envelope["details"]
+
 
 #: ``ping`` ``error_type`` for a request that never left this machine. Its
 #: endpoint was not tried, so the failure says nothing about an editor there.
@@ -780,6 +877,78 @@ def _outside_project_refusal(path: str, action: str, hint: str) -> Dict[str, Any
         ),
         "details": {"content_path": path, "allowed_root": PROJECT_CONTENT_ROOT, "hint": hint},
     }
+
+
+def _usd_import_options(options: Any) -> Tuple[Dict[str, Any], List[str]]:
+    """The USD importer settings for ``options``, and what is wrong with them.
+
+    Returns:
+        ``properties`` (UsdStageImportOptions property values), plus
+        ``fallback_collision_type``, ``prims_to_import`` and ``stage``
+        ({meters_per_unit, up_axis as an EUsdUpAxis name}) when given; and
+        one message per option that Unreal 5.7 does not take as given. Lights
+        and cameras have no options in 5.7 (``import_lights`` and
+        ``import_cameras`` failed with "Failed to find property"): they are
+        imported as actors with ``import_actors``.
+    """
+    values: Dict[str, Any] = {"properties": {}}
+    problems: List[str] = []
+    if not isinstance(options, dict):
+        return values, [f"import_options must be an object, got {options!r}"]
+    for key, value in options.items():
+        if key in ("import_lights", "import_cameras"):
+            problems.append(
+                f"{key} is not a USD import option in Unreal 5.7: lights and cameras are imported as "
+                "actors, with import_actors"
+            )
+        elif key in USD_IMPORT_BOOLEAN_OPTIONS:
+            if type(value) is bool:
+                values["properties"][key] = value
+            else:
+                problems.append(f"{key} must be true or false, got {value!r}")
+        elif key == "kinds_to_collapse":
+            if isinstance(value, list) and all(isinstance(kind, str) and kind.lower() in USD_KINDS for kind in value):
+                values["properties"][key] = sum({USD_KINDS[kind.lower()] for kind in value})
+            else:
+                problems.append(
+                    f"kinds_to_collapse must be a list of USD kinds from {sorted(USD_KINDS)}, got {value!r}"
+                )
+        elif key == "fallback_collision_type":
+            if isinstance(value, str) and value.lower() in USD_COLLISION_TYPES:
+                values[key] = value.lower()
+            else:
+                problems.append(f"fallback_collision_type must be one of {list(USD_COLLISION_TYPES)}, got {value!r}")
+        elif key == "nanite_triangle_threshold":
+            if type(value) is int and 0 <= value <= 2**31 - 1:
+                values["properties"][key] = value
+            else:
+                problems.append(f"nanite_triangle_threshold must be an integer from 0 to 2147483647, got {value!r}")
+        elif key == "prims_to_import":
+            if (
+                isinstance(value, list)
+                and value
+                and all(isinstance(prim, str) and prim.startswith("/") for prim in value)
+            ):
+                values[key] = list(value)
+            else:
+                problems.append(
+                    f"prims_to_import must be a non-empty list of prim paths such as /Root/Chair, got {value!r}"
+                )
+        elif key not in ("meters_per_unit", "up_axis"):
+            problems.append(f"Unknown USD import option {key!r}; the options are {list(USD_IMPORT_OPTIONS)}")
+    if "meters_per_unit" in options or "up_axis" in options:
+        meters, axis = options.get("meters_per_unit"), options.get("up_axis")
+        if meters is None or axis is None:
+            problems.append(
+                "meters_per_unit and up_axis override the stage's own units and up axis together: give both"
+            )
+        elif isinstance(meters, bool) or not isinstance(meters, (int, float)) or not 0 < meters < math.inf:
+            problems.append(f"meters_per_unit must be a number above 0 (0.01 for centimeters), got {meters!r}")
+        elif not isinstance(axis, str) or axis.lower() not in _USD_UP_AXES:
+            problems.append(f"up_axis must be 'y' or 'z', got {axis!r}")
+        else:
+            values["stage"] = {"meters_per_unit": float(meters), "up_axis": _USD_UP_AXES[axis.lower()]}
+    return values, problems
 
 
 def _sanitized_object_name(name: str) -> str:
@@ -1223,6 +1392,9 @@ class UnrealRuntimeSession(LoggerMixin):
         )
         result = self._parse_python_json(checked)
         if result.get("error") or result.get("verified") is not True:
+            refusal = _attachment_refusal(str(result.get("error", "")))
+            if refusal is not None:
+                raise UnrealAttachmentRefused(refusal)
             raise RuntimeError(
                 result.get("error", "Unreal attachment verification failed")
             )
@@ -1552,6 +1724,9 @@ class UnrealRuntimeSession(LoggerMixin):
             self.logger.info("Unreal refused the request (%s): %s", NOT_FOUND_ERROR, not_found)
             return {"success": False, "error_type": NOT_FOUND_ERROR, "error": not_found}
         if result.get("error"):
+            refusal = self._attached_refusal(result)
+            if refusal is not None:
+                return refusal
             error_type = result.get("error_type")
             if error_type == PIE_ACTIVE or error_type in expected_errors:
                 self.logger.info("Unreal refused the request (%s): %s", error_type, result["error"])
@@ -1559,6 +1734,19 @@ class UnrealRuntimeSession(LoggerMixin):
                 self.logger.log(failure_log_level, "Unreal tool script failed: %s", result["error"])
             return {"success": False, "error_type": "ScriptError", **result}
         return result
+
+    def _attached_refusal(self, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The InvalidState envelope when a failed script is the attachment guard's refusal.
+
+        Only in attached mode, where ``_guard_attachment`` runs the guard
+        ahead of every script; it is logged as a refusal.
+        """
+        if self.settings.unreal.mode != "attached" or result.get("error_type"):
+            return None
+        refusal = _attachment_refusal(str(result.get("error", "")))
+        if refusal is not None:
+            self.logger.info("Unreal refused the request (%s): %s", ATTACHMENT_REFUSED, refusal["error"])
+        return refusal
 
     async def _pie_active(self) -> bool:
         """Whether Play In Editor runs; False when the editor cannot say.
@@ -1706,7 +1894,8 @@ class UnrealRuntimeSession(LoggerMixin):
         raw = await self._execute_python(code, mode=mode)
         failure = self._python_failure(raw)
         if failure is not None:
-            return self._script_error(failure)
+            refusal = self._attached_refusal({"error": failure})
+            return refusal if refusal is not None else self._script_error(failure)
         info = [
             str(entry.get("Output", ""))
             for entry in raw.get("LogOutput") or []
@@ -1917,59 +2106,77 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
         class_names: Optional[List[str]] = None,
         package_paths: Optional[List[str]] = None,
         max_results: int = 100,
+        offset: int = 0,
+        recursive_paths: bool = True,
+        include_subclasses: bool = True,
     ) -> Dict[str, Any]:
         """
-        Search the Unreal Asset Registry.
+        Search the Unreal Asset Registry, without loading any asset.
+
+        Searches every mounted content root (/Game, /Engine and each plugin's)
+        unless ``package_paths`` narrows it. A class is given by its short
+        name (StaticMesh) or its path (/Script/Engine.StaticMesh). The query
+        matches part of the asset name, ignoring case; redirectors are left
+        out. Matches are sorted by object path, so ``offset`` pages through
+        them. Remote Control's asset search, used before, matched no short
+        class name (and fired an engine ensure), ignored subfolders, searched
+        only /Game without a filter, could not say whether more matched and
+        gave no package path (observed on UE 5.7.4).
 
         Args:
-            query: Search query string.
-            class_names: Filter by UClass names.
-            package_paths: Package path prefixes to search within.
+            query: Part of the asset name to match, ignoring case; empty
+                matches every asset.
+            class_names: Asset classes, by short name or class path.
+            package_paths: Content folders to search, such as /Game/Props;
+                empty searches every mounted content root.
             max_results: Maximum number of results, from 1 to
                 ``MAX_ASSET_SEARCH_RESULTS`` (1000).
+            offset: How many matches to skip, for the next page.
+            recursive_paths: Include the subfolders of package_paths.
+            include_subclasses: Include assets of the classes' subclasses.
 
         Returns:
-            Dictionary with ``assets`` list, ``count``, ``truncated``, or a
-            ``ValidationError`` envelope, sent to no editor, when
-            ``max_results`` is out of range: Remote Control sizes its result
+            Dictionary with ``assets`` (each with name, path, class_name,
+            class_path, package_name, package_path and metadata, the registry
+            tags Unreal records for that kind of asset, such as Triangles,
+            LODs, NaniteEnabled and CollisionPrims, as the strings Unreal
+            stores), ``count``, ``total`` (every match), ``offset``,
+            ``next_offset`` (None on the last page), ``truncated`` (more
+            matches follow) and ``class_paths`` (the classes searched), or a
+            ``ValidationError`` envelope for an unknown class, a malformed
+            package path or an out-of-range ``max_results`` or ``offset``,
+            the last two sent to no editor: Remote Control sized its result
             array to the limit, and -1 crashed the editor.
         """
-        if (
-            isinstance(max_results, bool)
-            or not isinstance(max_results, int)
-            or not 1 <= max_results <= MAX_ASSET_SEARCH_RESULTS
+        problem = None
+        if isinstance(max_results, bool) or not isinstance(max_results, int) or not (
+            1 <= max_results <= MAX_ASSET_SEARCH_RESULTS
         ):
-            return {
-                "success": False,
-                "error_type": "ValidationError",
-                "error": f"max_results must be an integer from 1 to {MAX_ASSET_SEARCH_RESULTS}, got {max_results!r}",
-            }
-        body: Dict[str, Any] = {
-            "Query": query,
-            "Limit": max_results,
+            problem = f"max_results must be an integer from 1 to {MAX_ASSET_SEARCH_RESULTS}, got {max_results!r}"
+        elif isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            problem = f"offset must be an integer of at least 0, got {offset!r}"
+        folders: List[str] = []
+        for path in package_paths or []:
+            folder = path.strip().rstrip("/")
+            if not folder:
+                continue  # "/" is every content root
+            problem = problem or _content_folder_problem(folder)
+            folders.append(folder)
+        classes = [name.strip() for name in class_names or [] if name.strip()]
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
+        args = {
+            "query": query or "",
+            "class_names": classes,
+            "package_paths": folders,
+            "recursive_paths": bool(recursive_paths),
+            "include_subclasses": bool(include_subclasses),
+            "offset": offset,
+            "limit": max_results,
         }
-        if class_names:
-            body["Filter"] = {"ClassNames": class_names}
-        if package_paths:
-            body.setdefault("Filter", {})["PackagePaths"] = package_paths
-
-        data = await self._http_put("/remote/search/assets", body)
-        raw_assets: list = data.get("Assets", [])
-
-        assets: list = []
-        for asset in raw_assets[:max_results]:
-            assets.append({
-                "name": asset.get("Name", ""),
-                "path": asset.get("Path", ""),
-                "class_name": asset.get("Class", ""),
-                "package_path": asset.get("PackagePath", ""),
-            })
-
-        return {
-            "assets": assets,
-            "count": len(assets),
-            "truncated": len(raw_assets) > max_results,
-        }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + ASSET_SEARCH, expected_errors=("ValidationError",)
+        )
 
     async def describe_object(self, object_path: str) -> Dict[str, Any]:
         """
@@ -3114,6 +3321,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_path: str,
         material_path: str,
         slot_index: int = 0,
+        slot_name: str = "",
+        component_name: str = "",
     ) -> Dict[str, Any]:
         """
         Assign a material to a mesh component's material slot.
@@ -3130,17 +3339,24 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Args:
             actor_path: Target actor path.
             material_path: Material asset path to assign.
-            slot_index: Material slot index (default 0).
+            slot_index: Material slot index (default 0); unused when
+                ``slot_name`` is given.
+            slot_name: Material slot name, as the Details panel shows it;
+                empty uses ``slot_index``.
+            component_name: Mesh component to assign to, by name (such as
+                StaticMeshComponent0) or path; empty picks the actor's mesh
+                root component, else its only mesh component.
 
         Returns:
-            Dictionary with actor_path, component_path, material_path (the
-            assigned material's object path), slot_index and
+            Dictionary with actor_path, component_path, component_name,
+            material_path (the assigned material's object path), slot_index,
+            slot_name (the slot's name; None when the mesh names none) and
             previous_material_path (what the slot rendered with before). An
             error envelope when the actor is not in the level being edited
             (``Actor not found``), the material path names no material
-            (``NotFoundError``), the slot is out of range
-            (``ValidationError``) or the slot reads back a different material
-            (``MaterialNotApplied``).
+            (``NotFoundError``), the component or slot is not found or is
+            ambiguous, naming the ones the actor has (``ValidationError``), or
+            the slot reads back a different material (``MaterialNotApplied``).
         """
         if isinstance(slot_index, bool) or not isinstance(slot_index, int):
             return {
@@ -3148,7 +3364,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "error_type": "ValidationError",
                 "error": f"slot_index must be an integer, got {slot_index!r}",
             }
-        args = {"actor_path": actor_path, "material_path": material_path, "slot_index": slot_index}
+        args = {
+            "actor_path": actor_path,
+            "material_path": material_path,
+            "slot_index": slot_index,
+            "slot_name": (slot_name or "").strip(),
+            "component_name": (component_name or "").strip(),
+        }
         return await self._execute_json_script(
             f"args = {args!r}\n" + ASSIGN_MATERIAL,
             expected_errors=("NotFoundError", "ValidationError"),
@@ -3738,6 +3960,22 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 },
             }
 
+    def _import_destination(self, destination_path: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """The content folder an import writes to, or the envelope refusing it.
+
+        Imports write only under the project's /Game folder, /Game itself
+        included.
+        """
+        destination = (destination_path or "").strip().rstrip("/")
+        problem = _content_folder_problem(destination)
+        if problem is not None:
+            return destination, {"success": False, "error_type": "ValidationError", "error": problem}
+        if not _in_project_content(destination):
+            return destination, _outside_project_refusal(
+                destination, "import into", "Pass a destination_path under /Game, such as /Game/Imports"
+            )
+        return destination, None
+
     async def import_usd(
         self,
         usd_path: str,
@@ -3753,53 +3991,54 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         ``replace_existing`` the import is refused when that folder already
         holds assets, and existing actors are kept (new ones are added beside
         them): Unreal's USD importer otherwise replaces both, an earlier
-        import's actors and customized assets included. The options are set
-        without saving them to the project's config, where the editor's own
-        import dialog would read them. The call waits
-        ``unreal.import_export_timeout``.
+        import's actors and customized assets included. Every option is set
+        on every import (to Unreal's default unless given) without saving it
+        to the project's config, where the editor's own import dialog would
+        read it. The call waits ``unreal.import_export_timeout``.
 
         Args:
             usd_path: Path to the USD file on disk.
-            destination_path: Content browser destination.
-            import_options: Interchange pipeline options.
+            destination_path: Content folder under /Game, /Game included.
+            import_options: USDImporter options (see ``USD_IMPORT_OPTIONS``):
+                the booleans in ``USD_IMPORT_BOOLEAN_OPTIONS``,
+                kinds_to_collapse (USD kinds: model, component, group,
+                assembly, subcomponent), fallback_collision_type (one of
+                ``USD_COLLISION_TYPES``), nanite_triangle_threshold,
+                prims_to_import (prim paths) and meters_per_unit with up_axis
+                (y or z), given together, to override the stage's own.
             replace_existing: Replace the assets in the destination folder and
                 the level's actors from an earlier import of this file.
 
         Returns:
             Dict with imported_assets, actor_paths (actors added to the level),
-            removed_actor_paths (actors the import replaced) and warnings, or
-            an error envelope: ``InvalidState`` when the folder already holds
+            removed_actor_paths (actors the import replaced) and warnings (the
+            warnings and errors the editor logged during the import, and
+            saved import settings that differ from Unreal's defaults), or an
+            error envelope: ``ValidationError`` for an option, value or
+            folder Unreal does not take, ``SandboxError`` for a folder
+            outside /Game, ``InvalidState`` when the folder already holds
             assets and ``replace_existing`` is false (nothing is imported),
             ``NotFoundError`` for a file the editor host does not have,
-            ``EngineError`` when the importer produced nothing, ``PIEActive``,
-            ``PluginUnavailable`` and ``TimeoutError``.
+            ``EngineError`` when the importer produced nothing (with the
+            logged reasons), ``PIEActive``, ``PluginUnavailable`` and
+            ``TimeoutError``.
 
         Raises:
             SandboxDenied: If ``usd_path`` is outside the sandbox.
         """
 
         usd_path = self._path_policy.authorize(usd_path)
-        if not destination_path.startswith("/Game/") or ".." in destination_path.split(
-            "/"
-        ):
-            raise ValueError("destination_path must be a /Game/ content directory")
+        destination, refusal = self._import_destination(destination_path)
+        if refusal is not None:
+            return refusal
         if type(replace_existing) is not bool:
             raise ValueError("replace_existing must be true or false")
-        options = import_options or {}
-        allowed = {
-            "import_actors",
-            "import_geometry",
-            "import_materials",
-            "import_lights",
-            "import_cameras",
-        }
-        if set(options) - allowed or any(type(v) is not bool for v in options.values()):
-            raise ValueError(
-                f"import_options accepts boolean values for: {sorted(allowed)}"
-            )
+        options, problems = _usd_import_options(import_options or {})
+        if problems:
+            return {"success": False, "error_type": "ValidationError", "error": "; ".join(problems)}
         args = {
             "path": usd_path,
-            "destination": destination_path.rstrip("/"),
+            "destination": destination,
             "name": _sanitized_object_name(Path(usd_path).stem),
             "options": options,
             "replace": replace_existing,
@@ -3815,6 +4054,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_paths: List[str],
         output_path: str,
         export_options: Optional[Dict[str, Any]] = None,
+        overwrite: bool = False,
     ) -> Dict[str, Any]:
         """
         Export selected actors with the optional USDImporter plugin.
@@ -3823,22 +4063,29 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         is refused without loading that map. The actors exported are read
         back from the written stage: Unreal's exporter leaves out what it does
         not export (editor helpers such as WorldSettings or PlayerStart)
-        without an error, and an export that wrote none of them fails. The
-        call waits ``unreal.import_export_timeout``, since the first USD
-        export of an editor session loads the USD Python modules (25-40 s).
+        without an error, and an export that wrote none of them fails. Unreal
+        also writes a file per mesh and material, and MaterialOverrides, next
+        to the output; every file written is reported. The call waits
+        ``unreal.import_export_timeout``, since the first USD export of an
+        editor session loads the USD Python modules (25-40 s).
 
         Args:
             actor_paths: Actor paths to export.
             output_path: Output USD file path.
             export_options: Export pipeline options.
+            overwrite: Replace an existing output file; otherwise the export
+                is refused when it exists.
 
         Returns:
             Dict with output_path, actors_exported (the actors the stage has a
             prim for), exported_prims (each one's actor_path and prim_path),
-            skipped_actors (the actors it has none for) and file_size_bytes,
-            or an error envelope: ``EngineError`` when Unreal exported nothing
-            or failed, ``PIEActive``, ``PluginUnavailable`` and
-            ``TimeoutError``.
+            skipped_actors (the actors it has none for), file_size_bytes,
+            written_files (every file the export created or changed under the
+            output's folder) and overwritten_files (those that existed
+            before), or an error envelope: ``InvalidState`` when the output
+            exists and ``overwrite`` is false, ``EngineError`` when Unreal
+            exported nothing or failed, ``PIEActive``, ``PluginUnavailable``
+            and ``TimeoutError``.
 
         Raises:
             SandboxDenied: If ``output_path`` is outside the sandbox.
@@ -3849,17 +4096,148 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             raise ValueError("At least one actor path is required")
         if Path(output_path).suffix.lower() not in {".usd", ".usda", ".usdc"}:
             raise ValueError("Output must have a .usd, .usda or .usdc extension")
+        if type(overwrite) is not bool:
+            raise ValueError("overwrite must be true or false")
         options = export_options or {}
         allowed = {"export_actor_folders", "export_sublayers"}
         if set(options) - allowed or any(type(v) is not bool for v in options.values()):
             raise ValueError(
                 f"export_options accepts boolean values for: {sorted(allowed)}"
             )
-        args = {"path": output_path, "actors": actor_paths, "options": options}
+        args = {"path": output_path, "actors": actor_paths, "options": options, "overwrite": overwrite}
         return await self._run_import_export(
             f"args = {args!r}\n" + USD_EXPORT,
             f"the export to {output_path}",
-            expected_errors=("PluginUnavailable",),
+            expected_errors=("PluginUnavailable", "InvalidState"),
+        )
+
+    async def import_asset(
+        self,
+        file_path: str,
+        destination_path: str = "/Game/Imports",
+        replace_existing: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Import an FBX, glTF, GLB or OBJ file as assets through Interchange.
+
+        Uses Unreal's Interchange importer with the project's default content
+        pipelines, as the Content Browser's Import does: meshes, materials
+        and textures are created and saved under ``destination_path``, and no
+        actor is placed. Without ``replace_existing`` an asset that already
+        exists is kept (Interchange skips it), and a file whose every asset
+        exists imports nothing (``InvalidState``). The call waits
+        ``unreal.import_export_timeout``.
+
+        Args:
+            file_path: Path of the file on disk; must be inside the sandbox.
+            destination_path: Content folder under /Game, /Game included.
+            replace_existing: Replace assets of the same name in the folder.
+
+        Returns:
+            Dict with imported_assets, replaced_assets (those that existed
+            before), kept_assets (existing assets left as they were) and
+            warnings (what the editor logged during the import), or an error
+            envelope: ``ValidationError`` for an unsupported file type or a
+            malformed folder, ``SandboxError`` for a folder outside /Game,
+            ``InvalidState`` when every asset exists and ``replace_existing``
+            is false, ``NotFoundError`` for a file the editor host does not
+            have, ``EngineError`` when Unreal imported nothing (with the
+            logged reasons), ``PIEActive`` and ``TimeoutError``.
+
+        Raises:
+            SandboxDenied: If ``file_path`` is outside the sandbox.
+        """
+        file_path = self._path_policy.authorize(file_path)
+        suffix = Path(file_path).suffix.lower()
+        if suffix not in ASSET_IMPORT_EXTENSIONS:
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": (
+                    f"{Path(file_path).name} is not a file this tool imports: pass one of "
+                    f"{', '.join(ASSET_IMPORT_EXTENSIONS)} (USD has import_unreal_usd)"
+                ),
+            }
+        destination, refusal = self._import_destination(destination_path)
+        if refusal is not None:
+            return refusal
+        if type(replace_existing) is not bool:
+            raise ValueError("replace_existing must be true or false")
+        args = {"path": file_path, "destination": destination, "replace": replace_existing}
+        return await self._run_import_export(
+            f"args = {args!r}\n" + ASSET_IMPORT,
+            f"the import of {file_path}",
+            expected_errors=("NotFoundError", "InvalidState"),
+        )
+
+    async def save_assets(
+        self,
+        asset_paths: Optional[List[str]] = None,
+        save_level: bool = False,
+        all_dirty: bool = False,
+        allow_engine_content: bool = False,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Save modified assets and the level being edited.
+
+        Saves only packages that are modified: the named assets', the level's
+        (its map package and, in a World Partition level, its actors' and
+        objects' packages) with ``save_level``, or every modified package
+        with ``all_dirty``. Packages outside /Game (engine or plugin content,
+        shared by every project using it) are skipped unless
+        ``allow_engine_content``, and ones never saved (under /Temp) are
+        skipped. Refused while Play In Editor runs, when the editor saves
+        nothing. In attached mode it runs, like every tool, only while the
+        attached map is the one being edited. The call waits
+        ``unreal.import_export_timeout``.
+
+        Args:
+            asset_paths: Asset paths whose packages to save.
+            save_level: Save the level being edited.
+            all_dirty: Save every modified package.
+            allow_engine_content: Also save packages outside /Game.
+            dry_run: Report what would be saved and save nothing.
+
+        Returns:
+            Dict with saved, failed and would_save (package names), skipped
+            (each package left unsaved and why), level_package and dry_run,
+            or an error envelope: ``ValidationError`` when nothing is asked,
+            ``SandboxError`` for a named asset outside /Game without
+            ``allow_engine_content``, ``InvalidState`` for a level never
+            saved, ``EngineError`` when a package did not save (``failed``),
+            ``PIEActive`` and ``TimeoutError``.
+        """
+        flags = {
+            "save_level": save_level,
+            "all_dirty": all_dirty,
+            "allow_engine_content": allow_engine_content,
+            "dry_run": dry_run,
+        }
+        for name, value in flags.items():
+            if type(value) is not bool:
+                raise ValueError(f"{name} must be true or false")
+        paths = [path.strip() for path in asset_paths or [] if path.strip()]
+        if not paths and not save_level and not all_dirty:
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": "Nothing to save: pass asset_paths, save_level=true or all_dirty=true",
+            }
+        for path in paths:
+            package = path.split(".", 1)[0]
+            problem = _content_folder_problem(package)
+            if problem is not None:
+                return {"success": False, "error_type": "ValidationError", "error": problem}
+            if not allow_engine_content and not _in_project_content(package):
+                return _outside_project_refusal(
+                    package, "save", "Pass allow_engine_content=true to save the shared asset"
+                )
+        args = {"asset_paths": paths, **flags}
+        return await self._run_import_export(
+            f"args = {args!r}\n" + SAVE_ASSETS,
+            "the save",
+            expected_errors=("InvalidState",),
         )
 
     async def convert_to_simready(

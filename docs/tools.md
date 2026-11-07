@@ -209,7 +209,7 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 |---|---|
 | Engine and scene | `get_unreal_engine_info`, `get_unreal_loaded_map`, `summarize_unreal_scene`, `query_unreal_scene_graph`, `analyze_unreal_scene_for_robotics`, `get_unreal_viewport_info` |
 | Actors | `list_unreal_actors`, `get_unreal_actor_info`, `describe_unreal_object`, `get_unreal_actor_by_semantic_label`, `get_unreal_actor_thumbnail`, `spawn_unreal_actor`, `delete_unreal_actor`, `set_unreal_actor_transform`, `set_unreal_actor_property`, `set_unreal_actor_visibility`, `set_unreal_actor_parent`, `add_unreal_component`, `focus_unreal_on_actor` |
-| Assets | `search_unreal_assets` |
+| Assets | `search_unreal_assets`, `import_unreal_asset`, `save_unreal_assets` |
 | Camera, lights, rendering | `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
 | Materials | `get_unreal_material_info`, `assign_unreal_material`, `create_unreal_material_instance`, `set_unreal_material_params` |
 | Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `apply_unreal_force`, `control_unreal_simulation`, `get_unreal_simulation_status` |
@@ -361,13 +361,36 @@ Behaviour worth knowing:
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
   `get_unreal_interchange_info` reports whether the plugin is available.
-  Import options accept booleans `import_actors`, `import_geometry`,
-  `import_materials`, `import_lights`, `import_cameras`; export options accept
-  booleans `export_actor_folders`, `export_sublayers`.
+  Export options accept booleans `export_actor_folders`, `export_sublayers`.
+  - `import_unreal_usd` options are Unreal 5.7's USD importer settings:
+    booleans `import_actors`, `import_geometry`, `import_materials`,
+    `import_skeletal_animations`, `import_level_sequences`,
+    `import_groom_assets`, `import_sparse_volume_textures`, `import_sounds`,
+    `import_only_used_materials`, `use_prim_kinds_for_collapsing`,
+    `merge_identical_material_slots`, `share_assets_for_identical_prims`,
+    `prim_path_folder_structure`, `interpret_lods`; `kinds_to_collapse` (a
+    list of USD kinds: `model`, `component`, `group`, `assembly`,
+    `subcomponent`); `fallback_collision_type` (`none`, `convex_decomposition`,
+    `convex_hull`, `sphere`, `cube`, `mesh_simplification`, `capsule`,
+    `custom_mesh`); `nanite_triangle_threshold`; `prims_to_import` (prim
+    paths); and `meters_per_unit` with `up_axis` (`y` or `z`), given together,
+    to override the stage's own units and up axis. An option left out takes
+    Unreal's default, whatever the project's saved settings say. By default
+    the importer merges the meshes under a prim of a collapsing kind into one
+    (three exported StaticMeshActors came back as one `SM_Root`); pass
+    `use_prim_kinds_for_collapsing` false for a mesh per prim. The default
+    fallback collision, `none`, uses the render triangles as collision, so a
+    mesh has no simple shapes; `convex_hull` gives each a hull. Earlier simul
+    versions documented `import_lights` and `import_cameras`, which 5.7 does
+    not have ("Failed to find property"): lights and cameras are imported as
+    actors with `import_actors`. Any other name or a malformed value is a
+    `ValidationError` before anything runs.
   - `import_unreal_usd` files the assets under
     `<destination_path>/<file name>` (the name as Unreal names assets: `my
     robot.usda` becomes `my_robot`) and spawns the actors in the level being
-    edited. Without `replace_existing` (the default) an import into a folder
+    edited. `destination_path` is a folder under `/Game`, `/Game` itself
+    included; another content root is a `SandboxError`. Without
+    `replace_existing` (the default) an import into a folder
     that already holds assets is refused with `InvalidState` and nothing is
     imported, and existing actors are kept: the new ones are added beside
     them. Unreal's USD importer otherwise replaces both, whatever
@@ -376,26 +399,35 @@ Behaviour worth knowing:
     deleted the earlier import's actors. With `replace_existing` true the
     folder's assets and the level's actors from an earlier import of the file
     (the top-level actor named after the file) are replaced;
-    `removed_actor_paths` lists the actors that went.
+    `removed_actor_paths` lists the actors that went, and `actor_paths` lists
+    each new actor once. `warnings` holds the warnings and errors the editor
+    logged during the import (read back from its log file; they can include a
+    line from other editor activity at the same time), and a file the
+    importer cannot read fails with `EngineError` carrying those lines.
   - The import options are set without saving them. Unreal's
     UsdStageImportOptions saves its settings to the project's
     `Saved/Config/<Platform>Editor/EditorPerProjectUserSettings.ini` whenever
     a change is notified, and earlier simul versions notified it, so one
     import with `import_actors` false left `bImportActors=False` there for
     every later import and the editor's own **Import into Level** dialog.
-    simul now sets `import_actors`, `import_geometry` and `import_materials`
-    on every import (true unless given) and, when the project's saved
-    settings differ from Unreal's defaults, says so in `warnings` and leaves
-    them alone: nothing tells a value simul wrote from one the user chose.
-    Reset them in the editor's USD import dialog.
+    simul now sets every option above on every import and, when the
+    project's saved settings differ from Unreal's defaults, says so in
+    `warnings` and leaves them alone: nothing tells a value simul wrote from
+    one the user chose. Reset them in the editor's USD import dialog.
   - `export_unreal_usd` exports actors of the level being edited; a path in
     another map is refused without loading it. `actors_exported` counts the
     actors the written stage has a prim for, read back from the file
     (`exported_prims` gives each one's prim), since Unreal's exporter leaves
     out editor helpers such as WorldSettings or PlayerStart without an error;
     they are listed in `skipped_actors`, and an export that wrote none of the
-    actors fails with `EngineError`. Mesh and material files are written next
-    to the output file.
+    actors fails with `EngineError`. An existing output file is refused with
+    `InvalidState` unless `overwrite` is true. Unreal writes a file per mesh
+    and material, and `MaterialOverrides`, next to the output, replacing one
+    of the same name; `written_files` lists every file the export created or
+    changed under the output's folder and `overwritten_files` those that
+    existed before. Export into a folder of its own to keep exports apart.
+    With `overwrite`, a file whose content would not change is left as it is
+    (Unreal skips identical files), so it is not in `written_files`.
   - Both wait `unreal.import_export_timeout` (default 300 s,
     `UNREAL__IMPORT_EXPORT_TIMEOUT`) instead of `unreal.timeout`: the first
     USD export of an editor session loads Unreal's USD Python modules and
@@ -407,13 +439,40 @@ Behaviour worth knowing:
     Control runs its scripts in. The export's AssetExportTask used to keep
     the editor world referenced there, and the next level load failed the
     editor's world leak check and took the editor down.
+- `import_unreal_asset` imports an FBX, glTF, GLB or OBJ file through
+  Unreal's Interchange importer with the project's default content pipelines,
+  as the Content Browser's **Import** does: the meshes, materials and textures
+  are created and saved under `destination_path` (a `/Game` folder; glTF files
+  get a folder of their own), and no actor is placed. The file must be inside
+  the sandbox, like a USD file. Without `replace_existing` an asset that
+  already exists is kept (`kept_assets`), and a file whose every asset exists
+  imports nothing (`InvalidState`); with it they are replaced
+  (`replaced_assets`). `warnings` holds what the editor logged, and a file
+  Unreal cannot read fails with `EngineError` and its logged reasons. It waits
+  `unreal.import_export_timeout`. USD files go through `import_unreal_usd`.
+- `save_unreal_assets` saves modified packages to disk: the packages of
+  `asset_paths`, the level being edited with `save_level` (its map package
+  and, in a World Partition level, its actors' and objects' packages), or
+  every modified package with `all_dirty`. Only modified packages are written.
+  Packages outside `/Game` (engine or plugin content, which importers and edits
+  can leave modified) are skipped unless `allow_engine_content`, as are ones
+  never saved (under `/Temp`); `skipped` says why for each. `dry_run` lists
+  what would be saved. A package still modified afterwards is in `failed`,
+  and the call fails with `EngineError`. A level never saved is
+  `InvalidState`: save it once in the editor to give it a file. In attached
+  mode it runs, like every tool, only while the attached map is open.
 - `assign_unreal_material` assigns the material in one undoable transaction
   that records the component first, which marks the level dirty (in a World
   Partition level, the actor's package), so saving keeps the assignment and
   Undo reverts it; the slot is read back, and `previous_material_path` is what
   it rendered with before. The actor must be in the level being edited: a path
   in another map is refused without loading that map, as is a map path given
-  as the material.
+  as the material. `component_name` picks the mesh component by name (or
+  path); without it the actor's mesh root component is used, else its only
+  mesh component, and an actor with several is a `ValidationError` naming
+  them. `slot_name` picks the material slot by the name the Details panel
+  shows; an unknown component or slot is a `ValidationError` listing the
+  actor's components or the component's slots.
 - `create_unreal_material_instance` writes under the project's `/Game` folder:
   `save_path`, else next to a parent in `/Game`, else `/Game/Materials`. It
   used to save an instance of an `/Engine` parent into the engine install
@@ -423,10 +482,37 @@ Behaviour worth knowing:
   `set_unreal_material_params` refuses an instance outside `/Game` the same
   way. A folder with an empty, `.` or `..` name, or with characters Unreal
   does not allow, is a `ValidationError`: Unreal does not resolve `..` and
-  turned `/Game/../Engine` into a folder named `__`.
-- `search_unreal_assets` returns at most `max_results` assets, from 1 to 1000:
-  Remote Control sizes its result array to the limit it is sent, and -1
-  crashed the editor.
+  turned `/Game/../Engine` into a folder named `__`. A missing parent is a
+  `NotFoundError`, a parent that is no material (a StaticMesh, a level, which
+  is never loaded) an `InvalidAssetType`, a name already taken an
+  `InvalidState`, and an instance Unreal created but did not save an
+  `EngineError` naming it.
+- `search_unreal_assets` reads the editor's asset registry, loading nothing,
+  in or out of Play In Editor. Without `package_paths` it searches every
+  mounted content root (`/Game`, `/Engine` and each plugin's); with them, their
+  subfolders too unless `recursive_paths` is false. `class_names` take a
+  class's name (`StaticMesh`, `Material`, `Texture2D`) or its path
+  (`/Script/Engine.StaticMesh`), with subclasses unless `include_subclasses`
+  is false; an unknown name is a `ValidationError`. The query matches part of
+  the asset name, ignoring case, and redirectors are left out. Matches are
+  sorted by object path; `total` counts them, `truncated` says more follow and
+  `next_offset` is the `offset` of the next page. Each asset has its
+  `class_path`, `package_name`, `package_path` and `metadata`: the registry
+  tags Unreal records for its kind, as the strings it stores (`Triangles`,
+  `Vertices`, `LODs`, `NaniteEnabled`, `CollisionPrims` for a mesh;
+  `Dimensions` and `Format` for a texture; `MaterialDomain`, `BlendMode` or
+  `Parent` for a material). Remote Control's search, used before, matched no
+  short class name, searched only `/Game` and no subfolders, and could not
+  tell whether more matched. `max_results` is 1 to 1000: Remote Control sized
+  its result array to the limit it was sent, and -1 crashed the editor.
+- `get_unreal_interchange_info` lists Interchange's formats for each kind of
+  translator (`supported_formats_by_kind`: assets, scenes, actors) and the
+  project's pipeline stacks, content and scene, with each stack's pipeline
+  assets (`pipelines`, `default_pipeline_stacks`).
+- In attached mode a tool run after the attached editor, map or viewport
+  changed fails with `InvalidState` and `details.reason`
+  `"attachment_changed"`, having run nothing; run `simul unreal attach` again.
+  It used to come back as the tool's own traceback.
 - SimReady conversion and validation are not implemented for Unreal. Those
   tools return `UnsupportedOperation` without changing files.
 - `analyze_unreal_scene_for_robotics` classifies the actors loaded in the
@@ -523,7 +609,9 @@ Behaviour worth knowing:
     `generate_unreal_procedural_scene`, the mesh tools that create an actor
     (`generate_unreal_mesh_primitive`, `compute_unreal_convex_hull`,
     `decompose_unreal_convex_hull`, `convert_unreal_mesh_format` to
-    `dynamic_mesh`), `import_unreal_usd`, `export_unreal_usd` and, in attached
+    `dynamic_mesh`), `import_unreal_usd`, `export_unreal_usd`,
+    `import_unreal_asset`, `save_unreal_assets` (the editor saves nothing
+    during PIE) and, in attached
     mode, every `control_unreal_ui` action except `inspect` and `clear_cursor`
     return `error_type: "PIEActive"`, with `details.hint` naming the way out:
     `control_unreal_simulation` with action `stop` (CLI: `simul unreal sim stop`).

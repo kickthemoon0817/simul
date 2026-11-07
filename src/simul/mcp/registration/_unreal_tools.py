@@ -66,6 +66,7 @@ from ..schemas.unreal import (
     UnrealGetSimulationStatusResponse,
     UnrealGetThumbnailResponse,
     UnrealHealthCheckResponse,
+    UnrealImportAssetResponse,
     UnrealImportUsdResponse,
     UnrealListActorsResponse,
     UnrealListInstancesResponse,
@@ -73,6 +74,7 @@ from ..schemas.unreal import (
     UnrealPingResponse,
     UnrealQuerySceneGraphResponse,
     UnrealRemeshMeshResponse,
+    UnrealSaveAssetsResponse,
     UnrealSceneSummaryResponse,
     UnrealSearchAssetsResponse,
     UnrealSetActorParentResponse,
@@ -555,25 +557,41 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="search_unreal_assets",
-        description="Search the Unreal Asset Registry by name, class, or package path.",
+        description=(
+            "Search the Unreal Asset Registry, loading nothing: every mounted content root (/Game, /Engine, "
+            "plugins) unless package_paths narrows it, subfolders included. Matches part of the asset name "
+            "(ignoring case), sorted by path; page with offset (total counts every match). Each asset carries "
+            "the registry metadata Unreal records, such as Triangles, LODs, NaniteEnabled and CollisionPrims."
+        ),
         response=UnrealSearchAssetsResponse,
         read_only=True,
         idempotent=True,
         method="search_assets",
         params=(
-            ToolParam("query", str, "", description="Search query string."),
+            ToolParam(
+                "query",
+                str,
+                "",
+                description="Part of the asset name to match, ignoring case; empty matches every asset.",
+            ),
             ToolParam(
                 "class_names",
                 str,
                 "",
-                description="Comma-separated UClass names to filter.",
+                description=(
+                    "Comma-separated asset classes, by name (StaticMesh, Material, Texture2D) or class path "
+                    "(/Script/Engine.StaticMesh). Empty matches every class."
+                ),
                 convert=_name_list,
             ),
             ToolParam(
                 "package_paths",
                 str,
                 "",
-                description="Comma-separated package paths to search.",
+                description=(
+                    "Comma-separated content folders to search, such as /Game/Props. Empty searches every "
+                    "mounted content root."
+                ),
                 convert=_name_list,
             ),
             ToolParam(
@@ -582,6 +600,92 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 100,
                 description=f"Maximum number of results, from 1 to {MAX_ASSET_SEARCH_RESULTS}.",
             ),
+            ToolParam(
+                "offset",
+                Annotated[int, Field(ge=0)],
+                0,
+                description="Matches to skip, for the next page: pass the previous call's next_offset.",
+            ),
+            ToolParam(
+                "recursive_paths",
+                bool,
+                True,
+                description="Include the subfolders of package_paths.",
+            ),
+            ToolParam(
+                "include_subclasses",
+                bool,
+                True,
+                description="Include assets whose class derives from one of class_names.",
+            ),
+        ),
+    ),
+    UnrealTool(
+        name="import_unreal_asset",
+        description=(
+            "Import an FBX, glTF, GLB or OBJ file as assets (meshes, materials, textures) under a /Game folder "
+            "through Unreal's Interchange importer, saved, placing no actor. Without replace_existing, assets "
+            "that already exist are kept, and a file whose every asset exists imports nothing."
+        ),
+        response=UnrealImportAssetResponse,
+        read_only=False,
+        destructive=True,
+        method="import_asset",
+        params=(
+            ToolParam(
+                "file_path",
+                str,
+                description="Path of the .fbx, .gltf, .glb or .obj file on disk; must be inside the sandbox.",
+            ),
+            ToolParam(
+                "destination_path",
+                str,
+                "/Game/Imports",
+                description="Content folder under /Game to import into (/Game itself included).",
+            ),
+            ToolParam(
+                "replace_existing",
+                bool,
+                False,
+                description=(
+                    "Replace assets of the same name in the folder. Default false keeps them, and refuses "
+                    "(InvalidState) a file whose every asset exists."
+                ),
+            ),
+        ),
+    ),
+    UnrealTool(
+        name="save_unreal_assets",
+        description=(
+            "Save modified packages to disk: the named assets, the level being edited (save_level), or every "
+            "modified package (all_dirty). Only /Game packages unless allow_engine_content; refused during "
+            "Play In Editor. dry_run lists what would be saved."
+        ),
+        response=UnrealSaveAssetsResponse,
+        read_only=False,
+        idempotent=True,
+        destructive=True,
+        method="save_assets",
+        params=(
+            ToolParam(
+                "asset_paths",
+                str,
+                "",
+                description="Comma-separated asset paths whose packages to save, such as /Game/Materials/MI_Red.",
+                convert=_name_list,
+            ),
+            ToolParam(
+                "save_level",
+                bool,
+                False,
+                description=(
+                    "Save the level being edited: its map package and, in a World Partition level, its "
+                    "actors' packages."
+                ),
+            ),
+            ToolParam("all_dirty", bool, False, description="Save every modified package."),
+            ToolParam("allow_engine_content", bool, False, description=_ALLOW_ENGINE_CONTENT_DESCRIPTION),
+            ToolParam("dry_run", bool, False, description="Report what would be saved; save nothing."),
         ),
     ),
     UnrealTool(
@@ -984,6 +1088,21 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("actor_path", str),
             ToolParam("material_path", str),
             ToolParam("slot_index", int, 0),
+            ToolParam(
+                "slot_name",
+                str,
+                "",
+                description="Material slot name, as the Details panel shows it; empty uses slot_index.",
+            ),
+            ToolParam(
+                "component_name",
+                str,
+                "",
+                description=(
+                    "Mesh component to assign to, by name (StaticMeshComponent0) or path. Empty picks the "
+                    "actor's mesh root component, else its only mesh component."
+                ),
+            ),
         ),
     ),
     UnrealTool(
@@ -1185,8 +1304,18 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 Optional[Dict[str, Any]],
                 None,
                 description=(
-                    "Boolean USD options: import_actors, import_geometry, import_materials, "
-                    "import_lights, import_cameras."
+                    "USDImporter options. Booleans: import_actors, import_geometry, import_materials, "
+                    "import_skeletal_animations, import_level_sequences, import_groom_assets, "
+                    "import_sparse_volume_textures, import_sounds, import_only_used_materials, "
+                    "use_prim_kinds_for_collapsing (merge a prim's meshes into one per kinds_to_collapse; "
+                    "false keeps a mesh per prim), merge_identical_material_slots, "
+                    "share_assets_for_identical_prims, prim_path_folder_structure, interpret_lods. "
+                    "kinds_to_collapse: list of USD kinds (model, component, group, assembly, subcomponent). "
+                    "fallback_collision_type: none (render triangles), convex_decomposition, convex_hull, "
+                    "sphere, cube, mesh_simplification, capsule, custom_mesh. nanite_triangle_threshold: int. "
+                    "prims_to_import: prim paths. meters_per_unit with up_axis (y or z), together, override the "
+                    "stage's own. Lights and cameras import as actors with import_actors. Unset options take "
+                    "Unreal's defaults."
                 ),
             ),
             ToolParam(
@@ -1224,6 +1353,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 Optional[Dict[str, Any]],
                 None,
                 description="Boolean USD options: export_actor_folders, export_sublayers.",
+            ),
+            ToolParam(
+                "overwrite",
+                bool,
+                False,
+                description=(
+                    "Replace an existing output file. Default false refuses the export (InvalidState). Mesh and "
+                    "material files are written next to it and listed in written_files."
+                ),
             ),
         ),
     ),
@@ -1272,7 +1410,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="get_unreal_interchange_info",
-        description="Query available Interchange pipelines and supported formats.",
+        description=(
+            "Interchange's supported formats by translator kind (assets, scenes, actors), the project's "
+            "content and scene pipeline stacks, and whether USD import and export are available."
+        ),
         response=UnrealGetInterchangeInfoResponse,
         read_only=True,
         idempotent=True,
