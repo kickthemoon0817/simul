@@ -152,8 +152,8 @@ dispatchers, and `simul isaac exec` / `simul unreal exec` return a
 `control_unreal_ui`, keep working. The Isaac prim tools refuse the writes
 that would plant code instead (`ScriptExecutionDisabled`): code-carrying
 attributes such as `inputs:script*` and `inputs:codeStr`, a `node:type` that
-runs code (ScriptNode, omni.warp's WarpKernel), any write to such a node,
-creating one and duplicating a subtree that holds one.
+runs code (ScriptNode, omni.warp's WarpKernel, Replicator's OgnAugment), any
+write to such a node, creating one and duplicating a subtree that holds one.
 
 Isaac Sim also runs Python that an OmniGraph node carries as data:
 `omni.graph.scriptnode.ScriptNode` runs its `inputs:script`,

@@ -316,8 +316,10 @@ Notes:
   would plant code Kit runs (`ScriptExecutionDisabled`): code-carrying
   attributes (`inputs:script*`, `inputs:codeStr`, Replicator's
   `inputs:augmentationScript` / `inputs:conditionScript`), a `node:type` that
-  runs code (ScriptNode, omni.warp's WarpKernel), any write to such a node,
-  creating one, and duplicating a subtree that holds one.
+  runs code (ScriptNode, omni.warp's WarpKernel, Replicator's OgnAugment and
+  condition-script nodes), any write to such a node, creating one, and
+  duplicating a subtree that holds one. They use the same predicates as the
+  graph tools (`graph.py`).
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
 - `create_isaac_physics_scene` derives a new scene's gravity from the stage:

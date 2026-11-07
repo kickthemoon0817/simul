@@ -1256,6 +1256,11 @@ def _locked_tools() -> Tools:
             ("/World/Graph/aug", "inputs:conditionScript", "x"),
         ),
         ("set_isaac_prim_attribute", ("/World/Graph/node", "inputs:SCRIPT", "x")),
+        # Named by graph.py's deny-list, not by any hint.
+        (
+            "set_isaac_prim_attribute",
+            ("/World/Graph/node", "node:type", "omni.replicator.core.OgnAugmentCPU"),
+        ),
         ("create_isaac_object", ("/World/Graph/node", "ScriptNode")),
     ],
 )
@@ -1306,6 +1311,12 @@ def _graph_stage() -> Usd.Stage:
         "omni.warp.WarpKernel"
     )
     kernel.CreateAttribute("inputs:dim1", Sdf.ValueTypeNames.Int).Set(1)
+    # Replicator's augmentation node runs code yet its name has neither hint.
+    augment = stage.DefinePrim("/World/Graph/augment", "OmniGraphNode")
+    augment.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
+        "omni.replicator.core.OgnAugment"
+    )
+    augment.CreateAttribute("inputs:seed", Sdf.ValueTypeNames.Int).Set(0)
     const = stage.DefinePrim("/World/Graph/const", "OmniGraphNode")
     const.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
         "omni.graph.nodes.ConstantString"
@@ -1319,6 +1330,7 @@ def _graph_stage() -> Usd.Stage:
     [
         ("/World/Graph/script", "inputs:usePath", True),
         ("/World/Graph/kernel", "inputs:dim1", 4),
+        ("/World/Graph/augment", "inputs:seed", 7),
     ],
 )
 def test_no_attribute_of_a_code_running_node_is_written(
@@ -1362,7 +1374,11 @@ def test_duplicating_a_subtree_with_a_script_node_is_refused(run_on_stage: Any) 
     assert [node["path"] for node in result["details"]["nodes"]] == [
         "/World/Graph/script",
         "/World/Graph/kernel",
+        "/World/Graph/augment",
     ]
+    assert (
+        result["details"]["nodes"][2]["node_type"] == "omni.replicator.core.OgnAugment"
+    )
     assert not stage.GetPrimAtPath("/World/GraphCopy").IsValid()
 
 

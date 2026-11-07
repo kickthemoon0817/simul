@@ -19,87 +19,24 @@ from ._shared import (
 )
 from .._meta import tool_meta
 
+# OmniGraph nodes are USD prims, so with security.allow_script_execution off
+# the prim tools are another way to plant code Kit runs. graph.py holds the
+# one definition of "script-capable" (names server side, prims through
+# script_guard_source() Kit side); the prim tools ask the same predicates.
+from .graph import (
+    _script_execution_refusal,
+    is_script_attribute,
+    is_script_capable_node_type,
+    script_guard_source,
+)
+
 DELETE_MODES = ("auto", "remove", "deactivate")
 
-# OmniGraph nodes are USD prims, so with security.allow_script_execution off
-# the prim tools are another way to plant code Kit runs: a ScriptNode runs its
-# inputs:script (or the file in inputs:scriptPath), omni.warp's WarpKernel
-# compiles its inputs:codeStr, Replicator nodes run inputs:augmentationScript
-# and inputs:conditionScript. Matched by name fragment, deliberately broadly:
-# a refused harmless write costs one call, an admitted one costs the setting.
-# Local stand-ins for the shared predicate the graph lane is landing in
-# graph.py (#316); switch to graph.is_script_capable_node_type and
-# graph.is_script_attribute once it is on main.
-SCRIPT_NODE_TYPE_HINTS = ("script", "warp")
-SCRIPT_ATTRIBUTE_HINTS = ("script", "code")
-
-
-def is_script_capable_node_type(node_type: Any) -> bool:
-    """Whether an OmniGraph ``node:type`` (or prim type) names a node that runs code.
-
-    Args:
-        node_type: Node type ID, e.g. ``omni.graph.scriptnode.ScriptNode``.
-
-    Returns:
-        True when creating, copying or editing such a node amounts to running
-        agent-authored code.
-    """
-    return isinstance(node_type, str) and any(
-        hint in node_type.lower() for hint in SCRIPT_NODE_TYPE_HINTS
-    )
-
-
-def is_script_attribute(attribute_name: Any) -> bool:
-    """Whether an attribute name carries code or a path to code.
-
-    Args:
-        attribute_name: Attribute name, e.g. ``inputs:script`` or ``inputs:codeStr``.
-
-    Returns:
-        True when writing it can change the code a node runs.
-    """
-    return isinstance(attribute_name, str) and any(
-        hint in attribute_name.lower() for hint in SCRIPT_ATTRIBUTE_HINTS
-    )
-
-
-def _script_refusal(message: str, **details: Any) -> Dict[str, Any]:
-    """Return the ScriptExecutionDisabled envelope for a write that would plant code."""
-    return ErrorResponse(
-        error=(
-            message + " Script execution is disabled by security.allow_script_execution; "
-            "set SECURITY__ALLOW_SCRIPT_EXECUTION=true to allow it."
-        ),
-        error_type="ScriptExecutionDisabled",
-        details=details or None,
-    ).model_dump()
-
-
-# The same guard inside Kit, where the target prim's node:type can be read.
-# A ScriptNode's every input steers its code (inputs:usePath switches it to
-# a file), so any write to a script-capable node is refused, not only the
-# code attribute. Needs ``Usd``.
-SCRIPT_GUARD_CORE = (
-    f"    _SCRIPT_NODE_TYPE_HINTS = {_pyval(SCRIPT_NODE_TYPE_HINTS)}\n"
-    + """\
-
-    def _script_node_type(prim):
-        attr = prim.GetAttribute("node:type")
-        value = attr.Get() if attr else None
-        if isinstance(value, str) and any(hint in value.lower() for hint in _SCRIPT_NODE_TYPE_HINTS):
-            return value
-        return None
-
-    def _script_nodes_in(stage, root):
-        found = []
-        for prim in Usd.PrimRange(root, Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)):
-            node_type = _script_node_type(prim)
-            if node_type:
-                found.append({"path": str(prim.GetPath()), "node_type": node_type})
-                if len(found) >= 20:
-                    break
-        return found
-
+# The refusal envelope a generated script prints when the Kit-side guard
+# (script_guard_source) finds a code-running node. A ScriptNode's every input
+# steers its code (inputs:usePath switches it to a file), so any write to such
+# a node is refused, not only the code attribute.
+SCRIPT_GUARD_REFUSAL_CORE = """\
     def _script_guard_error(message, **details):
         return {
             "error": (
@@ -109,8 +46,11 @@ SCRIPT_GUARD_CORE = (
             "error_type": "ScriptExecutionDisabled",
             "details": details,
         }
+
+    def _node_type_of(prim):
+        attr = prim.GetAttribute("node:type")
+        return str(attr.Get()) if attr and attr.IsValid() and attr.Get() is not None else None
 """
-)
 
 # Where a prim's opinions live, for the tools that remove, copy or move it.
 # Editing the root layer alone ignored the stage's edit target and every
@@ -418,7 +358,10 @@ DUPLICATE_PRIM_CORE = """\
         if refusal is not None:
             return refusal
         if script_guard:
-            nodes = _script_nodes_in(stage, src)
+            nodes = [
+                {"path": path, "node_type": _node_type_of(stage.GetPrimAtPath(path)) or ""}
+                for path in _script_capable_prims_under(src)
+            ]
             if nodes:
                 return _script_guard_error(
                     "Refusing to duplicate " + prim_path + ": it holds OmniGraph nodes that run code ("
@@ -733,13 +676,13 @@ class PrimEditMixin:
         if not self._script_guard:
             return None
         if is_script_attribute(attribute_name):
-            return _script_refusal(
+            return _script_execution_refusal(
                 f"Refusing to write {attribute_name}: it carries code or a path to code "
                 "an OmniGraph node runs.",
                 attribute=attribute_name,
             )
         if attribute_name == "node:type" and is_script_capable_node_type(value):
-            return _script_refusal(
+            return _script_execution_refusal(
                 f"Refusing to set node:type to {value!r}: that node runs code.",
                 attribute=attribute_name,
                 node_type=value,
@@ -779,7 +722,7 @@ class PrimEditMixin:
             ancestors it created (``ancestors_created``).
         """
         if self._script_guard and is_script_capable_node_type(prim_type):
-            return _script_refusal(
+            return _script_execution_refusal(
                 f"Refusing to create a {prim_type!r} prim: that type runs code.", prim_type=prim_type
             )
         for name, value in (attributes or {}).items():
@@ -1064,14 +1007,17 @@ class PrimEditMixin:
             """,
             JSON_VALUE_CORE,
             COERCE_ATTRIBUTE_VALUE_CORE,
-            SCRIPT_GUARD_CORE,
+            script_guard_source(),
+            SCRIPT_GUARD_REFUSAL_CORE,
             f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
                 prim = stage.GetPrimAtPath({_prim_path})
-                guarded_type = _script_node_type(prim) if {_guard} and prim.IsValid() else None
+                guarded_type = None
+                if {_guard} and prim.IsValid() and _script_capable_prim(prim):
+                    guarded_type = _node_type_of(prim) or "code-running"
                 if not prim.IsValid():
                     print(json.dumps({{
                         "error": "Prim not found: " + {_prim_path},
@@ -1175,7 +1121,8 @@ class PrimEditMixin:
             import omni.usd
             from pxr import Sdf, Usd
             """,
-            SCRIPT_GUARD_CORE,
+            script_guard_source(),
+            SCRIPT_GUARD_REFUSAL_CORE,
             PRIM_LAYERING_CORE,
             DUPLICATE_PRIM_CORE,
             f"""\
