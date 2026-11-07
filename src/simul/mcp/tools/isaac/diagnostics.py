@@ -537,7 +537,9 @@ class DiagnosticsMixin:
     @tool_meta(
         name="disable_isaac_extension",
         description=(
-            "Disable an extension immediately in the running Isaac Sim instance. Refuses the transport "
+            "Disable an extension immediately in the running Isaac Sim instance, and fail when "
+            "it is still enabled afterwards (an enabled extension depending on it keeps it "
+            "loaded). Refuses the transport "
             "extensions simul speaks through (khemoo.simul, "
             "isaacsim.code_editor.python_server, isaacsim.code_editor.vscode)."
         ),
@@ -558,7 +560,9 @@ class DiagnosticsMixin:
             Dict with success status and extension info after disabling, or a
             RefusedOperation error for the extensions the MCP transport runs on.
         """
-        bare_name = extension_id.rsplit("-", 1)[0] if "-" in extension_id else extension_id
+        # Names hold dots, never hyphens; a version may hold hyphens
+        # (1.0.0-rc1), so the name ends at the first one.
+        bare_name = extension_id.strip().split("-", 1)[0]
         if bare_name in PROTECTED_EXTENSIONS:
             return self._refusal(
                 f"Refusing to disable {extension_id!r}: simul reaches Isaac Sim "
@@ -578,19 +582,30 @@ class DiagnosticsMixin:
             # Verify by matching on bare name or fully qualified ID — both are
             # accepted by the Kit extension manager, but get_extensions() always
             # returns the version-suffixed form in 'id' and the bare form in 'name'.
-            bare_query = ext_id.rsplit("-", 1)[0] if "-" in ext_id else ext_id
+            bare_query = ext_id.split("-", 1)[0]
             found = False
             for ext in ext_manager.get_extensions():
                 eid = ext.get("id", "")
                 ename = ext.get("name", "")
                 if ext_id in (eid, ename) or bare_query == ename:
                     found = True
-                    print(json.dumps({{
+                    enabled = bool(ext.get("enabled", False))
+                    payload = {{
                         "extension_id": eid or ename,
                         "name": ename,
-                        "enabled": ext.get("enabled", False),
+                        "enabled": enabled,
                         "version": ext.get("version", ""),
-                    }}))
+                    }}
+                    if enabled:
+                        # The manager keeps an extension that another enabled
+                        # one depends on; without an explicit failure the
+                        # envelope would report success for a no-op.
+                        payload["success"] = False
+                        payload["error"] = (
+                            "Extension is still enabled: " + (eid or ename)
+                            + " (an enabled extension may depend on it; check the Kit log)"
+                        )
+                    print(json.dumps(payload))
                     break
 
             if not found:
