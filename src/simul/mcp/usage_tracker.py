@@ -12,15 +12,17 @@ import json
 import logging
 import os
 import time
-
-logger = logging.getLogger(__name__)
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
+from ..utils.paths import state_dir
 
-_DEFAULT_LOG_DIR = Path.home() / ".simul" / "logs"
+logger = logging.getLogger(__name__)
+
+# Under $SIMUL_HOME (default ~/.simul); created on the first write, not here.
+_DEFAULT_LOG_DIR = state_dir() / "logs"
 
 
 @dataclass
@@ -97,7 +99,6 @@ class ToolUsageTracker:
 
         self._log_dir = log_dir or _DEFAULT_LOG_DIR
         self._log_file = self._log_dir / "tool_usage.jsonl"
-        self._log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def record(
         self,
@@ -151,8 +152,9 @@ class ToolUsageTracker:
         self._append_log(rec)
 
     def _append_log(self, rec: CallRecord) -> None:
-        """Append a single record to the JSONL log file."""
+        """Append a single record to the JSONL log file, creating its directory on first use."""
         try:
+            self._log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             with open(
                 os.open(self._log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
                 "w",
@@ -209,6 +211,8 @@ class ToolUsageTracker:
         """Clear in-memory data and truncate the JSONL log."""
         self._stats.clear()
         self._recent.clear()
+        if not self._log_file.exists():
+            return
         try:
             self._log_file.write_text("", encoding="utf-8")
         except OSError as exc:

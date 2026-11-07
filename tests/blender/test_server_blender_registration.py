@@ -242,12 +242,18 @@ def test_check_blender_object_bounds_calls_is_object_within_bounds(
             },
         )
     ]
+    # The relation report is optional: an add-on that predates it still answers.
     assert payload == {
         "success": True,
         "error": None,
         "object_name": "Cube",
         "within_bounds": True,
         "object_location": [0.5, 0.5, 0.5],
+        "relation": None,
+        "intersects": None,
+        "origin_within_bounds": None,
+        "object_bbox_min": None,
+        "object_bbox_max": None,
     }
 
 
@@ -524,3 +530,55 @@ def test_an_older_addon_still_answers_calls_that_leave_the_new_parameters_alone(
     ]
     assert unsupported["success"] is False
     assert "keep_transform" in unsupported["error"]
+
+
+class _AddonBeforePaging:
+    """The session of an add-on built before listing pages and scene-only delete."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def list_scene_objects(
+        self, collection_name=None, include_hidden=False, max_items=200
+    ) -> dict:
+        self.calls.append(("list_scene_objects", max_items))
+        return {
+            "collection": collection_name,
+            "include_hidden": include_hidden,
+            "max_items": max_items,
+            "count": 0,
+            "objects": [],
+            "truncated": False,
+        }
+
+    def search_objects(self, name_pattern=None, object_type=None, max_results=50) -> dict:
+        self.calls.append(("search_objects", object_type))
+        return {"pattern": name_pattern, "object_type": object_type, "count": 0, "objects": [], "truncated": False}
+
+    def delete_object(self, object_name: str) -> dict:
+        self.calls.append(("delete_object", object_name))
+        return {"deleted_name": object_name}
+
+
+def test_an_older_addon_still_lists_searches_and_deletes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """offset and use_global at their defaults are not sent; the reply's new fields are null."""
+    session = _AddonBeforePaging()
+    instance = _strict_server(monkeypatch, session, "attached")  # type: ignore[arg-type]
+
+    listed = _call(instance, "list_blender_scene_objects", {})
+    found = _call(instance, "search_blender_objects", {"object_type": "mesh"})
+    deleted = _call(instance, "delete_blender_object", {"object_name": "Cube"})
+    paged = _call(instance, "list_blender_scene_objects", {"offset": 200})
+
+    assert listed["success"] is True and listed["total"] is None
+    assert found["success"] is True and found["next_offset"] is None
+    assert deleted["success"] is True and deleted["remaining_scenes"] is None
+    # The server upper-cases the type for an add-on that compared it as given.
+    assert session.calls == [
+        ("list_scene_objects", 200),
+        ("search_objects", "MESH"),
+        ("delete_object", "Cube"),
+    ]
+    assert paged["success"] is False and "offset" in paged["error"]
