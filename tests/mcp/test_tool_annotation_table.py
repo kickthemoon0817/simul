@@ -55,6 +55,8 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     # Headless USD
     "load_usd_file": (RO, True, False),
     "get_prim_info": (RO, True, False),
+    "get_prim_subtree": (RO, True, False),
+    "search_prims": (RO, True, False),
     "create_prim": (RW, False, False),
     "update_prim_attributes": (DESTRUCTIVE, False, False),
     "delete_prim": (DESTRUCTIVE, False, False),
