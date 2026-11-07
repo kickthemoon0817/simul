@@ -498,9 +498,39 @@ Behaviour worth knowing:
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.
-- `execute_unreal_script` runs the code you send in the editor's persistent
-  Python console namespace through `PythonScriptLibrary.ExecutePythonCommandEx`,
-  in or out of PIE. On UE 5.7 avoid one engine hazard in that code: Unreal wraps
+- Every Python call simul makes runs in a namespace of its own, and that
+  namespace is cleared when the call ends, whether it returns or raises. This
+  covers its own tools, `execute_unreal_script`, `simul unreal exec`, and
+  `call_unreal_actor_function` or `batch_unreal_operations` calls to
+  `ExecutePythonCommandEx`.
+  - **Why it matters.** UE 5.7 runs all literal Python in one dict that every
+    call and the editor's own Python console share, and `FileExecutionScope`
+    applies only to `.py` files. A name a script leaves there keeps its object
+    alive for Unreal's garbage collector.
+  - **The crash it prevents.** When the editor changes maps it releases
+    Python's hold on the old world and the objects inside it, but not on the
+    world's package or on objects outside it. A kept
+    `pkg = world.get_outermost()` therefore made the next `new_blank_map` or
+    map load abort the editor with "World Memory Leaks: Old Package ... not
+    cleaned up by GC", losing unsaved work.
+  - **What remains.** Anything a script stores outside its namespace stays
+    alive for the editor's lifetime, and so can still keep a map from closing.
+    That includes a module attribute, `sys.modules`, a registered callback or a
+    `unreal.uclass` type. An editor that ran an older simul keeps what those
+    calls bound until it restarts.
+- `execute_unreal_script` runs the code you send through
+  `PythonScriptLibrary.ExecutePythonCommandEx`, in or out of PIE.
+  - **A fresh namespace per call.** Each call starts with only `unreal`
+    imported. Nothing carries over between calls, so pass values back in as
+    code. A callback the script registers must import what it uses inside
+    itself, because the script's names are gone once it returns.
+  - **Mode behaviour is unchanged.** `ExecuteStatement` prints an expression's
+    value as the console does, but no longer keeps it in `builtins._`.
+  - **Code mentioning `.py` now runs.** Code that names a `.py` file followed
+    by a space (`print('see my.py first')`) runs as code; Unreal used to take
+    it for the path of a file to run.
+
+  On UE 5.7 avoid one engine hazard in that code: Unreal wraps
   each static-library function
   (`unreal.MaterialEditingLibrary.get_scalar_parameter_names`,
   `unreal.EditorAssetLibrary.*`, `unreal.SystemLibrary.*`, every `*Library` /
@@ -513,7 +543,16 @@ Behaviour worth knowing:
   that built the cycle can return cleanly and the crash land minutes later. Call
   these functions inline (`unreal.MaterialEditingLibrary.get_scalar_parameter_names(mat)`)
   and don't stash them in a dict, list, closure or object that forms a cycle; a
-  reference that is dropped or stays reachable is safe. Module functions
+  reference that is dropped or stays reachable is safe.
+  - **Top-level aliases are safe.** An alias bound at the top level
+    (`names = unreal.MaterialEditingLibrary.get_scalar_parameter_names`) is
+    dropped when the call's namespace is cleared, even alongside functions
+    that use it.
+  - **Classes are not.** A class is always in a cycle, and a class the script
+    defines becomes garbage when the call ends, so one that holds such a
+    function crashes the editor's next garbage collection.
+
+  Module functions
   (`unreal.load_asset`) and the common `unreal.Object` accessors
   (`actor.get_name`, `actor.get_editor_property`) are a different, in-bounds
   wrapper and are safe, and simul's own tools call the library functions inline,

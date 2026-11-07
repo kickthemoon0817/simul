@@ -39,7 +39,11 @@ def settings(tmp_path):
 def editor(monkeypatch):
     callbacks, events = [], []
     level = SimpleNamespace(
-        on_map_changed=SimpleNamespace(add_callable=callbacks.append),
+        # Unique, as Unreal's add_callable_unique: the module re-binds its
+        # listener on every call, and only one may stay bound.
+        on_map_changed=SimpleNamespace(
+            add_callable_unique=lambda callback: callback in callbacks or callbacks.append(callback)
+        ),
         get_viewport_config_keys=lambda: ["viewport-a"],
         get_active_viewport_config_key=lambda: "viewport-a",
     )
@@ -147,6 +151,11 @@ async def test_guards_execute_on_editor_before_scripts_and_legacy_mutations(
             await session._call_function("/Editor", "SetLevelViewportCameraInfo")
         assert len(calls) == before + 1  # guard only; other viewport never moved
         level.get_active_viewport_config_key = lambda: "viewport-a"
+        # Every call re-binds the map listener; one stays bound. The module holds
+        # the subsystem, which keeps Unreal from collecting the listener's proxy
+        # now that no call leaves a `level` behind in the shared console dict.
+        assert len(callbacks) == 1
+        assert sys.modules["_simul_unreal_attachment_v1"].level_editor is level
         # Same map path, but a fresh load generation: old attachment must fail.
         for callback in callbacks:
             callback(1)

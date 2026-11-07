@@ -251,7 +251,7 @@ class Editor:
         level_editor = SimpleNamespace(
             is_in_play_in_editor=lambda: editor.pie,
             editor_request_end_play=end_play,
-            on_map_changed=SimpleNamespace(add_callable=lambda callback: None),
+            on_map_changed=SimpleNamespace(add_callable_unique=lambda callback: None),
             get_viewport_config_keys=lambda: [VIEWPORT],
             get_active_viewport_config_key=lambda: VIEWPORT,
             editor_get_game_view=lambda viewport: False,

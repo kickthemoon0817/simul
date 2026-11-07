@@ -16,8 +16,6 @@ def map_changed(flags):
     # MapChangeEventFlags::NewMap | WorldTornDown; rebuilds do not detach.
     if flags & 5:
         document_id = uuid.uuid4().hex
-
-unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).on_map_changed.add_callable(map_changed)
 """
 
 # Defined in that module again on every call, so an editor whose module an
@@ -26,6 +24,18 @@ unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).on_map_changed.add_call
 # Editor runs: UnrealEditorSubsystem.get_editor_world() returns None then, and
 # every attached call used to fail with "No editor world is available".
 STATE_FUNCTIONS = "import os, re, unreal\n" + EDITOR_WORLD_FUNCTION + """
+# A delegate holds the object its Python callable is bound through weakly, and
+# that proxy lives only while Python holds a wrapper of the object the
+# delegate is on (PyWrapperDelegate.cpp, UE 5.7). The module holds the
+# subsystem, so map_changed lives as long as the module. Every simul call runs
+# in a namespace of its own that is discarded, so nothing else holds one; the
+# listener used to survive only because scripts left `level` in the editor's
+# shared console dict. add_callable_unique re-binds a listener collected
+# before this held it, and adds no second one.
+level_editor = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+if "map_changed" in globals():
+    level_editor.on_map_changed.add_callable_unique(map_changed)
+
 def identity():
     world = editor_world()
     if world is None:

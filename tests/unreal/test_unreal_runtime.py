@@ -10,6 +10,7 @@ from typing import Any, Dict
 import pytest
 
 from simul.adapters import unreal_runtime
+from simul.adapters._unreal_python import unwrap
 from simul.config import Settings
 from simul.utils.paths import SandboxDenied
 
@@ -373,7 +374,9 @@ class SmartFakeClientSession:
         if headers is not None:
             self.headers[path] = headers
         if self._put_fn:
-            return self._put_fn(path, json)
+            # The source the editor's runner executes: every Python call is
+            # sent wrapped in it (_unreal_python.isolate).
+            return self._put_fn(path, unwrap(json) if json is not None else json)
         return self._put_responses.get(path, FakeResponse({}, 404))
 
     def post(self, path: str, json: Any = None) -> FakeResponse:
