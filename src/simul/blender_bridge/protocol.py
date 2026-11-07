@@ -17,7 +17,8 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # TypeError. Version 2: capture tools take ``agent_id``.
 # Version 3: capture tools take ``method``; execute_script takes ``max_output_chars``.
 # Version 4: focus_on_object's distance_factor is a multiple of the fitting distance; camera tools report world space.
-PROTOCOL_VERSION = 4
+# Version 5: export_file takes object, modifier, animation and format options; import_file takes scale.
+PROTOCOL_VERSION = 5
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 

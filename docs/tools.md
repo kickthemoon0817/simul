@@ -444,6 +444,44 @@ Behaviour worth knowing:
   collection, are not followed, so a camera that only they need is composed
   as well. An add-on built before this report answers without
   `pose_source` and `warning`, and the server returns them as `null`.
+- `export_blender_file` writes `file_path` exactly. The path must end in the
+  format's extension (`.obj`, `.fbx`, `.glb`/`.gltf`, `.usd`/`.usda`/`.usdc`/`.usdz`,
+  `.stl`, `.ply`); anything else is refused before Blender runs, as Blender's glTF
+  exporter would otherwise swap the extension (a `model.gltf` exported as GLB
+  used to overwrite `model.glb`). For GLTF the extension picks the layout: `.glb`
+  is GLB, `.gltf` is `GLTF_SEPARATE` (a `.bin` and textures beside it);
+  `gltf_format: "GLTF_EMBEDDED"` writes one `.gltf` with its data inline. The
+  reply's `files_written` lists every file the export created or changed in
+  that folder (and its `textures/` or newly created subfolders), `file_path`
+  first. An existing `.bin` or `.mtl` beside the file that the file being
+  replaced does not refer to is not overwritten unless
+  `overwrite_companion_files: true`; texture files a `GLTF_SEPARATE` export
+  writes replace files of the same name. Missing folders are created for every
+  format.
+- What to export: the whole scene by default, `selected_only` (an error when
+  nothing is selected, instead of an empty file), `object_names` or
+  `collection_name` (selected for the export, the previous selection restored
+  afterwards; a hidden object or one outside the view layer is refused, since
+  the exporter would leave it out). Children are not added to `object_names`.
+- Defaults that changed: `apply_modifiers` is on for every format (glTF used to
+  export the cage without its modifiers; USD always applies them, so `false` is
+  an error there), and `export_animation` is on for glTF, FBX and USD, also for
+  USD, whose exporter leaves animation out by default. `frame_start`/`frame_end`
+  set the scene's frame range for the export and restore it. FBX, OBJ, STL and
+  PLY take `axis_forward`/`axis_up` (together, on different axes) and
+  `global_scale`; USD takes `usd_up_axis` (`Y` rotates the scene to Y-up),
+  `meters_per_unit` (Blender 4.4+; the root is scaled so objects keep their
+  size) and `root_prim_path` (`""` for none). An option that does not apply to
+  the format, or that this Blender's exporter lacks, is an error rather than
+  ignored. `exporter_options` reports the operator properties that were set.
+  Edit, Pose and paint modes are left for the export, so unsaved mesh edits are
+  included, and entered again afterwards.
+- `import_blender_file` takes `scale`, about the world origin: OBJ, FBX, STL
+  and PLY pass it to Blender's importer; glTF (no importer option) and USD
+  (Blender 5.0.1's importer ignored it for USD files Blender wrote) scale the
+  imported root objects, and `warning` names roots whose transform is animated.
+  `save_blender_file` accepts only `.blend` paths, since the saved file becomes
+  the open document.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
   backtracks, and on a long object name such a pattern runs for hours on

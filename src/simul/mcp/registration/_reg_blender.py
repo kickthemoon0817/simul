@@ -930,7 +930,11 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="save_blender_file",
-        description="Save the current .blend file.",
+        description=(
+            "Save the current .blend file, in place or under a new .blend path, which then "
+            "becomes the open document. Other extensions are refused; use "
+            "export_blender_file for other formats."
+        ),
         hints=OVERWRITING,
         operation="save_blend_file",
         request=BlenderSaveFileRequest,
@@ -938,7 +942,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="import_blender_file",
-        description="Import a file into the Blender scene.",
+        description=(
+            "Import an OBJ, FBX, glTF, USD, STL or PLY file into the Blender scene, "
+            "optionally scaled about the world origin (scale)."
+        ),
         hints=ADDITIVE,
         operation="import_file",
         request=BlenderImportFileRequest,
@@ -946,7 +953,20 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="export_blender_file",
-        description="Export scene objects to a file.",
+        description=(
+            "Export the scene, the selection (selected_only), a list of objects "
+            "(object_names) or a collection (collection_name) to OBJ, FBX, glTF, USD, STL "
+            "or PLY. file_path must end in the format's extension and is written exactly: "
+            "for GLTF, .glb writes a GLB and .gltf a .gltf with its .bin and textures "
+            "(gltf_format to choose GLTF_EMBEDDED). Modifiers are applied and animation "
+            "included by default (apply_modifiers, export_animation, frame_start/frame_end; "
+            "USD animation is on here although Blender's exporter leaves it off). FBX, OBJ, "
+            "STL and PLY take axis_forward/axis_up and global_scale; USD takes usd_up_axis, "
+            "meters_per_unit and root_prim_path. Missing folders are created, Edit Mode is "
+            "entered again afterwards, an unrelated existing .bin/.mtl beside the file is "
+            "not replaced unless overwrite_companion_files, and files_written lists every "
+            "file written."
+        ),
         hints=DESTRUCTIVE,
         operation="export_file",
         request=BlenderExportFileRequest,

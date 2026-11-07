@@ -981,7 +981,18 @@
         "session_calls": [
           {
             "method": "import_file",
-            "arguments": {"file_path": "'/tmp/model.obj'", "file_format": "'OBJ'"}
+            "arguments": {"file_path": "'/tmp/model.obj'", "file_format": "'OBJ'", "scale": "1.0"}
+          }
+        ],
+        "response": {"checked_against": "BlenderImportFileResponse"},
+        "usage": [{"tool": "import_blender_file", "success": false}]
+      },
+      "full": {
+        "arguments": {"file_path": "/tmp/model.obj", "file_format": "OBJ", "scale": 0.01},
+        "session_calls": [
+          {
+            "method": "import_file",
+            "arguments": {"file_path": "'/tmp/model.obj'", "file_format": "'OBJ'", "scale": "0.01"}
           }
         ],
         "response": {"checked_against": "BlenderImportFileResponse"},
@@ -994,7 +1005,7 @@
           "success": false,
           "error": "1 validation error for BlenderImportFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"file_path": {"bogus": 1}, "file_format": "OBJ"}}
+          "details": {"input": {"file_path": {"bogus": 1}, "file_format": "OBJ", "scale": 1.0}}
         }
       }
     },
@@ -1004,18 +1015,136 @@
         "session_calls": [
           {
             "method": "export_file",
-            "arguments": {"file_path": "'/tmp/out.glb'", "file_format": "'GLTF'", "selected_only": "False"}
+            "arguments": {
+              "file_path": "'/tmp/out.glb'",
+              "file_format": "'GLTF'",
+              "selected_only": "False",
+              "object_names": "None",
+              "collection_name": "None",
+              "apply_modifiers": "True",
+              "export_animation": "True",
+              "frame_start": "None",
+              "frame_end": "None",
+              "gltf_format": "None",
+              "axis_forward": "None",
+              "axis_up": "None",
+              "global_scale": "None",
+              "usd_up_axis": "None",
+              "meters_per_unit": "None",
+              "root_prim_path": "None",
+              "overwrite_companion_files": "False"
+            }
           }
         ],
         "response": {"checked_against": "BlenderExportFileResponse"},
         "usage": [{"tool": "export_blender_file", "success": false}]
       },
       "full": {
-        "arguments": {"file_path": "/tmp/out.glb", "file_format": "GLTF", "selected_only": true},
+        "arguments": {
+          "file_path": "/tmp/out.fbx",
+          "file_format": "FBX",
+          "object_names": ["Cube", "Sphere"],
+          "apply_modifiers": false,
+          "export_animation": false,
+          "axis_forward": "-Y",
+          "axis_up": "Z",
+          "global_scale": 0.01,
+          "overwrite_companion_files": true
+        },
         "session_calls": [
           {
             "method": "export_file",
-            "arguments": {"file_path": "'/tmp/out.glb'", "file_format": "'GLTF'", "selected_only": "True"}
+            "arguments": {
+              "file_path": "'/tmp/out.fbx'",
+              "file_format": "'FBX'",
+              "selected_only": "False",
+              "object_names": "['Cube', 'Sphere']",
+              "collection_name": "None",
+              "apply_modifiers": "False",
+              "export_animation": "False",
+              "frame_start": "None",
+              "frame_end": "None",
+              "gltf_format": "None",
+              "axis_forward": "'-Y'",
+              "axis_up": "'Z'",
+              "global_scale": "0.01",
+              "usd_up_axis": "None",
+              "meters_per_unit": "None",
+              "root_prim_path": "None",
+              "overwrite_companion_files": "True"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderExportFileResponse"},
+        "usage": [{"tool": "export_blender_file", "success": false}]
+      },
+      "selected": {
+        "arguments": {
+          "file_path": "/tmp/out.gltf",
+          "file_format": "GLTF",
+          "selected_only": true,
+          "gltf_format": "GLTF_EMBEDDED",
+          "frame_start": 10,
+          "frame_end": 20
+        },
+        "session_calls": [
+          {
+            "method": "export_file",
+            "arguments": {
+              "file_path": "'/tmp/out.gltf'",
+              "file_format": "'GLTF'",
+              "selected_only": "True",
+              "object_names": "None",
+              "collection_name": "None",
+              "apply_modifiers": "True",
+              "export_animation": "True",
+              "frame_start": "10",
+              "frame_end": "20",
+              "gltf_format": "'GLTF_EMBEDDED'",
+              "axis_forward": "None",
+              "axis_up": "None",
+              "global_scale": "None",
+              "usd_up_axis": "None",
+              "meters_per_unit": "None",
+              "root_prim_path": "None",
+              "overwrite_companion_files": "False"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderExportFileResponse"},
+        "usage": [{"tool": "export_blender_file", "success": false}]
+      },
+      "usd": {
+        "arguments": {
+          "file_path": "/tmp/out.usda",
+          "file_format": "USD",
+          "collection_name": "Props",
+          "usd_up_axis": "Y",
+          "meters_per_unit": 0.01,
+          "root_prim_path": "/World"
+        },
+        "session_calls": [
+          {
+            "method": "export_file",
+            "arguments": {
+              "file_path": "'/tmp/out.usda'",
+              "file_format": "'USD'",
+              "selected_only": "False",
+              "object_names": "None",
+              "collection_name": "'Props'",
+              "apply_modifiers": "True",
+              "export_animation": "True",
+              "frame_start": "None",
+              "frame_end": "None",
+              "gltf_format": "None",
+              "axis_forward": "None",
+              "axis_up": "None",
+              "global_scale": "None",
+              "usd_up_axis": "'Y'",
+              "meters_per_unit": "0.01",
+              "root_prim_path": "'/World'",
+              "overwrite_companion_files": "False"
+            }
           }
         ],
         "response": {"checked_against": "BlenderExportFileResponse"},
@@ -1028,7 +1157,27 @@
           "success": false,
           "error": "1 validation error for BlenderExportFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"file_path": {"bogus": 1}, "file_format": "GLTF", "selected_only": false}}
+          "details": {
+            "input": {
+              "file_path": {"bogus": 1},
+              "file_format": "GLTF",
+              "selected_only": false,
+              "object_names": null,
+              "collection_name": null,
+              "apply_modifiers": true,
+              "export_animation": true,
+              "frame_start": null,
+              "frame_end": null,
+              "gltf_format": null,
+              "axis_forward": null,
+              "axis_up": null,
+              "global_scale": null,
+              "usd_up_axis": null,
+              "meters_per_unit": null,
+              "root_prim_path": null,
+              "overwrite_companion_files": false
+            }
+          }
         }
       }
     },

@@ -7123,42 +7123,8 @@ class TestFileIOTools:
 
     # -- export_file ---------------------------------------------------------
 
-    def test_export_obj_v4(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """OBJ export on Blender 4.x uses wm.obj_export."""
-        fake_bpy = self._make_fake_bpy_with_file_io(version=(4, 2, 0))
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.export_file("/tmp/simul-work/out.obj", "OBJ")
-
-        assert result["file_format"] == "OBJ"
-        assert result["file_path"] == str(Path("/tmp/simul-work/out.obj").resolve())
-        assert fake_bpy._ops_calls[0]["op"] == "wm.obj_export"
-
-    def test_export_obj_v36(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """OBJ export on Blender 3.6 uses export_scene.obj."""
-        fake_bpy = self._make_fake_bpy_with_file_io(version=(3, 6, 0))
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.export_file("/tmp/simul-work/out.obj", "OBJ")
-
-        assert result["file_format"] == "OBJ"
-        assert fake_bpy._ops_calls[0]["op"] == "export_scene.obj"
-
-    def test_export_selected_only_v4(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Export with selected_only on v4 passes export_selected_objects."""
-        fake_bpy = self._make_fake_bpy_with_file_io(version=(4, 0, 0))
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        session.export_file("/tmp/simul-work/out.obj", "OBJ", selected_only=True)
-
-        call = fake_bpy._ops_calls[0]
-        assert call["export_selected_objects"] is True
+    # Operator dispatch across versions, options and the files written are
+    # covered against stand-ins of Blender's exporters in test_file_export.py.
 
     def test_export_unsupported_format(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Exporting an unsupported format raises ValueError."""

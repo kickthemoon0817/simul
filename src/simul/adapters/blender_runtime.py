@@ -25,6 +25,7 @@ from typing import (
     Dict,
     Iterator,
     List,
+    Literal,
     Optional,
     Sequence,
     Tuple,
@@ -215,6 +216,87 @@ _MODIFIER_TEXTURE_SETTINGS: Dict[str, Tuple[str, str, str]] = {
     "WARP": ("texture", "texture_coords", "texture_coords_object"),
     "WAVE": ("texture", "texture_coords", "texture_coords_object"),
 }
+
+# export_file: the extensions each format writes. Blender's glTF exporter
+# replaces any other extension with .glb or .gltf, so a path ending in .gltf
+# exported as GLB overwrote a .glb beside it; its USD exporter refuses other
+# extensions, and the others write whatever path they get, a .blend included.
+EXPORT_EXTENSIONS: Dict[str, Tuple[str, ...]] = {
+    "OBJ": (".obj",),
+    "FBX": (".fbx",),
+    "GLTF": (".glb", ".gltf"),
+    "USD": (".usd", ".usda", ".usdc", ".usdz"),
+    "STL": (".stl",),
+    "PLY": (".ply",),
+}
+
+# The glTF layouts export_file writes: one binary .glb, a .gltf with its .bin
+# and textures beside it, or a single .gltf with everything inline. Blender
+# offers the last only while its glTF add-on's preference allows it.
+GLTF_FORMATS = ("GLB", "GLTF_SEPARATE", "GLTF_EMBEDDED")
+GltfFormat = Literal["GLB", "GLTF_SEPARATE", "GLTF_EMBEDDED"]
+ExportAxis = Literal["X", "Y", "Z", "-X", "-Y", "-Z"]
+UsdUpAxis = Literal["Y", "Z"]
+
+# The operator property each export_file option sets, per format, in the order
+# tried: the first one this Blender's exporter defines is used. Candidates cover
+# Blender 4.2 through 5.0.1 (checked against each version's operators) and the
+# Python exporters of earlier versions. A format without an entry has no such
+# option: asking for it there is an error rather than a silent no-op.
+_EXPORT_SELECTION_PROPERTIES: Dict[str, Tuple[str, ...]] = {
+    "OBJ": ("export_selected_objects", "use_selection"),
+    "FBX": ("use_selection",),
+    "GLTF": ("use_selection", "export_selected"),
+    "USD": ("selected_objects_only",),
+    "STL": ("export_selected_objects", "use_selection"),
+    "PLY": ("export_selected_objects", "use_selection"),
+}
+_EXPORT_MODIFIER_PROPERTIES: Dict[str, Tuple[str, ...]] = {
+    "OBJ": ("apply_modifiers", "use_mesh_modifiers"),
+    "FBX": ("use_mesh_modifiers",),
+    "GLTF": ("export_apply",),
+    "STL": ("apply_modifiers", "use_mesh_modifiers"),
+    "PLY": ("apply_modifiers", "use_mesh_modifiers"),
+}
+_EXPORT_ANIMATION_PROPERTIES: Dict[str, Tuple[str, ...]] = {
+    "FBX": ("bake_anim",),
+    "GLTF": ("export_animations",),
+    "USD": ("export_animation",),
+}
+_EXPORT_AXIS_PROPERTIES: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
+    "FBX": (("axis_forward",), ("axis_up",)),
+    "OBJ": (("forward_axis", "axis_forward"), ("up_axis", "axis_up")),
+    "STL": (("forward_axis", "axis_forward"), ("up_axis", "axis_up")),
+    "PLY": (("forward_axis", "axis_forward"), ("up_axis", "axis_up")),
+}
+# Import scale: Blender's glTF importer has no such option, and on 5.0.1 its
+# USD importer dropped its scale for a USD file Blender had written, whose
+# generated root prim it does not import. Those two are scaled afterwards.
+_IMPORT_SCALE_PROPERTIES: Dict[str, Tuple[str, ...]] = {
+    "OBJ": ("global_scale",),
+    "FBX": ("global_scale",),
+    "STL": ("global_scale",),
+    "PLY": ("global_scale",),
+}
+
+# USD's named scene units (convert_scene_units, Blender 4.4+), by metersPerUnit.
+_USD_SCENE_UNITS = {
+    1.0: "METERS",
+    1000.0: "KILOMETERS",
+    0.01: "CENTIMETERS",
+    0.001: "MILLIMETERS",
+    0.0254: "INCHES",
+    0.3048: "FEET",
+    0.9144: "YARDS",
+}
+
+# Subfolders of the export folder searched for files an export wrote, besides
+# any it created: Blender's USD exporter writes its textures into "textures".
+_EXPORT_TEXTURE_DIRS = ("textures",)
+
+# At most this many folder entries are compared to find the files an export
+# wrote, so that exporting into a huge folder stays quick.
+_EXPORT_SCAN_LIMIT = 20_000
 
 # Output-format settings a capture changes and restores, in restore order:
 # media_type first, so that the saved file_format is valid again.
@@ -1595,24 +1677,6 @@ class BlenderRuntimeSession:
         "PLY": "wm.ply_export",
     }
 
-    # Selection keyword varies by format and version.
-    _SELECTION_KW_LEGACY: Dict[str, str] = {
-        "OBJ": "use_selection",
-        "FBX": "use_selection",
-        "GLTF": "export_selected",
-        "USD": "selected_objects_only",
-        "STL": "use_selection",
-        "PLY": "use_selection",
-    }
-    _SELECTION_KW_V4: Dict[str, str] = {
-        "OBJ": "export_selected_objects",
-        "FBX": "use_selection",
-        "GLTF": "export_selected",
-        "USD": "selected_objects_only",
-        "STL": "export_selected_objects",
-        "PLY": "export_selected_objects",
-    }
-
     _SUPPORTED_FORMATS: Tuple[str, ...] = ("OBJ", "FBX", "GLTF", "USD", "STL", "PLY")
 
     def open_blend_file(self, file_path: str) -> Dict[str, Any]:
@@ -1650,20 +1714,29 @@ class BlenderRuntimeSession:
         """
         Save the current scene to a .blend file.
 
+        Saving under another path makes that file the open document, so only a
+        .blend path is accepted, as open_blend_file accepts only .blend files.
+
         Args:
-            file_path: Path to save to. None saves in place.
+            file_path: Path of the .blend file to save to. None saves in place.
 
         Returns:
             Dict with file_path.
 
         Raises:
             PermissionError: If the path is outside the sandbox policy.
-            ValueError: If no path given and file was never saved.
+            ValueError: If file_path does not end in .blend, or no path is
+                given and the file was never saved.
         """
         file_path = self._deny_outside_sandbox(file_path, write=True)
         blender_module: Any = bpy
 
         if file_path is not None:
+            if not file_path.lower().endswith(".blend"):
+                raise ValueError(
+                    f"Not a .blend file path: {file_path}. save_blend_file writes the "
+                    "open document as a .blend file; use export_file for other formats"
+                )
             _bpy_op(
                 f"Failed to save .blend file to '{file_path}'",
                 blender_module.ops.wm.save_as_mainfile,
@@ -1681,31 +1754,40 @@ class BlenderRuntimeSession:
         blender_module.ops.wm.save_mainfile()
         return {"file_path": current}
 
-    def import_file(self, file_path: str, file_format: str) -> Dict[str, Any]:
+    def import_file(
+        self, file_path: str, file_format: str, scale: float = 1.0
+    ) -> Dict[str, Any]:
         """
         Import a file into the scene. Version-aware operator dispatch.
 
         Args:
             file_path: Absolute path to the file.
             file_format: One of OBJ, FBX, GLTF, USD, STL, PLY.
+            scale: Uniform scale applied to the imported objects about the world
+                origin (1.0 keeps them as the file has them). OBJ, FBX, STL and
+                PLY pass it to Blender's importer as global_scale. For glTF and
+                USD the imported root objects' location and scale are multiplied
+                by it: Blender's glTF importer has no such option, and Blender
+                5.0.1's USD importer ignored its own for a USD file Blender
+                wrote. Keys or a Transform
+                Cache constraint on such a root's transform take over again at
+                the next frame change, and warning names those roots.
 
         Returns:
-            Dict with file_path, file_format, and imported_objects list.
+            Dict with file_path, file_format, imported_objects, scale and
+            warning (None unless something needs attention).
 
         Raises:
             PermissionError: If the path is outside the sandbox policy.
             FileNotFoundError: If the file does not exist.
-            ValueError: If the format is unsupported.
+            ValueError: If the format is unsupported or scale is not positive.
         """
         file_path = self._deny_outside_sandbox(file_path)
-        fmt = file_format.upper()
-        if fmt not in self._SUPPORTED_FORMATS:
-            raise ValueError(
-                f"Unsupported format: {file_format}. "
-                f"Valid: {', '.join(self._SUPPORTED_FORMATS)}"
-            )
+        fmt = self._file_format(file_format)
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
+        if not (math.isfinite(scale) and scale > 0.0):
+            raise ValueError(f"scale must be a positive number, not {scale!r}")
 
         blender_module: Any = bpy
         existing_names = set(blender_module.data.objects.keys())
@@ -1713,18 +1795,29 @@ class BlenderRuntimeSession:
         op_map = (
             self._IMPORT_OPS_V4 if self._is_blender_4_plus else self._IMPORT_OPS_LEGACY
         )
-        op_path = op_map[fmt]
-        parts = op_path.split(".")
-        op_func = getattr(getattr(blender_module.ops, parts[0]), parts[1])
-        op_func(filepath=file_path)
+        op_func = self._operator(op_map[fmt])
+        kwargs: Dict[str, Any] = {"filepath": file_path}
+        scale_roots = 1.0
+        if scale != 1.0:
+            prop = self._operator_property(op_func, _IMPORT_SCALE_PROPERTIES.get(fmt, ()))
+            if prop is None:
+                scale_roots = scale
+            else:
+                kwargs[prop] = scale
+        _bpy_op(f"Failed to import {fmt} file '{file_path}'", op_func, **kwargs)
 
         new_names = [
             n for n in blender_module.data.objects.keys() if n not in existing_names
         ]
+        warning = None
+        if scale_roots != 1.0:
+            warning = self._scale_imported_roots(new_names, scale_roots)
         return {
             "file_path": file_path,
             "file_format": fmt,
             "imported_objects": new_names,
+            "scale": scale,
+            "warning": warning,
         }
 
     def export_file(
@@ -1732,66 +1825,773 @@ class BlenderRuntimeSession:
         file_path: str,
         file_format: str,
         selected_only: bool = False,
+        object_names: Optional[List[str]] = None,
+        collection_name: Optional[str] = None,
+        apply_modifiers: bool = True,
+        export_animation: bool = True,
+        frame_start: Optional[int] = None,
+        frame_end: Optional[int] = None,
+        gltf_format: Optional[GltfFormat] = None,
+        axis_forward: Optional[ExportAxis] = None,
+        axis_up: Optional[ExportAxis] = None,
+        global_scale: Optional[float] = None,
+        usd_up_axis: Optional[UsdUpAxis] = None,
+        meters_per_unit: Optional[float] = None,
+        root_prim_path: Optional[str] = None,
+        overwrite_companion_files: bool = False,
     ) -> Dict[str, Any]:
         """
         Export scene objects to a file. Version-aware operator dispatch.
 
+        The file is written at file_path exactly: its extension must be one the
+        format writes, and for GLTF it picks the layout unless gltf_format
+        does. A missing folder is created. Edit, Pose and paint modes are left
+        for the export, so unsaved mesh edits are included, and entered again
+        afterwards. An export that would replace an existing file other than
+        file_path (a glTF's .bin, an OBJ's .mtl) that the file at file_path
+        does not refer to is refused before anything is written, unless
+        overwrite_companion_files. Texture files that GLTF_SEPARATE writes
+        beside the .gltf replace files of the same name.
+
         Args:
-            file_path: Absolute path to export to.
+            file_path: Path to export to, ending in .obj, .fbx, .glb or .gltf,
+                .usd/.usda/.usdc/.usdz, .stl or .ply for the format.
             file_format: One of OBJ, FBX, GLTF, USD, STL, PLY.
-            selected_only: If True, export only selected objects.
+            selected_only: Export only the selected objects; an error when none
+                is selected.
+            object_names: Export exactly these objects (children are not added).
+                They are selected for the export and the previous selection is
+                restored afterwards. Not with selected_only or collection_name.
+            collection_name: Export the objects of this collection and its child
+                collections that are in the view layer, the same way.
+            apply_modifiers: Export the meshes with their modifiers applied
+                (default, for every format). USD always applies them, except
+                that Blender writes a last Subdivision Surface as a USD
+                subdivision scheme, so false is an error for USD.
+            export_animation: Include animation (default): glTF actions, FBX
+                baked animation, USD time samples over the scene's frame range.
+                Blender's USD exporter leaves animation out unless asked; this
+                default includes it. OBJ, STL and PLY have no animation.
+            frame_start: First frame of the exported animation (glTF, FBX, USD),
+                with frame_end; the scene's frame range is restored afterwards.
+                Without them FBX and USD use the scene's frame range and glTF
+                each action's whole range.
+            frame_end: Last frame of the exported animation, with frame_start.
+            gltf_format: GLB (one binary .glb), GLTF_SEPARATE (.gltf plus .bin
+                and textures beside it) or GLTF_EMBEDDED (one .gltf with its data
+                inline). Default: GLB for .glb and GLTF_SEPARATE for .gltf; it
+                must agree with the extension.
+            axis_forward: FBX, OBJ, STL and PLY: the axis written as forward, one
+                of X, Y, Z, -X, -Y, -Z, together with axis_up on another axis.
+                Default: the exporter's (FBX and OBJ -Z forward, Y up; STL and
+                PLY Y forward, Z up).
+            axis_up: The axis written as up, together with axis_forward.
+            global_scale: FBX, OBJ, STL and PLY: scale factor applied to the
+                exported data (default 1.0).
+            usd_up_axis: USD: the stage's up axis, Y (Blender rotates the scene
+                from Z-up to Y-up) or Z (default, Blender's own).
+            meters_per_unit: USD: the stage's metersPerUnit (default 1.0); Blender
+                scales the root so objects keep their size. Blender 4.4 and
+                later.
+            root_prim_path: USD: path of the prim everything is exported under
+                (default /root); an empty string exports without one.
+            overwrite_companion_files: Let the export replace an existing .bin
+                (GLTF_SEPARATE) or .mtl (OBJ) beside file_path that the file at
+                file_path does not refer to. file_path itself is always replaced.
 
         Returns:
-            Dict with file_path and file_format.
+            Dict with file_path (the file written), file_format, gltf_format
+            (GLTF only), files_written (every file the export created or
+            changed in file_path's folder and in its new or textures
+            subfolders, file_path first), object_count (the objects chosen for
+            export; None for the whole scene), exporter_options (the operator
+            properties set besides filepath) and warning.
 
         Raises:
             PermissionError: If the path is outside the sandbox policy.
-            ValueError: If the format is unsupported.
+            ValueError: If the format, extension or an option is invalid, or
+                no object is chosen.
+            FileExistsError: If a companion file would be replaced.
         """
         file_path = self._deny_outside_sandbox(file_path, write=True)
-        return self._run_export(file_path, file_format, selected_only)
+        fmt = self._file_format(file_format)
+        target = self._export_target(file_path)
+        variant = self._gltf_variant(target, fmt, gltf_format)
+        if sum((bool(selected_only), object_names is not None, collection_name is not None)) > 1:
+            raise ValueError(
+                "Choose the objects to export with one of selected_only, object_names "
+                "or collection_name"
+            )
+        if (frame_start is None) != (frame_end is None):
+            raise ValueError("Pass frame_start and frame_end together")
+        if frame_start is not None and frame_end is not None and frame_start > frame_end:
+            raise ValueError(
+                f"frame_start ({frame_start}) is after frame_end ({frame_end})"
+            )
 
-    def _run_export(
-        self,
-        file_path: str,
-        file_format: str,
-        selected_only: bool = False,
-        options: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Dispatch the version-aware export operator.
+        blender_module: Any = bpy
+        view_layer = blender_module.context.view_layer
+        to_select: Optional[List[Any]] = None
+        object_count: Optional[int] = None
+        if selected_only:
+            chosen = [o for o in view_layer.objects if o.select_get()]
+            if not chosen:
+                raise ValueError(
+                    f"selected_only is set but no object is selected in view layer "
+                    f"{view_layer.name!r}; select objects, or pass object_names"
+                )
+            object_count = len(chosen)
+        elif object_names is not None:
+            to_select = self._named_export_objects(object_names)
+            object_count = len(to_select)
+        elif collection_name is not None:
+            to_select = self._collection_export_objects(collection_name)
+            object_count = len(to_select)
 
-        ``options`` are extra operator properties, passed only when this
-        Blender's operator defines them.
-        """
+        op_func = self._operator(self._export_op_path(fmt))
+        kwargs = self._export_options(
+            op_func,
+            fmt,
+            target,
+            variant,
+            subset=selected_only or to_select is not None,
+            apply_modifiers=apply_modifiers,
+            export_animation=export_animation,
+            frame_range=frame_start is not None,
+            axes=(axis_forward, axis_up),
+            global_scale=global_scale,
+            usd_up_axis=usd_up_axis,
+            meters_per_unit=meters_per_unit,
+            root_prim_path=root_prim_path,
+        )
+
+        main = Path(target)
+        if not overwrite_companion_files:
+            foreign = [
+                str(companion)
+                for companion in self._companion_files(main, fmt, variant)
+                if companion.exists() and not self._refers_to(main, companion.name)
+            ]
+            if foreign:
+                raise FileExistsError(
+                    f"Exporting {main.name} would replace {', '.join(foreign)}, which "
+                    f"{main.name} does not refer to; export under another name, or pass "
+                    "overwrite_companion_files=true to replace it"
+                )
+
+        created = self._make_folders(main.parent)
+        before = self._folder_state(main.parent)
+        frames = (
+            None
+            if frame_start is None or frame_end is None
+            else (frame_start, frame_end)
+        )
+        try:
+            warning = self._run_export(
+                f"Failed to export {fmt} file '{target}'",
+                op_func,
+                kwargs,
+                to_select=to_select,
+                frame_range=frames,
+                embedded_gltf=variant == "GLTF_EMBEDDED",
+            )
+        except Exception:
+            self._remove_empty_folders(created)
+            raise
+        written = self._written_files(main.parent, before, target)
+        if target not in written:
+            self._remove_empty_folders(created)
+            raise RuntimeError(
+                f"Blender's {fmt} exporter reported success but wrote no {main.name}: the "
+                "exported objects hold nothing this format can store (OBJ, STL and PLY "
+                "need geometry)"
+            )
+        return {
+            "file_path": target,
+            "file_format": fmt,
+            "gltf_format": variant,
+            "files_written": written,
+            "object_count": object_count,
+            "exporter_options": {k: v for k, v in kwargs.items() if k != "filepath"},
+            "warning": warning,
+        }
+
+    def _file_format(self, file_format: str) -> str:
+        """Return the upper-case format name, or refuse an unsupported one."""
         fmt = file_format.upper()
         if fmt not in self._SUPPORTED_FORMATS:
             raise ValueError(
                 f"Unsupported format: {file_format}. "
                 f"Valid: {', '.join(self._SUPPORTED_FORMATS)}"
             )
+        return fmt
 
+    @staticmethod
+    def _operator(op_path: str) -> Any:
+        """Return the ``bpy.ops`` operator named ``module.name``."""
         blender_module: Any = bpy
+        module, name = op_path.split(".")
+        return getattr(getattr(blender_module.ops, module), name)
+
+    def _export_op_path(self, fmt: str) -> str:
+        """Name the version-aware export operator of a format."""
         op_map = (
             self._EXPORT_OPS_V4 if self._is_blender_4_plus else self._EXPORT_OPS_LEGACY
         )
-        op_path = op_map[fmt]
-        parts = op_path.split(".")
-        op_func = getattr(getattr(blender_module.ops, parts[0]), parts[1])
+        return op_map[fmt]
 
-        kwargs: Dict[str, Any] = {"filepath": file_path}
-        if selected_only:
-            sel_kw_map = (
-                self._SELECTION_KW_V4
-                if self._is_blender_4_plus
-                else self._SELECTION_KW_LEGACY
+    @staticmethod
+    def _operator_properties(op_func: Any) -> Dict[str, Any]:
+        """Return an operator's properties by identifier."""
+        properties = op_func.get_rna_type().properties
+        return {name: properties[name] for name in properties.keys()}
+
+    @classmethod
+    def _operator_property(
+        cls, op_func: Any, candidates: Sequence[str]
+    ) -> Optional[str]:
+        """Return the first of ``candidates`` that the operator defines, or None."""
+        defined = op_func.get_rna_type().properties.keys()
+        return next((name for name in candidates if name in defined), None)
+
+    @staticmethod
+    def _export_target(file_path: str) -> str:
+        """Return the absolute path an export writes, resolving Blender's ``//`` prefix.
+
+        With the sandbox enabled the path is already absolute; with it
+        disabled, ``//`` is relative to the open .blend file, as bpy reads it.
+        """
+        if file_path.startswith("//"):
+            blender_module: Any = bpy
+            file_path = blender_module.path.abspath(file_path)
+        return os.path.abspath(file_path)
+
+    @staticmethod
+    def _gltf_variant(
+        target: str, fmt: str, gltf_format: Optional[str]
+    ) -> Optional[str]:
+        """Check the file extension against the format; return the glTF layout.
+
+        Raises:
+            ValueError: When the extension is not one the format writes, or
+                gltf_format names a layout with another extension.
+        """
+        name = os.path.basename(target)
+        extension = os.path.splitext(name)[1].lower()
+        allowed = EXPORT_EXTENSIONS[fmt]
+        if extension not in allowed:
+            raise ValueError(
+                f"{fmt} export writes a file ending in {' or '.join(allowed)}; "
+                f"file_path ends in {name!r}"
             )
-            kwargs[sel_kw_map[fmt]] = True
-        if options:
-            supported = op_func.get_rna_type().properties.keys()
-            kwargs.update({k: v for k, v in options.items() if k in supported})
+        if fmt != "GLTF":
+            if gltf_format is not None:
+                raise ValueError("gltf_format applies to GLTF export only")
+            return None
+        if gltf_format is None:
+            return "GLB" if extension == ".glb" else "GLTF_SEPARATE"
+        if gltf_format not in GLTF_FORMATS:
+            raise ValueError(
+                f"gltf_format must be one of {', '.join(GLTF_FORMATS)}, not {gltf_format!r}"
+            )
+        expected = ".glb" if gltf_format == "GLB" else ".gltf"
+        if extension != expected:
+            # Blender's glTF exporter would swap the extension and write another file.
+            raise ValueError(
+                f"gltf_format {gltf_format} writes a {expected} file; file_path ends in "
+                f"{extension}. Use a {expected} path, or the gltf_format of a {extension} file"
+            )
+        return gltf_format
 
-        op_func(**kwargs)
-        return {"file_path": file_path, "file_format": fmt}
+    def _named_export_objects(self, object_names: List[str]) -> List[Any]:
+        """Resolve object_names to objects, in order, without repeats."""
+        if not object_names:
+            raise ValueError("object_names is empty; name at least one object")
+        objects: List[Any] = []
+        for name in dict.fromkeys(object_names):
+            objects.append(self._get_object_or_raise(name))
+        return objects
+
+    @staticmethod
+    def _collection_export_objects(collection_name: str) -> List[Any]:
+        """Return the objects of a collection and its children in the view layer."""
+        blender_module: Any = bpy
+        collection = blender_module.data.collections.get(collection_name)
+        if collection is None:
+            raise ValueError(f"Collection not found: {collection_name}")
+        view_layer = blender_module.context.view_layer
+        objects = [o for o in collection.all_objects if o.name in view_layer.objects]
+        if not objects:
+            raise ValueError(
+                f"Collection {collection_name!r} holds no object in view layer "
+                f"{view_layer.name!r} (it is empty, excluded or in another scene)"
+            )
+        return objects
+
+    def _export_options(
+        self,
+        op_func: Any,
+        fmt: str,
+        target: str,
+        variant: Optional[str],
+        *,
+        subset: bool,
+        apply_modifiers: bool,
+        export_animation: bool,
+        frame_range: bool,
+        axes: Tuple[Optional[str], Optional[str]],
+        global_scale: Optional[float],
+        usd_up_axis: Optional[str],
+        meters_per_unit: Optional[float],
+        root_prim_path: Optional[str],
+    ) -> Dict[str, Any]:
+        """Translate export_file's options into the exporter's operator properties.
+
+        An option this format has no equivalent for, or this Blender's exporter
+        lacks, is an error, so that nothing asked for is silently left out.
+        Only apply_modifiers and export_animation, which default to on, are
+        left to the exporter where it defines neither.
+
+        Returns:
+            The operator's keyword arguments, filepath included.
+        """
+        properties = self._operator_properties(op_func)
+        version = ".".join(str(part) for part in self._blender_version)
+
+        def require(option: str, candidates: Sequence[str]) -> str:
+            name = next((c for c in candidates if c in properties), None)
+            if name is None:
+                raise ValueError(
+                    f"{option} is not supported by Blender {version}'s {fmt} exporter"
+                )
+            return name
+
+        def only_for(option: str, value: Any, formats: Sequence[str]) -> None:
+            if value is not None and fmt not in formats:
+                raise ValueError(f"{option} applies to {', '.join(formats)} export only")
+
+        kwargs: Dict[str, Any] = {"filepath": target}
+        if subset:
+            kwargs[require("selected_only", _EXPORT_SELECTION_PROPERTIES[fmt])] = True
+        if variant is not None:
+            kwargs[require("gltf_format", ("export_format",))] = variant
+
+        modifiers = self._operator_property(op_func, _EXPORT_MODIFIER_PROPERTIES.get(fmt, ()))
+        if modifiers is not None:
+            kwargs[modifiers] = apply_modifiers
+        elif fmt == "USD" and not apply_modifiers:
+            raise ValueError(
+                "USD export always applies modifiers: Blender's USD exporter has no "
+                "option to leave them out"
+            )
+
+        animation = self._operator_property(
+            op_func, _EXPORT_ANIMATION_PROPERTIES.get(fmt, ())
+        )
+        if animation is not None:
+            kwargs[animation] = export_animation
+        if frame_range:
+            if fmt not in _EXPORT_ANIMATION_PROPERTIES:
+                raise ValueError("frame_start and frame_end apply to GLTF, FBX and USD export only")
+            if not export_animation:
+                raise ValueError("frame_start and frame_end need export_animation")
+            if fmt == "GLTF":
+                kwargs[require("frame_start", ("export_frame_range",))] = True
+
+        forward, up = axes
+        if forward is not None or up is not None:
+            if fmt not in _EXPORT_AXIS_PROPERTIES:
+                raise ValueError(
+                    "axis_forward and axis_up apply to FBX, OBJ, STL and PLY export only"
+                )
+            if forward is None or up is None:
+                raise ValueError("Pass axis_forward and axis_up together")
+            if forward[-1] == up[-1]:
+                raise ValueError(
+                    f"axis_forward ({forward}) and axis_up ({up}) must be different axes"
+                )
+            forward_candidates, up_candidates = _EXPORT_AXIS_PROPERTIES[fmt]
+            for value, candidates, option in (
+                (forward, forward_candidates, "axis_forward"),
+                (up, up_candidates, "axis_up"),
+            ):
+                name = require(option, candidates)
+                kwargs[name] = self._axis_item(properties[name], value)
+        if global_scale is not None:
+            only_for("global_scale", fmt, ("FBX", "OBJ", "STL", "PLY"))
+            if not (math.isfinite(global_scale) and global_scale > 0.0):
+                raise ValueError(f"global_scale must be a positive number, not {global_scale!r}")
+            kwargs[require("global_scale", ("global_scale",))] = global_scale
+
+        only_for("usd_up_axis", usd_up_axis, ("USD",))
+        only_for("meters_per_unit", meters_per_unit, ("USD",))
+        only_for("root_prim_path", root_prim_path, ("USD",))
+        if usd_up_axis == "Y":
+            kwargs[require("usd_up_axis", ("convert_orientation",))] = True
+            kwargs[require("usd_up_axis", ("export_global_up_selection",))] = "Y"
+            kwargs[require("usd_up_axis", ("export_global_forward_selection",))] = "NEGATIVE_Z"
+        elif usd_up_axis == "Z" and "convert_orientation" in properties:
+            kwargs["convert_orientation"] = False
+        elif usd_up_axis not in (None, "Z"):
+            raise ValueError(f"usd_up_axis must be Y or Z, not {usd_up_axis!r}")
+        if meters_per_unit is not None:
+            if not 0.0001 <= meters_per_unit <= 1000.0:
+                raise ValueError(
+                    "meters_per_unit must be between 0.0001 and 1000 (Blender's limits), "
+                    f"not {meters_per_unit!r}"
+                )
+            if "convert_scene_units" in properties:
+                unit = next(
+                    (
+                        name
+                        for value, name in _USD_SCENE_UNITS.items()
+                        if math.isclose(value, meters_per_unit, rel_tol=1e-9)
+                    ),
+                    "CUSTOM",
+                )
+                kwargs["convert_scene_units"] = unit
+                if unit == "CUSTOM":
+                    kwargs[require("meters_per_unit", ("meters_per_unit",))] = meters_per_unit
+            else:
+                # Before Blender 4.4 the exporter has neither option.
+                kwargs[require("meters_per_unit", ("meters_per_unit",))] = meters_per_unit
+        if root_prim_path is not None:
+            if root_prim_path and not re.fullmatch(
+                r"(/[A-Za-z_][A-Za-z0-9_]*)+", root_prim_path
+            ):
+                raise ValueError(
+                    f"root_prim_path must be an absolute USD prim path such as /World, or "
+                    f"empty, not {root_prim_path!r}"
+                )
+            kwargs[require("root_prim_path", ("root_prim_path",))] = root_prim_path
+        return kwargs
+
+    @staticmethod
+    def _axis_item(prop: Any, axis: str) -> str:
+        """Spell an axis as the exporter's enum does: -Z, or NEGATIVE_Z in the C++ exporters."""
+        items = {item.identifier for item in prop.enum_items}
+        if axis in items:
+            return axis
+        spelled = f"NEGATIVE_{axis[1:]}" if axis.startswith("-") else axis
+        if spelled not in items:
+            raise ValueError(f"The exporter offers no axis {axis!r}")
+        return spelled
+
+    @staticmethod
+    def _companion_files(main: Path, fmt: str, variant: Optional[str]) -> List[Path]:
+        """Name the files an export writes beside file_path under fixed names."""
+        if fmt == "OBJ":
+            return [main.with_suffix(".mtl")]
+        if variant == "GLTF_SEPARATE":
+            return [main.with_suffix(".bin")]
+        return []
+
+    @staticmethod
+    def _refers_to(main: Path, companion: str) -> bool:
+        """Report whether the existing file at ``main`` refers to a companion file.
+
+        Such a companion belongs to the file being replaced: an OBJ's mtllib
+        line, a .gltf's buffer URI.
+        """
+        if not main.is_file():
+            return False
+        try:
+            if main.suffix.lower() == ".gltf":
+                with main.open("r", encoding="utf-8") as handle:
+                    document = json.load(handle)
+                from urllib.parse import unquote
+
+                return any(
+                    unquote(str(buffer.get("uri", ""))) == companion
+                    for buffer in document.get("buffers", [])
+                    if isinstance(buffer, dict)
+                )
+            with main.open("r", encoding="utf-8", errors="replace") as handle:
+                for number, line in enumerate(handle):
+                    if number > 10_000:
+                        break
+                    if line.startswith("mtllib") and companion in line[6:].strip():
+                        return True
+        except (OSError, ValueError, AttributeError):
+            return False
+        return False
+
+    @staticmethod
+    def _make_folders(folder: Path) -> List[Path]:
+        """Create a missing export folder; return the folders created, deepest first."""
+        created: List[Path] = []
+        probe = folder
+        while not probe.exists() and probe.parent != probe:
+            created.append(probe)
+            probe = probe.parent
+        folder.mkdir(parents=True, exist_ok=True)
+        return created
+
+    @staticmethod
+    def _remove_empty_folders(folders: List[Path]) -> None:
+        """Remove folders created for a failed export, deepest first, if still empty."""
+        for folder in folders:
+            try:
+                folder.rmdir()
+            except OSError:
+                return
+
+    @staticmethod
+    def _folder_state(
+        folder: Path, subfolders: Sequence[str] = _EXPORT_TEXTURE_DIRS
+    ) -> Dict[str, Tuple[int, int]]:
+        """Record each file's modification time and size in a folder.
+
+        Covers the files in the folder and in the named subfolders, at most
+        _EXPORT_SCAN_LIMIT entries; subfolders are recorded under their path
+        plus a separator.
+        """
+        state: Dict[str, Tuple[int, int]] = {}
+        budget = [_EXPORT_SCAN_LIMIT]
+
+        def scan(directory: Path, depth: int, names: Optional[Sequence[str]]) -> None:
+            try:
+                entries = list(os.scandir(directory))
+            except OSError:
+                return
+            for entry in entries:
+                if budget[0] <= 0:
+                    return
+                budget[0] -= 1
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        stat = entry.stat(follow_symlinks=False)
+                        state[entry.path] = (stat.st_mtime_ns, stat.st_size)
+                    elif entry.is_dir(follow_symlinks=False):
+                        state[entry.path + os.sep] = (0, -1)
+                        if depth > 0 and (names is None or entry.name in names):
+                            scan(Path(entry.path), depth - 1, None)
+                except OSError:
+                    continue
+
+        scan(folder, 1, subfolders)
+        return state
+
+    @classmethod
+    def _written_files(
+        cls, folder: Path, before: Dict[str, Tuple[int, int]], target: str
+    ) -> List[str]:
+        """List the files an export created or changed, its main file first."""
+        new_folders = [
+            Path(path).name
+            for path in cls._folder_state(folder)
+            if path.endswith(os.sep) and path not in before
+        ]
+        after = cls._folder_state(folder, (*_EXPORT_TEXTURE_DIRS, *new_folders))
+        written = sorted(
+            path
+            for path, state in after.items()
+            if not path.endswith(os.sep) and before.get(path) != state
+        )
+        if target in written:
+            written.remove(target)
+            written.insert(0, target)
+        return written
+
+    def _run_export(
+        self,
+        description: str,
+        op_func: Any,
+        kwargs: Dict[str, Any],
+        *,
+        to_select: Optional[List[Any]] = None,
+        frame_range: Optional[Tuple[int, int]] = None,
+        embedded_gltf: bool = False,
+    ) -> Optional[str]:
+        """Run an exporter in Object Mode with the chosen objects selected.
+
+        Args:
+            description: Context for an exporter failure.
+            op_func: The export operator.
+            kwargs: Its properties.
+            to_select: Objects to select for the export instead of the current
+                selection, which is restored afterwards.
+            frame_range: Scene frame range for the export, restored afterwards.
+            embedded_gltf: Allow the glTF add-on's GLTF_EMBEDDED layout for the export.
+
+        Returns:
+            A warning when the previous mode could not be entered again, else None.
+        """
+        blender_module: Any = bpy
+        scene = blender_module.context.scene
+        warnings: List[str] = []
+        with self._object_mode(warnings):
+            with self._export_selection(to_select):
+                with self._scene_frame_range(scene, frame_range):
+                    with self._gltf_embedded_allowed(embedded_gltf):
+                        _bpy_op(description, op_func, **kwargs)
+        return warnings[0] if warnings else None
+
+    @staticmethod
+    @contextmanager
+    def _object_mode(warnings: List[str]) -> Iterator[None]:
+        """Leave Edit, Pose or a paint mode for the block, then enter it again.
+
+        Leaving Edit Mode writes the edited mesh back, so the export includes
+        unsaved edits; Blender's glTF, OBJ and USD exporters switched the
+        window to Object Mode themselves and stayed there.
+
+        Args:
+            warnings: Receives a note when the mode cannot be entered again.
+        """
+        blender_module: Any = bpy
+        view_layer = blender_module.context.view_layer
+        active = view_layer.objects.active
+        mode = getattr(active, "mode", "OBJECT") if active is not None else "OBJECT"
+        if mode == "OBJECT":
+            yield
+            return
+        _bpy_op(
+            f"Failed to leave {mode} mode for the export",
+            blender_module.ops.object.mode_set,
+            mode="OBJECT",
+        )
+        try:
+            yield
+        finally:
+            try:
+                view_layer.objects.active = active
+                blender_module.ops.object.mode_set(mode=mode)
+            except Exception as exc:  # The export itself is complete.
+                logger.exception("Could not enter %s mode again after the export", mode)
+                warnings.append(
+                    f"The export left {mode} mode and could not enter it again ({exc}); "
+                    "the window is in Object Mode"
+                )
+
+    @staticmethod
+    @contextmanager
+    def _export_selection(objects: Optional[List[Any]]) -> Iterator[None]:
+        """Select exactly ``objects`` for the block, then restore the selection.
+
+        Raises:
+            ValueError: When an object cannot be selected: hidden, disabled in
+                the viewport or outside the view layer, so the exporters would
+                leave it out.
+        """
+        if objects is None:
+            yield
+            return
+        blender_module: Any = bpy
+        view_layer = blender_module.context.view_layer
+        previous = [o for o in view_layer.objects if o.select_get()]
+        active = view_layer.objects.active
+        try:
+            for obj in previous:
+                obj.select_set(False)
+            for obj in objects:
+                try:
+                    obj.select_set(True)
+                except RuntimeError as exc:
+                    raise ValueError(
+                        f"Object {obj.name!r} is not in view layer {view_layer.name!r}, "
+                        "so it cannot be exported"
+                    ) from exc
+                if not obj.select_get():
+                    raise ValueError(
+                        f"Object {obj.name!r} is hidden or disabled in the viewport, so the "
+                        "exporter would leave it out; unhide it or leave it out of the list"
+                    )
+            yield
+        finally:
+            for obj in objects:
+                try:
+                    obj.select_set(False)
+                except RuntimeError:
+                    pass
+            for obj in previous:
+                try:
+                    obj.select_set(True)
+                except RuntimeError:
+                    pass
+            view_layer.objects.active = active
+
+    @classmethod
+    @contextmanager
+    def _scene_frame_range(
+        cls, scene: Any, frame_range: Optional[Tuple[int, int]]
+    ) -> Iterator[None]:
+        """Give the scene a frame range for the block, then restore it.
+
+        The preview range is switched off meanwhile: the glTF exporter limits
+        animation to it instead when it is on.
+        """
+        if frame_range is None:
+            yield
+            return
+        saved = (scene.frame_start, scene.frame_end)
+        preview = scene.use_preview_range
+        cls._set_frame_range(scene, *frame_range)
+        scene.use_preview_range = False
+        try:
+            yield
+        finally:
+            cls._set_frame_range(scene, *saved)
+            scene.use_preview_range = preview
+
+    @staticmethod
+    def _set_frame_range(scene: Any, start: int, end: int) -> None:
+        """Set a scene's frame range; Blender clamps each end to the other, so order matters."""
+        if start > scene.frame_end:
+            scene.frame_end = end
+            scene.frame_start = start
+        else:
+            scene.frame_start = start
+            scene.frame_end = end
+
+    @staticmethod
+    @contextmanager
+    def _gltf_embedded_allowed(allow: bool) -> Iterator[None]:
+        """Let the glTF exporter write GLTF_EMBEDDED for the block.
+
+        Blender's glTF add-on offers that layout only while its preference
+        allow_embedded_format is on; it is switched back off afterwards.
+        """
+        blender_module: Any = bpy
+        addon = blender_module.context.preferences.addons.get("io_scene_gltf2") if allow else None
+        preferences = getattr(addon, "preferences", None)
+        if preferences is None or getattr(preferences, "allow_embedded_format", True):
+            yield
+            return
+        preferences.allow_embedded_format = True
+        try:
+            yield
+        finally:
+            preferences.allow_embedded_format = False
+
+    def _scale_imported_roots(self, names: List[str], factor: float) -> Optional[str]:
+        """Scale imported objects about the world origin through their root objects.
+
+        Returns:
+            A warning naming roots whose transform is keyed, else None.
+        """
+        blender_module: Any = bpy
+        imported = [blender_module.data.objects[name] for name in names]
+        members = {obj.name for obj in imported}
+        animated: List[str] = []
+        for obj in imported:
+            if obj.parent is not None and obj.parent.name in members:
+                continue
+            obj.location = [c * factor for c in obj.location]
+            obj.scale = [c * factor for c in obj.scale]
+            anim_data = getattr(obj, "animation_data", None)
+            keyed = anim_data is not None and anim_data.action is not None
+            # The USD importer animates transforms through this constraint.
+            cached = any(c.type == "TRANSFORM_CACHE" for c in getattr(obj, "constraints", ()))
+            if keyed or cached:
+                animated.append(obj.name)
+        if not animated:
+            return None
+        return (
+            f"Scaled the imported roots by {factor}, but the transform of "
+            f"{', '.join(repr(n) for n in animated[:5])} is animated: its keys or "
+            "Transform Cache constraint take over again at the next frame change"
+        )
 
     def get_file_info(self) -> Dict[str, Any]:
         """
@@ -2996,17 +3796,19 @@ class BlenderRuntimeSession:
             issues = result.get("issues")
             validation_passed = result.get("compliant", True)
 
-        # Select only the requested objects
-        for obj in self._resolve_object_source(None):
-            obj.select_set(False)
-        for obj in targets:
-            obj.select_set(True)
-
+        op_func = self._operator(self._export_op_path("USD"))
+        kwargs: Dict[str, Any] = {"filepath": file_path}
+        if object_names:
+            kwargs["selected_objects_only"] = True
+        # An older exporter without the option writes no custom properties.
+        if self._operator_property(op_func, ("export_custom_properties",)):
+            kwargs["export_custom_properties"] = embed_metadata
+        # The requested objects are selected for the export only.
         self._run_export(
-            file_path,
-            "USD",
-            selected_only=bool(object_names),
-            options={"export_custom_properties": embed_metadata},
+            f"Failed to export SimReady USD file '{file_path}'",
+            op_func,
+            kwargs,
+            to_select=targets if object_names else None,
         )
 
         return {
