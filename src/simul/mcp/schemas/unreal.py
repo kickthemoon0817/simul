@@ -424,9 +424,23 @@ class UnrealAssetEntry(BaseModel):
     """Single asset entry from the Asset Registry."""
 
     name: str = Field(..., description="Asset name")
-    path: str = Field(..., description="Full asset path")
-    class_name: str = Field(..., description="UClass name")
-    package_path: str = Field(..., description="Package path")
+    path: str = Field(..., description="Object path, such as /Game/Props/SM_Chair.SM_Chair")
+    class_name: str = Field(..., description="Asset class name, such as StaticMesh")
+    class_path: Optional[str] = Field(
+        None, description="Asset class path, such as /Script/Engine.StaticMesh"
+    )
+    package_name: Optional[str] = Field(
+        None, description="Package, such as /Game/Props/SM_Chair"
+    )
+    package_path: str = Field(..., description="Content folder, such as /Game/Props")
+    metadata: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Asset registry tags Unreal records for this kind of asset, as the strings it stores: "
+            "Triangles, Vertices, LODs, NaniteEnabled, CollisionPrims for meshes; Dimensions, Format for "
+            "textures; MaterialDomain, BlendMode, Parent for materials"
+        ),
+    )
 
 
 class UnrealSearchAssetsResponse(BaseModel):
@@ -440,7 +454,15 @@ class UnrealSearchAssetsResponse(BaseModel):
         default_factory=list, description="Matching assets"
     )
     count: int = Field(..., description="Number of assets returned")
-    truncated: bool = Field(False, description="Whether results were truncated")
+    total: Optional[int] = Field(None, description="Number of assets that match")
+    offset: int = Field(0, description="Matches skipped before the first returned")
+    next_offset: Optional[int] = Field(
+        None, description="offset of the next page; null on the last page"
+    )
+    truncated: bool = Field(False, description="Whether more matches follow this page")
+    class_paths: List[str] = Field(
+        default_factory=list, description="The class paths searched, the given class names resolved"
+    )
 
 
 class UnrealPropertyInfo(BaseModel):
@@ -962,8 +984,12 @@ class UnrealAssignMaterialResponse(BaseModel):
     component_path: Optional[str] = Field(
         None, description="Mesh component whose slot was set"
     )
+    component_name: Optional[str] = Field(None, description="That component's name")
     material_path: str = Field(..., description="Assigned material's object path")
     slot_index: int = Field(0, description="Slot index")
+    slot_name: Optional[str] = Field(
+        None, description="Material slot name; null when the mesh names none"
+    )
     previous_material_path: Optional[str] = Field(
         None, description="Material the slot rendered with before the assignment"
     )
@@ -1163,6 +1189,15 @@ class UnrealImportUsdResponse(BaseModel):
         description="Level actors the import replaced (only with replace_existing)",
     )
     warnings: List[str] = Field(default_factory=list, description="Import warnings")
+    dirty_engine_packages: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Packages outside /Game (engine or plugin content, shared by every project) the editor holds "
+            "modified when the import finishes, which imports leave (sometimes a moment after they "
+            "return); simul saves none of them, but the editor's Save All would write them into the "
+            "engine install"
+        ),
+    )
 
 
 class UnrealExportUsdResponse(BaseModel):
@@ -1185,6 +1220,72 @@ class UnrealExportUsdResponse(BaseModel):
         description="Actors given that the exporter wrote no prim for (editor helpers it leaves out)",
     )
     file_size_bytes: int = Field(0, description="Output file size in bytes")
+    written_files: List[str] = Field(
+        default_factory=list,
+        description="Every file the export created or changed under the output's folder",
+    )
+    overwritten_files: List[str] = Field(
+        default_factory=list, description="Those of written_files that existed before"
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "What the export wrote differently from the level, such as DynamicMeshActors written as "
+            "empty Xforms without their mesh"
+        ),
+    )
+
+
+class UnrealImportAssetResponse(BaseModel):
+    """Response after importing an FBX, glTF or OBJ file as assets."""
+
+    success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    imported_assets: List[str] = Field(..., description="Object paths of the assets imported")
+    replaced_assets: List[str] = Field(
+        default_factory=list, description="Imported assets that replaced existing ones"
+    )
+    kept_assets: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Existing assets the import left as they were: any that existed with replace_existing false, "
+            "and with it true the textures and materials an earlier import of the file made, which "
+            "Unreal's reimport keeps"
+        ),
+    )
+    warnings: List[str] = Field(
+        default_factory=list, description="Warnings and errors the editor logged during the import"
+    )
+    dirty_engine_packages: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Packages outside /Game (engine or plugin content, shared by every project) the editor holds "
+            "modified when the import finishes, which imports leave (sometimes a moment after they "
+            "return); simul saves none of them, but the editor's Save All would write them into the "
+            "engine install"
+        ),
+    )
+
+
+class UnrealSaveAssetsResponse(BaseModel):
+    """Response after saving packages."""
+
+    success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    saved: List[str] = Field(default_factory=list, description="Packages saved")
+    failed: List[str] = Field(default_factory=list, description="Packages Unreal did not save")
+    would_save: List[str] = Field(
+        default_factory=list, description="Packages a save would write (dry_run)"
+    )
+    skipped: List[Dict[str, str]] = Field(
+        default_factory=list, description="Packages left unsaved, each with the reason"
+    )
+    level_package: Optional[str] = Field(None, description="The level being edited")
+    dry_run: bool = Field(False, description="Whether nothing was saved")
 
 
 class UnrealConvertToSimreadyResponse(BaseModel):
@@ -1223,9 +1324,21 @@ class UnrealGetInterchangeInfoResponse(BaseModel):
         None, description="Error message when success is False"
     )
     pipelines: List[Dict[str, Any]] = Field(
-        ..., description="Available import/export pipelines"
+        ...,
+        description=(
+            "The project's Interchange pipeline stacks: each one's name, kind (content or scene) and "
+            "pipeline asset paths"
+        ),
     )
-    supported_formats: List[str] = Field(..., description="Supported file formats")
+    supported_formats: List[str] = Field(
+        ..., description="Supported formats of every translator kind, as 'extension;description'"
+    )
+    supported_formats_by_kind: Dict[str, List[str]] = Field(
+        default_factory=dict, description="Supported formats by translator kind: assets, scenes, actors"
+    )
+    default_pipeline_stacks: Dict[str, str] = Field(
+        default_factory=dict, description="The project's default content and scene pipeline stacks"
+    )
     interchange_version: str = Field(..., description="Interchange Framework version")
     pipeline_enumeration_available: bool = Field(
         False, description="Whether pipeline enumeration is available"
