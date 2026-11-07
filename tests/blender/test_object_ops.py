@@ -317,6 +317,9 @@ class World:
             world.calls.append(("object.mode_set", {"mode": mode}))
             override = world.overrides[-1] if world.overrides else {}
             obj = override.get("active_object") or world.view_layer.objects.active
+            if obj.type == "EMPTY" and mode != "OBJECT":
+                # Blender's poll: an empty has no Edit Mode.
+                raise RuntimeError("Operator bpy.ops.object.mode_set.poll() failed")
             obj.mode = mode
             world.mode = "OBJECT" if mode == "OBJECT" else f"{mode}_MESH"
             return {"FINISHED"}
@@ -519,6 +522,18 @@ def test_create_object_refuses_values_it_cannot_write(world: World) -> None:
     assert world.objects == {} and world.calls == []
 
 
+def test_create_object_refuses_edit_mode_before_adding_anything(world: World) -> None:
+    """Embedded mode has no bridge guard: in Edit Mode the add operator edited
+    the active mesh, and the call then failed with nothing created."""
+    world.view_layer.objects.active = world.add("Edited")
+    world.mode = "EDIT_MESH"
+
+    with pytest.raises(ValueError, match="set_blender_object_mode"):
+        _session(attached=False).create_object("CUBE")
+
+    assert world.calls == [] and sorted(world.objects) == ["Edited"]
+
+
 # -- delete_object (B1-11, B3-03) ---------------------------------------------
 
 
@@ -628,6 +643,18 @@ def test_set_object_mode_activates_a_named_object(world: World) -> None:
 
     assert world.view_layer.objects.active is world.objects["Sphere"]
     assert result["mode"] == "EDIT" and result["context_mode"] == "EDIT_MESH"
+
+
+def test_a_refused_mode_switch_keeps_the_active_object(world: World) -> None:
+    """The named object became active even when Blender refused its mode."""
+    sphere = world.add("Sphere")
+    world.view_layer.objects.active = sphere
+    world.add("Marker", object_type="EMPTY")
+
+    with pytest.raises(RuntimeError, match="poll"):
+        _session().set_object_mode("EDIT", object_name="Marker")
+
+    assert world.view_layer.objects.active is sphere
 
 
 def test_set_object_mode_without_an_object(world: World) -> None:

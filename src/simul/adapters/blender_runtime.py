@@ -2035,7 +2035,8 @@ class BlenderRuntimeSession:
         warning says so. The object is told apart from the others by what the
         add operator created, never by the active object, and removed again
         when naming or scaling it fails. It never enters Edit Mode, whatever
-        the "Enter Edit Mode" preference says.
+        the "Enter Edit Mode" preference says, and outside Object Mode the
+        call is refused before anything is added.
 
         Args:
             object_type: Type key (CUBE, SPHERE, POINT_LIGHT, CAMERA, etc.).
@@ -2074,6 +2075,14 @@ class BlenderRuntimeSession:
 
         view_layer = blender_module.context.view_layer
         mode_before = blender_module.context.mode
+        if mode_before != "OBJECT":
+            # In Edit Mode an add operator adds to the edited mesh instead of
+            # creating an object. Attached mode's bridge refuses this up front;
+            # embedded mode has no such guard.
+            raise ValueError(
+                f"Blender is in {mode_before} mode; set_blender_object_mode switches back to "
+                "Object Mode, where objects can be created"
+            )
         active_collection = view_layer.active_layer_collection
         target, warning = self._creation_collection(view_layer)
         existing = {obj.as_pointer() for obj in blender_module.data.objects}
@@ -2101,7 +2110,7 @@ class BlenderRuntimeSession:
                     f"Adding a {kind} created {len(created)} objects, not one"
                 )
             obj = created[0]
-            if mode_before == "OBJECT" and blender_module.context.mode != "OBJECT":
+            if blender_module.context.mode != "OBJECT":
                 with blender_module.context.temp_override(active_object=obj, object=obj):
                     _bpy_op(
                         f"Failed to return '{obj.name}' to Object Mode",
@@ -2296,14 +2305,20 @@ class BlenderRuntimeSession:
             raise ValueError(f"No active object to switch to {wanted} mode; pass object_name")
         previous = obj.mode
         if previous != wanted:
-            if view_layer.objects.active != obj:
+            was_active = view_layer.objects.active
+            if was_active != obj:
                 view_layer.objects.active = obj
-            with blender_module.context.temp_override(active_object=obj, object=obj):
-                _bpy_op(
-                    f"Failed to switch '{obj.name}' to {wanted} mode",
-                    operator,
-                    mode=wanted,
-                )
+            try:
+                with blender_module.context.temp_override(active_object=obj, object=obj):
+                    _bpy_op(
+                        f"Failed to switch '{obj.name}' to {wanted} mode",
+                        operator,
+                        mode=wanted,
+                    )
+            except Exception:
+                # A refused switch leaves the user's active object as it was.
+                view_layer.objects.active = was_active
+                raise
         return {
             "object_name": obj.name,
             "mode": obj.mode,

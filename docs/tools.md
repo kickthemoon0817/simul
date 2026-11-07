@@ -783,7 +783,9 @@ Behaviour worth knowing:
   user's active collection stays as it was. The new object is the one the add
   operator created (an object hidden in the 3D View is not its
   `context.active_object`), and a failed call removes it again. It stays in
-  Object Mode whatever Blender's "Enter Edit Mode" preference says.
+  Object Mode whatever Blender's "Enter Edit Mode" preference says, and
+  outside Object Mode it is refused before anything is added (embedded mode
+  too, where an add operator would otherwise add to the edited mesh).
   `set_blender_object_mode` switches an object (the active one by default)
   into a mode, `OBJECT` by default: the way back for a window left in Edit or
   Pose Mode, where creating, deleting, importing and the other mode-sensitive
