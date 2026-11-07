@@ -33,7 +33,12 @@ from simul.adapters.unreal_runtime import (
 from simul.config import Settings
 from simul.mcp import server as server_module
 from tests.fakes import AvailableAdapter
-from tests.unreal.editor_world import SUBSYSTEM_NAMES, World, editor_subsystems, is_valid
+from tests.unreal.editor_world import (
+    SUBSYSTEM_NAMES,
+    World,
+    editor_subsystems,
+    is_valid,
+)
 
 ACTOR = "/Game/Map.Map:PersistentLevel.PointLight_0"
 WORLD = World("/Game/Map.Map")
