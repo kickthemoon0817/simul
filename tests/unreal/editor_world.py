@@ -47,10 +47,11 @@ def editor_subsystems(
     ``LayersSubsystem.get_world`` (GWorld while Remote Control runs a script)
     still returns the editor world.
     """
+    play = pie_world or World("/Game/UEDPIE_0_Map.Map")
     return {
         "UnrealEditorSubsystem": SimpleNamespace(
             get_editor_world=lambda: None if pie() else world,
-            get_game_world=lambda: (pie_world or World("/Game/UEDPIE_0_Map.Map")) if pie() else None,
+            get_game_world=lambda: play if pie() else None,
         ),
         "LayersSubsystem": SimpleNamespace(get_world=lambda: world),
     }

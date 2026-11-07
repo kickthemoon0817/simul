@@ -107,6 +107,9 @@ ACTOR_NOT_FOUND = "Actor not found: {path}"
 # belongs to another world; for the PIE world's copy of an actor the message
 # names the editor's path. Each raises SimulNotFound, whose message starts
 # with ACTOR_NOT_FOUND, and the session reports it as NotFoundError.
+# actor_at(path, play_world=True) also takes an actor of the running Play In
+# Editor world (UnrealEditorSubsystem.get_game_world), for the physics and
+# collision edits that change the running copy on purpose.
 ACTOR_HELPERS = EDITOR_WORLD + f"_ACTOR_NOT_FOUND = {ACTOR_NOT_FOUND!r}\n" + """
 # The package name prefix of a Play In Editor world, UEDPIE_<n>_<map>.
 _PIE_PACKAGE = "UEDPIE_[0-9]+_"
@@ -114,7 +117,7 @@ _PIE_PACKAGE = "UEDPIE_[0-9]+_"
 class SimulNotFound(Exception):
     pass
 
-def actor_at(path):
+def actor_at(path, play_world=False):
     actor = unreal.find_object(None, path)
     world = editor_world()
     if not isinstance(actor, unreal.Actor) or not unreal.SystemLibrary.is_valid(actor):
@@ -124,16 +127,19 @@ def actor_at(path):
         raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path)
                             + " (no live actor at that path in the level open in the editor, " + where + hint + ")")
     owner = actor.get_world()
-    if world is None or owner != world:
-        playing = owner is not None and re.match(_PIE_PACKAGE, owner.get_outermost().get_name().rpartition("/")[2])
-        advice = ("Play In Editor's copy of an actor; pass the editor's, " + re.sub(_PIE_PACKAGE, "", path, count=1)
-                  if playing else "open that map to edit it")
-        raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path) + " (it belongs to "
-                            + (owner.get_path_name() if owner is not None else "no world")
-                            + ", not to the level open in the editor, "
-                            + (world.get_path_name() if world is not None else "none")
-                            + "; " + advice + ")")
-    return actor
+    if owner is not None and owner == world:
+        return actor
+    if (play_world and owner is not None
+            and owner == unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()):
+        return actor
+    playing = owner is not None and re.match(_PIE_PACKAGE, owner.get_outermost().get_name().rpartition("/")[2])
+    advice = ("Play In Editor's copy of an actor; pass the editor's, " + re.sub(_PIE_PACKAGE, "", path, count=1)
+              if playing else "open that map to edit it")
+    raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path) + " (it belongs to "
+                        + (owner.get_path_name() if owner is not None else "no world")
+                        + ", not to the level open in the editor, "
+                        + (world.get_path_name() if world is not None else "none")
+                        + "; " + advice + ")")
 
 def actor_transform(actor):
     location = actor.get_actor_location()
@@ -1090,6 +1096,371 @@ result = {"component_path": component.get_path_name(), "applied": applied,
 if rejected:
     result.update(success=False, error="Unreal did not apply: " + ", ".join(rejected))
 print(json.dumps(result))
+"""
+
+#: ``error_type`` of a physics edit refused because the body cannot take it:
+#: ``details.problems`` lists each reason as {"code", "message"}.
+INCOMPATIBLE_BODY = "IncompatibleBody"
+
+# Shared by the physics and collision scripts below. Each edits one primitive
+# component (the actor's root, else its only one, as actor_component picks).
+# An actor in the editor world is edited the way the Details panel does it:
+# inside one ScopedEditorTransaction, after modify(), so the edit is one Undo
+# step and marks the map dirty, and Save All writes it. The runtime setters
+# alone (set_simulate_physics and the like) change the live body but neither
+# record an undo step nor dirty the map, so the edit was lost on exit (observed
+# on UE 5.7.4); after modify() they are recorded, Undo and Redo restore them,
+# the attachment a simulating body drops included, and they survive a save and
+# reload (UE 5.7.4). Cancelling a transaction only drops its record and keeps
+# what was changed (UTransBuffer::Cancel), so a script that fails after
+# writing restores the values itself before it cancels. An actor in a running
+# simulation's world (UEDPIE_<n>_<map>) is the play copy: Unreal records no
+# undo for it and saves nothing of it, so it is edited directly and the reply
+# says so (world "simulation").
+#
+# Unreal accepts simulate_physics on any body and is_simulating_physics()
+# reads True for one that never moves (UE 5.7.4): a Static or Stationary body
+# (no mass, stays put), one whose collision has no physics (NoCollision or
+# QueryOnly such as OverlapAll: "Invalid Simulate Options ... Collision Enabled
+# is incompatible", and the body falls through the floor) and one whose mesh
+# has no simple collision shape (falls through). physics_problems names them
+# before anything is written. A mesh that uses its render triangles as simple
+# collision (CTF_USE_COMPLEX_AS_SIMPLE) cannot simulate at all, though it can
+# be a kinematic collider. StaticMeshEditorSubsystem reports -1 for every mesh
+# while Play In Editor runs, so the mesh checks are skipped then.
+PHYSICS_HELPERS = ACTOR_HELPERS + f"_INCOMPATIBLE_BODY = {INCOMPATIBLE_BODY!r}\n" + """
+import re
+
+PHYSICS_COLLISION = ("QUERY_AND_PHYSICS", "PHYSICS_ONLY")
+
+def in_simulation(actor):
+    world = actor.get_world()
+    package = world.get_outermost().get_name().rpartition("/")[2] if world is not None else ""
+    return re.match("UEDPIE_[0-9]+_", package) is not None
+
+def physics_component(actor):
+    return actor_component(actor, unreal.PrimitiveComponent)
+
+def physics_mode(component):
+    if component.get_collision_enabled().name not in PHYSICS_COLLISION:
+        return "none"
+    if component.mobility.name != "MOVABLE":
+        return "static"
+    body = component.get_editor_property("body_instance")
+    if body.get_editor_property("simulate_physics") and component.is_simulating_physics():
+        return "simulated"
+    return "kinematic"
+
+def physics_report(component):
+    body = component.get_editor_property("body_instance")
+    parent = component.get_attach_parent()
+    override = bool(body.get_editor_property("override_mass"))
+    return {
+        "component_path": component.get_path_name(),
+        "physics_mode": physics_mode(component),
+        "simulate_physics": bool(body.get_editor_property("simulate_physics")),
+        "mobility": component.mobility.name.title(),
+        "collision_mode": component.get_collision_enabled().name,
+        "collision_preset": str(component.get_collision_profile_name()),
+        "mass_kg": component.get_mass(),
+        "mass_override_kg": body.get_editor_property("mass_in_kg_override") if override else None,
+        "gravity_enabled": bool(body.get_editor_property("enable_gravity")),
+        "linear_damping": body.get_editor_property("linear_damping"),
+        "angular_damping": body.get_editor_property("angular_damping"),
+        "attach_parent": parent.get_path_name() if parent is not None else None,
+    }
+
+def mesh_collision(mesh):
+    tools = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+    simple = tools.get_simple_collision_count(mesh)
+    convex = tools.get_convex_collision_count(mesh)
+    if simple < 0 or convex < 0:
+        return None
+    return simple, convex, tools.get_collision_complexity(mesh).name
+
+def physics_problems(component, simulate, make_movable, allow_detach):
+    problems = []
+    body = "a simulated" if simulate else "a kinematic"
+    mobility = component.mobility.name
+    if mobility != "MOVABLE" and not make_movable:
+        problems.append({"code": "NOT_MOVABLE", "message": (
+            "its mobility is " + mobility.title() + ", and Unreal moves and simulates only Movable "
+            "bodies: pass make_movable true (the default) to make it Movable")})
+    collision = component.get_collision_enabled().name
+    if collision not in PHYSICS_COLLISION:
+        problems.append({"code": "NO_PHYSICS_COLLISION", "message": (
+            "its collision is " + collision + " (preset " + str(component.get_collision_profile_name())
+            + "), and " + body + " body needs physics collision (QUERY_AND_PHYSICS or PHYSICS_ONLY): "
+            "call set_unreal_collision with collision_preset PhysicsActor, or with collision_enabled "
+            "true")})
+    if isinstance(component, unreal.StaticMeshComponent):
+        mesh = component.get_editor_property("static_mesh")
+        if mesh is None:
+            problems.append({"code": "NO_GEOMETRY", "message": (
+                "it has no static mesh, so Unreal gives it no physics body")})
+        else:
+            counts = mesh_collision(mesh)
+            if counts is not None:
+                simple, convex, complexity = counts
+                if complexity == "CTF_USE_COMPLEX_AS_SIMPLE":
+                    if simulate:
+                        problems.append({"code": "COMPLEX_AS_SIMPLE", "message": (
+                            "its mesh " + mesh.get_path_name() + " uses its render triangles as simple "
+                            "collision (Collision Complexity: Use Complex Collision As Simple), which "
+                            "Unreal cannot simulate: set the mesh's Collision Complexity to Project "
+                            "Default and give it simple collision, or make the body kinematic")})
+                elif simple + convex == 0:
+                    problems.append({"code": "NO_SIMPLE_COLLISION", "message": (
+                        "its mesh " + mesh.get_path_name() + " has no simple collision shape, so " + body
+                        + " body would pass through everything: add simple collision to the mesh "
+                        "(Static Mesh editor, Collision menu)")})
+    parent = component.get_attach_parent()
+    if simulate and parent is not None and not allow_detach:
+        problems.append({"code": "ATTACHED", "message": (
+            "it is attached to " + parent.get_path_name() + ", and Unreal detaches a body from its "
+            "parent when it starts simulating (keeping its world transform): pass allow_detach true to "
+            "detach it in the same undoable step")})
+    return problems
+
+def refusal(actor, what, problems, component):
+    return {"success": False, "error_type": _INCOMPATIBLE_BODY,
+            "error": "Cannot " + what + " " + actor.get_actor_label() + ": "
+                     + "; ".join(problem["message"] for problem in problems),
+            "details": {"problems": problems, "component_path": component.get_path_name()}}
+
+def pie_running():
+    return bool(unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).is_in_play_in_editor())
+
+def edit_note(simulation):
+    if simulation:
+        return ("This changed the running simulation's copy of the actor only: Unreal records no undo "
+                "for it and it is gone when the simulation stops.")
+    if pie_running():
+        return ("Play In Editor is running: this changed the editor world, which the running "
+                "simulation does not see; it takes effect the next time the simulation starts.")
+    return None
+"""
+
+# Expects ``args`` = {"actor_path", "mode" ("simulate", "kinematic" or "off"),
+# "make_movable", "allow_detach", "transaction"}. "simulate" makes the body
+# simulate physics, "kinematic" keeps its physics collision without simulating
+# (simulated bodies hit it; it moves only when its transform is set) and "off"
+# stops it simulating, collision and mobility kept. A body that cannot take
+# the mode is refused with nothing written (IncompatibleBody). A Static or
+# Stationary body is made Movable when make_movable is true, and a simulated
+# body attached to a parent is detached, as Unreal does, only with
+# allow_detach. If the body still does not read back as asked, every value is
+# restored and the transaction cancelled.
+ENABLE_PHYSICS = PHYSICS_HELPERS + """
+def apply(component, mode):
+    if mode != "off" and component.mobility.name != "MOVABLE":
+        component.set_mobility(unreal.ComponentMobility.MOVABLE)
+    component.set_simulate_physics(mode == "simulate")
+
+def unmet(component, mode):
+    flag = bool(component.get_editor_property("body_instance").get_editor_property("simulate_physics"))
+    if mode == "off":
+        return None if not flag else "the body still simulates physics"
+    if component.mobility.name != "MOVABLE":
+        return "the body is still " + component.mobility.name.title()
+    if mode == "kinematic":
+        return None if not flag else "the body still simulates physics"
+    if not (flag and component.is_simulating_physics()):
+        return "Unreal did not start simulating the body"
+    if component.get_mass() <= 0:
+        return "Unreal gives the body no mass"
+    return None
+
+def restore(component, before):
+    component.set_simulate_physics(before["simulate"])
+    if component.mobility != before["mobility"]:
+        component.set_mobility(before["mobility"])
+    parent = before["parent"]
+    if parent is not None and component.get_attach_parent() != parent:
+        rule = unreal.AttachmentRule.KEEP_WORLD
+        component.attach_to_component(parent, before["socket"], rule, rule, rule, False)
+
+def enable():
+    actor = actor_at(args["actor_path"], play_world=True)
+    component = physics_component(actor)
+    mode = args["mode"]
+    if mode != "off":
+        problems = physics_problems(component, mode == "simulate", args["make_movable"], args["allow_detach"])
+        if problems:
+            what = "simulate physics on" if mode == "simulate" else "make kinematic"
+            return refusal(actor, what, problems, component)
+    before = {"simulate": bool(component.get_editor_property("body_instance").get_editor_property("simulate_physics")),
+              "mobility": component.mobility, "parent": component.get_attach_parent(),
+              "socket": component.get_attach_socket_name()}
+    simulation = in_simulation(actor)
+    failure = None
+    if simulation:
+        apply(component, mode)
+        failure = unmet(component, mode)
+        if failure is not None:
+            restore(component, before)
+    else:
+        with unreal.ScopedEditorTransaction(args["transaction"]) as transaction:
+            component.modify()
+            if before["parent"] is not None:
+                before["parent"].modify()
+            try:
+                apply(component, mode)
+                failure = unmet(component, mode)
+            except Exception as exc:
+                failure = str(exc) or type(exc).__name__
+            if failure is not None:
+                restore(component, before)
+                transaction.cancel()
+    if failure is not None:
+        return {"success": False, "error_type": "PhysicsNotApplied",
+                "error": failure + "; nothing was changed", "details": physics_report(component)}
+    result = physics_report(component)
+    result.update(actor_path=actor.get_path_name(), world="simulation" if simulation else "editor",
+                  physics_enabled=result["physics_mode"] == "simulated",
+                  mobility_changed_from=None if component.mobility == before["mobility"]
+                  else before["mobility"].name.title(),
+                  detached_from=None)
+    warnings = []
+    if before["parent"] is not None and component.get_attach_parent() is None:
+        result["detached_from"] = before["parent"].get_path_name()
+        warnings.append("Detached from " + result["detached_from"] + ", as Unreal does when a body starts "
+                        "simulating; Undo reattaches it, turning physics off does not "
+                        "(set_unreal_actor_parent does).")
+    note = edit_note(simulation)
+    if note:
+        warnings.append(note)
+    result["warning"] = " ".join(warnings) or None
+    return result
+
+print(json.dumps(enable()))
+"""
+
+# Expects ``args`` = {"actor_path", "values": {"mass", "linear_damping",
+# "angular_damping", "enable_gravity"} (only those given), "transaction"}.
+# Writes them with the body's setters in one undoable transaction and reads
+# every value back (mass as the override stored, PhysicsParamsNotApplied for
+# one that reads back different). With no values it only reads the body.
+# Unreal gives a Static or Stationary body no mass (get_mass() reads 0) and
+# never simulates it, so the reply warns that the values apply once the body
+# is Movable.
+SET_PHYSICS_PARAMS = PHYSICS_HELPERS + """
+import struct
+
+def stored(value):
+    return struct.unpack("f", struct.pack("f", value))[0]
+
+def write(component, values):
+    if "mass" in values:
+        component.set_mass_override_in_kg("None", values["mass"], True)
+    if "linear_damping" in values:
+        component.set_linear_damping(values["linear_damping"])
+    if "angular_damping" in values:
+        component.set_angular_damping(values["angular_damping"])
+    if "enable_gravity" in values:
+        component.set_enable_gravity(values["enable_gravity"])
+
+def set_params():
+    actor = actor_at(args["actor_path"], play_world=True)
+    component = physics_component(actor)
+    values = args["values"]
+    simulation = in_simulation(actor)
+    if values:
+        if simulation:
+            write(component, values)
+        else:
+            with unreal.ScopedEditorTransaction(args["transaction"]):
+                component.modify()
+                write(component, values)
+    result = physics_report(component)
+    read = {"mass": result["mass_override_kg"], "linear_damping": result["linear_damping"],
+            "angular_damping": result["angular_damping"], "enable_gravity": result["gravity_enabled"]}
+    applied = {name: read[name] for name in values}
+    rejected = sorted(name for name, wanted in values.items()
+                      if (read[name] != wanted if isinstance(wanted, bool)
+                          else read[name] is None or abs(read[name] - stored(wanted)) > 1e-6 * max(1.0, abs(wanted))))
+    result.update(actor_path=actor.get_path_name(), world="simulation" if simulation else "editor",
+                  applied=applied, params_set=len(values) - len(rejected))
+    warnings = []
+    if result["mobility"] != "Movable":
+        warnings.append("The body is " + result["mobility"] + ": Unreal gives such a body no mass (mass_kg "
+                        "reads 0) and never simulates it. The values are stored and apply once it is "
+                        "Movable (enable_unreal_physics makes it Movable).")
+    elif result["physics_mode"] == "none":
+        warnings.append("The body has no physics collision (" + result["collision_mode"] + "), so Unreal "
+                        "gives it no physics mass and it collides with nothing.")
+    note = edit_note(simulation)
+    if note and values:
+        warnings.append(note)
+    result["warning"] = " ".join(warnings) or None
+    if rejected:
+        result.update(success=False, error_type="PhysicsParamsNotApplied",
+                      error="Unreal did not apply: " + ", ".join(rejected))
+    return result
+
+print(json.dumps(set_params()))
+"""
+
+# Expects ``args`` = {"actor_path", "preset" (or None), "enabled" (True, False
+# or None), "transaction"}. A preset is checked on a transient component
+# first, since Unreal renames an unknown preset to Custom instead of failing,
+# so an unknown one changes nothing. Setting collision_enabled on a static mesh
+# component clears its Use Default Collision flag first, as setting a preset
+# does in Unreal (UStaticMeshComponent::SetCollisionProfileName): with the flag
+# set, Unreal puts the mesh's own collision back when the component is
+# registered again, in the play copy when the simulation starts and after the
+# map reloads, so a collision turned off came back as BlockAll (UE 5.7.4).
+SET_COLLISION = PHYSICS_HELPERS + """
+def known_preset(name):
+    probe = unreal.new_object(unreal.StaticMeshComponent)
+    probe.set_collision_profile_name(name)
+    return str(probe.get_collision_profile_name()).lower() == name.lower()
+
+def write(component, preset, enabled):
+    if preset:
+        component.set_collision_profile_name(preset)
+    if enabled is not None:
+        if (isinstance(component, unreal.StaticMeshComponent)
+                and component.get_editor_property("use_default_collision")):
+            component.set_editor_property("use_default_collision", False)
+        component.set_collision_enabled(unreal.CollisionEnabled.QUERY_AND_PHYSICS if enabled
+                                        else unreal.CollisionEnabled.NO_COLLISION)
+
+def set_collision():
+    actor = actor_at(args["actor_path"], play_world=True)
+    component = physics_component(actor)
+    preset, enabled = args["preset"], args["enabled"]
+    if preset and not known_preset(preset):
+        return {"success": False, "error_type": "ValidationError",
+                "error": "Unknown collision preset: " + preset + "; nothing was changed. Presets include "
+                         "BlockAll, BlockAllDynamic, PhysicsActor, OverlapAll, NoCollision and Custom"}
+    simulation = in_simulation(actor)
+    if preset or enabled is not None:
+        if simulation:
+            write(component, preset, enabled)
+        else:
+            with unreal.ScopedEditorTransaction(args["transaction"]):
+                component.modify()
+                write(component, preset, enabled)
+    result = physics_report(component)
+    result.update(actor_path=actor.get_path_name(), world="simulation" if simulation else "editor",
+                  collision_enabled=result["collision_mode"] != "NO_COLLISION",
+                  use_default_collision=bool(component.get_editor_property("use_default_collision"))
+                  if isinstance(component, unreal.StaticMeshComponent) else None)
+    warnings = []
+    if result["simulate_physics"] and result["collision_mode"] not in PHYSICS_COLLISION:
+        effect = ("does not move at all" if result["collision_mode"] == "NO_COLLISION"
+                  else "falls through everything")
+        warnings.append("The body simulates physics but now has no physics collision ("
+                        + result["collision_mode"] + "): in the simulation it " + effect
+                        + ", and Unreal logs Invalid Simulate Options.")
+    note = edit_note(simulation)
+    if note and (preset or enabled is not None):
+        warnings.append(note)
+    result["warning"] = " ".join(warnings) or None
+    return result
+
+print(json.dumps(set_collision()))
 """
 
 # Expects ``args`` = {"path", "values"}, where ``values`` maps "scalar",

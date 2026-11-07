@@ -233,6 +233,8 @@ class Editor:
     def __init__(self) -> None:
         self.world = World(MAP_B)
         self.map_a = World(MAP_A)
+        # The running game's copy of MapB while Play In Editor runs.
+        self.play_world = World("/Game/Maps/UEDPIE_0_MapB.MapB")
         # Loaded objects by path: what find_object finds, destroyed actors
         # included until garbage collection, as on UE 5.7.4.
         self.memory: Dict[str, Actor] = {}
@@ -382,7 +384,7 @@ class Editor:
         subsystems = {
             "EditorActorSubsystem": self,
             "LevelEditorSubsystem": SimpleNamespace(is_in_play_in_editor=lambda: editor.pie),
-            **editor_subsystems(self.world, pie=lambda: editor.pie),
+            **editor_subsystems(self.world, pie=lambda: editor.pie, pie_world=self.play_world),
         }
         return SimpleNamespace(
             Actor=Actor,
@@ -467,8 +469,12 @@ def _run(editor: Editor, monkeypatch: pytest.MonkeyPatch, method: str, *args: An
 
 
 def _not_found(result: Dict[str, Any], path: str) -> bool:
-    """The refusal ``actor_at`` raises for ``path``, as the session reports it."""
-    return result.get("success") is False and ACTOR_NOT_FOUND.format(path=path) in result.get("error", "")
+    """The refusal ``actor_at`` raises for ``path``, as the session reports it: NotFoundError."""
+    return (
+        result.get("success") is False
+        and result.get("error_type") == "NotFoundError"
+        and result.get("error", "").startswith(ACTOR_NOT_FOUND.format(path=path) + " (")
+    )
 
 
 class _Adapter(AvailableAdapter):
