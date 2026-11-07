@@ -15,6 +15,7 @@ import json
 import re
 import sys
 import textwrap
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Coroutine, Dict, List, Optional
 
@@ -1006,6 +1007,109 @@ def bridge_set_unsafe(
         f"[green]execute_script[/green] {state}"
         + (" and bridge restarted" if parsed.get("restarted") else "")
     )
+
+
+# ---------------------------------------------------------------------------
+# claims
+# ---------------------------------------------------------------------------
+@app.command("claims")
+def claims(
+    port: Optional[int] = typer.Option(
+        None, "--port", "-p", click_type=PORT_NUMBER, help="Only the instance on this socket port"
+    ),
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Only this agent_id's claims"),
+    clear: bool = typer.Option(
+        False, "--clear", help="Remove the selected claims (every live claim without --port/--agent)"
+    ),
+) -> None:
+    """List the live Isaac instance claims MCP servers on this machine hold, or clear them.
+
+    Claims live in the session records every server process shares
+    (~/.simul/sessions). Clearing one is the operator's way out when an agent
+    is locked out by a claim nothing will release, for instance one whose
+    server crashed; agents that reconnect can also re-claim their own
+    orphaned claim with the same agent_id.
+    """
+    from simul.mcp.session_manager import (
+        CLAIM_TTL_SECONDS,
+        ClaimStoreError,
+        SessionManager,
+        claim_is_orphaned,
+    )
+
+    manager = SessionManager()
+    if clear:
+        try:
+            removed = manager.clear(port=port, agent_id=agent)
+        except ClaimStoreError as exc:
+            fail(str(exc), ClaimStoreError.error_type, exc.details)
+        if is_json_mode():
+            emit({"success": True, "cleared": removed, "session_dir": str(manager.session_dir)})
+            return
+        console.print(f"[green]Cleared {len(removed)} claim(s)[/green] in {manager.session_dir}")
+        for record in removed:
+            console.print(f"  port {record['port']}: {rich_escape(str(record.get('agent_id')))}")
+        return
+
+    now = time.time()
+    rows: List[Dict[str, Any]] = []
+    unreadable: List[Dict[str, Any]] = []
+    for instance in manager.get_all_sessions():
+        if port is not None and instance["port"] != port:
+            continue
+        if "error" in instance:
+            unreadable.append({"port": instance["port"], "error": instance["error"]})
+            continue
+        for record in instance["sessions"]:
+            if agent is not None and record.get("agent_id") != agent:
+                continue
+            last_active = float(record.get("last_active", 0.0))
+            rows.append(
+                {
+                    "port": instance["port"],
+                    "agent_id": record.get("agent_id"),
+                    "purpose": record.get("purpose", ""),
+                    "last_active": last_active,
+                    "expires_in_seconds": round(max(0.0, CLAIM_TTL_SECONDS - (now - last_active)), 1),
+                    "orphaned": claim_is_orphaned(record),
+                    "pid": record.get("pid"),
+                }
+            )
+        if "repaired_at" in instance:
+            unreadable.append(
+                {"port": instance["port"], "repaired_at": instance["repaired_at"]}
+            )
+    if is_json_mode():
+        emit({"success": not any("error" in u for u in unreadable), "claims": rows,
+              "problems": unreadable, "session_dir": str(manager.session_dir)})
+        if any("error" in u for u in unreadable):
+            raise typer.Exit(1)
+        return
+    if not rows:
+        console.print(f"[dim]No live claims in {manager.session_dir}.[/dim]")
+    else:
+        table = Table(title=f"Isaac instance claims ({manager.session_dir})")
+        for column in ("Port", "Agent", "Purpose", "Expires in", "Orphaned"):
+            table.add_column(column)
+        for row in rows:
+            table.add_row(
+                str(row["port"]),
+                rich_escape(str(row["agent_id"])),
+                rich_escape(str(row["purpose"])),
+                f"{row['expires_in_seconds']:.0f} s",
+                "yes" if row["orphaned"] else "",
+            )
+        console.print(table)
+    for problem in unreadable:
+        if "error" in problem:
+            console.print(f"[red]port {problem['port']}: {rich_escape(problem['error'])}[/red]")
+        else:
+            console.print(
+                f"[yellow]port {problem['port']}: records were repaired; enforcement stays "
+                "closed for one claim TTL[/yellow]"
+            )
+    if any("error" in u for u in unreadable):
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,9 @@ from ._shared import (
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
     MAX_RETAINED_CAPTURES,
+    XFORM_READ_CORE,
     FloatList,
+    _compose_script,
     _pyval,
 )
 from .._meta import tool_meta
@@ -41,11 +43,14 @@ class CameraMixin:
             Dict with camera position, target, focal length, clipping range, etc.
         """
         _cam_path = _pyval(camera_path or "")
-        script = textwrap.dedent(f"""\
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom, Gf
-
+            """,
+            XFORM_READ_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -77,11 +82,13 @@ class CameraMixin:
                     xformable = UsdGeom.Xformable(cam_prim)
                     world_xform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
                     pos = world_xform.ExtractTranslation()
-                    rot = world_xform.ExtractRotation().GetQuat()
+                    # Scale factored out first: ExtractRotation() on a camera
+                    # under a scaled parent reads the wrong orientation.
+                    world_pose = _decompose_matrix(world_xform)
                     print(json.dumps({{
                         "camera_path": str(cam_path),
                         "position": list(pos),
-                        "rotation_quat": [float(rot.GetReal())] + [float(x) for x in rot.GetImaginary()],
+                        "rotation_quat": world_pose["rotation_quat"],
                         "focal_length": float(cam.GetFocalLengthAttr().Get()),
                         "horizontal_aperture": float(cam.GetHorizontalApertureAttr().Get()),
                         "vertical_aperture": float(cam.GetVerticalApertureAttr().Get()),
@@ -90,7 +97,8 @@ class CameraMixin:
                     }}))
                 elif not cam_path:
                     print(json.dumps({{"error": "No camera found in scene"}}))
-        """)
+            """,
+        )
         return await self._execute_json_script(script)
 
     @tool_meta(

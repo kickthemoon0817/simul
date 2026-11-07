@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 
 from ._shared import (
     DEFAULT_MAX_RESULTS,
+    JSON_VALUE_CORE,
+    _compose_script,
     _pyval,
 )
 from .._meta import DeprecatedAlias, tool_meta
@@ -289,10 +291,15 @@ class RenderMixin:
     @tool_meta(
         name="query_isaac_typed_prims",
         description=(
-            "Find prims below root_path by USD schema type (subclasses included) and read "
-            "the requested attributes from each. Attributes resolve via the schema API "
-            "first (e.g. 'intensity' -> GetIntensityAttr), then the plain and inputs: "
-            "names. Paged (max_results/offset)."
+            "Find prims below root_path by USD schema type and read the requested attributes "
+            "from each. type_name is a schema class ('UsdGeom.Mesh', 'UsdPhysics.RevoluteJoint', "
+            "'UsdPhysics.RigidBodyAPI', any pxr module) or a registered schema name ('Mesh', "
+            "'PhysicsRevoluteJoint'); typed schemas match subclasses, applied API schemas "
+            "match prims that have them applied, and an unknown name is refused. Attributes "
+            "resolve via the schema API first (e.g. 'intensity' -> GetIntensityAttr), then "
+            "the plain and inputs: names; values come back as JSON (quaternions [w, x, y, z]), "
+            "arrays longer than max_array_elements as a length summary. Paged "
+            "(max_results/offset)."
         ),
         read_only=True,
         idempotent=True,
@@ -305,6 +312,7 @@ class RenderMixin:
         root_path: str = "/",
         max_results: int = 200,
         offset: int = 0,
+        max_array_elements: int = 16,
     ) -> Dict[str, Any]:
         """
         Query prims by USD schema type and read specified attributes.
@@ -313,9 +321,14 @@ class RenderMixin:
         schema type, and reads the requested attributes from each.
 
         Args:
-            type_name: USD schema type (e.g. "UsdLux.DistantLight",
-                "UsdGeom.Mesh", "UsdGeom.PointInstancer"), or any prim type
-                name as returned by list_isaac_prims.
+            type_name: USD schema type as ``Module.Class`` (e.g.
+                "UsdLux.DistantLight", "UsdGeom.Mesh",
+                "UsdPhysics.RevoluteJoint", "UsdPhysics.RigidBodyAPI",
+                "PhysxSchema.PhysxRigidBodyAPI") or a registered schema type
+                name (e.g. "Mesh", "PhysicsRevoluteJoint"). Typed schemas
+                match subclasses too; API schemas match prims they are
+                applied to. A name that resolves to no schema is refused,
+                unless prims below root_path carry it as their type name.
             attributes: Attribute names to read from each prim. If None,
                 returns prim paths only. Max 32 entries.
             root_path: USD prim path to start the traversal from.
@@ -324,23 +337,69 @@ class RenderMixin:
                 as applied_limit.
             offset: Number of matching prims to skip before the page starts;
                 pass the previous page's next_offset to continue.
+            max_array_elements: Longest array attribute (points, extent,
+                faceVertexIndices, ...) returned in full; a longer one comes
+                back as ``{"type", "length", "elements_omitted": true}``.
+                Clamped to [0, 10000].
 
         Returns:
-            Dict with list of matching prims and their attribute values.
+            Dict with the resolved ``schema``, the matching prims and their
+            attribute values as JSON. Non-finite floats (an open joint
+            limit) are null, counted in ``non_finite_values``.
         """
         if attributes and len(attributes) > 32:
             return {"error": "attributes must not exceed 32 entries", "error_type": "ValueError"}
         max_results = max(1, min(max_results, 2000))
         offset = max(0, offset)
+        max_array_elements = max(0, min(int(max_array_elements), 10000))
 
         _type_name = _pyval(type_name)
         _attributes = _pyval(attributes)
         _root_path = _pyval(root_path)
-        script = textwrap.dedent(f"""\
+        script = _compose_script(
+            """\
+            import importlib
             import json
             import omni.usd
-            from pxr import Usd, UsdGeom, UsdLux, UsdShade, Sdf, Gf
-
+            from pxr import Usd, Sdf, Gf, Tf
+            """,
+            JSON_VALUE_CORE,
+            """\
+            def _resolve_schema(type_str):
+                # Returns (kind, tf_type, schema_cls, error). kind is "typed"
+                # (IsA, subclasses included), "api" (HasAPI) or "type_name"
+                # (exact prim type name, for a name no schema registers).
+                if "." in type_str:
+                    module_name, _, class_name = type_str.partition(".")
+                    if not (module_name.isidentifier() and class_name.isidentifier()):
+                        return None, None, None, "Invalid schema type: " + type_str
+                    try:
+                        module = importlib.import_module("pxr." + module_name)
+                    except ImportError:
+                        return None, None, None, "Unknown schema module: pxr." + module_name
+                    schema_cls = getattr(module, class_name, None)
+                    if schema_cls is None:
+                        return None, None, None, "Unknown schema type: " + type_str
+                    tf_type = Tf.Type.Find(schema_cls)
+                else:
+                    tf_type = Usd.SchemaRegistry.GetTypeFromSchemaTypeName(type_str)
+                    if tf_type.isUnknown:
+                        tf_type = Tf.Type.FindByName(type_str)
+                    if tf_type.isUnknown:
+                        return "type_name", None, None, None
+                    schema_cls = tf_type.pythonClass
+                if tf_type.isUnknown:
+                    return None, None, None, "Not a USD schema type: " + type_str
+                if Usd.SchemaRegistry.IsTyped(tf_type):
+                    return "typed", tf_type, schema_cls, None
+                if Usd.SchemaRegistry.IsAppliedAPISchema(tf_type):
+                    return "api", tf_type, schema_cls, None
+                return None, None, None, (
+                    type_str + " is neither a typed schema nor an applied API schema, so no "
+                    "prim can be found by it"
+                )
+            """,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -350,88 +409,96 @@ class RenderMixin:
                 root_path = {_root_path}
                 max_results = {max_results}
                 offset = {offset}
+                max_array_elements = {max_array_elements}
 
-                parts = type_str.split(".")
-                schema_cls = None
-                if len(parts) == 2:
-                    mod_map = {{"UsdGeom": UsdGeom, "UsdLux": UsdLux, "UsdShade": UsdShade}}
-                    mod = mod_map.get(parts[0])
-                    if mod:
-                        schema_cls = getattr(mod, parts[1], None)
-
+                kind, tf_type, schema_cls, resolve_error = _resolve_schema(type_str)
                 root_prim = stage.GetPrimAtPath(root_path) if root_path != "/" else stage.GetPseudoRoot()
                 prims_data = []
                 truncated = False
                 matched = 0
 
-                # Usd.PrimRange over an invalid prim is empty; without this a
-                # mistyped root reads as "no prims of that type".
-                prim_range = Usd.PrimRange(root_prim) if root_prim.IsValid() else ()
-                for prim in prim_range:
-                    if schema_cls is not None:
-                        if not prim.IsA(schema_cls):
+                def _read(prim, typed_prim, attr_name):
+                    attr = None
+                    if typed_prim is not None:
+                        getter = getattr(typed_prim, "Get" + attr_name[0].upper() + attr_name[1:] + "Attr", None)
+                        if getter is not None:
+                            try:
+                                attr = getter()
+                            except Exception:
+                                attr = None
+                    for candidate in (attr, prim.GetAttribute(attr_name), prim.GetAttribute("inputs:" + attr_name)):
+                        if candidate and candidate.HasValue():
+                            attr = candidate
+                            break
+                    else:
+                        return None
+                    value = attr.Get()
+                    type_name = attr.GetTypeName()
+                    if type_name.isArray and value is not None and len(value) > max_array_elements:
+                        return {{"type": str(type_name), "length": len(value), "elements_omitted": True}}
+                    return _json_value(value)
+
+                if resolve_error is None and root_prim.IsValid():
+                    # Usd.PrimRange over an invalid prim is empty; the root
+                    # check below keeps a mistyped root from reading as "no
+                    # prims of that type".
+                    for prim in Usd.PrimRange(root_prim):
+                        if kind == "typed":
+                            hit = prim.IsA(tf_type)
+                        elif kind == "api":
+                            hit = prim.HasAPI(tf_type)
+                        else:
+                            hit = prim.GetTypeName() == type_str
+                        if not hit:
                             continue
-                    elif prim.GetTypeName() != type_str:
-                        continue
-                    matched += 1
-                    if matched <= offset:
-                        continue
-                    if len(prims_data) >= max_results:
-                        truncated = True
-                        break
+                        matched += 1
+                        if matched <= offset:
+                            continue
+                        if len(prims_data) >= max_results:
+                            truncated = True
+                            break
+                        prim_info = {{"path": str(prim.GetPath()), "type": prim.GetTypeName()}}
+                        if attr_names:
+                            typed_prim = schema_cls(prim) if schema_cls is not None else None
+                            prim_info["attributes"] = {{name: _read(prim, typed_prim, name) for name in attr_names}}
+                        prims_data.append(prim_info)
 
-                    prim_info = {{"path": str(prim.GetPath()), "type": prim.GetTypeName()}}
-
-                    if attr_names:
-                        attrs = {{}}
-                        typed_prim = schema_cls(prim) if schema_cls else None
-                        for attr_name in attr_names:
-                            val = None
-                            if typed_prim:
-                                cap_name = attr_name[0].upper() + attr_name[1:]
-                                getter = getattr(typed_prim, f"Get{{cap_name}}Attr", None)
-                                if getter:
-                                    try:
-                                        val = getter().Get()
-                                    except Exception:
-                                        pass
-                            if val is None:
-                                attr = prim.GetAttribute(attr_name)
-                                if attr and attr.HasValue():
-                                    val = attr.Get()
-                                else:
-                                    attr = prim.GetAttribute(f"inputs:{{attr_name}}")
-                                    if attr and attr.HasValue():
-                                        val = attr.Get()
-                            if isinstance(val, (Gf.Vec3f, Gf.Vec3d, Gf.Vec4f, Gf.Vec4d)):
-                                val = list(val)
-                            elif isinstance(val, Gf.Matrix4d):
-                                val = [list(val.GetRow(i)) for i in range(4)]
-                            elif isinstance(val, Sdf.AssetPath):
-                                val = str(val.path)
-                            elif hasattr(val, '__len__') and not isinstance(val, (str, list, dict)):
-                                try:
-                                    val = list(val)
-                                except Exception:
-                                    val = str(val)
-                            attrs[attr_name] = val
-                        prim_info["attributes"] = attrs
-                    prims_data.append(prim_info)
-
-                if not root_prim.IsValid():
+                if resolve_error is not None:
+                    print(json.dumps({{"error": resolve_error, "type_filter": type_str}}))
+                elif not root_prim.IsValid():
                     print(json.dumps({{"error": "Root path not found: " + root_path}}))
-                else:
+                elif kind == "type_name" and matched == 0:
+                    # A typo ("cube") used to come back as count 0, success.
                     print(json.dumps({{
+                        "error": (
+                            "Unknown schema type: " + type_str + " (no registered schema has that "
+                            "name, and no prim below " + root_path + " has it as its type). Use a "
+                            "schema class such as UsdGeom.Cube or a schema name such as Cube."
+                        ),
                         "type_filter": type_str,
+                    }}))
+                else:
+                    payload = {{
+                        "type_filter": type_str,
+                        "schema": {{
+                            "kind": kind,
+                            "type": tf_type.typeName if tf_type is not None else None,
+                        }},
                         "root_path": root_path,
                         "count": len(prims_data),
                         "offset": offset,
                         "applied_limit": max_results,
+                        "max_array_elements": max_array_elements,
                         "truncated": truncated,
                         "next_offset": offset + len(prims_data) if truncated else None,
                         "prims": prims_data,
-                    }}))
-        """)
+                    }}
+                    if _JSON_NON_FINITE[0]:
+                        payload["non_finite_values"] = _JSON_NON_FINITE[0]
+                        payload["note"] = "Non-finite values (inf, nan) are reported as null."
+                    print(json.dumps(payload))
+            """,
+        )
         return await self._execute_json_script(script)
 
     # ------------------------------------------------------------------
