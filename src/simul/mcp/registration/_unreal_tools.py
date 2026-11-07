@@ -67,6 +67,7 @@ from ..schemas.unreal import (
     UnrealGetThumbnailResponse,
     UnrealHealthCheckResponse,
     UnrealImportUsdResponse,
+    UnrealListActorComponentsResponse,
     UnrealListActorsResponse,
     UnrealListInstancesResponse,
     UnrealLoadedMapResponse,
@@ -524,7 +525,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- Scene read operations ----------------------------------------------
     UnrealTool(
         name="list_unreal_actors",
-        description="List actors in the current Unreal Engine level with optional class and tag filters.",
+        description=(
+            "List the current level's actors, one page at a time, with world transforms, tags and "
+            "attachment (parent, children). Filter by class (optionally with subclasses), tag and "
+            "label. total counts every match; a page stops at max_results or the response budget, "
+            "and next_offset is where the next one starts."
+        ),
         response=UnrealListActorsResponse,
         read_only=True,
         idempotent=True,
@@ -534,31 +540,79 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 "class_filter",
                 str,
                 "",
-                description="Filter by UClass name (empty string = no filter).",
+                description=(
+                    "Keep actors whose class has this name (StaticMeshActor, BP_Door_C) or path "
+                    "(/Script/Engine.StaticMeshActor); empty keeps every class."
+                ),
                 convert=_optional_text,
             ),
             ToolParam(
                 "tag_filter",
                 str,
                 "",
-                description="Filter by actor tag (empty string = no filter).",
+                description="Keep actors with this actor tag, ignoring case (empty string = no filter).",
                 convert=_optional_text,
             ),
-            ToolParam("max_results", int, 200, description="Maximum number of actors to return."),
+            ToolParam("max_results", int, 200, description="Most actors in the page, 1 to 5000."),
+            ToolParam("offset", int, 0, description="Matching actors to skip: the previous page's next_offset."),
+            ToolParam(
+                "label_filter",
+                str,
+                "",
+                description="Keep actors whose label contains this text, ignoring case (empty = no filter).",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "include_subclasses",
+                bool,
+                False,
+                description=(
+                    "Also keep actors whose class derives from class_filter's: Light keeps PointLight, "
+                    "SpotLight and Blueprints derived from them."
+                ),
+            ),
         ),
     ),
     UnrealTool(
         name="get_unreal_actor_info",
         description=(
-            "Get detailed information about a specific actor including transform, components, and tags. The path "
-            "must name a live actor of the level open in the editor; a deleted actor, or one of a map that is not "
-            "open, is not found, and no map is loaded to look for it."
+            "Get detailed information about a specific actor including transform, components, tags and "
+            "attachment (parent and children). The path must name a live actor of the level open in the "
+            "editor; a deleted actor, or one of a map that is not open, is not found, and no map is loaded "
+            "to look for it."
         ),
         response=UnrealGetActorInfoResponse,
         read_only=True,
         idempotent=True,
         method="get_actor_info",
         params=(ToolParam("actor_path", str, description="Full object path of the actor."),),
+    ),
+    UnrealTool(
+        name="list_unreal_actor_components",
+        description=(
+            "List an actor's components, one page at a time: class, root and editor-only flags, and "
+            "for scene components the component they are attached to, world location, mobility and "
+            "visibility; primitive components add world bounds (center, half-size, sphere radius)."
+        ),
+        response=UnrealListActorComponentsResponse,
+        read_only=True,
+        idempotent=True,
+        method="list_actor_components",
+        params=(
+            ToolParam("actor_path", str, description="Full object path of the actor."),
+            ToolParam(
+                "class_filter",
+                str,
+                "",
+                description=(
+                    "Keep components whose class has this name or path or derives from it "
+                    "(PrimitiveComponent keeps meshes, shapes and sprites); empty keeps all."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam("offset", int, 0, description="Components to skip: the previous page's next_offset."),
+            ToolParam("max_results", int, 200, description="Most components in the page, 1 to 5000."),
+        ),
     ),
     UnrealTool(
         name="search_unreal_assets",
@@ -1372,16 +1426,52 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="query_unreal_scene_graph",
-        description="Query the Unreal scene graph hierarchy.",
+        description=(
+            "Read the level's attachment hierarchy as a tree: the level (or the root_path actor), "
+            "the actors attached to it and theirs, max_depth levels down, optionally with each "
+            "actor's components. One page of the root's children at a time; total_actors and "
+            "total_depth cover the whole tree."
+        ),
         response=UnrealQuerySceneGraphResponse,
         read_only=True,
         idempotent=True,
         method="query_scene_graph",
         params=(
-            ToolParam("root_path", Optional[str], None),
-            ToolParam("max_depth", int, 10),
-            ToolParam("include_components", bool, False),
-            ToolParam("class_filter", Optional[str], None),
+            ToolParam(
+                "root_path",
+                Optional[str],
+                None,
+                description="Actor whose attached actors form the tree; null or empty starts at the level.",
+            ),
+            ToolParam(
+                "max_depth",
+                int,
+                10,
+                description="Levels below the root to include, 1 to 64 (the root's children are level 1).",
+            ),
+            ToolParam(
+                "include_components",
+                bool,
+                False,
+                description="Give each actor its components: name, class, is_root, attach_parent.",
+            ),
+            ToolParam(
+                "class_filter",
+                Optional[str],
+                None,
+                description=(
+                    "Keep actors whose class has this name or path, and the actors above them "
+                    "(matches_filter false); null keeps every actor."
+                ),
+            ),
+            ToolParam(
+                "include_subclasses",
+                bool,
+                False,
+                description="Also keep actors whose class derives from class_filter's.",
+            ),
+            ToolParam("offset", int, 0, description="Root children to skip: the previous page's next_offset."),
+            ToolParam("max_results", int, 100, description="Most root children in the page, 1 to 5000."),
         ),
     ),
     UnrealTool(
@@ -1467,7 +1557,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="get_unreal_actor_by_semantic_label",
-        description="Find level actors whose actor tags match a label: exact, contains or regex, ignoring case.",
+        description=(
+            "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case. "
+            "One page at a time: total_matches counts every match, and next_offset is where the next "
+            "page starts."
+        ),
         response=UnrealGetActorBySemanticLabelResponse,
         read_only=True,
         idempotent=True,
@@ -1476,6 +1570,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("label", str),
             ToolParam("match_mode", str, "exact"),
             ToolParam("max_results", int, 100),
+            ToolParam("offset", int, 0, description="Matching actors to skip: the previous page's next_offset."),
         ),
     ),
     # -- Geometry and modeling (GeometryScript) --------------------------------------

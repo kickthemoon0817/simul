@@ -300,6 +300,11 @@ def test_set_blender_light_params_forwards_every_parameter(
                 "spot_size": 0.8,
                 "spot_blend": 0.2,
                 "shadow_soft_size": 0.1,
+                "light_type": None,
+                "angle": None,
+                "size": None,
+                "size_y": None,
+                "shape": None,
             },
         )
     ]
@@ -310,6 +315,16 @@ def test_set_blender_light_params_forwards_every_parameter(
         "light_type": "SPOT",
         "energy": 500.0,
         "color": [1.0, 0.5, 0.25],
+        # An add-on built before these fields answers without them.
+        "use_shadow": None,
+        "shadow_soft_size": None,
+        "spot_size": None,
+        "spot_blend": None,
+        "angle": None,
+        "shape": None,
+        "size": None,
+        "size_y": None,
+        "warnings": [],
     }
     # Omitted parameters stay None, so the session leaves those properties alone.
     session.calls.clear()
@@ -325,6 +340,11 @@ def test_set_blender_light_params_forwards_every_parameter(
                 "spot_size": None,
                 "spot_blend": None,
                 "shadow_soft_size": None,
+                "light_type": None,
+                "angle": None,
+                "size": None,
+                "size_y": None,
+                "shape": None,
             },
         )
     ]

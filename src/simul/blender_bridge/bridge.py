@@ -77,6 +77,8 @@ UNDO_STEPS: dict[str, str] = {
     "set_rigid_body_world": "set_blender_rigid_body_world",
     "setup_rigid_body": "setup_blender_rigid_body",
     "setup_simready_hierarchy": "setup_simready_hierarchy",
+    # It writes UV coordinates; the Edit Mode round trip it makes records nothing.
+    "uv_unwrap_mesh": "uv_unwrap_blender_mesh",
 }
 #: ``control_ui`` actions that change scene data: the selection and the active
 #: object's transform, which Blender's own selection and property edits record.

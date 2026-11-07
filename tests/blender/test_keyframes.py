@@ -82,7 +82,11 @@ class KeyframePoints(list):
 
 
 class FCurve:
-    """``bpy.types.FCurve``: what it animates, its keys, and whether Blender may key it."""
+    """``bpy.types.FCurve``: what it animates, its keys, whether Blender may key it, and ``evaluate``.
+
+    ``evaluate`` holds a Constant key's value to the next key and goes in a
+    straight line from any other, standing in for Blender's curves.
+    """
 
     __slots__ = (
         "data_path",
@@ -90,6 +94,7 @@ class FCurve:
         "_keyframe_points",
         "lock",
         "group",
+        "mute",
         "sampled_points",
         "modifiers",
     )
@@ -99,7 +104,9 @@ class FCurve:
         self.array_index = array_index
         self.keyframe_points = [Keyframe(frame) for frame in frames]
         self.lock = False
+        # An ActionGroup stand-in with ``lock`` and ``mute``, or None.
         self.group: Any = None
+        self.mute = False
         self.sampled_points: List[Any] = []
         # FModifier stand-ins: type, mute, is_valid and, for a generator, use_additive.
         self.modifiers: List[Any] = []
@@ -111,6 +118,25 @@ class FCurve:
     @keyframe_points.setter
     def keyframe_points(self, keys: List[Keyframe]) -> None:
         self._keyframe_points = KeyframePoints(keys)
+
+    def evaluate(self, frame: float) -> float:
+        keys = sorted(self.keyframe_points, key=lambda k: k.co[0])
+        if frame <= keys[0].co[0]:
+            return float(keys[0].co[1])
+        for left, right in zip(keys, keys[1:]):
+            if frame < right.co[0]:
+                if left.interpolation == "CONSTANT":
+                    return float(left.co[1])
+                share = (frame - left.co[0]) / (right.co[0] - left.co[0])
+                return float(left.co[1] + share * (right.co[1] - left.co[1]))
+        return float(keys[-1].co[1])
+
+
+def curve(data_path: str, array_index: int, *points: Tuple[float, float]) -> FCurve:
+    """An F-curve keyed at (frame, value) ``points``."""
+    fcurve = FCurve(data_path, array_index)
+    fcurve.keyframe_points = [Keyframe(frame, value) for frame, value in points]
+    return fcurve
 
 
 class ActionSlot:
@@ -170,10 +196,14 @@ class Blender42:
             self.groups: List[Any] = []
 
     class AnimData:
-        __slots__ = ("action",)
+        __slots__ = ("action", "nla_tracks", "use_nla", "drivers")
 
         def __init__(self, action: Any) -> None:
             self.action = action
+            self.nla_tracks: List[Any] = []
+            self.use_nla = True
+            # Driver F-curves: data_path and array_index.
+            self.drivers: List[Any] = []
 
 
 class Blender50:
@@ -187,11 +217,15 @@ class Blender50:
             self.slots = slots
 
     class AnimData:
-        __slots__ = ("action", "action_slot")
+        __slots__ = ("action", "action_slot", "nla_tracks", "use_nla", "drivers")
 
         def __init__(self, action: Any, action_slot: Optional[ActionSlot]) -> None:
             self.action = action
             self.action_slot = action_slot
+            self.nla_tracks: List[Any] = []
+            self.use_nla = True
+            # Driver F-curves: data_path and array_index.
+            self.drivers: List[Any] = []
 
 
 class Blender44:
@@ -259,9 +293,10 @@ class Object:
     ``keyframe_insert`` and ``keyframe_delete`` take their arguments as Blender
     5.0 documents them and, like Blender, report a refused or missing key by
     returning False. ``keyframe_insert`` keys the property's current value
-    into ``fcurves``, the curves Blender keys this object into, replacing a key
-    on the same frame; ``keyframe_delete`` removes the keys on the frame from
-    them. ``location`` stands for an array property, ``props`` for custom
+    into ``fcurves``, the curves Blender keys this object into, replacing the
+    value of a key within 0.01 frames, which keeps its frame, as on Blender
+    5.0.1; ``keyframe_delete`` removes the keys on the frame from them.
+    ``location`` stands for an array property, ``props`` for custom
     properties (``obj["name"]``) and ``paths`` for the structs ``path_resolve``
     finds, such as a pose bone.
     """
@@ -303,15 +338,11 @@ class Object:
         self.tags.append(set(refresh))
 
     def evaluate_animation(self, frame: float) -> None:
-        """Write each channel's value at ``frame`` to its property, as Blender's
-        animation evaluation does for a tagged ID (constant between keys here)."""
+        """Write every channel's value at ``frame`` to its property, as Blender's
+        animation evaluation does for a tagged ID."""
         for fcurve in self.fcurves:
-            keys = sorted(fcurve.keyframe_points, key=lambda k: k.co[0])
-            if not keys:
-                continue
-            before = [k for k in keys if k.co[0] <= frame]
-            value = (before[-1] if before else keys[0]).co[1]
-            self._write(fcurve.data_path, fcurve.array_index, value)
+            if fcurve.keyframe_points:
+                self._write(fcurve.data_path, fcurve.array_index, fcurve.evaluate(frame))
 
     def _write(self, data_path: str, index: int, value: float) -> None:
         if data_path.startswith('["'):
@@ -380,9 +411,15 @@ class Object:
             if fcurve is None:
                 fcurve = FCurve(data_path, element)
                 self.fcurves.append(fcurve)
-            kept = [k for k in fcurve.keyframe_points if abs(k.co[0] - frame) >= 0.01]
+            near = [k for k in fcurve.keyframe_points if abs(k.co[0] - frame) <= 0.01]
+            if near:
+                near[0].co[1] = float(values[element])
+                near[0].type = keytype
+                continue
             key = Keyframe(frame, float(values[element]), keytype)
-            fcurve.keyframe_points = sorted(kept + [key], key=lambda k: k.co[0])
+            fcurve.keyframe_points = sorted(
+                list(fcurve.keyframe_points) + [key], key=lambda k: k.co[0]
+            )
         return True
 
     def keyframe_delete(
@@ -434,7 +471,11 @@ def session_on(
     setattr(bpy_extras, "anim_utils", anim_utils)
     monkeypatch.setitem(sys.modules, "bpy_extras", bpy_extras)
     monkeypatch.setitem(sys.modules, "bpy_extras.anim_utils", anim_utils)
-    scene = SimpleNamespace(frame_current=1)
+    scene = SimpleNamespace(
+        frame_current=1,
+        frame_subframe=0.0,
+        render=SimpleNamespace(frame_map_old=100, frame_map_new=100),
+    )
 
     def evaluated_depsgraph_get() -> None:
         """Evaluate what update_tag tagged, as bpy's call does on the active depsgraph."""
@@ -724,8 +765,8 @@ class TestInsertKeyframe:
         """Keying a value at another frame keyed the current one: there was no value.
 
         A GUI Blender 5.0.1 showed a first key at once and a later one only
-        after a frame change, background Blender neither; the call has Blender
-        evaluate the animation either way.
+        after a frame change, background Blender neither; the call writes what
+        the keyed channels' F-curves give either way.
         """
         ball = keyed_ball(version)
         ball.location = [1.0, 2.0, 3.0]
@@ -790,6 +831,166 @@ class TestInsertKeyframe:
         session.insert_keyframe("Ball", "location", 10, value=[4.0, 5.0, 6.0])
 
         assert ball.location == [4.0, 5.0, 6.0]
+
+    @every_version
+    def test_a_given_value_leaves_unkeyed_edits_on_other_channels(
+        self, monkeypatch: pytest.MonkeyPatch, version: Version
+    ) -> None:
+        """Blender's own keyframe_insert kept an unkeyed edit on another animated
+        channel; evaluating the object's animation put every channel back."""
+        curves = [curve("location", i, (1, 0.0), (10, 10.0)) for i in range(3)]
+        gear = curve('["gear"]', 0, (1, 1.0), (10, 5.0))
+        ball = keyed_ball(version, *curves, gear)
+        # Unkeyed edits at frame 1, where every curve gives its first key.
+        ball.location = [5.0, 7.0, 2.0]
+        ball.props["gear"] = 3
+        session = session_on(monkeypatch, version, ball)
+
+        result = session.insert_keyframe("Ball", "location", 5, index=2, value=1.0)
+
+        assert "warning" not in result
+        assert [k.co for k in curves[2].keyframe_points] == [
+            [1, 0.0],
+            [5, 1.0],
+            [10, 10.0],
+        ]
+        # z shows its curve at frame 1; x, y and gear keep their unkeyed edits.
+        assert ball.location == [5.0, 7.0, 0.0]
+        assert ball.props["gear"] == 3
+
+    def test_keying_one_bone_leaves_another_bones_unkeyed_pose(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b0 = SimpleNamespace(rotation_euler=[0.5, 0.0, 0.0])
+        b1 = SimpleNamespace(rotation_euler=[0.4, 0.25, 0.0])
+        curves = [
+            curve(f'pose.bones["{bone}"].rotation_euler', i, (1, 0.0), (10, 1.0))
+            for bone in ("b0", "b1")
+            for i in range(3)
+        ]
+        rig = keyed_ball(BLENDER_5_0, *curves)
+        rig.paths['pose.bones["b0"]'] = b0
+        rig.paths['pose.bones["b1"]'] = b1
+        session = session_on(monkeypatch, BLENDER_5_0, rig)
+
+        session.insert_keyframe(
+            "Ball", 'pose.bones["b1"].rotation_euler', 5, index=0, value=0.75
+        )
+
+        assert b0.rotation_euler == [0.5, 0.0, 0.0]
+        # b1's x shows its curve at frame 1; its y keeps the unkeyed edit.
+        assert b1.rotation_euler == [0.0, 0.25, 0.0]
+
+    def test_shows_the_curve_at_the_scenes_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The frame, its subframe and the render's time remapping, as Blender
+        evaluates animation: frame 5.5 under old 100 and new 200 is time 2.75."""
+        x = curve("location", 0, (1, 0.0), (11, 10.0))
+        ball = keyed_ball(BLENDER_5_0, x)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        scene = blender_runtime.bpy.context.scene
+        scene.frame_current, scene.frame_subframe = 5, 0.5
+        scene.render.frame_map_new = 200
+
+        session.insert_keyframe("Ball", "location", 20, index=0, value=3.0)
+
+        assert ball.location[0] == pytest.approx(1.75)
+
+    def test_shows_the_curve_with_the_interpolation_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The interpolation shapes the curve after the new key: frame 25 holds
+        the Constant key at 20, where a straight line to frame 30 gave 5."""
+        x = curve("location", 0, (1, 0.0), (30, 0.0))
+        ball = keyed_ball(BLENDER_5_0, x)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        blender_runtime.bpy.context.scene.frame_current = 25
+
+        session.insert_keyframe(
+            "Ball", "location", 20, index=0, value=10.0, interpolation="CONSTANT"
+        )
+
+        assert ball.location[0] == 10.0
+
+    def test_an_integer_property_shows_a_whole_number(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0, curve('["gear"]', 0, (1, 1.0), (10, 8.0)))
+        ball.props["gear"] = 1
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        blender_runtime.bpy.context.scene.frame_current = 4
+
+        session.insert_keyframe("Ball", '["gear"]', 20, value=2.0)
+
+        # The double's straight line gives 3.33 at frame 4; Blender rounds an
+        # integer property's curve.
+        assert ball.props["gear"] == 3 and isinstance(ball.props["gear"], int)
+
+    def test_nla_tracks_leave_the_keyed_value_until_a_frame_change(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blender blends NLA tracks with the action on a frame change; the
+        F-curve alone is not what the channel would show."""
+        x = curve("location", 0, (1, 0.0), (10, 10.0))
+        ball = keyed_ball(BLENDER_5_0, x)
+        ball.location = [6.0, 0.0, 0.0]
+        ball.animation_data.nla_tracks = [SimpleNamespace(name="NlaTrack")]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframe("Ball", "location", 5, index=0, value=1.0)
+
+        assert ball.location == [6.0, 0.0, 0.0]
+        assert "'Ball' has NLA tracks" in result["warning"]
+
+        ball.animation_data.use_nla = False
+        result = session.insert_keyframe("Ball", "location", 6, index=0, value=2.0)
+
+        # With the NLA off Blender evaluates the action alone.
+        assert ball.location == [0.0, 0.0, 0.0]
+        assert "warning" not in result
+
+    def test_a_muted_or_driven_channel_keeps_its_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blender's animation writes neither: a driver sets the one, nothing the other."""
+        curves = [curve("location", i, (1, 0.0), (10, 10.0)) for i in range(3)]
+        curves[0].mute = True
+        curves[1].group = SimpleNamespace(mute=True)
+        ball = keyed_ball(BLENDER_5_0, *curves)
+        ball.animation_data.drivers = [
+            SimpleNamespace(data_path="location", array_index=2)
+        ]
+        ball.location = [4.0, 5.0, 6.0]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframe("Ball", "location", 5, value=[1.0, 1.0, 1.0])
+
+        assert ball.location == [4.0, 5.0, 6.0]
+        assert "warning" not in result
+
+    def test_finds_a_key_blender_merged_into_a_nearby_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blender 5.0.1 replaced a key 0.005 frames away and kept its frame."""
+        x = curve("location", 0, (1, 0.0), (4.995, 0.0))
+        ball = keyed_ball(BLENDER_5_0, x)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframe(
+            "Ball", "location", 5, index=0, value=2.0, interpolation="LINEAR"
+        )
+
+        assert [k.co for k in x.keyframe_points] == [[1, 0.0], [4.995, 2.0]]
+        assert result["keyframes"] == [
+            {
+                "array_index": 0,
+                "value": 2.0,
+                "interpolation": "LINEAR",
+                "keyframe_type": "KEYFRAME",
+            }
+        ]
+        assert "warning" not in result
 
     def test_one_channel_takes_one_number(
         self, monkeypatch: pytest.MonkeyPatch
