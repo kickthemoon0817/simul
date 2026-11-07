@@ -22,12 +22,16 @@ attributes from a file the policy would have refused by name.
   refused with a ``SandboxDenied`` that lists every offending path. Only
   layers that pass are opened and walked further, so a refused file is never
   read.
-- After composition, ``check_stage`` checks every layer the stage really uses
-  (``GetUsedLayers``, value clips included) and walks any the first pass did
-  not see. It is the backstop for whatever the first pass could not predict
-  (a resolver that finds a layer somewhere its anchored path did not say, a
-  file swapped on disk between the passes). A file read this way is never
-  reported: the stage is discarded with the refusal.
+- After composition, ``check_stage`` checks every layer the stage uses by
+  then (``GetUsedLayers``) and walks any the first pass did not see. It is the
+  backstop for whatever the first pass could not predict (a resolver that
+  finds a layer somewhere its anchored path did not say, a file swapped on
+  disk between the passes). A file read this way is never reported: the
+  stage is discarded with the refusal. Value clips are the exception: when a
+  clip set authors a ``manifestAssetPath``, pxr opens its clip layers only on
+  the first read of a time-varying value, after this check. Clips are
+  therefore covered by the first pass alone, which checks every clip and
+  manifest path before anything opens.
 
 Asset paths that resolve nowhere are checked by their anchored location too.
 Otherwise the difference between "refused" and "loaded with a missing
@@ -40,12 +44,17 @@ unresolved-dependency check), so an outside texture path would again tell
 the caller which outside files exist; and one rule for every path the file
 names is the one a user can predict. A file whose textures live outside the
 sandbox needs ``security.allowed_paths`` widened to cover them.
+
+Each load runs one ``PathPolicy.read_check``: a location named from many
+layers (a texture every sublayer shares) is resolved and judged once, and a
+shared root's trust (``/tmp/simul-work``) is walked once, not once per path.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
 
 from pxr import Ar, Sdf, UsdUtils
@@ -95,10 +104,34 @@ def _outer_path(identifier: str) -> str:
 
 def _is_layer_path(path: str) -> bool:
     """Whether pxr would open ``path`` as a layer (it has a layer file format)."""
+    return _is_layer_extension(os.path.splitext(_outer_path(path))[1])
+
+
+@lru_cache(maxsize=256)
+def _is_layer_extension(extension: str) -> bool:
     try:
-        return bool(Sdf.FileFormat.FindByExtension(os.path.splitext(_outer_path(path))[1]))
+        return bool(Sdf.FileFormat.FindByExtension(extension))
     except Exception:
         return False
+
+
+def _composition_arcs(layer: "Sdf.Layer") -> Set[str]:
+    """The sublayer, reference and payload asset paths ``layer`` authors.
+
+    An expression-valued one (`` `"${DIR}/a.usd"` ``) is evaluated with the
+    layer's expression variables, as ``ExtractExternalReferences`` reports it.
+    """
+    arcs = set(layer.GetCompositionAssetDependencies())
+    expression = getattr(Sdf, "VariableExpression", None)
+    if expression is None:
+        return arcs
+    variables = dict(layer.expressionVariables or {})
+    for arc in list(arcs):
+        if expression.IsExpression(arc):
+            result = expression(arc).Evaluate(variables)
+            if isinstance(result.value, str) and not result.errors:
+                arcs.add(result.value)
+    return arcs
 
 
 class CompositionSandbox:
@@ -115,6 +148,10 @@ class CompositionSandbox:
     def __init__(self, policy: "PathPolicy") -> None:
         self._policy = policy
         self._visited: Set[str] = set()
+        # One memoised read check for the whole load: each distinct location
+        # is judged once, each shared root's trust walked once.
+        self._allowed_check = policy.read_check()
+        self._resolved: Dict[str, str] = {}
 
     @property
     def enabled(self) -> bool:
@@ -147,7 +184,11 @@ class CompositionSandbox:
         return held
 
     def check_stage(self, stage: "Usd.Stage") -> None:
-        """Check the layers a composed stage uses, value clips included.
+        """Check the layers a composed stage uses by now.
+
+        Value clip layers that pxr opens lazily (a clip set with a manifest)
+        are not open yet; ``check_layers`` already held their paths to the
+        sandbox.
 
         Raises:
             SandboxDenied: A used layer, or an asset path one of them authors,
@@ -196,7 +237,14 @@ class CompositionSandbox:
 
     @staticmethod
     def _dependencies(layer: "Sdf.Layer") -> Iterator[Tuple[str, str]]:
-        """The asset paths ``layer`` authors, with the kind of each."""
+        """The asset paths ``layer`` authors, with the kind of each.
+
+        Kinds: ``sublayer``, ``reference`` and ``payload`` for composition
+        arcs; ``clip`` for another layer file the layer names, which is a
+        value clip or clip manifest; ``asset`` for anything else, such as a
+        texture.
+        """
+        arcs = _composition_arcs(layer)
         try:
             # Evaluates expression-variable asset paths, and covers every
             # variant, value clips and asset-valued attributes and metadata.
@@ -205,16 +253,17 @@ class CompositionSandbox:
             # Without pxr's full listing, still hold every composition arc
             # (sublayers, references, payloads) to the sandbox.
             sublayers = list(layer.subLayerPaths)
-            references = sorted(layer.GetCompositionAssetDependencies())
+            references = sorted(arcs)
             payloads = []
         for path in sublayers:
             yield "sublayer", path
         for path in payloads:
             yield "payload", path
         for path in references:
-            # A reference arc or another layer the file names (a value clip);
-            # anything else is an asset such as a texture.
-            yield ("reference" if _is_layer_path(path) else "asset"), path
+            if path in arcs:
+                yield "reference", path
+            else:
+                yield ("clip" if _is_layer_path(path) else "asset"), path
 
     def _check(self, layer: "Sdf.Layer", kind: str, authored: str) -> Any:
         """Return an ``OutsidePath``, the identifier to follow, or None for nothing to check."""
@@ -222,28 +271,36 @@ class CompositionSandbox:
             return None
         scheme = self._policy.url_scheme(authored)
         if scheme is not None and scheme != "file":
-            if self._policy.is_allowed(authored):
+            if self._allowed_check(authored):
                 return None
             return OutsidePath(kind, authored, authored, layer.identifier)
         try:
             identifier = layer.ComputeAbsolutePath(authored)
         except Exception:
             identifier = authored
-        try:
-            resolved = str(Ar.GetResolver().Resolve(identifier))
-        except Exception:
-            resolved = ""
+        resolved = self._resolve(identifier)
         anchored = _outer_path(identifier)
         locations = [_outer_path(resolved)] if resolved else []
-        if anchored and os.path.isabs(anchored):
+        if anchored and os.path.isabs(anchored) and anchored not in locations:
             locations.append(anchored)
         for location in locations:
             if not self._allowed(location):
                 return OutsidePath(kind, authored, location, layer.identifier)
         return identifier if (resolved or os.path.isabs(anchored)) else None
 
+    def _resolve(self, identifier: str) -> str:
+        """``Ar.Resolve`` once per identifier for the load (many layers name one texture)."""
+        resolved = self._resolved.get(identifier)
+        if resolved is None:
+            try:
+                resolved = str(Ar.GetResolver().Resolve(identifier))
+            except Exception:
+                resolved = ""
+            self._resolved[identifier] = resolved
+        return resolved
+
     def _allowed(self, location: str) -> bool:
-        return self._policy.is_allowed(_outer_path(location))
+        return self._allowed_check(_outer_path(location))
 
     @staticmethod
     def _open(identifier: str) -> Optional["Sdf.Layer"]:

@@ -160,6 +160,93 @@ class TestOffTheEventLoop:
         assert outcome["after"]["success"] is True
 
 
+# Arguments for calling every USD tool once against tests/data/simple_scene. A new
+# tool with a required argument not listed here fails the test below with its
+# name, so it has to be added (and so shown to run through the scheduler).
+_TOOL_ARGUMENTS: Dict[str, Any] = {
+    "prim_path": "/World/Cube",
+    "prim_type": "Xform",
+    "attributes": {"custom:scheduled": 1.0},
+    "search_type": "by_name",
+    "query": "Cube",
+}
+_TOOL_OVERRIDES: Dict[str, Dict[str, Any]] = {
+    "create_prim": {"prim_path": "/World/made_by_test"},
+    "delete_prim": {"prim_path": "/World/made_by_test"},
+}
+# Edits run alone; everything else bound to a stage holds that stage's lock.
+_WRITES = {"create_prim", "update_prim_attributes", "delete_prim"}
+_UNBOUND = {"validate_usd_file"}
+
+
+def test_every_usd_tool_runs_through_the_scheduler(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tool that skips the scheduler reads stages on the event loop, outside the write lock."""
+    from simul.mcp import usd_scheduler
+
+    scene = root / "simple_scene.usda"
+    scene.write_text((Path(__file__).resolve().parents[1] / "data" / "simple_scene.usda").read_text())
+    runs: List[Dict[str, Any]] = []
+    real_run = usd_scheduler.USDCallScheduler.run
+
+    async def recording_run(self: Any, tool_name: str, work: Any, **kwargs: Any) -> Any:
+        loop_thread = threading.get_ident()
+        threads: List[int] = []
+
+        def tracked() -> Any:
+            threads.append(threading.get_ident())
+            return work()
+
+        result = await real_run(self, tool_name, tracked, **kwargs)
+        runs.append({"tool": tool_name, "off_loop": threads != [loop_thread], **kwargs})
+        return result
+
+    monkeypatch.setattr(usd_scheduler.USDCallScheduler, "run", recording_run)
+    server = _server(root)
+    usd_tools = sorted(name for name, backend in server._tool_backends.items() if backend == "usd")
+    order = sorted(usd_tools, key=lambda name: (name != "load_usd_file", name == "delete_prim", name))
+
+    async def scenario() -> Dict[str, Dict[str, Any]]:
+        results: Dict[str, Dict[str, Any]] = {}
+        async with Client(server.mcp) as client:
+            tools = {tool.name: tool for tool in await client.list_tools()}
+            stage_id = None
+            for name in order:
+                schema = tools[name].input_schema
+                arguments: Dict[str, Any] = {}
+                for param in schema.get("required", []):
+                    if param == "file_path":
+                        arguments[param] = str(scene)
+                    elif param == "stage_id":
+                        arguments[param] = stage_id
+                    else:
+                        value = _TOOL_OVERRIDES.get(name, {}).get(param, _TOOL_ARGUMENTS.get(param))
+                        assert value is not None, f"add an argument for {name}.{param}"
+                        arguments[param] = value
+                for param, value in _TOOL_OVERRIDES.get(name, {}).items():
+                    if param in schema.get("properties", {}):
+                        arguments[param] = value
+                results[name] = await _call(client, name, **arguments)
+                if name == "load_usd_file":
+                    stage_id = results[name]["stage_id"]
+        return results
+
+    results = asyncio.run(scenario())
+
+    for name, payload in results.items():
+        assert payload.get("success") is not False, (name, payload)
+    by_tool = {run["tool"]: run for run in runs}
+    assert sorted(by_tool) == usd_tools
+    assert len(runs) == len(usd_tools), "each call is scheduled exactly once"
+    stage_id = results["load_usd_file"]["stage_id"]
+    for name, run in by_tool.items():
+        assert run["off_loop"], name
+        assert run.get("writes", False) is (name in _WRITES), name
+        expected_key = None if name in _UNBOUND or name in _WRITES else stage_id
+        assert run.get("stage_key") == expected_key, name
+
+
 def test_successful_usd_responses_carry_success(root: Path) -> None:
     scene = root / "simple_scene.usda"
     scene.write_text((Path(__file__).resolve().parents[1] / "data" / "simple_scene.usda").read_text())

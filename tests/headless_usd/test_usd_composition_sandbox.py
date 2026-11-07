@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pytest
 
@@ -158,7 +158,26 @@ class TestArcsLeavingTheSandbox:
         clips.SetClipTimes([(0, 0)])
         stage.GetRootLayer().Save()
 
-        assert str(clip) in [location for _, location in _kinds(_denied(session, path, policy))]
+        assert ("clip", str(clip)) in _kinds(_denied(session, path, policy))
+
+    @pytest.mark.parametrize("outside_part", ["clip", "manifest"])
+    def test_clip_set_with_a_manifest(self, dirs, policy, session, outside_part: str) -> None:
+        """With a manifest pxr opens clip layers lazily, after check_stage; the first pass holds them."""
+        inside, outside = dirs
+        clip = _secret(outside if outside_part == "clip" else inside, "clip.usda")
+        manifest = _secret(outside if outside_part == "manifest" else inside, "manifest.usda")
+        path = inside / "manifest_clips.usda"
+        stage = _stage(path)
+        clips = Usd.ClipsAPI(stage.DefinePrim("/World/Clipped", "Xform"))
+        clips.SetClipAssetPaths([Sdf.AssetPath(str(clip))])
+        clips.SetClipManifestAssetPath(Sdf.AssetPath(str(manifest)))
+        clips.SetClipPrimPath("/Secret")
+        clips.SetClipActive([(0, 0)])
+        clips.SetClipTimes([(0, 0), (1, 1)])
+        stage.GetRootLayer().Save()
+
+        offender = clip if outside_part == "clip" else manifest
+        assert ("clip", str(offender)) in _kinds(_denied(session, path, policy))
 
     def test_texture_asset(self, dirs, policy, session) -> None:
         inside, outside = dirs
@@ -366,3 +385,66 @@ def _denied_many(session: HeadlessUSDSession, path: Path, policy: PathPolicy) ->
         _load(session, path, policy)
     assert "and 27 more" in caught.value.error_message
     return caught.value.details
+
+
+def test_walk_judges_each_location_once_and_a_shared_root_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stack whose layers share textures, under a root in a world-writable dir.
+
+    The walk used to resolve every asset path at its anchored and its resolved
+    location and re-walk the shared root's trust for each: 1000 sublayers of
+    50 textures took 5 to 10 times the load itself.
+    """
+    from simul.utils import paths as paths_module
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o1777)
+    root = shared / "work"
+    root.mkdir(mode=0o700)
+    (root / "tex").mkdir()
+    for index in range(5):
+        (root / "tex" / f"t{index}.png").write_bytes(b"x")
+    sublayers = []
+    for layer_index in range(20):
+        sub = Sdf.Layer.CreateNew(str(root / f"s{layer_index}.usda"))
+        for prim_index in range(10):
+            spec = Sdf.CreatePrimInLayer(sub, f"/World/L{layer_index}/P{prim_index}")
+            spec.specifier = Sdf.SpecifierDef
+            attr = Sdf.AttributeSpec(spec, "inputs:file", Sdf.ValueTypeNames.Asset)
+            attr.default = Sdf.AssetPath(f"./tex/t{prim_index % 5}.png")
+        sub.Save()
+        sublayers.append(f"./s{layer_index}.usda")
+    top = Sdf.Layer.CreateNew(str(root / "stack.usda"))
+    top.subLayerPaths = sublayers
+    top.Save()
+
+    policy = PathPolicy(enabled=True, allowed_paths=[str(root)])
+    assert policy._shared_roots, "the root must count as shared for this test"
+    trust_walks: List[Path] = []
+    judged: List[str] = []
+    real_problem = paths_module.shared_directory_problem
+    real_judge = PathPolicy._judge
+
+    def counting_problem(path: Path) -> Any:
+        trust_walks.append(path)
+        return real_problem(path)
+
+    def counting_judge(self: PathPolicy, path_str: str, **kwargs: Any) -> Any:
+        judged.append(path_str)
+        return real_judge(self, path_str, **kwargs)
+
+    monkeypatch.setattr(paths_module, "shared_directory_problem", counting_problem)
+    monkeypatch.setattr(PathPolicy, "_judge", counting_judge)
+    session = HeadlessUSDSession()
+    try:
+        session.load_stage_or_raise(root / "stack.usda", sandbox=CompositionSandbox(policy))
+    finally:
+        session.cleanup()
+
+    # 20 sublayers, 5 distinct textures named 200 times, and the root layer the
+    # post-composition check sees: each judged once.
+    assert len(judged) == len(set(judged)) == 26
+    # One trust walk per check of the root (as configured and as resolved).
+    assert len(trust_walks) == 2

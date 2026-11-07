@@ -641,28 +641,54 @@ class UnrealCallActorFunctionResponse(BaseModel):
 
 
 class UnrealSetActorParentResponse(BaseModel):
-    """Response after setting actor parent."""
+    """Response after attaching an actor to a parent or detaching it."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    actor_path: str = Field(..., description="Child actor path")
+    actor_path: str = Field(..., description="Path of the actor attached or detached")
     parent_path: Optional[str] = Field(
-        None, description="Parent actor path (None if detached)"
+        None,
+        description="The actor's parent read back after the call; null once detached",
+    )
+    previous_parent_path: Optional[str] = Field(
+        None, description="The actor's parent before the call; null when it had none"
+    )
+    changed: bool = Field(
+        ...,
+        description=(
+            "Whether the parent changed: false when the actor already had that parent, "
+            "or had none to detach from"
+        ),
     )
 
 
 class UnrealAddComponentResponse(BaseModel):
-    """Response after adding a component."""
+    """Response after adding a component, read back from the actor."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor that received the component")
-    component_path: str = Field(..., description="Full path of the new component")
-    component_class: str = Field(..., description="Class of the added component")
+    component_path: str = Field(
+        ..., min_length=1, description="Full path of the new component"
+    )
+    component_name: str = Field(..., description="Name of the new component")
+    component_class: str = Field(
+        ..., description="Class name of the new component, read back"
+    )
+    parent_component: Optional[str] = Field(
+        None,
+        description=(
+            "Name of the component it is attached under; null for a component that is "
+            "not a scene component, or one that became the actor's root"
+        ),
+    )
+    is_root: bool = Field(
+        False, description="Whether the new component is the actor's root component"
+    )
 
 
 class UnrealSetActorVisibilityResponse(BaseModel):
@@ -787,6 +813,9 @@ class UnrealCreateMaterialInstanceResponse(BaseModel):
     )
     instance_path: str = Field(..., description="New MIC asset path")
     parent_path: str = Field(..., description="Parent material path")
+    class_name: str = Field(
+        "MaterialInstanceConstant", description="Class of the new asset"
+    )
 
 
 class UnrealAssignMaterialResponse(BaseModel):
@@ -797,8 +826,14 @@ class UnrealAssignMaterialResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor path")
-    material_path: str = Field(..., description="Assigned material path")
+    component_path: Optional[str] = Field(
+        None, description="Mesh component whose slot was set"
+    )
+    material_path: str = Field(..., description="Assigned material's object path")
     slot_index: int = Field(0, description="Slot index")
+    previous_material_path: Optional[str] = Field(
+        None, description="Material the slot rendered with before the assignment"
+    )
 
 
 class UnrealSetLightParamsResponse(BaseModel):
@@ -825,8 +860,16 @@ class UnrealSetRenderSettingsResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    setting_name: str = Field(..., description="Setting name")
-    applied: bool = Field(True, description="Whether the setting was applied")
+    setting_name: str = Field(..., description="Console variable name")
+    requested_value: Optional[str] = Field(None, description="The value asked for")
+    applied: bool = Field(
+        ..., description="Whether the variable reads back as the requested value"
+    )
+    value: Optional[str] = Field(
+        None,
+        description="The variable read back after the write, as Unreal formats it (true/false for a bool)",
+    )
+    previous_value: Optional[str] = Field(None, description="The variable before the write")
 
 
 # ------------------------------------------------------------------
@@ -982,6 +1025,10 @@ class UnrealImportUsdResponse(BaseModel):
     actor_paths: List[str] = Field(
         default_factory=list, description="Spawned actor paths in the level"
     )
+    removed_actor_paths: List[str] = Field(
+        default_factory=list,
+        description="Level actors the import replaced (only with replace_existing)",
+    )
     warnings: List[str] = Field(default_factory=list, description="Import warnings")
 
 
@@ -993,7 +1040,17 @@ class UnrealExportUsdResponse(BaseModel):
         None, description="Error message when success is False"
     )
     output_path: str = Field(..., description="Written USD file path")
-    actors_exported: int = Field(..., description="Number of actors exported")
+    actors_exported: int = Field(
+        ..., description="Number of actors the written stage has a prim for"
+    )
+    exported_prims: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Each exported actor's actor_path and the prim_path it was written to",
+    )
+    skipped_actors: List[str] = Field(
+        default_factory=list,
+        description="Actors given that the exporter wrote no prim for (editor helpers it leaves out)",
+    )
     file_size_bytes: int = Field(0, description="Output file size in bytes")
 
 

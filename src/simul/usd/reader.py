@@ -19,6 +19,7 @@ from ._pxr import Gf, Pcp, Sdf, Usd, UsdGeom, UsdShade
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import Timer, monitor_performance
 from .bbox import describe_bounds
+from .search import count_prims, traversal_predicate
 from .timecode import resolve_time_code, time_code_value
 from .values import DEFAULT_ARRAY_PREVIEW, describe_attribute, to_json
 
@@ -103,11 +104,6 @@ class USDStageInfo:
     stage_variables: Dict[str, Any] = field(default_factory=dict)
 
 
-# Prims a listing reaches: active, defined, loaded, non-abstract, and the
-# instance proxies under an instanceable prim (which the default predicate
-# skips, so an instance would otherwise look childless).
-CHILD_PREDICATE = Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)
-
 _SPECIFIERS = {
     Sdf.SpecifierDef: "def",
     Sdf.SpecifierOver: "over",
@@ -123,7 +119,8 @@ _REPORTED_METADATA = frozenset({
 
 
 def _children(prim: Usd.Prim) -> List[Usd.Prim]:
-    return list(prim.GetFilteredChildren(CHILD_PREDICATE))
+    """The children every listing counts, instance proxies included."""
+    return list(prim.GetFilteredChildren(traversal_predicate()))
 
 
 def _arc_key(item: Any) -> str:
@@ -396,7 +393,7 @@ class USDReader(LoggerMixin):
 
         Args:
             stage: USD Stage object
-            prim_count: Pre-computed ``stage.Traverse()`` count. Callers that
+            prim_count: Pre-computed ``search.count_prims`` count. Callers that
                 already walked the stage pass it to skip a second traversal.
 
         Returns:
@@ -434,9 +431,9 @@ class USDReader(LoggerMixin):
                 for key, value in stage.GetPseudoRoot().GetAllAuthoredMetadata().items()
             }
 
-            # Count prims without materializing the traversal into a list
+            # The count every listing uses: instance proxies included.
             if prim_count is None:
-                prim_count = sum(1 for _ in stage.Traverse())
+                prim_count = count_prims(stage)
 
             root_prims = [str(prim.GetPath()) for prim in stage.GetPseudoRoot().GetChildren()]
 

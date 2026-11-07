@@ -93,14 +93,44 @@ def level_actors():
 """
 )
 
-ACTOR_HELPERS = """
-import json, unreal
+#: Message of the ``SimulNotFound`` an editor script raises for an actor path
+#: that names no live actor of the editor world; ``{path}`` is the path.
+ACTOR_NOT_FOUND = "Actor not found: {path}"
 
-def actor_at(path):
-    actor = unreal.load_object(None, path)
-    if actor is None or not isinstance(actor, unreal.Actor):
-        raise ValueError("Actor not found: " + path)
-    return actor
+# actor_at(path) is the live actor at ``path`` in the editor world, PIE-aware
+# through editor_world(). It finds the actor among loaded objects and never
+# loads one: load_object on the path of an actor in a map that is not open
+# loads that map's package from disk, so an edit landed in a map nobody sees
+# and left it dirty for the next Save All (UE 5.7.4). A destroyed actor stays
+# findable, invalid (SystemLibrary.is_valid is False), until garbage
+# collection; an actor of a map loaded but not open, or of the PIE world,
+# belongs to another world. Each raises SimulNotFound, whose message starts
+# with ACTOR_NOT_FOUND, and the session reports it as NotFoundError.
+# actor_at(path, play_world=True) also takes an actor of the running Play In
+# Editor world (UnrealEditorSubsystem.get_game_world), for the physics and
+# collision edits that change the running copy on purpose.
+ACTOR_HELPERS = EDITOR_WORLD + f"_ACTOR_NOT_FOUND = {ACTOR_NOT_FOUND!r}\n" + """
+class SimulNotFound(Exception):
+    pass
+
+def actor_at(path, play_world=False):
+    actor = unreal.find_object(None, path)
+    world = editor_world()
+    if not isinstance(actor, unreal.Actor) or not unreal.SystemLibrary.is_valid(actor):
+        where = world.get_path_name() if world is not None else "no editor world"
+        raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path)
+                            + " (no live actor at that path in the level open in the editor, " + where + ")")
+    owner = actor.get_world()
+    if owner is not None and owner == world:
+        return actor
+    if (play_world and owner is not None
+            and owner == unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()):
+        return actor
+    raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path) + " (it belongs to "
+                        + (owner.get_path_name() if owner is not None else "no world")
+                        + ", not to the level open in the editor, "
+                        + (world.get_path_name() if world is not None else "none")
+                        + "; open that map to edit it)")
 
 def actor_transform(actor):
     location = actor.get_actor_location()
@@ -155,85 +185,223 @@ print(json.dumps({
 }))
 """
 
-# Imported actors are found as the level actors that were not there before,
-# a listing Unreal withholds while PIE runs, so the import is refused then.
+# Both USD scripts keep every editor object they create inside a function, so
+# nothing outlives the script in the console namespace Remote Control runs it
+# in (FileExecutionScope Public): a module-level AssetExportTask kept its
+# Object, the editor world, referenced through Python's reference collector,
+# and the next level load failed the editor's world leak check, "Old World ...
+# not cleaned up by GC", and took the editor down (observed on UE 5.7.4). The
+# import's factory holds the scene actor it spawned the same way. Each task's
+# object references are also cleared before the function returns.
+
+# Expects ``args`` = {"path", "destination", "name", "options", "replace"}:
+# the USD file on the editor host, the content folder, the folder name the
+# import is filed under (the file's name, sanitized as Unreal names assets),
+# the importer options by UsdStageImportOptions property name, and whether to
+# replace what an earlier import left. Imported actors are found as the level
+# actors that were not there before, a listing Unreal withholds while PIE
+# runs, so the import is refused then.
+#
+# The options are set on a fresh UsdStageImportOptions without change
+# notifications. UsdStageImportOptions saves its config on every notified
+# change (PostEditChangeProperty calls SaveConfig, UE 5.7), and
+# set_editor_property notifies by default, so one import with import_actors
+# false wrote bImportActors=False to the project's
+# EditorPerProjectUserSettings.ini: every later import, the editor's own
+# "Import into Level" dialog included, then spawned no actors. A fresh object
+# starts from those saved settings, so the options simul documents are always
+# set, to Unreal's defaults unless given. A saved setting that differs from
+# Unreal's default is reported in warnings and left as it is: nothing tells a
+# setting simul once wrote from one the user chose.
+#
+# Without replace the import is refused when the folder already holds assets,
+# and runs with Unreal's Append actor policy (new actors beside existing ones)
+# and Ignore asset policy (an existing asset is kept), so nothing is replaced.
+# Unreal's defaults, Replace for both, replaced an earlier import's assets
+# (a customized mesh lost its collision and lightmap resolution) and deleted
+# its actors even though AssetImportTask.replace_existing was False, which the
+# USD importer does not read. With replace, both policies are Replace.
 USD_IMPORT = EDITOR_WORLD + """
 import os
-if not hasattr(unreal, "UsdStageImportFactory"):
-    print(json.dumps({"success": False, "error_type": "PluginUnavailable",
-        "error": "USD import requires the USDImporter plugin enabled at editor startup."}))
-elif pie_active():
-    print(json.dumps(pie_refusal("import USD into the level")))
-else:
-    if not os.path.isfile(args["path"]):
-        raise ValueError("USD file not found on the editor host: " + args["path"])
-    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-    before = {a.get_path_name() for a in subsystem.get_all_level_actors()}
+
+# UsdStageImportOptions' constructor defaults (UE 5.7) for the options simul sets on every import.
+DEFAULTS = {"import_actors": True, "import_geometry": True, "import_materials": True}
+LISTED = 20
+
+def import_options(values, replace):
     options = unreal.UsdStageImportOptions()
-    for key, value in args["options"].items():
-        options.set_editor_property(key, value)
+    quiet = unreal.PropertyAccessChangeNotifyMode.NEVER
+    for key, value in dict(DEFAULTS, **values).items():
+        options.set_editor_property(key, value, quiet)
+    if replace:
+        actors, assets = unreal.ReplaceActorPolicy.REPLACE, unreal.ReplaceAssetPolicy.REPLACE
+    else:
+        actors, assets = unreal.ReplaceActorPolicy.APPEND, unreal.ReplaceAssetPolicy.IGNORE
+    options.set_editor_property("existing_actor_policy", actors, quiet)
+    options.set_editor_property("existing_asset_policy", assets, quiet)
+    return options
+
+def saved_settings():
+    # The class default object holds the project's saved import settings.
+    saved = unreal.get_default_object(unreal.UsdStageImportOptions)
+    return {key: saved.get_editor_property(key) for key in DEFAULTS}
+
+def import_usd(path, destination, name, options, replace):
+    if not hasattr(unreal, "UsdStageImportFactory"):
+        return {"success": False, "error_type": "PluginUnavailable",
+                "error": "USD import requires the USDImporter plugin enabled at editor startup."}
+    if pie_active():
+        return pie_refusal("import USD into the level")
+    if not os.path.isfile(path):
+        return {"success": False, "error_type": "NotFoundError",
+                "error": "USD file not found on the editor host: " + path}
+    folder = destination + "/" + name
+    registry = unreal.AssetRegistryHelpers.get_asset_registry()
+    existing = sorted({str(asset.package_name) for asset in registry.get_assets_by_path(folder, recursive=True)})
+    if existing and not replace:
+        return {"success": False, "error_type": "InvalidState",
+                "error": (folder + " already holds " + str(len(existing)) + " asset(s) and replace_existing is "
+                          "false, so nothing was imported"),
+                "details": {"folder": folder, "existing_assets": existing[:LISTED],
+                            "hint": "Pass another destination_path, or replace_existing=true to replace "
+                                    "those assets and the level's actors from an earlier import of this file"}}
+    saved_before = saved_settings()
+    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    before = [actor.get_path_name() for actor in subsystem.get_all_level_actors()]
     task = unreal.AssetImportTask()
-    task.filename = args["path"]
-    task.destination_path = args["destination"]
-    task.automated = True
-    task.save = True
-    task.replace_existing = False
-    task.factory = unreal.UsdStageImportFactory()
-    task.options = options
-    unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
-    assets = [str(p) for p in task.imported_object_paths]
-    actors = [a.get_path_name() for a in subsystem.get_all_level_actors()
-              if a.get_path_name() not in before]
+    try:
+        task.filename = path
+        task.destination_path = destination
+        task.destination_name = name
+        task.automated = True
+        task.save = True
+        task.replace_existing = replace
+        task.factory = unreal.UsdStageImportFactory()
+        task.options = import_options(options, replace)
+        unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
+        assets = [str(p) for p in task.imported_object_paths]
+    finally:
+        task.factory = None
+        task.options = None
+    after = [actor.get_path_name() for actor in subsystem.get_all_level_actors()]
+    known = set(before)
+    actors = [p for p in after if p not in known]
+    current = set(after)
+    removed = [p for p in before if p not in current]
     if not assets and not actors:
-        raise RuntimeError("USD importer produced no assets or actors; check the editor log")
-    print(json.dumps({"imported_assets": assets, "actor_paths": actors, "warnings": []}))
+        return {"success": False, "error_type": "EngineError",
+                "error": "The USD importer produced no assets or actors from " + path + "; see the editor log"}
+    warnings = []
+    saved_after = saved_settings()
+    if saved_after != saved_before:
+        warnings.append("The import changed this project's saved USD import settings: "
+                        + json.dumps(saved_before) + " became " + json.dumps(saved_after))
+    differing = {key: value for key, value in saved_after.items() if value != DEFAULTS[key]}
+    if differing:
+        warnings.append(
+            "This project's saved USD import settings differ from Unreal's defaults ("
+            + ", ".join(key + "=" + json.dumps(value) for key, value in sorted(differing.items()))
+            + "); they are in Saved/Config/<Platform>Editor/EditorPerProjectUserSettings.ini, section "
+            "[/Script/USDStageImporter.UsdStageImportOptions], and the editor's own USD import dialog uses them. "
+            "simul set these options explicitly for this import and left the saved settings unchanged. "
+            "Earlier simul versions saved the options an import was given, so an import with "
+            "import_actors false left bImportActors=False there.")
+    return {"imported_assets": assets, "actor_paths": actors, "removed_actor_paths": removed,
+            "warnings": warnings}
+
+print(json.dumps(import_usd(**args)))
 """
 
-# The export selects the actors and exports the editor world, neither of which
-# Unreal allows while PIE runs, so the export is refused then.
-USD_EXPORT = EDITOR_WORLD + """
+# Expects ``args`` = {"path", "actors", "options"}. The export selects the
+# actors and exports the editor world, neither of which Unreal allows while PIE
+# runs, so the export is refused then. Each actor path must name an actor of
+# the level being edited (actor_at). Unreal's USD level exporter writes
+# what it accepts and leaves out the rest without an error (actors of another
+# world, editor helpers such as a WorldSettings or PlayerStart), so the actors
+# exported are read back from the written stage: the prim each actor's root
+# component went to (UsdConversionLibrary.get_prim_path_for_object, which the
+# exporter names it by, with the exporter's _<n> suffix for a name already
+# used). An export that wrote none of them fails.
+USD_EXPORT = ACTOR_HELPERS + """
 import os
-if not hasattr(unreal, "LevelExporterUSD"):
-    print(json.dumps({"success": False, "error_type": "PluginUnavailable",
-        "error": "USD export requires the USDImporter plugin enabled at editor startup."}))
-elif pie_active():
-    print(json.dumps(pie_refusal("export actors to USD")))
-else:
+
+def exported_prims(path, actors, inner):
+    from pxr import Usd
+    stage = Usd.Stage.Open(path, Usd.Stage.LoadNone)
+    claimed, exported, skipped = set(), [], []
+    try:
+        for actor in actors:
+            root = actor.root_component
+            found = None
+            if root is not None:
+                base = str(unreal.UsdConversionLibrary.get_prim_path_for_object(
+                    root, "", inner.export_actor_folders, inner.root_prim_name))
+                for candidate in [base] + [base + "_" + str(n) for n in range(len(actors))]:
+                    if candidate not in claimed and stage.GetPrimAtPath(candidate):
+                        found = candidate
+                        break
+            if found is None:
+                skipped.append(actor.get_path_name())
+            else:
+                claimed.add(found)
+                exported.append({"actor_path": actor.get_path_name(), "prim_path": found})
+    finally:
+        del stage
+    return exported, skipped
+
+def export_usd(path, actor_paths, values):
+    if not hasattr(unreal, "LevelExporterUSD"):
+        return {"success": False, "error_type": "PluginUnavailable",
+                "error": "USD export requires the USDImporter plugin enabled at editor startup."}
+    if pie_active():
+        return pie_refusal("export actors to USD")
+    actors = [actor_at(actor_path) for actor_path in actor_paths]
     subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-    actors = [actor_at(path) for path in args["actors"]]
     previous_selection = subsystem.get_selected_level_actors()
     # UE's native level exporter hands its task to Python through the CDO.
     options = unreal.get_default_object(unreal.LevelExporterUSDOptions)
     previous_inner = options.inner.copy()
     inner = previous_inner.copy()
-    for key, value in args["options"].items():
+    for key, value in values.items():
         inner.set_editor_property(key, value)
     inner.selection_only = True
     # Secondary assets must stay under the authorized output directory too.
-    inner.asset_folder = unreal.DirectoryPath(os.path.dirname(args["path"]))
+    inner.asset_folder = unreal.DirectoryPath(os.path.dirname(path))
     task = unreal.AssetExportTask()
-    task.object = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
-    task.filename = args["path"]
-    task.automated = True
-    task.prompt = False
-    task.selected = True
-    task.replace_identical = True
-    task.exporter = unreal.LevelExporterUSD()
-    task.options = options
     try:
+        task.object = editor_world()
+        task.filename = path
+        task.automated = True
+        task.prompt = False
+        task.selected = True
+        task.replace_identical = True
+        task.exporter = unreal.LevelExporterUSD()
+        task.options = options
         options.inner = inner
-        os.makedirs(os.path.dirname(args["path"]), exist_ok=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         subsystem.set_selected_level_actors(actors)
         if not unreal.Exporter.run_asset_export_task(task):
-            raise RuntimeError("USD export failed: " + "; ".join(str(e) for e in task.errors))
-        size = os.path.getsize(args["path"])
-        if size == 0:
-            raise RuntimeError("USD export produced an empty file")
-        print(json.dumps({"output_path": args["path"], "actors_exported": len(actors),
-                          "file_size_bytes": size}))
+            return {"success": False, "error_type": "EngineError",
+                    "error": "USD export failed: " + ("; ".join(str(e) for e in task.errors) or "see the editor log")}
     finally:
+        task.object = None
+        task.exporter = None
+        task.options = None
         subsystem.set_selected_level_actors(previous_selection)
         options.inner = previous_inner
+    size = os.path.getsize(path) if os.path.isfile(path) else 0
+    if size == 0:
+        return {"success": False, "error_type": "EngineError", "error": "USD export wrote no file at " + path}
+    exported, skipped = exported_prims(path, actors, inner)
+    result = {"output_path": path, "actors_exported": len(exported), "exported_prims": exported,
+              "skipped_actors": skipped, "file_size_bytes": size}
+    if not exported:
+        result.update(success=False, error_type="EngineError",
+                      error="Unreal's USD exporter wrote no prim for any actor given (it leaves out editor "
+                            "helpers such as WorldSettings, PlayerStart and brushes): " + ", ".join(skipped))
+    return result
+
+print(json.dumps(export_usd(args["path"], args["actors"], args["options"])))
 """
 
 INTERCHANGE_INFO = """
@@ -333,7 +501,7 @@ print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}
 # level, a child actor or an actor inside a level instance, which Unreal
 # selects only through its parent, or any actor while the editor mode or a
 # selection lock prevents selection) reads back unselected.
-FOCUS_ACTOR = ACTOR_HELPERS + EDITOR_WORLD + """
+FOCUS_ACTOR = ACTOR_HELPERS + """
 import math
 
 def left_out_by_editor_focus(component, root):
@@ -394,7 +562,7 @@ print(json.dumps({"location": actor_transform(actor)["location"],
 # transaction. When the path loads nothing, or Unreal places no actor for it,
 # the script prints an error instead of an empty actor path; while PIE runs,
 # when Unreal places nothing whatever the path, it prints the PIE refusal.
-SPAWN_ACTOR = ACTOR_HELPERS + EDITOR_WORLD + """
+SPAWN_ACTOR = ACTOR_HELPERS + """
 def spawn(path, location, rotation, label):
     if pie_active():
         return pie_refusal("spawn actors")
@@ -433,6 +601,195 @@ def spawn(path, location, rotation, label):
             "rotation": transform["rotation"]}
 
 print(json.dumps(spawn(**args)))
+"""
+
+# Expects ``args`` = {"actor_path", "parent_path"}; parent_path None detaches.
+# K2_AttachToActor (Python attach_to_actor) returns False and changes nothing
+# for an attachment Unreal refuses: the actor itself, a parent attached under
+# the child, or a Static child under a parent that is not Static (UE 5.7.4).
+# The first two and the mobility rule are refused here first with their
+# reason; a parent path that names no live actor of the editor world raises
+# SimulNotFound like the child's. The attachment keeps the world transform
+# (location, rotation and scale) and is one undoable transaction, with the
+# child, the new parent and the previous parent recorded first (Actor.modify
+# also records the root component, whose attachment changes). The parent is
+# read back; an attachment Unreal refused cancels the transaction.
+SET_ACTOR_PARENT = ACTOR_HELPERS + """
+def path_of(actor):
+    return actor.get_path_name() if actor is not None else None
+
+def refused(error_type, message):
+    return {"success": False, "error_type": error_type, "error": message}
+
+def result(actor_path, parent, previous):
+    return {"actor_path": actor_path, "parent_path": path_of(parent),
+            "previous_parent_path": path_of(previous), "changed": parent != previous}
+
+def detach(actor_path, child, previous):
+    if previous is not None:
+        rule = unreal.DetachmentRule.KEEP_WORLD
+        with unreal.ScopedEditorTransaction("simul: detach actor"):
+            child.modify()
+            previous.modify()
+            child.detach_from_actor(rule, rule, rule)
+    after = child.get_attach_parent_actor()
+    if after is not None:
+        return refused("EngineError", "Unreal did not detach " + actor_path + " from " + path_of(after))
+    return result(actor_path, None, previous)
+
+def set_parent(actor_path, parent_path):
+    child = actor_at(actor_path)
+    previous = child.get_attach_parent_actor()
+    if parent_path is None:
+        return detach(actor_path, child, previous)
+    parent = actor_at(parent_path)
+    if parent == child:
+        return refused("ValidationError", "An actor cannot be attached to itself: " + actor_path)
+    node = parent
+    while node is not None:
+        if node == child:
+            return refused("ValidationError", "Attaching " + actor_path + " to " + parent_path
+                           + " would make a cycle: " + parent_path + " is attached under " + actor_path
+                           + "; detach " + parent_path + " first")
+        node = node.get_attach_parent_actor()
+    child_root, parent_root = child.root_component, parent.root_component
+    if child_root is None or parent_root is None:
+        return refused("InvalidState", (actor_path if child_root is None else parent_path)
+                       + " has no root component, which an attachment joins")
+    static = unreal.ComponentMobility.STATIC
+    if child_root.mobility == static and parent_root.mobility != static:
+        return refused("InvalidState", "Unreal attaches a Static actor only under a Static parent: " + actor_path
+                       + " is Static and " + parent_path + " is " + parent_root.mobility.name.title()
+                       + "; make the child's root component Movable first")
+    if previous == parent:
+        return result(actor_path, parent, previous)
+    rule = unreal.AttachmentRule.KEEP_WORLD
+    with unreal.ScopedEditorTransaction("simul: attach actor") as transaction:
+        child.modify()
+        parent.modify()
+        if previous is not None:
+            previous.modify()
+        attached = child.attach_to_actor(parent, "", rule, rule, rule, False)
+        after = child.get_attach_parent_actor()
+        if not attached and after == previous:
+            transaction.cancel()
+    if not attached or after != parent:
+        return refused("EngineError", "Unreal did not attach " + actor_path + " to " + parent_path
+                       + "; the editor log says why")
+    return result(actor_path, after, previous)
+
+print(json.dumps(set_parent(**args)))
+"""
+
+# Expects ``args`` = {"actor_path", "component_class", "component_name",
+# "parent_component"}. Adds an instance component the way the editor's Add
+# Component button does, through SubobjectDataSubsystem.add_new_subobject:
+# Remote Control refuses AddComponentByClass on UE 5.7 ("deprecated or
+# unavailable remotely"). component_class is a class path
+# (/Script/Engine.PointLightComponent, a Blueprint's /Game/BP_Lamp.BP_Lamp_C or
+# its /Game/BP_Lamp.BP_Lamp) or a native class name (PointLightComponent).
+# A path inside a map's package is refused before anything loads. An abstract
+# class is refused too: the subsystem adds one without complaint and the
+# engine fires an ensure (UE 5.7.4). unreal.new_object refuses an abstract
+# class before creating anything and makes a throwaway transient object of a
+# concrete one, which the garbage collector reclaims; nothing else reports a
+# class's abstract flag to Python. A scene component attaches under
+# parent_component (a scene component of the actor, by name) or the root
+# component, and becomes the root of an actor without one; any other component
+# takes no parent. The add and the name are one undoable transaction; a name
+# already used inside the actor is refused before it. The component is read
+# back from the actor.
+ADD_COMPONENT = ACTOR_HELPERS + """
+def refused(error_type, message):
+    return {"success": False, "error_type": error_type, "error": message}
+
+def handle_object(handle):
+    if not unreal.SubobjectDataBlueprintFunctionLibrary.is_handle_valid(handle):
+        return None
+    data = unreal.SubobjectDataBlueprintFunctionLibrary.get_data(handle)
+    return unreal.SubobjectDataBlueprintFunctionLibrary.get_associated_object(data)
+
+def resolve(name):
+    if "/" not in name:
+        wrapper = getattr(unreal, name, None)
+        if isinstance(wrapper, type) and hasattr(wrapper, "static_class"):
+            return wrapper.static_class(), None
+        return None, ("No class named " + repr(name)
+                      + ": pass a native class name such as PointLightComponent or a class path")
+    if ":" in name:
+        return None, name + " names an object inside a package, not a class"
+    if name.startswith("/Script/"):
+        found = unreal.find_object(None, name)
+    else:
+        package = name.split(".", 1)[0]
+        assets = unreal.AssetRegistryHelpers.get_asset_registry().get_assets_by_package_name(package)
+        if any(str(asset.asset_class_path.asset_name) == "World" for asset in assets):
+            return None, name + " is in a map package, not a class; simul loads no map"
+        found = unreal.load_object(None, name)
+    if isinstance(found, unreal.Blueprint):
+        found = found.generated_class()
+    if not isinstance(found, unreal.Class):
+        return None, "No class at " + repr(name)
+    return found, None
+
+def describe(actor, component):
+    parent = component.get_attach_parent() if isinstance(component, unreal.SceneComponent) else None
+    return {"component_path": component.get_path_name(), "component_name": component.get_name(),
+            "component_class": component.get_class().get_name(),
+            "parent_component": parent.get_name() if parent is not None else None,
+            "is_root": component == actor.root_component}
+
+def add(actor_path, component_class, component_name, parent_component):
+    actor = actor_at(actor_path)
+    cls, reason = resolve(component_class)
+    if cls is None:
+        return refused("NotFoundError", reason)
+    if not unreal.MathLibrary.class_is_child_of(cls, unreal.ActorComponent.static_class()):
+        return refused("ValidationError", component_class + " is the class " + cls.get_name()
+                       + ", not a component class (an ActorComponent)")
+    try:
+        unreal.new_object(cls)
+    except Exception as exc:
+        if "abstract" not in str(exc):
+            raise
+        return refused("ValidationError", cls.get_name() + " is abstract; pass a concrete component class")
+    scene = unreal.MathLibrary.class_is_child_of(cls, unreal.SceneComponent.static_class())
+    if component_name is not None and unreal.find_object(actor, component_name) is not None:
+        return refused("ValidationError", actor_path + " already has a component or subobject named "
+                       + repr(component_name))
+    target = actor.root_component if scene else None
+    if parent_component is not None:
+        if not scene:
+            return refused("ValidationError", cls.get_name() + " is not a scene component, so it attaches to "
+                           "nothing and takes no parent_component")
+        target = next((c for c in actor.get_components_by_class(unreal.SceneComponent)
+                       if c.get_name() == parent_component), None)
+        if target is None:
+            return refused("NotFoundError", "Component not found: " + parent_component
+                           + " (no scene component of that name on " + actor_path + ")")
+    subsystem = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+    handles = list(subsystem.k2_gather_subobject_data_for_instance(actor))
+    parent_handle = next((h for h in handles if target is not None and handle_object(h) == target), handles[0])
+    with unreal.ScopedEditorTransaction("simul: add component") as transaction:
+        actor.modify()
+        params = unreal.AddNewSubobjectParams(parent_handle=parent_handle, new_class=cls, blueprint_context=None)
+        handle, failure = subsystem.add_new_subobject(params)
+        component = handle_object(handle)
+        if component is None:
+            transaction.cancel()
+            return refused("EngineError", "Unreal added no " + cls.get_name() + " to " + actor_path
+                           + (": " + str(failure) if str(failure) else ""))
+        if component_name is not None and not (subsystem.rename_subobject(handle, unreal.Text(component_name))
+                                               and component.get_name() == component_name):
+            subsystem.delete_subobject(handles[0], handle, None)
+            transaction.cancel()
+            return refused("EngineError", "Unreal did not name the new " + cls.get_name() + " "
+                           + repr(component_name) + ", so it was removed again")
+    if component not in actor.get_components_by_class(unreal.ActorComponent):
+        return refused("EngineError", "The new " + cls.get_name() + " is not among " + actor_path + "'s components")
+    return dict(describe(actor, component), actor_path=actor_path)
+
+print(json.dumps(add(**args)))
 """
 
 # Expects ``args`` = {"label", "match_mode", "max_results"}. Semantic labels
@@ -512,6 +869,70 @@ def create(parent, name, folder):
             "class_name": instance.get_class().get_name()}
 
 print(json.dumps(create(**args)))
+"""
+
+# Expects ``args`` = {"actor_path", "material_path", "slot_index"}. Assigns the
+# material as the Details panel does: inside an undoable transaction, after
+# modify() records the component, which also marks the package that holds it
+# (the level, or the actor's own package in a World Partition level) dirty, so
+# saving keeps the change. MeshComponent.set_material alone, which the tool
+# called before, records and dirties nothing: on UE 5.7.4 "save dirty
+# packages" saved nothing, reloading the level reverted the material and Undo
+# did not undo it. The actor must be in the level being edited (actor_at),
+# and the material is loaded only when the asset registry lists it as
+# something other than a level, so a map path never loads that map. The slot
+# is read back after the write.
+ASSIGN_MATERIAL = ACTOR_HELPERS + """
+def mesh_component(actor):
+    root = actor.root_component
+    if isinstance(root, unreal.MeshComponent):
+        return root
+    components = actor.get_components_by_class(unreal.MeshComponent)
+    if len(components) != 1:
+        raise ValueError("Actor must have a mesh root component or exactly one MeshComponent: "
+                         + actor.get_path_name())
+    return components[0]
+
+def material_at(path):
+    package = path.split(".", 1)[0]
+    registry = unreal.AssetRegistryHelpers.get_asset_registry()
+    if any(str(asset.asset_class_path.asset_name) == "World"
+           for asset in registry.get_assets_by_package_name(package)):
+        return None
+    material = unreal.load_asset(path)
+    return material if isinstance(material, unreal.MaterialInterface) else None
+
+def path_of(material):
+    return material.get_path_name() if material is not None else None
+
+def assign(actor_path, material_path, slot_index):
+    actor = actor_at(actor_path)
+    material = material_at(material_path)
+    if material is None:
+        return {"success": False, "error_type": "NotFoundError",
+                "error": "No material at " + repr(material_path) + ": pass a Material or Material Instance "
+                         "asset path such as /Engine/BasicShapes/BasicShapeMaterial"}
+    component = mesh_component(actor)
+    slots = component.get_num_materials()
+    if not 0 <= slot_index < slots:
+        return {"success": False, "error_type": "ValidationError",
+                "error": ("slot_index " + str(slot_index) + " is out of range: " + component.get_name()
+                          + " has " + str(slots) + " material slot(s)")}
+    previous = path_of(component.get_material(slot_index))
+    with unreal.ScopedEditorTransaction("simul: assign material"):
+        component.modify()
+        component.set_material(slot_index, material)
+    applied = path_of(component.get_material(slot_index))
+    result = {"actor_path": actor.get_path_name(), "component_path": component.get_path_name(),
+              "material_path": material.get_path_name(), "slot_index": slot_index,
+              "previous_material_path": previous}
+    if applied != material.get_path_name():
+        result.update(success=False, error_type="MaterialNotApplied",
+                      error="Slot " + str(slot_index) + " of " + component.get_name() + " reads back "
+                            + json.dumps(applied) + " after the assignment")
+    return result
+
+print(json.dumps(assign(**args)))
 """
 
 # Defines material_parameters(material): every scalar, vector and texture
@@ -858,7 +1279,7 @@ def restore(component, before):
         component.attach_to_component(parent, before["socket"], rule, rule, rule, False)
 
 def enable():
-    actor = actor_at(args["actor_path"])
+    actor = actor_at(args["actor_path"], play_world=True)
     component = physics_component(actor)
     mode = args["mode"]
     if mode != "off":
@@ -938,7 +1359,7 @@ def write(component, values):
         component.set_enable_gravity(values["enable_gravity"])
 
 def set_params():
-    actor = actor_at(args["actor_path"])
+    actor = actor_at(args["actor_path"], play_world=True)
     component = physics_component(actor)
     values = args["values"]
     simulation = in_simulation(actor)
@@ -1004,7 +1425,7 @@ def write(component, preset, enabled):
                                         else unreal.CollisionEnabled.NO_COLLISION)
 
 def set_collision():
-    actor = actor_at(args["actor_path"])
+    actor = actor_at(args["actor_path"], play_world=True)
     component = physics_component(actor)
     preset, enabled = args["preset"], args["enabled"]
     if preset and not known_preset(preset):
@@ -1060,7 +1481,11 @@ print(json.dumps(set_collision()))
 # as set while the layer renders as it was (observed on UE 5.7.4). A name both
 # the material and a layer have sets the material's own parameter. Assets load
 # through unreal.load_asset: EditorAssetLibrary loads nothing during PIE. The
-# instance is left unsaved, as an edit in its editor is.
+# instance is left unsaved, as an edit in its editor is. An instance outside
+# /Game (engine or plugin content, which every project using that engine or
+# plugin shares, such as /Engine/BasicShapes/BasicShapeMaterial_Inst) is
+# refused as a SandboxError unless ``args`` has "allow_engine_content" true:
+# editing one left the shared engine asset dirty (observed on UE 5.7.4).
 SET_MATERIAL_PARAMS = """
 import json, struct, unreal
 """ + MATERIAL_PARAMETERS + """
@@ -1116,7 +1541,7 @@ def described(reasons):
     return "; ".join(name + " (" + kind + "): " + reason
                      for kind, entries in reasons.items() for name, reason in entries.items())
 
-def set_params(path, values):
+def set_params(path, values, allow_engine_content=False):
     instance = unreal.load_asset(path)
     if instance is None:
         return {"success": False, "error_type": "NotFoundError",
@@ -1127,6 +1552,14 @@ def set_params(path, values):
         if isinstance(instance, unreal.Material):
             error += "; create an instance of it with create_unreal_material_instance and set that"
         return {"success": False, "error_type": "InvalidAssetType", "error": error}
+    if not allow_engine_content and not instance.get_path_name().startswith("/Game/"):
+        return {"success": False, "error_type": "SandboxError",
+                "error": ("Nothing was written to " + instance.get_path_name() + ": it is engine or plugin "
+                          "content, outside the project's /Game folder, and every project using that engine "
+                          "or plugin shares it"),
+                "details": {"content_path": instance.get_path_name(), "allowed_root": "/Game",
+                            "hint": "Create an instance of it under /Game with create_unreal_material_instance "
+                                    "and set that, or pass allow_engine_content=true to edit the shared asset"}}
     found = material_parameters(instance)
     pending, refused = [], {}
     for kind, requested in values.items():
