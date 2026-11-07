@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
@@ -50,6 +51,96 @@ DEFAULT_ALLOWED_WRITE_URL_SCHEMES: Tuple[str, ...] = ()
 
 # Sub-directory created under an allowed root to receive viewport captures.
 CAPTURE_SUBDIR = "captures"
+
+
+def shared_directory_problem(path: Path) -> Optional[str]:
+    """Explain why ``path`` cannot be trusted as this user's directory, or None.
+
+    Only the components of ``path`` that sit inside a world-writable directory
+    (``/tmp``, ``/var/tmp``) are judged, because any local user can create
+    entries there: such a component must be owned by this user (or root) and,
+    unless it is a symlink, writable by nobody else, and the world-writable
+    directory must carry the sticky bit so nobody else can rename it away.
+    Components that do not exist yet are not judged. Platforms without POSIX
+    ownership (Windows) are never judged.
+
+    Args:
+        path: An absolute path, symlinks resolved or not; each component is
+            inspected as written (``lstat``).
+
+    Returns:
+        A human-readable problem, or None when nothing is wrong.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return None
+    uid = getuid()
+    parent_shared = False
+    parent_sticky = True
+    for component in [*reversed(path.parents), path]:
+        try:
+            link = os.lstat(component)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            return f"cannot inspect {component}: {exc.strerror or exc}"
+        if parent_shared:
+            if not parent_sticky:
+                return (
+                    f"{component.parent} is world-writable without the sticky bit, so any "
+                    f"local user can replace {component}"
+                )
+            if link.st_uid not in (uid, 0):
+                return (
+                    f"{component} sits in the world-writable {component.parent} and is owned "
+                    f"by uid {link.st_uid}, not by this user (uid {uid})"
+                )
+            if not stat.S_ISLNK(link.st_mode) and link.st_mode & 0o022:
+                return (
+                    f"{component} sits in the world-writable {component.parent} and is "
+                    f"writable by group or others (mode {stat.S_IMODE(link.st_mode):o})"
+                )
+        try:
+            target = os.stat(component)
+        except OSError:
+            return None  # a dangling symlink: nothing exists there to trust or distrust
+        parent_shared = stat.S_ISDIR(target.st_mode) and bool(target.st_mode & stat.S_IWOTH)
+        parent_sticky = bool(target.st_mode & stat.S_ISVTX)
+    return None
+
+
+def _inside_world_writable_directory(path: Path) -> bool:
+    """Return True when an existing ancestor of ``path`` is world-writable."""
+    for ancestor in path.parents:
+        try:
+            mode = os.stat(ancestor).st_mode
+        except OSError:
+            continue
+        if stat.S_ISDIR(mode) and mode & stat.S_IWOTH:
+            return True
+    return False
+
+
+def _make_private_directory(path: Path) -> None:
+    """Create ``path`` and any missing parents with mode 0700.
+
+    ``os.makedirs`` applies its mode to the leaf only, so each missing
+    component is created on its own. A component another process creates in
+    between is left alone; ``shared_directory_problem`` judges it afterwards.
+    """
+    missing: List[Path] = []
+    probe = path
+    while not os.path.lexists(probe) and probe.parent != probe:
+        missing.append(probe)
+        probe = probe.parent
+    for component in reversed(missing):
+        try:
+            os.mkdir(component, 0o700)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            _LOGGER.warning("Cannot create sandbox root %s: %s", component, exc)
+            return
 
 
 class SandboxDenied(PermissionError):
@@ -108,6 +199,10 @@ class PathPolicy:
         self._enabled = enabled
         self._project_root: Optional[Path] = project_root or find_checkout_root()
         self._allowed_roots: List[Path] = []
+        # Roots inside a world-writable directory (the default /tmp/simul-work),
+        # resolved root -> the path as configured. Another local user can create
+        # or plant those, so each use re-checks them (see _root_problem).
+        self._shared_roots: Dict[Path, Path] = {}
         for allowed_path in allowed_paths:
             if self._project_root is None and not Path(os.path.expandvars(allowed_path)).expanduser().is_absolute():
                 _LOGGER.info(
@@ -115,7 +210,11 @@ class PathPolicy:
                     allowed_path,
                 )
                 continue
-            self._allowed_roots.append(self.resolve(allowed_path))
+            root = self.resolve(allowed_path)
+            self._allowed_roots.append(root)
+            lexical = self._lexical(allowed_path)
+            if _inside_world_writable_directory(lexical) or _inside_world_writable_directory(root):
+                self._shared_roots[root] = lexical
         self._allowed_url_schemes: Tuple[str, ...] = tuple(
             scheme.lower() for scheme in allowed_url_schemes
         )
@@ -203,13 +302,60 @@ class PathPolicy:
         except ValueError:
             # A file:// URL naming a remote host is not a local path.
             raise SandboxDenied(path_str, self.denial_details(path_str, write=write)) from None
+        untrusted: Optional[Tuple[Path, str]] = None
         for allowed_root in self._allowed_roots:
-            try:
-                candidate.relative_to(allowed_root)
-                return str(candidate)
-            except ValueError:
+            if not self._is_relative_to(candidate, allowed_root):
                 continue
-        raise SandboxDenied(path_str, self.denial_details(path_str, write=write))
+            problem = self._root_problem(allowed_root, create=write)
+            if problem is None:
+                return str(candidate)
+            untrusted = untrusted or (allowed_root, problem)
+        details = self.denial_details(path_str, write=write)
+        if untrusted is not None:
+            root, problem = untrusted
+            details["untrusted_root"] = str(root)
+            details["reason"] = problem
+            details["hint"] = (
+                f"The allowed root {root} sits in a world-writable directory and another "
+                f"local user could control it. Remove it (or fix its owner and mode: "
+                f"chmod 700) or configure a private directory in security.allowed_paths."
+            )
+        raise SandboxDenied(path_str, details)
+
+    def _root_problem(self, root: Path, *, create: bool) -> Optional[str]:
+        """Explain why an allowed root cannot be used right now, or None.
+
+        Only roots inside a world-writable directory are judged (see
+        ``shared_directory_problem``), as configured and as resolved, so a
+        symlink planted under the configured name is caught too. A missing one
+        is created with mode 0700 first when ``create`` is set, before anyone
+        else's process can create it with theirs.
+
+        Args:
+            root: One of ``allowed_roots``.
+            create: Whether to create the root when it does not exist.
+
+        Returns:
+            The problem, or None when the root is usable.
+        """
+        lexical = self._shared_roots.get(root)
+        if lexical is None:
+            return None
+        if create and not os.path.lexists(lexical):
+            _make_private_directory(lexical)
+        for candidate in (lexical, root):
+            problem = shared_directory_problem(candidate)
+            if problem is not None:
+                _LOGGER.warning("Refusing sandbox root %s: %s", root, problem)
+                return problem
+        return None
+
+    def _lexical(self, path_str: str) -> Path:
+        """Return ``path_str`` made absolute as ``resolve`` does, without following symlinks."""
+        candidate = Path(os.path.expandvars(path_str)).expanduser()
+        if not candidate.is_absolute():
+            candidate = (self._project_root or Path.cwd()) / candidate
+        return Path(os.path.normpath(candidate))
 
     def is_allowed(self, path_str: str, *, write: bool = False) -> bool:
         """Return True when ``path_str`` may be used for the requested access.
@@ -317,6 +463,8 @@ class PathPolicy:
         Roots inside the system temp directory are preferred: scratch output
         belongs in scratch space when the sandbox includes any. A root that does
         not exist yet counts as writable when its nearest existing ancestor is.
+        A root inside a world-writable directory is created with mode 0700 when
+        it is missing and skipped when another user could control it.
 
         Returns:
             The chosen root, or None when no allowed root is writable.
@@ -327,6 +475,8 @@ class PathPolicy:
             key=lambda root: 0 if self._is_relative_to(root, temp_root) else 1,
         )
         for root in ordered:
+            if self._root_problem(root, create=True) is not None:
+                continue
             probe = root
             while not probe.exists() and probe.parent != probe:
                 probe = probe.parent
