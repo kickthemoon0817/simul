@@ -472,7 +472,12 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
                 "physics": {"mass_kg": 2, "collider_type": "box"},
                 "material": {"substrate_type": "metal"},
             },
-        }
+        },
+        "full": {
+            "object_name": "Cube",
+            "metadata": {"physics": {"is_rigid_body": False}},
+            "clear": ["mass_kg", "additional_labels"],
+        },
     },
     "get_simready_metadata": {"minimal": {"object_name": "Cube"}},
     "validate_simready_compliance": {
@@ -484,6 +489,13 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "check_transforms": False,
             "check_materials": False,
             "check_hierarchy": False,
+            "check_metadata": False,
+            "check_physics": False,
+            "check_geometry": False,
+            "include_children": False,
+            "severity": "error",
+            "offset": 5,
+            "limit": 10,
         },
     },
     "export_simready_usd": {
@@ -496,6 +508,7 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "include_children": False,
             "include_lights_and_cameras": True,
             "force": True,
+            "skip_checks": ["naming", "scale"],
         },
     },
     "setup_simready_hierarchy": {
@@ -504,6 +517,7 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "root_name": "asset_root",
             "child_names": ["Cube"],
             "semantic": {"semantic_class": "cup", "semantic_qcode": "Q81727"},
+            "reuse_root": True,
         },
     },
 }

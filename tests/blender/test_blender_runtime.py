@@ -7977,12 +7977,18 @@ class FakeObjectWithProps:
         self._custom_props: Dict[str, Any] = {}
         self.hide_viewport = False
         self.empty_display_type = ""
+        self.matrix_world = FakeMatrix.Translation(location)
+        self.matrix_basis = FakeMatrix.Translation(location)
+        self.matrix_parent_inverse = FakeMatrix.Identity(4)
 
     def __setitem__(self, key: str, value: Any) -> None:
         self._custom_props[key] = value
 
     def __getitem__(self, key: str) -> Any:
         return self._custom_props[key]
+
+    def __delitem__(self, key: str) -> None:
+        del self._custom_props[key]
 
     def keys(self) -> list:
         return list(self._custom_props.keys())
@@ -8035,7 +8041,7 @@ class TestSimReadyMethods:
 
         data_objects = ObjCollection(list(objs))
         scene_col = SimpleNamespace(objects=data_objects)
-        scene = SimpleNamespace(collection=scene_col)
+        scene = SimpleNamespace(collection=scene_col, objects=data_objects)
         return SimpleNamespace(
             app=SimpleNamespace(
                 version=(5, 0, 1),
@@ -8047,7 +8053,11 @@ class TestSimReadyMethods:
                 filepath="",
                 objects=data_objects,
             ),
-            context=SimpleNamespace(scene=scene),
+            context=SimpleNamespace(
+                scene=scene,
+                view_layer=SimpleNamespace(objects=data_objects),
+                mode="OBJECT",
+            ),
             ops=SimpleNamespace(
                 wm=SimpleNamespace(
                     usd_export=lambda **kw: None,
@@ -8156,9 +8166,9 @@ class TestSimReadyMethods:
         assert result["metadata"] is None
 
     def test_validate_naming_issue(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Uppercase names should produce a naming error."""
+        """A name that is not a USD identifier is a naming warning; camelCase is fine."""
         obj = FakeObjectWithProps(
-            name="MyBadName",
+            name="My Bad.Name",
             data=SimpleNamespace(materials=["mat1"]),
         )
         obj.parent = FakeObjectWithProps(name="root", object_type="EMPTY")
@@ -8168,18 +8178,20 @@ class TestSimReadyMethods:
 
         session = blender_runtime.BlenderRuntimeSession()
         result = session.validate_simready_compliance(
-            object_names=["MyBadName"],
+            object_names=["My Bad.Name"],
             check_scale=False,
             check_transforms=False,
             check_materials=False,
             check_hierarchy=False,
+            check_metadata=False,
+            check_physics=False,
         )
 
-        assert result["compliant"] is False
-        assert result["issue_count"] >= 1
+        assert result["compliant"] is True
         naming_issues = [i for i in result["issues"] if i["check"] == "naming"]
         assert len(naming_issues) == 1
-        assert "MyBadName" in naming_issues[0]["message"]
+        assert naming_issues[0]["severity"] == "warning"
+        assert "My_Bad_Name" in naming_issues[0]["message"]
 
     def test_validate_compliant_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A well-named, correctly-scaled object with material passes."""
@@ -8190,6 +8202,8 @@ class TestSimReadyMethods:
             data=SimpleNamespace(materials=["ceramic_white"]),
             parent=parent,
         )
+        # Only exported objects pass their labels on: coffee_cup is checked alone.
+        obj["simready_semantic_class"] = "cup"
         fake_bpy = self._make_fake_bpy([obj])
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -8261,8 +8275,8 @@ class TestSimReadyMethods:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        with pytest.raises(ValueError, match="violates SimReady naming"):
+        with pytest.raises(ValueError, match="is not a USD identifier"):
             session.setup_simready_hierarchy(
-                root_name="BadName",
+                root_name="Bad Name",
                 child_names=[],
             )

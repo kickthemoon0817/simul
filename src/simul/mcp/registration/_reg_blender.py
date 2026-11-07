@@ -187,12 +187,17 @@ from ..schemas.blender_ui import AgentControl, BlenderUIRequest, BlenderUIRespon
 from ..schemas.simready import (
     SimReadyApplyMetadataRequest,
     SimReadyApplyMetadataResponse,
+    SimReadyCheckName,
+    SimReadyClearName,
     SimReadyExportRequest,
     SimReadyExportResponse,
     SimReadyGetMetadataRequest,
     SimReadyGetMetadataResponse,
+    SimReadyMetadata,
+    SimReadySemanticLabels,
     SimReadySetupHierarchyRequest,
     SimReadySetupHierarchyResponse,
+    SimReadySeverity,
     SimReadyValidateRequest,
     SimReadyValidateResponse,
 )
@@ -1544,19 +1549,28 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="apply_simready_metadata",
         description=(
-            "Apply NVIDIA SimReady metadata (semantic labels, physics properties, material info) "
-            "to a Blender object as custom properties. Stored with simready_ prefix for USD export."
+            "Store NVIDIA SimReady metadata (semantic labels, physics properties, material info) "
+            "on a Blender object as simready_ custom properties, which export_simready_usd writes "
+            "as UsdPhysics and UsdSemantics schemas. Omitted fields keep their stored value; "
+            "clear removes stored values. An additional label named after a field's taxonomy "
+            "(class, hierarchy, wikidata_qcode) sets that field. Unknown fields, invalid values, "
+            "Edit Mode and linked objects are refused, before anything changes."
         ),
         hints=OVERWRITING,
         operation="apply_simready_metadata",
         request=SimReadyApplyMetadataRequest,
         response=SimReadyApplyMetadataResponse,
+        params={
+            "metadata": Param(Optional[SimReadyMetadata]),
+            "clear": Param(Optional[List[SimReadyClearName]]),
+        },
     ),
     BlenderTool(
         name="get_simready_metadata",
         description=(
-            "Read NVIDIA SimReady metadata from a Blender object. Returns semantic labels, "
-            "physics properties, and material info stored as simready_ custom properties."
+            "Read NVIDIA SimReady metadata from a Blender object: semantic labels, physics "
+            "properties and material info stored as simready_ custom properties. Stored values "
+            "that break the rules are listed in invalid_values instead of failing the call."
         ),
         hints=READ_ONLY,
         operation="get_simready_metadata",
@@ -1566,39 +1580,55 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="validate_simready_compliance",
         description=(
-            "Validate Blender objects against NVIDIA SimReady conventions: naming "
-            "(lowercase_underscore), scale (meters), clean transforms, material segmentation, hierarchy."
+            "Validate the Blender objects export_simready_usd would export against the SimReady "
+            "Robotics-Prop rules and Isaac Sim's asset checks; any error makes them non-compliant. Errors: an "
+            "asset root that is not the identity, a rigid body skewed in the world, no material, no "
+            "semantic label on a mesh or an exported object above it, invalid stored values, a "
+            "rigid body without mass, without a collider or nested in another with no joint, a "
+            "constraint the export cannot write as a joint (MOTOR), degenerate faces. Warnings: "
+            "names, sizes and units, scaled parts, an empty slot faces use, missing colliders, "
+            "what a joint leaves out, UVs, n-gons. Filter by severity and page with offset/limit "
+            "(next_offset)."
         ),
         hints=READ_ONLY,
         operation="validate_simready_compliance",
         request=SimReadyValidateRequest,
         response=SimReadyValidateResponse,
+        params={"severity": Param(SimReadySeverity)},
     ),
     BlenderTool(
         name="export_simready_usd",
         description=(
             "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ "
             "metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, "
-            "and UsdSemantics labels. The asset root is the default prim and holds its materials; "
+            "and UsdSemantics labels; rigid body constraints between exported objects become "
+            "UsdPhysics joints (fixed, revolute, prismatic, spherical, D6 with limits). The asset "
+            "root is the default prim and holds its materials and joints; "
             "metersPerUnit follows the scene's Unit Scale. Listed objects export with their "
             "descendants, hidden ones too; lights, cameras and the World are left out by default. "
-            "Refuses when validation finds errors unless force=true. Returns each object's prim path."
+            "Refuses when validation finds errors; skip_checks leaves a check out, force=true "
+            "ignores every error. Returns each object's prim path."
         ),
         hints=DESTRUCTIVE,
         operation="export_simready_usd",
         request=SimReadyExportRequest,
         response=SimReadyExportResponse,
+        params={"skip_checks": Param(Optional[List[SimReadyCheckName]])},
     ),
     BlenderTool(
         name="setup_simready_hierarchy",
         description=(
-            "Create a SimReady-compliant object hierarchy in Blender with a root empty (XForm "
-            "equivalent) and parent the given children under it. Optionally applies semantic "
-            "labels to the root."
+            "Put Blender objects under a SimReady root empty (an Xform in the USD), keeping where "
+            "they are, also for objects in excluded collections, skewed by a parent or under "
+            "constraints. Only listed objects without a listed ancestor are re-parented; existing "
+            "nesting stays. Needs Object Mode; refuses linked objects. Checks everything first "
+            "and changes nothing on failure; an existing root name is refused unless "
+            "reuse_root=true. Optionally stores semantic labels on the root."
         ),
         hints=ADDITIVE,
         operation="setup_simready_hierarchy",
         request=SimReadySetupHierarchyRequest,
         response=SimReadySetupHierarchyResponse,
+        params={"semantic": Param(Optional[SimReadySemanticLabels])},
     ),
 )
