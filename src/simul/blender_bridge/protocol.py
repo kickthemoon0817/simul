@@ -24,7 +24,9 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # Version 7: bake_simulation and free_bake take scope, and a bake replaces an earlier one;
 # get_physics_state takes step_simulation; get/set_rigid_body_world are new. An older add-on
 # would reject the arguments, or, left without them, report a re-bake it did not do.
-PROTOCOL_VERSION = 7
+# Version 8: export_simready_usd takes include_children, include_lights_and_cameras and force, and
+# authors UsdPhysics and UsdSemantics schemas through the add-on's bundled simready_usd module.
+PROTOCOL_VERSION = 8
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 

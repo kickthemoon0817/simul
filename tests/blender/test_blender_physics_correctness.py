@@ -1,4 +1,4 @@
-"""Physics sampling, bake dispatch and SimReady export against a stand-in bpy.
+"""Physics sampling, bake dispatch and SimReady validation against a stand-in bpy.
 
 Each case pins a behaviour that real Blender 5.0 exposed: rigid bodies only
 move in the evaluated world matrix, the positional context-override dict is
@@ -220,22 +220,6 @@ def _default_scene() -> List[Any]:
     ]
 
 
-@pytest.mark.parametrize("embed", [True, False])
-def test_simready_export_validates_meshes_and_forwards_embed_metadata(
-    install: Any, embed: bool
-) -> None:
-    fake = _fake_bpy(_default_scene())
-    session = install(fake)
-
-    result = session.export_simready_usd("/tmp/simul-work/asset.usda", embed_metadata=embed)
-
-    assert {i["object_name"] for i in result["issues"]} <= {"box"}
-    assert not [i for i in result["issues"] if i["message"] == "No material assigned"]
-    name, kwargs = fake.calls["ops"][-1]
-    assert name == "wm.usd_export"
-    assert kwargs["export_custom_properties"] is embed
-
-
 def test_validation_skips_material_check_for_objects_without_slots(install: Any) -> None:
     fake = _fake_bpy(_default_scene())
     session = install(fake)
@@ -248,13 +232,5 @@ def test_validation_skips_material_check_for_objects_without_slots(install: Any)
     assert result["issues"] == []
 
 
-def test_export_drops_options_the_operator_does_not_define(install: Any) -> None:
-    fake = _fake_bpy(_default_scene())
-    fake.ops.wm.usd_export.get_rna_type = lambda: SimpleNamespace(
-        properties={"filepath": 0, "selected_objects_only": 0}
-    )
-    session = install(fake)
-
-    session.export_simready_usd("/tmp/simul-work/asset.usda", validate_before_export=False)
-
-    assert "export_custom_properties" not in fake.calls["ops"][-1][1]
+# export_simready_usd is covered against a Blender-like exporter, with the
+# written file checked through pxr, in test_simready_export.py.
