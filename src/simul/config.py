@@ -504,6 +504,16 @@ class UnrealConfig(BaseModel):
         description="HTTP request timeout in seconds",
         ge=1,
     )
+    import_export_timeout: int = Field(
+        default=300,
+        description=(
+            "Timeout in seconds for the asset import and export tools (import_unreal_usd, "
+            "export_unreal_usd), which can run for minutes: the first USD export of an editor "
+            "session loads the USD Python modules, 25-40 s on UE 5.7. Never shorter than timeout. "
+            "Env: UNREAL__IMPORT_EXPORT_TIMEOUT."
+        ),
+        ge=1,
+    )
     embedded_mode: bool = Field(
         default=False,
         description="Running inside UE5 Python interpreter",
@@ -691,6 +701,13 @@ class SecurityConfig(BaseModel):
     allowed_write_url_schemes: List[str] = Field(
         default_factory=list,
         description="URL schemes that may be written to; empty keeps writes local-only",
+    )
+    relative_path_base: Optional[str] = Field(
+        default=None,
+        description=(
+            "Directory a relative path passed to a tool resolves against; unset uses "
+            "the directory the server was started in"
+        ),
     )
     allow_script_execution: bool = Field(
         default=True,
@@ -1031,6 +1048,7 @@ _YAML_GROUPS: Dict[str, Dict[str, Dict[str, str]]] = {
             "allowed_paths": "allowed_paths",
             "allowed_url_schemes": "allowed_url_schemes",
             "allowed_write_url_schemes": "allowed_write_url_schemes",
+            "relative_path_base": "relative_path_base",
         },
         "rate_limiting": {
             "enabled": "rate_limiting_enabled",

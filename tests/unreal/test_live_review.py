@@ -224,12 +224,22 @@ print(json.dumps({{'saved': bool(les.save_current_level())}}))
             assert [p["code"] for p in refused["details"]["problems"]] == ["NO_PHYSICS_COLLISION"], refused
             assert (await physics_state(client, sensor))["actors"][sensor]["simulate"] is False
 
-            # Save All writes the edits, and they survive a reload.
+            # Saving the dirty packages writes the edits, and they survive a reload.
+            # Only /Game packages: Save All would also write any dirty engine or
+            # plugin package into the shared engine install. The packages are held
+            # inside a function only: a Python reference to the old map's package
+            # when load_map replaces it is a world leak, which Unreal makes fatal
+            # (EditorServer.cpp CheckForWorldGCLeaks, UE 5.7.4).
             reloaded = await client._execute_json_script(f"""
 import unreal, json
-ok = unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
+def save_game_packages():
+    ls = unreal.EditorLoadingAndSavingUtils
+    packages = [p for p in list(ls.get_dirty_map_packages()) + list(ls.get_dirty_content_packages())
+                if p.get_name().startswith('/Game/')]
+    return bool(ls.save_packages(packages, True))
+saved = save_game_packages()
 unreal.EditorLoadingAndSavingUtils.load_map({level!r})
-print(json.dumps({{'saved': bool(ok)}}))
+print(json.dumps({{'saved': saved}}))
 """)
             assert reloaded == {"saved": True}, reloaded
             state = await physics_state(client, cube, ghost)
@@ -323,6 +333,58 @@ print(json.dumps({{'new': bool(unreal.get_editor_subsystem(unreal.LevelEditorSub
             pawns = await client.list_simulation_actors(class_filter="DefaultPawn")
             assert pawns["count"] == 1 and pawns["actors"][0]["editor_path"] is None, pawns
         finally:
+            await client.control_simulation("stop")
+            await client.close()
+
+    asyncio.run(run())
+
+
+_MAX_FPS = """
+import unreal, json
+world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+unreal.SystemLibrary.execute_console_command(world, 't.MaxFPS ' + str(args['fps']))
+print(json.dumps({'fps': args['fps']}))
+"""
+
+
+def test_a_force_keeps_pace_with_gravity_at_ten_frames_a_second():
+    """Review of #320: the force was counted in game time while Unreal's physics,
+    gravity included, steps at most MaxPhysicsDeltaTime (1/30 s) a frame, so a 10 kg
+    cube held up by exactly m g gained +1216 cm/s at 10 fps. Now it keeps the speed
+    it fell at for the whole force, which lasts 2 s of physics time."""
+
+    async def run():
+        client = session()
+        level = "/Game/SimulReview_Pace_" + uuid.uuid4().hex[:8]
+        try:
+            assert (await client.control_simulation("stop"))["state"] == "stopped"
+            made = await client._execute_json_script(
+                "import unreal, json\nprint(json.dumps({'new': bool(unreal.get_editor_subsystem("
+                f"unreal.LevelEditorSubsystem).new_level({level!r}))}}))"
+            )
+            assert made == {"new": True}, made
+            cube = (await client.spawn_actor("/Engine/BasicShapes/Cube.Cube", (0, 0, 50000)))["actor_path"]
+            assert (await client.enable_physics(cube))["physics_mode"] == "simulated"
+            await client.set_physics_params(cube, mass=10, linear_damping=0, angular_damping=0, enable_gravity=True)
+            assert (await client.control_simulation("start"))["state"] == "playing"
+            await client._execute_json_script("args = {'fps': 10}\n" + _MAX_FPS)
+            await asyncio.sleep(0.5)
+
+            async def vz():
+                state = await client.get_physics_state([cube])
+                return state["sim_time"], state["bodies"][0]["linear_velocity"][2]
+
+            pushed = await client.apply_force(cube, force_z=10 * 980.0, duration=2.0)
+            assert pushed["physics_step_limit_s"] == pytest.approx(1 / 30, rel=1e-4), pushed
+            held = [await vz()]
+            for _ in range(4):
+                await asyncio.sleep(1.0)
+                held.append(await vz())
+            # Within the force (6 s of game time at 10 fps), the speed does not change.
+            speeds = [speed for _, speed in held]
+            assert max(speeds) - min(speeds) <= 980.0 / 30 + 1e-3, held
+        finally:
+            await client._execute_json_script("args = {'fps': 0}\n" + _MAX_FPS)
             await client.control_simulation("stop")
             await client.close()
 
@@ -818,6 +880,73 @@ def test_material_layer_parameters_are_reported_per_layer_and_refused_by_set_in_
         finally:
             await client.control_simulation("stop")
             await client._execute_python(f"import unreal\nunreal.EditorAssetLibrary.delete_directory({folder!r})")
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_scene_graph_listing_pages_and_components_read_the_level():
+    """The scene graph read the Asset Registry and found no level actors, and
+    the listings had no paging; both now read the editor world's attachment
+    hierarchy, one page at a time."""
+
+    async def run():
+        client = session()
+        tag = "simul_graph_" + uuid.uuid4().hex[:8]
+        made = await client._execute_json_script(f"""
+import unreal, json
+sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+cube = unreal.load_asset('/Engine/BasicShapes/Cube')
+paths = []
+for i in range(3):
+    actor = sub.spawn_actor_from_object(cube, unreal.Vector(5000 + i * 200, 5000, 100))
+    actor.set_actor_label({tag!r} + '_' + str(i))
+    actor.set_editor_property('tags', [unreal.Name({tag!r})])
+    if paths:
+        actor.attach_to_actor(unreal.load_object(None, paths[-1]), unreal.Name('None'),
+                              unreal.AttachmentRule.KEEP_WORLD, unreal.AttachmentRule.KEEP_WORLD,
+                              unreal.AttachmentRule.KEEP_WORLD, False)
+    paths.append(actor.get_path_name())
+light = sub.spawn_actor_from_class(unreal.PointLight, unreal.Vector(5000, 5400, 300))
+light.set_actor_label({tag!r} + '_light')
+light.set_editor_property('tags', [unreal.Name({tag!r})])
+paths.append(light.get_path_name())
+print(json.dumps({{'paths': paths}}))
+""")
+        assert not made.get("error"), made
+        top, middle, leaf, light = made["paths"]
+        try:
+            graph = await client.query_scene_graph(root_path=top, include_components=True)
+            assert not graph.get("error"), graph
+            assert graph["root"]["path"] == top
+            assert [child["path"] for child in graph["root"]["children"]] == [middle]
+            assert graph["root"]["children"][0]["children"][0]["path"] == leaf
+            assert (graph["total_actors"], graph["total_depth"]) == (2, 2)
+            assert graph["root"]["children"][0]["components"][0]["is_root"] is True
+            shallow = await client.query_scene_graph(root_path=top, max_depth=1)
+            assert shallow["root"]["children"][0]["children_truncated"] is True
+            level = await client.query_scene_graph(class_filter="StaticMeshActor", max_results=5000)
+            assert level["total_actors"] >= 3 and level["root"]["class_name"] == "World"
+            first = await client.get_actor_by_semantic_label(tag, max_results=2)
+            assert (first["count"], first["total_matches"], first["next_offset"]) == (2, 4, 2), first
+            rest = await client.get_actor_by_semantic_label(tag, max_results=2, offset=2)
+            assert [a["path"] for a in first["actors"] + rest["actors"]] == made["paths"]
+            listing = await client.list_actors(label_filter=tag, class_filter="Light", include_subclasses=True)
+            assert [a["path"] for a in listing["actors"]] == [light]
+            listing = await client.list_actors(label_filter=tag + "_1")
+            entry = listing["actors"][0]
+            assert (entry["parent"], entry["children"], entry["child_count"]) == (top, [leaf], 1)
+            info = await client.get_actor_info(leaf)
+            assert (info["parent"], info["child_count"]) == (middle, 0)
+            components = await client.list_actor_components(light)
+            assert components["total"] >= 1 and components["components"][0]["mobility"] in (
+                "Static", "Stationary", "Movable",
+            )
+            primitives = await client.list_actor_components(top, class_filter="PrimitiveComponent")
+            assert primitives["components"][0]["bounds"]["extent"] == pytest.approx([50, 50, 50], abs=1e-3)
+        finally:
+            for path in reversed(made["paths"]):
+                await destroy_actor(client, path)
             await client.close()
 
     asyncio.run(run())

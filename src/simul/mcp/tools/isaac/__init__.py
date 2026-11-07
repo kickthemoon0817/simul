@@ -5,7 +5,7 @@ The public class and every name below are re-exported by
 """
 
 from ._base import IsaacScriptBase
-from ._shared import (
+from ._shared import (  # noqa: F401 - re-exported through simul.mcp.tools.isaac_tools
     BULK_GEOMETRY_ATTRIBUTES,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
@@ -22,6 +22,7 @@ from .core import CoreToolsMixin
 from .diagnostics import DiagnosticsMixin
 from .exploration import ExplorationMixin
 from .graph import OmniGraphMixin
+from .joints import JointsMixin
 from .materials import MaterialsMixin
 from .physics import PhysicsMixin
 from .prims import PrimEditMixin
@@ -40,6 +41,7 @@ class IsaacTools(
     CameraMixin,
     PrimEditMixin,
     PhysicsMixin,
+    JointsMixin,
     SimulationMixin,
     MaterialsMixin,
     StageAssetMixin,

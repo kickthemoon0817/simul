@@ -29,9 +29,11 @@ from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
 from ._unreal_errors import (
+    CAMERA_NOT_APPLIED,
     CONNECTION_ERROR,
     NOT_FOUND_ERROR,
     TIMEOUT_ERROR,
+    VALIDATION_ERROR,
     UnrealConnectionError,
     UnrealError,
     UnrealTimeoutError,
@@ -42,18 +44,26 @@ from ._unreal_errors import (
 )
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_scripts import (
+    ACTOR_COMPONENTS,
+    ACTOR_EXISTS,
     ACTOR_HELPERS,
+    ACTOR_INFO,
     ADD_COMPONENT,
     APPLY_FORCE,
+    ASSIGN_MATERIAL,
     BULK_PHYSICS,
     CREATE_MATERIAL_INSTANCE,
+    DELETE_ACTOR,
     EDITOR_WORLD,
     ENABLE_PHYSICS,
     ENGINE_METADATA,
     FIND_ACTORS_BY_TAG,
     FOCUS_ACTOR,
     INCOMPATIBLE_BODY,
+    INFO_CHILDREN,
     INTERCHANGE_INFO,
+    LIST_ACTORS,
+    LISTED_CHILDREN,
     LOADED_MAP,
     MATERIAL_INFO,
     NOT_IN_SIMULATION,
@@ -61,15 +71,18 @@ from ._unreal_scripts import (
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
+    SCENE_GRAPH,
     SCENE_SUMMARY,
     SET_ACTOR_PARENT,
     SET_ACTOR_TRANSFORM,
+    SET_ACTOR_VISIBILITY,
     SET_COLLISION,
     SET_LIGHT_PARAMS,
     SET_MATERIAL_PARAMS,
     SET_PHYSICS_PARAMS,
     SIMULATION_ACTORS,
     SIMULATION_NOT_RUNNING,
+    SIMULATION_START_HINT,
     SIMULATION_STATUS,
     SPAWN_ACTOR,
     USD_EXPORT,
@@ -121,6 +134,25 @@ PHYSICS_MAX_MASS_KG = 1e9
 #: within one 120 Hz step, as it would with any larger damping.
 PHYSICS_MAX_DAMPING = 1e6
 
+#: Most assets ``search_assets`` returns per call. Remote Control's asset
+#: search sizes its result array to the limit it is sent, so a negative limit
+#: crashed the editor ("Trying to resize TArray to an invalid size of
+#: 4294967295", UE 5.7.4).
+MAX_ASSET_SEARCH_RESULTS = 1000
+
+#: The content root of the project. Assets elsewhere (``/Engine``, a plugin's
+#: mount point) are shared by every project using that engine or plugin, so the
+#: material tools write there only when told to (``allow_engine_content``).
+PROJECT_CONTENT_ROOT = "/Game"
+
+#: Where ``create_material_instance`` files an instance of a parent outside
+#: ``/Game`` when no ``save_path`` is given.
+DEFAULT_MATERIAL_FOLDER = "/Game/Materials"
+
+# Characters Unreal does not allow in a folder name (INVALID_LONGPACKAGE_CHARACTERS,
+# UE 5.7); an object name's are _INVALID_OBJECT_NAME_CHARACTERS, below.
+_INVALID_FOLDER_CHARACTERS = frozenset("\\:*?\"<>|' ,.&!~\n\r\t@#")
+
 #: Most actors ``setup_physics_bulk`` sets up in one call, and how many of the
 #: configured and failed actors its reply lists (it counts them all).
 PHYSICS_BULK_MAX_ACTORS = 1000
@@ -147,6 +179,50 @@ FORCE_MAX_DURATION_S = 600.0
 #: ``get_physics_state`` worlds and its most bodies per call.
 PHYSICS_STATE_WORLDS: Tuple[str, ...] = ("auto", "simulation", "editor")
 PHYSICS_STATE_MAX_RESULTS = 1000
+
+
+class ArgumentError(UnrealError, ValueError):
+    """A physics, simulation or light tool argument out of range, refused before anything is sent.
+
+    The envelope reports it as a ``ValidationError`` whose ``details.code``
+    names the problem, with the parameter, the value and the range in
+    ``details``; it is still a ``ValueError`` to ``except`` clauses.
+    """
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message, VALIDATION_ERROR, details={"code": code, **details})
+
+
+def _check_page_args(offset: int, max_results: int, most: int) -> None:
+    """Refuse a page size or offset out of range with an ArgumentError."""
+    if not 1 <= max_results <= most:
+        raise ArgumentError(
+            f"max_results must be from 1 to {most}, got {max_results}",
+            "OUT_OF_RANGE",
+            parameter="max_results",
+            value=max_results,
+            minimum=1,
+            maximum=most,
+        )
+    if offset < 0:
+        raise ArgumentError(
+            f"offset must be 0 or more, got {offset}", "OUT_OF_RANGE", parameter="offset", value=offset, minimum=0
+        )
+
+
+def _check_range(name: str, value: float, low: float, high: float, unit: str = "") -> float:
+    """``value`` as a float when it is finite and within [low, high], else an ArgumentError."""
+    if not (math.isfinite(value) and low <= value <= high):
+        raise ArgumentError(
+            f"{name} must be from {low:g} to {high:g}{unit}, got {value!r}",
+            "OUT_OF_RANGE",
+            parameter=name,
+            value=value if math.isfinite(value) else str(value),
+            minimum=low,
+            maximum=high,
+        )
+    return float(value)
+
 
 # UE's FMD5 hex output is lowercase. Accept either case from configured
 # input and normalize. Anything that isn't a clean 32-char hex digest is
@@ -217,18 +293,15 @@ def _physics_values(
     """The body parameters given, checked against Unreal's ranges.
 
     Raises:
-        ValueError: A value is not finite or out of its range.
+        ArgumentError: A value is not finite or out of its range (a
+            ValidationError with ``details.code`` OUT_OF_RANGE).
     """
     values: Dict[str, Any] = {}
     if mass is not None:
-        if not (math.isfinite(mass) and PHYSICS_MIN_MASS_KG <= mass <= PHYSICS_MAX_MASS_KG):
-            raise ValueError(f"mass must be from {PHYSICS_MIN_MASS_KG:g} to {PHYSICS_MAX_MASS_KG:g} kg, got {mass!r}")
-        values["mass"] = float(mass)
+        values["mass"] = _check_range("mass", mass, PHYSICS_MIN_MASS_KG, PHYSICS_MAX_MASS_KG, " kg")
     for name, value in (("linear_damping", linear_damping), ("angular_damping", angular_damping)):
         if value is not None:
-            if not (math.isfinite(value) and 0.0 <= value <= PHYSICS_MAX_DAMPING):
-                raise ValueError(f"{name} must be from 0 to {PHYSICS_MAX_DAMPING:g}, got {value!r}")
-            values[name] = float(value)
+            values[name] = _check_range(name, value, 0.0, PHYSICS_MAX_DAMPING)
     if enable_gravity is not None:
         values["enable_gravity"] = bool(enable_gravity)
     return values
@@ -275,6 +348,11 @@ logger = get_logger(__name__)
 # above this the caller gets the path on the editor host instead. Kept local to
 # the adapter so this layer does not depend on the MCP layer.
 MAX_INLINE_CAPTURE_BYTES = 262_144
+#: Characters of JSON a page of a scene read's entries may take. The MCP layer
+#: trims any result above 40,000 characters (``mcp.result_budget``), so a page
+#: stops here and leaves room for the rest of the reply; a page that fits needs
+#: no trim, and its count and next offset stay exact.
+PAGE_BUDGET_BYTES = 30_000
 # Editor-relative screenshot directories HighResShot writes into, per platform.
 _SCREENSHOT_SUBDIRS = ("MacEditor", "WindowsEditor", "LinuxEditor", "Mac", "Windows", "Linux")
 # Interval between screenshot polls; each poll is one cheap Remote Control call.
@@ -388,6 +466,60 @@ def focus_view_error(fov: float, aspect_ratio: float) -> Optional[str]:
         return (
             f"aspect_ratio must be a width / height from 1/{FOCUS_MAX_ASPECT_RATIO:g} to "
             f"{FOCUS_MAX_ASPECT_RATIO:g}, not {aspect_ratio}"
+        )
+    return None
+
+
+#: Farthest the level viewport camera goes from the origin along each axis, in
+#: cm: Unreal clamps a location beyond it to it (UE_LARGE_HALF_WORLD_MAX, 2^42,
+#: about 44,000 km; UE 5.7.4).
+CAMERA_LOCATION_LIMIT = 4398046511104.0
+
+#: Steepest pitch the level viewport camera takes, in degrees: Unreal clamps a
+#: steeper one to just under it (95 reads back as 89.9999; UE 5.7.4).
+CAMERA_PITCH_LIMIT = 90.0
+
+
+def camera_view_error(
+    location: Optional[Sequence[float]], rotation: Optional[Sequence[float]]
+) -> Optional[str]:
+    """Why ``set_camera_view`` cannot place the camera there, or None.
+
+    Args:
+        location: Camera position (X, Y, Z) in cm, or None.
+        rotation: Camera rotation (Pitch, Yaw, Roll) in degrees, or None.
+    """
+    for name, value, axes in (("location", location, "x, y, z"), ("rotation", rotation, "pitch, yaw, roll")):
+        if value is not None:
+            try:
+                _vector3(name, value, axes)
+            except ValueError as exc:
+                return str(exc)
+    if location is not None and any(abs(v) > CAMERA_LOCATION_LIMIT for v in location):
+        return (
+            f"location components must be within {CAMERA_LOCATION_LIMIT:.0f} cm of the origin (2^42, the "
+            f"farthest Unreal moves the viewport camera), not {list(location)}"
+        )
+    if rotation is not None and abs(rotation[0]) > CAMERA_PITCH_LIMIT:
+        return (
+            f"pitch must be from -{CAMERA_PITCH_LIMIT:g} to {CAMERA_PITCH_LIMIT:g} degrees, the steepest the "
+            f"viewport camera looks, not {rotation[0]}"
+        )
+    return None
+
+
+#: ``set_actor_visibility`` scopes: which of an actor's hidden flags it sets.
+VISIBILITY_SCOPES = ("all", "editor", "game")
+
+
+def visibility_request_error(scope: str, persistent: bool) -> Optional[str]:
+    """Why ``set_actor_visibility`` cannot take this scope and persistence, or None."""
+    if scope not in VISIBILITY_SCOPES:
+        return f"scope must be one of {list(VISIBILITY_SCOPES)}, not {scope!r}"
+    if persistent and scope == "game":
+        return (
+            "persistent applies to the editor's hiding (scope 'editor' or 'all'); "
+            "hidden in game is always saved with the level"
         )
     return None
 
@@ -719,6 +851,22 @@ def _object_name_error(name: str, value: str) -> Optional[str]:
     return None
 
 
+def _actor_label_error(label: str) -> Optional[str]:
+    """Why Unreal would not take ``label`` as an actor label, or None.
+
+    ``SetActorLabel`` trims surrounding whitespace and drops a label of 1024
+    characters or more, or one that reads "None", without a word (UE 5.7.4):
+    a 2000-character label was reported as applied.
+    """
+    if label != label.strip():
+        return f"label {label[:80]!r} has leading or trailing whitespace, which Unreal trims"
+    if len(label) > _MAX_OBJECT_NAME_LENGTH:
+        return f"label is {len(label)} characters long; Unreal keeps at most {_MAX_OBJECT_NAME_LENGTH}"
+    if label.lower() == "none":
+        return "label cannot be 'None', which Unreal reserves for no name"
+    return None
+
+
 def _rotator_quaternion(rotation: Sequence[float]) -> Tuple[float, float, float, float]:
     """Quaternion (x, y, z, w) of a [pitch, yaw, roll] rotator in degrees.
 
@@ -838,6 +986,55 @@ def _material_parameter_values(
     if not values and not problems:
         problems.append("No parameters given: pass at least one scalar, vector or texture parameter")
     return values, refused, problems
+
+
+def _content_folder_problem(folder: str) -> Optional[str]:
+    """Why ``folder`` is not a content folder path Unreal can create, or None.
+
+    A folder is ``/<root>/<name>/...``: absolute, each name non-empty and free
+    of the characters Unreal refuses in a package path. ``.`` and ``..`` are
+    refused rather than resolved: Unreal does not resolve them either, and
+    sanitized ``/Game/../Engine`` into a folder named ``__`` under ``/Game``.
+
+    Args:
+        folder: The folder path, without a trailing slash.
+
+    Returns:
+        The problem, or None for a usable folder.
+    """
+    if not folder.startswith("/"):
+        return f"{folder!r} is not a content folder path such as /Game/Materials"
+    names = folder[1:].split("/")
+    for name in names:
+        if name in ("", ".", ".."):
+            return f"{folder!r} has an empty, '.' or '..' folder name; Unreal does not resolve them"
+        bad = sorted(set(name) & _INVALID_FOLDER_CHARACTERS)
+        if bad:
+            return f"{folder!r} has characters Unreal does not allow in a folder name: {''.join(bad)!r}"
+    return None
+
+
+def _in_project_content(path: str) -> bool:
+    """Whether a content path is under ``/Game``, the project's own content."""
+    return path == PROJECT_CONTENT_ROOT or path.startswith(PROJECT_CONTENT_ROOT + "/")
+
+
+def _outside_project_refusal(path: str, action: str, hint: str) -> Dict[str, Any]:
+    """The SandboxError envelope of a write to content outside ``/Game``."""
+    return {
+        "success": False,
+        "error_type": "SandboxError",
+        "error": (
+            f"Refused to {action} {path}: it is engine or plugin content, outside the project's "
+            f"{PROJECT_CONTENT_ROOT} folder, and every project using that engine or plugin shares it"
+        ),
+        "details": {"content_path": path, "allowed_root": PROJECT_CONTENT_ROOT, "hint": hint},
+    }
+
+
+def _sanitized_object_name(name: str) -> str:
+    """``name`` as Unreal names an asset after it (ObjectTools::SanitizeObjectName)."""
+    return "".join("_" if char in _INVALID_OBJECT_NAME_CHARACTERS else char for char in name)
 
 
 class UnrealRuntimeSession(LoggerMixin):
@@ -1524,6 +1721,7 @@ class UnrealRuntimeSession(LoggerMixin):
         object_path: str,
         function_name: str,
         parameters: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Call a UObject function via ``PUT /remote/object/call``.
@@ -1532,6 +1730,7 @@ class UnrealRuntimeSession(LoggerMixin):
             object_path: Full UObject path (actor, CDO, subsystem).
             function_name: Blueprint-visible function name.
             parameters: Optional function parameters.
+            timeout: Seconds to wait for the answer; None waits ``unreal.timeout``.
 
         Returns:
             Parsed JSON response dictionary.
@@ -1542,12 +1741,13 @@ class UnrealRuntimeSession(LoggerMixin):
         }
         if parameters:
             body["parameters"] = parameters
-        return await self._http_put("/remote/object/call", body)
+        return await self._http_put("/remote/object/call", body, timeout_override=timeout)
 
     async def _execute_python(
         self,
         code: str,
         mode: str = "ExecuteFile",
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Execute Python code inside UE5 via ``PythonScriptLibrary``.
@@ -1557,19 +1757,16 @@ class UnrealRuntimeSession(LoggerMixin):
             mode: ``EvaluateStatement`` (single expression, returns value),
                   ``ExecuteFile`` (multi-line, captures print/log),
                   ``ExecuteStatement`` (single statement).
+            timeout: Seconds to wait for the script; None waits ``unreal.timeout``.
 
         Returns:
             Dictionary with ``CommandResult``, ``LogOutput``, ``ReturnValue``.
         """
-        return await self._call_function(
-            "/Script/PythonScriptPlugin.Default__PythonScriptLibrary",
-            "ExecutePythonCommandEx",
-            {
-                "PythonCommand": code,
-                "ExecutionMode": mode,
-                "FileExecutionScope": "Public",
-            },
-        )
+        parameters = {"PythonCommand": code, "ExecutionMode": mode, "FileExecutionScope": "Public"}
+        library = "/Script/PythonScriptPlugin.Default__PythonScriptLibrary"
+        if timeout is None:
+            return await self._call_function(library, "ExecutePythonCommandEx", parameters)
+        return await self._call_function(library, "ExecutePythonCommandEx", parameters, timeout=timeout)
 
     async def _execute_json_script(
         self,
@@ -1577,6 +1774,7 @@ class UnrealRuntimeSession(LoggerMixin):
         *,
         failure_log_level: int = logging.ERROR,
         expected_errors: Sequence[str] = (),
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Run a fixed tool script and preserve failures as error envelopes.
 
@@ -1595,8 +1793,10 @@ class UnrealRuntimeSession(LoggerMixin):
                 either way.
             expected_errors: Further ``error_type`` values the script reports
                 for a request it refused as asked.
+            timeout: Seconds to wait for the script; None waits ``unreal.timeout``.
         """
-        result = self._parse_python_json(await self._execute_python(code))
+        raw = await (self._execute_python(code) if timeout is None else self._execute_python(code, timeout=timeout))
+        result = self._parse_python_json(raw)
         not_found = script_not_found(str(result.get("error") or ""))
         if not_found is not None:
             self.logger.info("Unreal refused the request (%s): %s", NOT_FOUND_ERROR, not_found)
@@ -1911,55 +2111,166 @@ class UnrealRuntimeSession(LoggerMixin):
     # Phase 1 session methods — Scene Read Operations
     # ------------------------------------------------------------------
 
+    async def _paged_read(
+        self,
+        script: str,
+        args: Dict[str, Any],
+        noun: str,
+        total_key: str,
+        *,
+        expected_errors: Sequence[str] = (),
+    ) -> Dict[str, Any]:
+        """Run a paged scene read and say how to get the rest.
+
+        The editor script renders one page (``_unreal_scripts.page``) and
+        reports where it ended; this adds ``truncated`` and, when more is
+        left, a ``hint`` naming the offset of the next page.
+
+        Args:
+            script: The editor script, run after ``args``.
+            args: The script's arguments; ``budget`` is set here.
+            noun: What the page lists, plural, for the hint.
+            total_key: The result's key for every match.
+            expected_errors: ``error_type`` values the script reports for a
+                request it refused as asked (``_execute_json_script``).
+
+        Returns:
+            The script's result with ``truncated`` and ``hint``, or its error.
+        """
+        args = {**args, "budget": PAGE_BUDGET_BYTES}
+        result = await self._execute_json_script(f"args = {args!r}\n" + script, expected_errors=expected_errors)
+        if result.get("error"):
+            return result
+        ended = result.pop("page_ended_by", None)
+        next_offset = result.get("next_offset")
+        result["truncated"] = next_offset is not None
+        if next_offset is not None:
+            stop = (
+                f"the page reached the {PAGE_BUDGET_BYTES}-character response budget before max_results"
+                if ended == "response_budget"
+                else "the page reached max_results"
+            )
+            result["hint"] = (
+                f"Returned {result.get('count')} of {result.get(total_key)} {noun} from offset "
+                f"{result.get('offset')}; {stop}. Call again with offset={next_offset} for the next page."
+            )
+        return result
+
+    @staticmethod
+    def _check_page(offset: int, max_results: int) -> None:
+        """Refuse an offset or page size out of range before anything is sent."""
+        if not 1 <= max_results <= 5000:
+            raise ValueError("max_results must be between 1 and 5000")
+        if offset < 0:
+            raise ValueError("offset must be 0 or more")
+
     async def list_actors(
         self,
         class_filter: Optional[str] = None,
         tag_filter: Optional[str] = None,
         max_results: int = 200,
+        offset: int = 0,
+        label_filter: Optional[str] = None,
+        include_subclasses: bool = False,
     ) -> Dict[str, Any]:
-        """List actors with actual world transforms, class names and actor tags.
+        """List level actors, one page at a time, with world transforms, tags and attachment.
+
+        Every level actor that passes the filters is counted in ``total``; the
+        page holds those from ``offset`` on, up to ``max_results``, and stops
+        early rather than exceed the response budget, so ``count`` is what
+        came back and ``next_offset`` is where the next page starts. Each
+        entry has the actor's attachment parent and children (the first 20,
+        with ``child_count``).
 
         While Play In Editor runs, Unreal's editor lists no level actors, so
         the editor world is read directly (``_unreal_scripts.EDITOR_WORLD``'s
         ``level_actors``) and ``pie_active`` is True: the same actors, as
         they are in the editor rather than in the running game, and possibly
         the builder brush and helper actors the Outliner hides.
-        """
-        if not 1 <= max_results <= 5000:
-            raise ValueError("max_results must be between 1 and 5000")
-        code = ACTOR_HELPERS + EDITOR_WORLD + f"""
-class_filter = {class_filter!r}
-tag_filter = {tag_filter!r}
-actors = []
-truncated = False
-for actor in level_actors():
-    cls = actor.get_class()
-    if class_filter and class_filter not in (cls.get_name(), cls.get_path_name()):
-        continue
-    if tag_filter and not actor.actor_has_tag(tag_filter):
-        continue
-    if len(actors) == {max_results!r}:
-        truncated = True
-        break
-    actors.append(actor_info(actor))
-print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncated,
-                  "pie_active": pie_active()}}))
-"""
-        return await self._execute_json_script(code)
 
-    async def get_actor_info(self, actor_path: str) -> Dict[str, Any]:
-        """Read an actor's world transform, components, tags and visibility, and ``pie_active``.
+        Args:
+            class_filter: Keep actors whose class has this name
+                (StaticMeshActor, BP_Door_C) or path
+                (/Script/Engine.StaticMeshActor); None keeps every class.
+            tag_filter: Keep actors with this actor tag (case-insensitive, as
+                Unreal compares tags); None keeps every actor.
+            max_results: Most actors in the page, 1 to 5000.
+            offset: Matching actors to skip before the page starts.
+            label_filter: Keep actors whose label contains this text,
+                ignoring case; None keeps every actor.
+            include_subclasses: Also keep actors whose class derives from
+                class_filter's (class_filter Light keeps PointLight and a
+                Blueprint derived from it).
 
         Returns:
-            The actor's info. A not-found error naming the path when it names
-            no live actor of the level open in the editor: nothing there, an
-            actor already deleted, or one of a map that is not open, which
-            is never loaded (``_unreal_scripts.ACTOR_HELPERS``' ``actor_at``).
+            ``actors``, ``count``, ``total``, ``offset``, ``next_offset``,
+            ``truncated``, ``hint`` (when more are left), ``warnings`` and
+            ``pie_active``; or a ScriptError envelope.
         """
-        return await self._execute_json_script(
-            ACTOR_HELPERS
-            + f"\nprint(json.dumps(dict(actor_info(actor_at({actor_path!r})), pie_active=pie_active())))"
-        )
+        self._check_page(offset, max_results)
+        args = {
+            "class_filter": class_filter or None,
+            "include_subclasses": bool(include_subclasses),
+            "tag_filter": tag_filter or None,
+            "label_filter": label_filter or None,
+            "offset": offset,
+            "max_results": max_results,
+            "listed_children": LISTED_CHILDREN,
+        }
+        return await self._paged_read(LIST_ACTORS, args, "actors", "total")
+
+    async def get_actor_info(self, actor_path: str) -> Dict[str, Any]:
+        """Read an actor's world transform, components, tags, visibility and attachment.
+
+        Returns:
+            ``actor_info``'s fields, the attachment ``parent`` (the actor the
+            root component is attached to, or None), ``children`` (the first
+            200 actors attached to it) and ``child_count``, and ``pie_active``.
+            A not-found error naming the path when it names no live actor of
+            the level open in the editor: nothing there, an actor already
+            deleted, or one of a map that is not open, which is never loaded
+            (``_unreal_scripts.ACTOR_HELPERS``' ``actor_at``).
+        """
+        args = {"actor_path": actor_path, "listed_children": INFO_CHILDREN}
+        return await self._execute_json_script(f"args = {args!r}\n" + ACTOR_INFO)
+
+    async def list_actor_components(
+        self,
+        actor_path: str,
+        class_filter: Optional[str] = None,
+        offset: int = 0,
+        max_results: int = 200,
+    ) -> Dict[str, Any]:
+        """List an actor's components, one page at a time.
+
+        Every component is listed, editor-only ones (sprites, arrows)
+        included, with its class, whether it is the root and editor-only;
+        scene components add the component they are attached to (its name,
+        or its path when it belongs to another actor), world location,
+        mobility and visibility, and primitive components their world bounds
+        (box center and half-size, and bounding sphere radius, in cm).
+
+        Args:
+            actor_path: Full object path of the actor.
+            class_filter: Keep components whose class has this name or path or
+                derives from it (PrimitiveComponent keeps every mesh, shape
+                and sprite); None keeps every component.
+            offset: Components to skip before the page starts.
+            max_results: Most components in the page, 1 to 5000.
+
+        Returns:
+            ``actor_path``, ``components``, ``count``, ``total``, ``offset``,
+            ``next_offset``, ``truncated``, ``hint``, ``warnings`` and
+            ``pie_active``; or a ScriptError envelope (no such actor).
+        """
+        self._check_page(offset, max_results)
+        args = {
+            "actor_path": actor_path,
+            "class_filter": class_filter or None,
+            "offset": offset,
+            "max_results": max_results,
+        }
+        return await self._paged_read(ACTOR_COMPONENTS, args, "components", "total")
 
     async def search_assets(
         self,
@@ -1975,11 +2286,25 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
             query: Search query string.
             class_names: Filter by UClass names.
             package_paths: Package path prefixes to search within.
-            max_results: Maximum number of results.
+            max_results: Maximum number of results, from 1 to
+                ``MAX_ASSET_SEARCH_RESULTS`` (1000).
 
         Returns:
-            Dictionary with ``assets`` list, ``count``, ``truncated``.
+            Dictionary with ``assets`` list, ``count``, ``truncated``, or a
+            ``ValidationError`` envelope, sent to no editor, when
+            ``max_results`` is out of range: Remote Control sizes its result
+            array to the limit, and -1 crashed the editor.
         """
+        if (
+            isinstance(max_results, bool)
+            or not isinstance(max_results, int)
+            or not 1 <= max_results <= MAX_ASSET_SEARCH_RESULTS
+        ):
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": f"max_results must be an integer from 1 to {MAX_ASSET_SEARCH_RESULTS}, got {max_results!r}",
+            }
         body: Dict[str, Any] = {
             "Query": query,
             "Limit": max_results,
@@ -2377,40 +2702,44 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
     async def set_camera_view(
         self,
-        location: Optional[tuple] = None,
-        rotation: Optional[tuple] = None,
+        location: Optional[Sequence[float]] = None,
+        rotation: Optional[Sequence[float]] = None,
     ) -> Dict[str, Any]:
         """
-        Set the editor viewport camera position and rotation.
+        Set the editor viewport camera position and rotation, and read it back.
 
         Field of view is not settable: Remote Control exposes no setter for
-        the level viewport's FOV.
+        the level viewport's FOV. Unreal clamps what it does not take without
+        a word, and the reply used to echo the request (a pitch of 95 read
+        back as 89.9999, an X of 1e300 as 4.4e12; UE 5.7.4), so the ranges are
+        checked first and the reply is the camera read back afterwards.
 
         Args:
-            location: Camera position (X, Y, Z) in cm; None leaves it unchanged.
-            rotation: Camera rotation (Pitch, Yaw, Roll) in degrees; None
-                leaves it unchanged.
+            location: Camera position (X, Y, Z) in cm, each within
+                CAMERA_LOCATION_LIMIT of the origin; None leaves it unchanged.
+            rotation: Camera rotation (Pitch, Yaw, Roll) in degrees, pitch from
+                -90 to 90; None leaves it unchanged.
 
         Returns:
-            Dictionary with the applied location and rotation; a field that
-            was not set is None.
+            Dictionary with the location and rotation read back from the
+            viewport camera (also when both were left unchanged). A
+            ``ValidationError`` envelope for a value out of range, before the
+            camera moves; ``ViewportUnavailable`` when the camera cannot be
+            read; ``CameraNotApplied``, with the read-back values and
+            ``details.expected`` / ``details.actual``, when the camera reads
+            back other than what was set.
         """
+        problem = camera_view_error(location, rotation)
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
         # SetLevelViewportCameraInfo takes both location and rotation, and
         # Remote Control zero-fills an omitted one; resend the current value
         # for whichever the caller left unset.
         params: Dict[str, Any] = {}
         if location is not None:
-            params["CameraLocation"] = {
-                "X": location[0],
-                "Y": location[1],
-                "Z": location[2],
-            }
+            params["CameraLocation"] = dict(zip(("X", "Y", "Z"), (float(v) for v in location)))
         if rotation is not None:
-            params["CameraRotation"] = {
-                "Pitch": rotation[0],
-                "Yaw": rotation[1],
-                "Roll": rotation[2],
-            }
+            params["CameraRotation"] = dict(zip(("Pitch", "Yaw", "Roll"), (float(v) for v in rotation)))
         if len(params) == 1:
             current = await self._call_function(
                 "/Script/UnrealEd.Default__UnrealEditorSubsystem",
@@ -2433,10 +2762,33 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 params,
             )
 
-        return {
-            "location": tuple(location) if location is not None else None,
-            "rotation": tuple(rotation) if rotation is not None else None,
+        info = await self.get_viewport_info()
+        if info.get("success") is False:
+            return info
+        result: Dict[str, Any] = {
+            "location": tuple(info["camera_location"]),
+            "rotation": tuple(info["camera_rotation"]),
         }
+        requested = {
+            name: wanted for name, wanted in (("location", location), ("rotation", rotation)) if wanted is not None
+        }
+        missed = [
+            name
+            for name, wanted in requested.items()
+            if not _transform_component_applied(name, [float(v) for v in wanted], result[name])
+        ]
+        if missed:
+            return {
+                **result,
+                "success": False,
+                "error": "The viewport camera reads back other than what was set: " + ", ".join(missed),
+                "error_type": CAMERA_NOT_APPLIED,
+                "details": {
+                    "expected": {name: [float(v) for v in value] for name, value in requested.items()},
+                    "actual": {name: list(result[name]) for name in requested},
+                },
+            }
+        return result
 
     async def focus_on_actor(
         self,
@@ -2600,27 +2952,48 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         is placed the way the editor places an asset dropped into the level:
         ``/Engine/BasicShapes/Cube.Cube`` becomes a StaticMeshActor showing
         the cube, a Blueprint asset its actor. Spawn and label are one
-        undoable editor transaction, run as one editor script.
+        undoable editor transaction, run as one editor script, and the label
+        is read back.
+
+        A class Unreal does not let you place is refused: its per-level
+        singletons and game-framework classes
+        (``_unreal_scripts.NOT_PLACEABLE_ACTOR_CLASSES``: a second
+        WorldSettings used to land in a saved level), the bare ``Brush`` (its
+        volumes spawn) and a Blueprint of one. So is a path into a map or an
+        actor in a level, before anything loads: loading one loads the map.
 
         Args:
             asset_path: Actor class path or asset path to spawn from.
             location: Spawn location (X, Y, Z) in cm.
             rotation: Spawn rotation (Pitch, Yaw, Roll) in degrees.
-            label: Optional actor label in the outliner.
+            label: Optional actor label in the outliner: no leading or
+                trailing whitespace, at most 1023 characters, not "None".
 
         Returns:
             Dictionary with actor_path, actor_class (the spawned actor's
             class), label, and the location and rotation read back from the
             new actor. An error envelope, never an empty actor_path, when the
             path loads nothing (``NotFoundError``) or names something Unreal
-            cannot place: a class that is not an Actor, an actor already in a
-            level, an asset no actor factory accepts (``SpawnError``); and
-            ``PIEActive`` while Play In Editor runs, when Unreal's editor
-            spawns nothing. Those are logged as refusals, not failures.
+            cannot or should not place: a class that is not an Actor or is
+            abstract, a class it does not let you place, an actor already in a
+            level, a map, an asset no actor factory accepts (``SpawnError``);
+            ``ValidationError`` for a label Unreal would not take (it trims
+            whitespace and drops the others without a word), before anything
+            spawns, and ``RenameNotApplied`` (the actor removed again) for one
+            it still does not take; and ``PIEActive`` while Play In Editor
+            runs, when Unreal's editor spawns nothing. The refusals are logged
+            as refusals, not failures.
 
         Raises:
             ValueError: location or rotation is not three finite numbers.
         """
+        problem = None
+        if not asset_path.strip():
+            problem = "asset_path must name an Actor class or an asset"
+        elif label:
+            problem = _actor_label_error(label)
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
         args = {
             "path": asset_path,
             "location": _vector3("location", location, "x, y, z"),
@@ -2629,7 +3002,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         }
         result = await self._execute_json_script(
             f"args = {args!r}\n" + SPAWN_ACTOR,
-            expected_errors=("NotFoundError", "SpawnError"),
+            expected_errors=("NotFoundError", "SpawnError", "ValidationError"),
         )
         if not result.get("error") and not result.get("actor_path"):
             return self._script_error(
@@ -2639,31 +3012,31 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
     async def delete_actor(self, actor_path: str) -> Dict[str, Any]:
         """
-        Delete an actor from the level.
+        Delete an actor from the level, in one undoable editor transaction.
 
-        Uses ``EditorActorSubsystem.DestroyActor`` via Remote Control.
+        One editor script (``_unreal_scripts.DELETE_ACTOR``) resolves the
+        path, deletes the actor through ``EditorActorSubsystem.destroy_actor``
+        and reads its validity back.
 
         Args:
-            actor_path: Full actor path to delete.
+            actor_path: Full actor path to delete, as ``list_unreal_actors``
+                reports it (not its label).
 
         Returns:
-            Dictionary with actor_path, deleted status. When Unreal destroyed
-            nothing because Play In Editor runs (DestroyActor refuses then), a
-            ``PIEActive`` error envelope instead.
+            Dictionary with actor_path and deleted (True). A ``NotFoundError``
+            envelope when the path names no live actor of the level open in
+            the editor (a label, an actor already deleted, one of another
+            map); ``ValidationError`` for an actor the editor does not let you
+            delete (the level's WorldSettings or builder brush, an actor kept
+            out of the Outliner); ``PIEActive`` while Play In Editor runs,
+            when Unreal deletes nothing; ``DeleteNotApplied`` when Unreal did
+            not delete it.
         """
-        data = await self._call_function(
-            "/Script/UnrealEd.Default__EditorActorSubsystem",
-            "DestroyActor",
-            {"ActorToDestroy": actor_path},
+        args = {"actor_path": actor_path}
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + DELETE_ACTOR,
+            expected_errors=("NotFoundError", "ValidationError"),
         )
-        deleted = bool(data.get("ReturnValue", False))
-        if not deleted and await self._pie_active():
-            return self._refused_during_pie("delete actors")
-
-        return {
-            "actor_path": actor_path,
-            "deleted": deleted,
-        }
 
     async def set_actor_transform(
         self,
@@ -2777,7 +3150,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         parameters: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Call a BlueprintCallable function on an actor.
+        Call a BlueprintCallable function on an actor, as one undo step.
+
+        The call goes through Remote Control's ``/remote/object/call`` with
+        ``generateTransaction``, which records the actor (and its root
+        component) before the function runs, so one undo reverts what the
+        function changed there. Without it the change left the undo history
+        alone, and the next undo reverted the change before it instead
+        (UE 5.7.4). A function that changes another object records only what
+        it records itself. Remote Control acts on whatever object the path
+        names, a deleted actor or one of a map loaded but not open included, so
+        an editor script first checks that the path names a live actor of the
+        level open in the editor.
 
         Args:
             actor_path: Full actor path.
@@ -2785,7 +3169,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             parameters: Parameters as JSON string.
 
         Returns:
-            Dictionary with actor_path, function_name, return_value.
+            Dictionary with actor_path, function_name, return_value. A
+            not-found error, before anything is called, when the path names
+            no live actor of the level open in the editor.
         """
         if not self.settings.security.allow_script_execution:
             return self._script_execution_denied()
@@ -2813,6 +3199,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 }
             body["parameters"] = decoded
 
+        args = {"actor_path": actor_path}
+        found = await self._execute_json_script(
+            f"args = {args!r}\n" + ACTOR_EXISTS, expected_errors=("NotFoundError",)
+        )
+        if found.get("error"):
+            return found
+        body["generateTransaction"] = True
         data = await self._http_put("/remote/object/call", body)
         return_value = json_lib.dumps(data) if data else None
 
@@ -2854,8 +3247,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             its parent and for a cycle; ``InvalidState`` for an actor without
             a root component or a Static child under a parent that is not
             Static; a not-found error for an actor or parent path that names
-            no live actor of the level open in the editor; ``EngineError``
-            when Unreal still did not attach or detach it.
+            no live actor of the level open in the editor;
+            ``AttachmentNotApplied`` when Unreal still did not attach or
+            detach it.
         """
         if bool(parent_path) == bool(detach):
             return {
@@ -2912,7 +3306,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             class that is abstract or not a component class, or a
             parent_component for a component that takes none; a not-found
             error for a class, parent component or actor that is not there;
-            ``EngineError`` when Unreal adds or names nothing.
+            ``ComponentNotApplied`` when Unreal adds nothing and
+            ``RenameNotApplied`` when it does not take the name.
         """
         problem = None
         if not component_class.strip():
@@ -2939,34 +3334,57 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_path: str,
         visible: bool = True,
         propagate: bool = True,
+        scope: str = "all",
+        persistent: bool = False,
     ) -> Dict[str, Any]:
         """
-        Set actor visibility.
+        Show or hide an actor in the editor, in the game, or both, and read it back.
 
-        Uses ``SetActorHiddenInGame`` UFUNCTION via Remote Control.
+        One editor script (``_unreal_scripts.SET_ACTOR_VISIBILITY``) writes the
+        flags ``scope`` names, on the actor and, with ``propagate``, on every
+        actor attached under it, in one undoable transaction, and reads every
+        actor's flags back. It used to set hidden-in-game alone, which the
+        level viewport and its captures ignore, through a Remote Control call
+        that took no ``propagate`` and recorded no undo step (UE 5.7.4).
 
         Args:
             actor_path: Full actor path.
             visible: Whether the actor should be visible.
-            propagate: Propagate to child components/actors.
+            propagate: Apply the same to every actor attached under it,
+                children of children included (a hidden parent hides none of
+                them).
+            scope: Which visibility to set, one of VISIBILITY_SCOPES:
+                ``editor`` (the editor's hide, as the Outliner's eye: the
+                level viewport and captures; kept for the editor session, not
+                saved), ``game`` (hidden in game, saved with the level: Play
+                In Editor and the packaged game; the viewport still draws the
+                actor outside Game View) or ``all`` (both).
+            persistent: Editor scopes only: also set Unreal's hidden at
+                editor startup flag (saved with the level, applied when it
+                loads), so the editor hiding outlasts a reload. Not while Play
+                In Editor runs.
 
         Returns:
-            Dictionary with actor_path, visible.
+            Dictionary with actor_path, visible, scope, propagate, persistent
+            and actors: each affected actor's hidden_in_editor,
+            hidden_in_editor_at_startup and hidden_in_game read back, the actor
+            first. ``VisibilityNotApplied``, with those, naming every actor
+            whose flags read back other than asked; ``ValidationError`` for an
+            unknown scope or persistent with the game scope; ``PIEActive`` for
+            persistent during PIE; a not-found error for a path that names no
+            live actor of the level open in the editor.
         """
-        body: Dict[str, Any] = {
-            "objectPath": actor_path,
-            "functionName": "SetActorHiddenInGame",
-            "parameters": {
-                "bNewHidden": not visible,
-                "bPropagateToChildren": propagate,
-            },
-        }
-        await self._http_put("/remote/object/call", body)
-
-        return {
+        problem = visibility_request_error(scope, persistent)
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
+        args = {
             "actor_path": actor_path,
-            "visible": visible,
+            "visible": bool(visible),
+            "scope": scope,
+            "propagate": bool(propagate),
+            "persistent": bool(persistent),
         }
+        return await self._execute_json_script(f"args = {args!r}\n" + SET_ACTOR_VISIBILITY)
 
     # ------------------------------------------------------------------
     # Phase 4 — Materials, Lighting & Rendering
@@ -3017,6 +3435,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         scalar_params: Optional[Dict[str, float]] = None,
         vector_params: Optional[Dict[str, list]] = None,
         texture_params: Optional[Dict[str, str]] = None,
+        allow_engine_content: bool = False,
     ) -> Dict[str, Any]:
         """
         Set parameters on a Material Instance Constant and read them back.
@@ -3032,7 +3451,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         does. A name only the material's Material Layers have is refused:
         Unreal's Python API writes parameters by name, and the global override
         it would add reads back as set while the layer stays as it was. The
-        instance is left unsaved.
+        instance is left unsaved. An instance outside ``/Game`` is refused
+        unless ``allow_engine_content`` is set: engine and plugin content is
+        shared by every project using that engine or plugin, and an edit to
+        /Engine/BasicShapes/BasicShapeMaterial_Inst left it dirty.
 
         Args:
             material_path: Material Instance asset path.
@@ -3040,6 +3462,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             vector_params: Vector parameter name to [r, g, b] or [r, g, b, a];
                 alpha defaults to 1.
             texture_params: Texture parameter name to texture asset path.
+            allow_engine_content: Also edit an instance outside the project's
+                /Game folder (engine or plugin content).
 
         Returns:
             Dictionary with material_path (the instance's object path),
@@ -3057,8 +3481,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             different after the write (not_applied names each; the values in
             applied were written and stay written, as for lights). An error
             envelope without them when the path loads nothing
-            (``NotFoundError``) or is not a Material Instance Constant
-            (``InvalidAssetType``).
+            (``NotFoundError``), is not a Material Instance Constant
+            (``InvalidAssetType``) or is outside /Game without
+            ``allow_engine_content`` (``SandboxError``).
         """
         values, refused, problems = _material_parameter_values(scalar_params, vector_params, texture_params)
         if problems:
@@ -3071,10 +3496,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "applied": {},
                 "not_applied": refused,
             }
-        args = {"path": material_path, "values": values}
+        args = {"path": material_path, "values": values, "allow_engine_content": bool(allow_engine_content)}
         return await self._execute_json_script(
             f"args = {args!r}\n" + SET_MATERIAL_PARAMS,
-            expected_errors=("NotFoundError", "InvalidAssetType", "ValidationError", "MaterialParamsNotApplied"),
+            expected_errors=(
+                "NotFoundError",
+                "InvalidAssetType",
+                "ValidationError",
+                "MaterialParamsNotApplied",
+                "SandboxError",
+            ),
         )
 
     async def create_material_instance(
@@ -3082,30 +3513,52 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         parent_path: str,
         instance_name: str,
         save_path: str = "",
+        allow_engine_content: bool = False,
     ) -> Dict[str, Any]:
         """
         Create a Material Instance Constant from a parent material.
 
         Uses ``MaterialInstanceConstantFactoryNew`` through ``AssetTools`` and
-        sets the parent, then saves the new asset.
+        sets the parent, then saves the new asset. It is written under the
+        project's /Game folder: without ``save_path``, next to a parent in
+        /Game, else in /Game/Materials. A folder outside /Game is refused
+        unless ``allow_engine_content`` is set: an instance of an /Engine
+        parent used to be saved into the shared engine install
+        (Engine/Content/BasicShapes).
 
         Args:
             parent_path: Parent material (or material instance) asset path.
             instance_name: Name for the new MIC.
-            save_path: Content-relative save directory (auto if empty).
+            save_path: Content folder to save it in, such as /Game/Materials;
+                empty picks the parent's folder when that is under /Game, else
+                /Game/Materials.
+            allow_engine_content: Also write to a folder outside /Game (engine
+                or plugin content, shared by every project using it).
 
         Returns:
-            Dictionary with instance_path, parent_path, or a ``ScriptError``
-            envelope when the parent is missing, the destination exists or
-            the asset could not be created, or a ``PIEActive`` envelope while
-            Play In Editor runs, when Unreal's EditorAssetLibrary loads,
-            finds and saves no assets.
+            Dictionary with instance_path, parent_path and class_name, or a
+            ``ScriptError`` envelope when the parent is missing, the
+            destination exists or the asset could not be created, a
+            ``PIEActive`` envelope while Play In Editor runs, when Unreal's
+            EditorAssetLibrary loads, finds and saves no assets, a
+            ``ValidationError`` envelope for a folder or name Unreal cannot
+            use and a ``SandboxError`` envelope for a folder outside /Game.
         """
         if not save_path:
-            # Derive save path from parent: /Game/Materials/M_Base -> /Game/Materials/
-            parts = parent_path.rsplit("/", 1)
-            save_path = parts[0] if len(parts) > 1 else "/Game"
+            # Next to a parent in /Game: /Game/Materials/M_Base -> /Game/Materials.
+            parent_folder = parent_path.rsplit("/", 1)[0] if "/" in parent_path else ""
+            save_path = parent_folder if _in_project_content(parent_folder) else DEFAULT_MATERIAL_FOLDER
         save_path = save_path.rstrip("/")
+        problem = _content_folder_problem(save_path) or _object_name_error("instance_name", instance_name)
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
+        if not allow_engine_content and not _in_project_content(save_path):
+            return _outside_project_refusal(
+                save_path,
+                "create a material instance in",
+                "Pass a save_path under /Game, such as /Game/Materials, or allow_engine_content=true "
+                "to write to the shared folder",
+            )
         args = {"parent": parent_path, "name": instance_name, "folder": save_path}
         code = f"args = {args!r}\n" + CREATE_MATERIAL_INSTANCE
         return await self._execute_json_script(code)
@@ -3119,8 +3572,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Assign a material to a mesh component's material slot.
 
-        Uses ``PUT /remote/object/property`` to set ``OverrideMaterials``
-        on the actor's first StaticMeshComponent.
+        Runs in one undoable editor transaction that records the component
+        first, which also marks its level (or, in a World Partition level, the
+        actor's package) dirty, so saving keeps the assignment, and reads the
+        slot back. ``MeshComponent.set_material`` alone, which the tool used
+        to call, recorded and dirtied nothing: a save kept nothing, a reload
+        reverted it and Undo did not undo it (observed on UE 5.7.4). The actor
+        must be in the level being edited; a path in another map is refused
+        without loading that map.
 
         Args:
             actor_path: Target actor path.
@@ -3128,26 +3587,25 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             slot_index: Material slot index (default 0).
 
         Returns:
-            Dictionary with actor_path, material_path, slot_index.
+            Dictionary with actor_path, component_path, material_path (the
+            assigned material's object path), slot_index and
+            previous_material_path (what the slot rendered with before). An
+            error envelope when the actor is not in the level being edited
+            (``Actor not found``), the material path names no material
+            (``NotFoundError``), the slot is out of range
+            (``ValidationError``) or the slot reads back a different material
+            (``MaterialNotApplied``).
         """
-
-        code = f"""
-material = unreal.load_asset({material_path!r})
-if material is None or not isinstance(material, unreal.MaterialInterface):
-    raise ValueError("Material not found: " + {material_path!r})
-if not 0 <= {slot_index!r} < component.get_num_materials():
-    raise ValueError("Material slot out of range")
-component.set_material({slot_index!r}, material)
-"""
-        return await self._component_operation(
-            actor_path,
-            code,
-            {
-                "actor_path": actor_path,
-                "material_path": material_path,
-                "slot_index": slot_index,
-            },
-            mesh=True,
+        if isinstance(slot_index, bool) or not isinstance(slot_index, int):
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": f"slot_index must be an integer, got {slot_index!r}",
+            }
+        args = {"actor_path": actor_path, "material_path": material_path, "slot_index": slot_index}
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + ASSIGN_MATERIAL,
+            expected_errors=("NotFoundError", "ValidationError"),
         )
 
     async def set_light_params(
@@ -3324,8 +3782,11 @@ component.set_material({slot_index!r}, material)
         Starting a session that runs resumes it if paused and otherwise leaves
         it as it is, whichever mode it runs in; the other actions leave a
         session already in their state unchanged. While either mode runs the
-        editor world refuses spawns and deletes (PIEActive), and the physics
-        tools act on and read the simulation's copies of the actors.
+        editor world refuses spawns and deletes (PIEActive);
+        ``apply_force``, ``get_physics_state`` and ``list_simulation_actors``
+        act on and read the simulation's copies of the actors, while the
+        physics and collision edits given an editor path change the editor
+        world, which the running simulation does not see.
 
         Args:
             action: start, stop, pause, resume or step (step is refused:
@@ -3335,18 +3796,31 @@ component.set_material({slot_index!r}, material)
         Returns:
             Dict with action, the resulting state (playing, paused or
             stopped) and, for start, the mode it began in (null when a
-            session already ran).
+            session already ran); or a SimulationNotRunning envelope for
+            pause or resume with no session running.
 
         Raises:
-            ValueError: An unknown action or mode.
+            ArgumentError: An unknown action or mode (a ValidationError).
         """
 
         action = action.lower().strip()
         if action not in SIMULATION_ACTIONS:
-            raise ValueError(f"Invalid PIE action: {action}; use {', '.join(SIMULATION_ACTIONS)}")
+            raise ArgumentError(
+                f"Invalid PIE action: {action}; use {', '.join(SIMULATION_ACTIONS)}",
+                "UNKNOWN_ACTION",
+                parameter="action",
+                value=action,
+                allowed=list(SIMULATION_ACTIONS),
+            )
         mode = mode.lower().strip()
         if mode not in SIMULATION_MODES:
-            raise ValueError(f"Invalid simulation mode: {mode}; use {', '.join(SIMULATION_MODES)}")
+            raise ArgumentError(
+                f"Invalid simulation mode: {mode}; use {', '.join(SIMULATION_MODES)}",
+                "UNKNOWN_MODE",
+                parameter="mode",
+                value=mode,
+                allowed=list(SIMULATION_MODES),
+            )
         if action == "step":
             return {
                 "success": False,
@@ -3359,8 +3833,9 @@ component.set_material({slot_index!r}, material)
         if action in {"pause", "resume"} and not status["is_playing"]:
             return {
                 "success": False,
-                "error_type": "InvalidState",
-                "error": "PIE is not running",
+                "error_type": SIMULATION_NOT_RUNNING,
+                "error": f"No simulation is running, so there is nothing to {action}",
+                "details": {"code": "SIMULATION_NOT_RUNNING", "hint": SIMULATION_START_HINT},
             }
         started = action == "start" and not status["is_playing"]
         if started:
@@ -3568,21 +4043,25 @@ component.set_material({slot_index!r}, material)
         (an editor or a simulation path) is mapped to its copy in the running
         simulation and the force acts there; with no simulation running the
         call is refused (``SimulationNotRunning``). The copy must simulate
-        physics (``enable_unreal_physics`` on the editor actor before the
-        simulation starts).
+        physics (``enable_physics`` on the editor actor before the simulation
+        starts).
 
         Units are Unreal's by default: a force in kg cm/s^2 (1 N is 100) and an
         impulse in kg cm/s (1 N s is 100); ``units`` "si" takes newtons and
-        newton-seconds. The application point is always a world location in
-        cm. An impulse changes the velocity at once by impulse / mass. A force
-        with ``duration`` 0 acts for one frame only, as Unreal clears a force
-        after each physics step. A positive ``duration`` keeps it on until the
-        simulation's game time has advanced that much: every frame the body
-        gets the momentum the force carries over the elapsed game time, so it
-        gets force x duration in all even when slow frames shorten Unreal's
-        physics steps. Paused time adds nothing, and the force ends early when
-        the simulation stops. Forces add up, so a second call acts with the
-        first.
+        newton-seconds. The application point is a world location in cm, fixed
+        in the world for the whole duration as the body moves; without one the
+        force pushes the center of mass. An impulse changes the velocity at
+        once by impulse / mass. A force with ``duration`` 0 acts for one
+        physics step only, as Unreal clears a force after each step. A positive
+        ``duration`` keeps it on for that many seconds of physics time: every
+        frame the body gets, as an impulse, the force's momentum over the
+        physics time that frame simulated, the frame's game time capped at the
+        physics step limit (``physics_step_limit_s``, Unreal's
+        MaxPhysicsDeltaTime, 1/30 s by default). So the force keeps pace with
+        gravity at any frame rate, and frames slower than the limit stretch it
+        in game time as they slow Unreal's physics. Paused time adds nothing,
+        and the force ends early when the simulation stops. Forces add up, so a
+        second call acts with the first.
 
         Args:
             actor_path: Full actor object path, in the editor or the
@@ -3593,12 +4072,11 @@ component.set_material({slot_index!r}, material)
             is_impulse: True for an impulse (instant change of momentum),
                 False for a force.
             location_x: Application point X in world cm (None = center of
-                mass).
+                mass), fixed in the world for the whole duration.
             location_y: Application point Y.
             location_z: Application point Z.
-            duration: Seconds of simulation time a force keeps acting, 0 to
-                FORCE_MAX_DURATION_S; 0 acts for one frame. Not for an
-                impulse.
+            duration: Seconds of physics time a force keeps acting, 0 to 600;
+                0 acts for one physics step. Not for an impulse.
             units: "unreal" (kg cm/s^2, kg cm/s) or "si" (N, N s).
 
         Returns:
@@ -3608,29 +4086,49 @@ component.set_material({slot_index!r}, material)
             (as applied), is_impulse, application ("impulse", "one_frame" or
             "continuous"), duration_s, mass_kg, expected_delta_v (cm/s: the
             change of linear velocity the impulse, or the force over its
-            duration, gives the body alone; null for one frame), sim_time,
-            ends_at_sim_time, paused and warning; or a SimulationNotRunning,
-            NotInSimulation or IncompatibleBody envelope.
+            duration, gives the body alone; null for one step),
+            physics_step_limit_s, sim_time, ends_at_sim_time (when a continuous
+            force ends if no frame is slower than the step limit), paused and
+            warning; or a SimulationNotRunning, NotFoundError, NotInSimulation
+            or IncompatibleBody envelope.
 
         Raises:
-            ValueError: Partial application coordinates, a value that is not
+            ArgumentError: Partial application coordinates, a value that is not
                 finite, an unknown unit, or a duration out of range or given
-                with an impulse.
+                with an impulse (a ValidationError with ``details.code``).
         """
 
         location = (location_x, location_y, location_z)
         if any(v is not None for v in location) and not all(v is not None for v in location):
-            raise ValueError("Provide all three force application coordinates or none")
+            raise ArgumentError(
+                "Provide all three force application coordinates or none",
+                "PARTIAL_LOCATION",
+                parameter="location",
+                value=[v for v in location],
+            )
         if units not in FORCE_UNITS:
-            raise ValueError(f"units must be one of {', '.join(FORCE_UNITS)}, got {units!r}")
+            raise ArgumentError(
+                f"units must be one of {', '.join(FORCE_UNITS)}, got {units!r}",
+                "UNKNOWN_UNITS",
+                parameter="units",
+                value=units,
+                allowed=list(FORCE_UNITS),
+            )
         given = (float(force_x), float(force_y), float(force_z))
-        values = given + tuple(float(v) for v in location if v is not None)
-        if not all(math.isfinite(v) for v in values):
-            raise ValueError("Force and location components must be finite numbers")
-        if not (math.isfinite(duration) and 0.0 <= duration <= FORCE_MAX_DURATION_S):
-            raise ValueError(f"duration must be from 0 to {FORCE_MAX_DURATION_S:g} s, got {duration!r}")
+        for name, value in zip(("force_x", "force_y", "force_z", "location_x", "location_y", "location_z"),
+                               given + location):
+            if value is not None and not math.isfinite(value):
+                raise ArgumentError(
+                    f"{name} must be a finite number, got {value!r}", "NOT_FINITE", parameter=name, value=str(value)
+                )
+        duration = _check_range("duration", duration, 0.0, FORCE_MAX_DURATION_S, " s")
         if is_impulse and duration:
-            raise ValueError("duration applies to a force; an impulse acts at once")
+            raise ArgumentError(
+                "duration applies to a force; an impulse acts at once",
+                "DURATION_WITH_IMPULSE",
+                parameter="duration",
+                value=duration,
+            )
         scale = FORCE_UNIT_SCALE[units]
         applied = [v * scale for v in given]
         args = {
@@ -3638,7 +4136,7 @@ component.set_material({slot_index!r}, material)
             "vector": applied,
             "location": None if location_x is None else [float(v) for v in location],  # type: ignore[arg-type]
             "impulse": bool(is_impulse),
-            "duration": float(duration),
+            "duration": duration,
         }
         result = await self._execute_json_script(
             f"args = {args!r}\n" + APPLY_FORCE,
@@ -3652,7 +4150,7 @@ component.set_material({slot_index!r}, material)
             "units": units,
             "force_vector_unreal": applied,
             "is_impulse": bool(is_impulse),
-            "duration_s": float(duration),
+            "duration_s": duration,
         }
 
     async def set_physics_params(
@@ -3691,7 +4189,8 @@ component.set_material({slot_index!r}, material)
             written).
 
         Raises:
-            ValueError: A value is not finite or out of its range.
+            ArgumentError: A value is not finite or out of its range (a
+                ValidationError with ``details.code`` OUT_OF_RANGE).
         """
         values = _physics_values(mass, linear_damping, angular_damping, enable_gravity)
         args = {"actor_path": actor_path, "values": values, "transaction": "simul: set physics params"}
@@ -3796,6 +4295,7 @@ component.set_material({slot_index!r}, material)
         tag_filter: Optional[str] = None,
         world: str = "auto",
         max_results: int = 100,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
         Read bodies' live physics state, in the running simulation or the editor world.
@@ -3804,41 +4304,58 @@ component.set_material({slot_index!r}, material)
         were placed (a body resting at z 49.5 read z 300 there), so by
         default (``world`` "auto") each actor is read in the running
         simulation, through its copy there, and in the editor world
-        otherwise. Editor and simulation paths are both accepted.
+        otherwise. Editor and simulation paths are both accepted, and a body
+        given by both is read once. The bodies are paged: the actors at
+        ``actor_paths`` first, then those with the tag, ``max_results`` at most
+        from ``offset``, and a page stops before 30,000 characters of bodies.
 
         Args:
             actor_paths: Actor paths, editor or simulation.
             tag_filter: Also read every actor with this actor tag in the
                 world read.
             world: "auto", "simulation" (refused when none runs) or "editor".
-            max_results: Most bodies returned, 1 to PHYSICS_STATE_MAX_RESULTS.
+            max_results: Most bodies on this page, 1 to 1000.
+            offset: Bodies to skip: the previous page's next_offset.
 
         Returns:
             Dict with world, pie_active, sim_time and paused (null for the
-            editor world), bodies, count, total, truncated and not_found (the
-            paths with no actor, or no copy in the world read). Each body has
-            name, class_name, editor_path, simulation_path, location (cm),
-            rotation (pitch, yaw, roll, degrees) and, for an actor with a root
-            or single primitive component, component_path, physics_mode,
-            linear_velocity (cm/s), angular_velocity (degrees/s), speed,
-            awake (null unless it simulates), mass_kg, center_of_mass (world
-            cm), gravity_enabled and simulate_physics. Unreal reports contacts
-            only to hit-event handlers, so none are listed.
+            editor world), bodies, count (on this page), total (every body
+            matched), offset, next_offset (null on the last page), truncated,
+            hint and not_found (the paths with no live actor, or no live copy
+            in the world read). Each body has name, class_name, editor_path,
+            simulation_path, location (cm), rotation (pitch, yaw, roll,
+            degrees) and, for an actor with a root or single primitive
+            component, component_path, physics_mode, linear_velocity (cm/s),
+            angular_velocity (degrees/s), speed, awake (null unless it
+            simulates), mass_kg, center_of_mass (world cm), gravity_enabled
+            and simulate_physics. Unreal reports contacts only to hit-event
+            handlers, so none are listed.
 
         Raises:
-            ValueError: Neither paths nor a tag, an unknown world, or
-                max_results out of range.
+            ArgumentError: Neither paths nor a tag, an unknown world, or
+                max_results or offset out of range (a ValidationError).
         """
         paths = [path for path in (actor_paths or []) if path]
         if not paths and not tag_filter:
-            raise ValueError("Give actor_paths, tag_filter or both")
+            raise ArgumentError("Give actor_paths, tag_filter or both", "NO_SELECTION", parameter="actor_paths")
         if world not in PHYSICS_STATE_WORLDS:
-            raise ValueError(f"world must be one of {', '.join(PHYSICS_STATE_WORLDS)}, got {world!r}")
-        if not 1 <= max_results <= PHYSICS_STATE_MAX_RESULTS:
-            raise ValueError(f"max_results must be from 1 to {PHYSICS_STATE_MAX_RESULTS}")
-        args = {"paths": paths, "tag": tag_filter or None, "world": world, "max_results": max_results}
-        return await self._execute_json_script(
-            f"args = {args!r}\n" + PHYSICS_STATE, expected_errors=(SIMULATION_NOT_RUNNING,)
+            raise ArgumentError(
+                f"world must be one of {', '.join(PHYSICS_STATE_WORLDS)}, got {world!r}",
+                "UNKNOWN_WORLD",
+                parameter="world",
+                value=world,
+                allowed=list(PHYSICS_STATE_WORLDS),
+            )
+        _check_page_args(offset, max_results, PHYSICS_STATE_MAX_RESULTS)
+        args = {
+            "paths": paths,
+            "tag": tag_filter or None,
+            "world": world,
+            "offset": offset,
+            "max_results": max_results,
+        }
+        return await self._paged_read(
+            PHYSICS_STATE, args, "bodies", "total", expected_errors=(SIMULATION_NOT_RUNNING,)
         )
 
     async def list_simulation_actors(
@@ -3847,36 +4364,39 @@ component.set_material({slot_index!r}, material)
         tag_filter: Optional[str] = None,
         simulating_only: bool = False,
         max_results: int = 200,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
-        List the running simulation's actors with their editor counterparts.
+        List the running simulation's actors with their editor counterparts, a page at a time.
 
         Args:
             class_filter: Only actors of this class (name or path).
             tag_filter: Only actors with this actor tag.
             simulating_only: Only actors with a body that simulates physics.
-            max_results: Most actors returned, 1 to 5000.
+            max_results: Most actors on this page, 1 to 5000; a page also
+                stops before 30,000 characters of entries.
+            offset: Actors to skip: the previous page's next_offset.
 
         Returns:
             Dict with world (the simulation's world), actors (name,
             class_name, simulation_path, editor_path, null for an actor the
             simulation spawned such as its player controller and pawn, and
-            simulating), count, total, truncated and sim_time; or a
-            SimulationNotRunning envelope.
+            simulating), count, total, offset, next_offset, truncated, hint and
+            sim_time; or a SimulationNotRunning envelope.
 
         Raises:
-            ValueError: max_results out of range.
+            ArgumentError: max_results or offset out of range (a ValidationError).
         """
-        if not 1 <= max_results <= 5000:
-            raise ValueError("max_results must be between 1 and 5000")
+        _check_page_args(offset, max_results, 5000)
         args = {
             "class_filter": class_filter or None,
             "tag_filter": tag_filter or None,
             "simulating_only": bool(simulating_only),
+            "offset": offset,
             "max_results": max_results,
         }
-        return await self._execute_json_script(
-            f"args = {args!r}\n" + SIMULATION_ACTORS, expected_errors=(SIMULATION_NOT_RUNNING,)
+        return await self._paged_read(
+            SIMULATION_ACTORS, args, "simulation actors", "total", expected_errors=(SIMULATION_NOT_RUNNING,)
         )
 
     # ------------------------------------------------------------------
@@ -3960,22 +4480,85 @@ component.set_material({slot_index!r}, material)
     # Phase 6: USD / SimReady Bridge
     # ------------------------------------------------------------------
 
+    def _import_export_timeout(self) -> float:
+        """Seconds the import and export tools wait: ``unreal.import_export_timeout``, at least ``timeout``."""
+        return float(max(self.timeout, self.settings.unreal.import_export_timeout))
+
+    async def _run_import_export(
+        self, code: str, work: str, expected_errors: Sequence[str] = ()
+    ) -> Dict[str, Any]:
+        """Run an import or export script with ``unreal.import_export_timeout``.
+
+        Remote Control cannot cancel a script it stopped waiting for, so a
+        timeout is reported as work that may still finish: the first USD
+        export of an editor session took 26-40 s against the 30 s default and
+        came back as a bare TimeoutError while its files were still written
+        (observed on UE 5.7.4).
+
+        Args:
+            code: The script.
+            work: What the script does, completing "... may still complete":
+                "the export to /tmp/x.usda".
+            expected_errors: ``error_type`` values the script reports for a
+                request it refused as asked.
+
+        Returns:
+            The script's result, or a ``TimeoutError`` envelope.
+        """
+        timeout = self._import_export_timeout()
+        try:
+            return await self._execute_json_script(code, expected_errors=expected_errors, timeout=timeout)
+        except asyncio.TimeoutError:
+            self.logger.warning("Unreal did not answer within %gs; %s may still complete", timeout, work)
+            return {
+                "success": False,
+                "error_type": "TimeoutError",
+                "error": (
+                    f"Unreal did not answer within {timeout:g} s, but the editor keeps running the script, "
+                    f"so {work} may still complete. Check the result before retrying: a retry runs it again."
+                ),
+                "details": {
+                    "timeout_seconds": timeout,
+                    "hint": "Raise UNREAL__IMPORT_EXPORT_TIMEOUT (unreal.import_export_timeout) for large files "
+                    "or levels.",
+                },
+            }
+
     async def import_usd(
         self,
         usd_path: str,
         destination_path: str = "/Game/Imports",
         import_options: Optional[Dict[str, Any]] = None,
+        replace_existing: bool = False,
     ) -> Dict[str, Any]:
         """
         Import a USD file with the optional USDImporter plugin.
+
+        The assets go to ``<destination_path>/<file name>`` and, with
+        import_actors, the actors to the level being edited. Without
+        ``replace_existing`` the import is refused when that folder already
+        holds assets, and existing actors are kept (new ones are added beside
+        them): Unreal's USD importer otherwise replaces both, an earlier
+        import's actors and customized assets included. The options are set
+        without saving them to the project's config, where the editor's own
+        import dialog would read them. The call waits
+        ``unreal.import_export_timeout``.
 
         Args:
             usd_path: Path to the USD file on disk.
             destination_path: Content browser destination.
             import_options: Interchange pipeline options.
+            replace_existing: Replace the assets in the destination folder and
+                the level's actors from an earlier import of this file.
 
         Returns:
-            Dict with imported_assets, actor_paths, warnings.
+            Dict with imported_assets, actor_paths (actors added to the level),
+            removed_actor_paths (actors the import replaced) and warnings, or
+            an error envelope: ``InvalidState`` when the folder already holds
+            assets and ``replace_existing`` is false (nothing is imported),
+            ``NotFoundError`` for a file the editor host does not have,
+            ``EngineError`` when the importer produced nothing, ``PIEActive``,
+            ``PluginUnavailable`` and ``TimeoutError``.
 
         Raises:
             SandboxDenied: If ``usd_path`` is outside the sandbox.
@@ -3986,6 +4569,8 @@ component.set_material({slot_index!r}, material)
             "/"
         ):
             raise ValueError("destination_path must be a /Game/ content directory")
+        if type(replace_existing) is not bool:
+            raise ValueError("replace_existing must be true or false")
         options = import_options or {}
         allowed = {
             "import_actors",
@@ -3998,8 +4583,18 @@ component.set_material({slot_index!r}, material)
             raise ValueError(
                 f"import_options accepts boolean values for: {sorted(allowed)}"
             )
-        args = {"path": usd_path, "destination": destination_path, "options": options}
-        return await self._execute_json_script(f"args = {args!r}\n" + USD_IMPORT)
+        args = {
+            "path": usd_path,
+            "destination": destination_path.rstrip("/"),
+            "name": _sanitized_object_name(Path(usd_path).stem),
+            "options": options,
+            "replace": replace_existing,
+        }
+        return await self._run_import_export(
+            f"args = {args!r}\n" + USD_IMPORT,
+            f"the import of {usd_path}",
+            expected_errors=("NotFoundError", "InvalidState", "PluginUnavailable"),
+        )
 
     async def export_usd(
         self,
@@ -4010,13 +4605,26 @@ component.set_material({slot_index!r}, material)
         """
         Export selected actors with the optional USDImporter plugin.
 
+        Every actor must be in the level being edited; a path in another map
+        is refused without loading that map. The actors exported are read
+        back from the written stage: Unreal's exporter leaves out what it does
+        not export (editor helpers such as WorldSettings or PlayerStart)
+        without an error, and an export that wrote none of them fails. The
+        call waits ``unreal.import_export_timeout``, since the first USD
+        export of an editor session loads the USD Python modules (25-40 s).
+
         Args:
             actor_paths: Actor paths to export.
             output_path: Output USD file path.
             export_options: Export pipeline options.
 
         Returns:
-            Dict with output_path, actors_exported, file_size_bytes.
+            Dict with output_path, actors_exported (the actors the stage has a
+            prim for), exported_prims (each one's actor_path and prim_path),
+            skipped_actors (the actors it has none for) and file_size_bytes,
+            or an error envelope: ``EngineError`` when Unreal exported nothing
+            or failed, ``PIEActive``, ``PluginUnavailable`` and
+            ``TimeoutError``.
 
         Raises:
             SandboxDenied: If ``output_path`` is outside the sandbox.
@@ -4034,8 +4642,10 @@ component.set_material({slot_index!r}, material)
                 f"export_options accepts boolean values for: {sorted(allowed)}"
             )
         args = {"path": output_path, "actors": actor_paths, "options": options}
-        return await self._execute_json_script(
-            ACTOR_HELPERS + f"\nargs = {args!r}\n" + USD_EXPORT
+        return await self._run_import_export(
+            f"args = {args!r}\n" + USD_EXPORT,
+            f"the export to {output_path}",
+            expected_errors=("PluginUnavailable",),
         )
 
     async def convert_to_simready(
@@ -4188,50 +4798,68 @@ component.set_material({slot_index!r}, material)
         max_depth: int = 10,
         include_components: bool = False,
         class_filter: Optional[str] = None,
+        include_subclasses: bool = False,
+        offset: int = 0,
+        max_results: int = 100,
     ) -> Dict[str, Any]:
         """
-        Query the scene graph hierarchy starting from a root actor.
+        Read the level's attachment hierarchy as a tree, one page of the root's children at a time.
+
+        One editor script reads the editor world's level actors and who is
+        attached to whom (``_unreal_scripts.SCENE_GRAPH``): an actor attached
+        to nothing is a child of the level. The tree starts at the level, or
+        at the actor at ``root_path``, and goes ``max_depth`` levels down. The
+        page holds the root's children from ``offset`` on, each with its
+        descendants, up to ``max_results`` of them and within the response
+        budget; a subtree too large for a page on its own is cut shallower
+        (``depth_limited``). Query a subtree whole with its actor as
+        ``root_path``.
 
         Args:
-            root_path: Root actor path (None for level root).
-            max_depth: Maximum traversal depth.
-            include_components: Include component sub-trees.
-            class_filter: Filter actors by UClass name.
+            root_path: Actor whose attached actors form the tree; None or empty
+                starts at the level, whose children are the actors attached
+                to nothing.
+            max_depth: Levels below the root to include, 1 to 64 (the root's
+                children are level 1). A node whose children are deeper has
+                ``children_truncated``.
+            include_components: Give each actor its components (name, class,
+                whether it is the root, the component it is attached to).
+            class_filter: Keep actors whose class has this name or path, and
+                the actors above them, which get ``matches_filter`` false.
+            include_subclasses: Also keep actors whose class derives from
+                class_filter's.
+            offset: Root children to skip before the page starts.
+            max_results: Most root children in the page, 1 to 5000.
 
         Returns:
-            Dict with root tree, total_actors, total_depth.
+            ``root`` (name, path, class_name, child_count, children; actors
+            nest the same way), ``total_actors`` and ``total_depth`` (every
+            actor below the root and the deepest level, whatever the page and
+            max_depth), ``returned_actors``, ``count``, ``total`` (the root's
+            children), ``offset``, ``next_offset``, ``truncated``, ``hint``,
+            ``depth_limited``, ``warnings`` and ``pie_active``; or a
+            ScriptError envelope (no actor at root_path).
         """
-        # Fetch all actors first
-        search_body: Dict[str, Any] = {
-            "Query": "",
-            "Filter": "Actor",
+        self._check_page(offset, max_results)
+        if not 1 <= max_depth <= 64:
+            raise ValueError("max_depth must be between 1 and 64")
+        args = {
+            "root_path": root_path or None,
+            "max_depth": max_depth,
+            "include_components": bool(include_components),
+            "class_filter": class_filter or None,
+            "include_subclasses": bool(include_subclasses),
+            "offset": offset,
+            "max_results": max_results,
         }
-        if class_filter:
-            search_body["Filter"] = class_filter
-
-        response = await self._http_put("/remote/search/assets", search_body)
-        actors = response.get("Assets", [])
-
-        # Build tree
-        tree: Dict[str, Any] = {"name": "Root", "path": root_path or "/", "children": []}
-        depth = 0
-        for actor in actors[:max_depth * 50]:
-            path = actor.get("Path", "")
-            if root_path and not path.startswith(root_path):
-                continue
-            node = {
-                "name": actor.get("Name", ""),
-                "path": path,
-                "class": actor.get("Class", ""),
-                "children": [],
-            }
-            tree["children"].append(node)
-
-        return {
-            "root": tree,
-            "total_actors": len(tree["children"]),
-            "total_depth": min(depth + 1, max_depth),
-        }
+        result = await self._paged_read(SCENE_GRAPH, args, "children of the root", "total")
+        if result.get("depth_limited"):
+            cut = ", ".join(f"{item['path']} (to depth {item['depth']})" for item in result["depth_limited"])
+            result["truncated"] = True
+            result.setdefault("warnings", []).append(
+                f"Too large for one page, so drawn shallower: {cut}. Query each with root_path set to it."
+            )
+        return result
 
     async def analyze_scene_for_robotics(
         self,
@@ -4422,13 +5050,16 @@ component.set_material({slot_index!r}, material)
         label: str,
         match_mode: str = "exact",
         max_results: int = 100,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
-        Find level actors whose actor tags match a semantic label.
+        Find level actors whose actor tags match a semantic label, one page at a time.
 
         Semantic labels are actor tags (Actor > Tags in the Details panel).
         Matching ignores case, as Unreal's own tag comparison does. One editor
-        script reads every actor's tags.
+        script reads every actor's tags and counts every match; the page holds
+        the matches from ``offset`` on, up to ``max_results``, and stops early
+        rather than exceed the response budget.
 
         Args:
             label: Semantic label (actor tag) to search for.
@@ -4437,29 +5068,31 @@ component.set_material({slot_index!r}, material)
                 for in each tag; a repeated group that holds a quantifier or
                 alternatives, as in (\\w+)+, is refused because it can run for
                 hours); every mode ignores case.
-            max_results: Maximum number of actors to return, 1 to 5000.
+            max_results: Most actors in the page, 1 to 5000.
+            offset: Matching actors to skip before the page starts.
 
         Returns:
             Dict with ``actors`` (each match as a ``list_unreal_actors``
-            entry, tags included), ``total_matches`` (every matching actor,
-            those past max_results too), ``truncated``, ``label_searched`` and
-            ``pie_active`` (while Play In Editor runs, the editor world is
-            searched, as in ``list_actors``), or a ``ScriptError`` envelope
-            when the editor script failed.
+            entry, tags and attachment included), ``count`` (in the page),
+            ``total_matches`` (every matching actor), ``offset``,
+            ``next_offset``, ``truncated``, ``hint`` (when more are left),
+            ``label_searched`` and ``pie_active`` (while Play In Editor runs,
+            the editor world is searched, as in ``list_actors``), or a
+            ``ScriptError`` envelope when the editor script failed.
 
         Raises:
             ValueError: match_mode is not exact, contains or regex; in regex
                 mode, label is not a valid regular expression or repeats a
                 group that holds a quantifier or alternatives (see
-                ``simul.utils.regex_guard``); or max_results is out of range.
+                ``simul.utils.regex_guard``); or max_results or offset is out
+                of range.
         """
         modes = ("exact", "contains", "regex")
         if match_mode not in modes:
             raise ValueError(
                 f"match_mode must be one of {', '.join(modes)}, got {match_mode!r}"
             )
-        if not 1 <= max_results <= 5000:
-            raise ValueError("max_results must be between 1 and 5000")
+        self._check_page(offset, max_results)
         if match_mode == "regex":
             try:
                 re.compile(label)
@@ -4475,10 +5108,14 @@ component.set_material({slot_index!r}, material)
                     "between the repetitions is tried. Repeat a plain character "
                     "class instead (\\w+ rather than (\\w+)+), or use contains mode"
                 )
-        args = {"label": label, "match_mode": match_mode, "max_results": max_results}
-        return await self._execute_json_script(
-            f"args = {args!r}\n" + FIND_ACTORS_BY_TAG
-        )
+        args = {
+            "label": label,
+            "match_mode": match_mode,
+            "offset": offset,
+            "max_results": max_results,
+            "listed_children": LISTED_CHILDREN,
+        }
+        return await self._paged_read(FIND_ACTORS_BY_TAG, args, "matching actors", "total_matches")
 
     # ------------------------------------------------------------------
     # Phase 8: Geometry & Modeling (GeometryScript)

@@ -1565,11 +1565,19 @@ def open_stage(
 @app.command("save-stage")
 def save_stage(
     file_path: Optional[str] = typer.Argument(None, help="Path to save USD file (omit for in-place save)"),
+    overwrite: bool = typer.Option(
+        False, "--overwrite", help="Replace an existing file at FILE_PATH (required for URL targets)"
+    ),
+    allow_while_playing: bool = typer.Option(
+        False, "--allow-while-playing", help="Save even while the simulation is playing or paused"
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
     """Save the current stage to a USD file."""
-    result = _run(_tools(host, port).save_isaac_stage(file_path=file_path))
+    result = _run(_tools(host, port).save_isaac_stage(
+        file_path=file_path, overwrite=overwrite, allow_while_playing=allow_while_playing
+    ))
     if is_json_mode():
         emit(result)
         return
@@ -1598,16 +1606,27 @@ def new_stage(
 @app.command("create-physics-scene")
 def create_physics_scene(
     prim_path: str = typer.Option("/World/PhysicsScene", "--path", help="USD path for the physics scene"),
-    gravity: float = typer.Option(9.81, "--gravity", "-g", help="Gravity magnitude in m/s^2"),
-    gravity_dir: str = typer.Option("0,0,-1", "--gravity-dir", help="Gravity direction as x,y,z"),
+    gravity: Optional[float] = typer.Option(
+        None,
+        "--gravity",
+        "-g",
+        help="Gravity magnitude in m/s^2 (default 9.81, converted to stage units)",
+    ),
+    gravity_dir: Optional[str] = typer.Option(
+        None,
+        "--gravity-dir",
+        help="Gravity direction as x,y,z (default: the stage's negative up axis)",
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
     """Create a UsdPhysics.Scene with gravity settings."""
-    try:
-        grav_dir_list = [float(v) for v in gravity_dir.split(",")]
-    except ValueError as e:
-        fail(f"Invalid numeric value in --gravity-dir: {e}", "ValueError")
+    grav_dir_list: Optional[List[float]] = None
+    if gravity_dir is not None:
+        try:
+            grav_dir_list = [float(v) for v in gravity_dir.split(",")]
+        except ValueError as e:
+            fail(f"Invalid numeric value in --gravity-dir: {e}", "ValueError")
     result = _run(_tools(host, port).create_isaac_physics_scene(
         prim_path=prim_path,
         gravity_direction=grav_dir_list,
@@ -1616,13 +1635,19 @@ def create_physics_scene(
     if is_json_mode():
         emit(result)
         return
+    m_per_s2 = result.get("gravity_magnitude_m_per_s2")
+    direction = result.get("gravity_direction")
     if result.get("already_existed"):
+        state = "gravity updated" if result.get("updated") else "gravity unchanged"
         console.print(
             f"[yellow]Physics scene already exists[/yellow] at {prim_path} "
-            f"(gravity updated to {result.get('gravity_magnitude')} m/s^2)"
+            f"({state}: {m_per_s2} m/s^2 along {direction})"
         )
     else:
-        console.print(f"[green]Physics scene created[/green] at {prim_path} (gravity={gravity} m/s^2)")
+        console.print(
+            f"[green]Physics scene created[/green] at {prim_path} "
+            f"(gravity {m_per_s2} m/s^2 along {direction})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1813,6 +1838,11 @@ def set_carb_settings(
     assignments: List[str] = typer.Argument(
         ..., help="Key=value pairs (e.g. /rtx/fog/enabled=true /rtx/fog/fogEndDist=200.0)"
     ),
+    allow_persistent: bool = typer.Option(
+        False,
+        "--allow-persistent",
+        help="Also write /persistent/ keys, which Kit saves to the user's configuration for later sessions.",
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
@@ -1836,10 +1866,14 @@ def set_carb_settings(
                 except ValueError:
                     pass
         parsed[key] = val
-    result = _run(_tools(host, port).set_carb_settings(settings=parsed))
+    result = _run(
+        _tools(host, port).set_carb_settings(settings=parsed, allow_persistent=allow_persistent)
+    )
     if is_json_mode():
         emit(result)
         return
+    if result.get("warning"):
+        console.print(f"[yellow]{result['warning']}[/yellow]")
     applied = result.get("applied", {})
     table = Table(title=f"Applied ({result.get('count', len(applied))} settings)")
     table.add_column("Key", style="cyan", no_wrap=True)
@@ -2042,7 +2076,12 @@ def runtime_info(
     sections = [
         ("App", "app", ["version", "python_version", "update_number"]),
         ("Timeline", "timeline", ["is_playing", "is_stopped", "current_time", "fps"]),
-        ("Physics Config", "physics_config", ["gpu_dynamics_enabled", "physics_dt", "solver_type"]),
+        ("Physics", "physics", ["cuda_device", "update_to_usd", "physx_fabric_enabled", "reset_on_stop"]),
+        (
+            "Physics Config",
+            "physics_config",
+            ["scene_path", "time_steps_per_second", "gpu_dynamics_enabled", "physics_dt", "solver_type"],
+        ),
         ("Renderer", "renderer", ["gpu_name", "raytracing_mode", "hgi_driver"]),
         ("Stage", "stage", ["url", "prim_count"]),
         ("Extensions", "extensions", ["total", "enabled"]),

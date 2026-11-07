@@ -21,10 +21,16 @@ did in a live editor (observed through Remote Control):
 * a running simulation has its own world, ``/Game/Maps/UEDPIE_0_Lab``, with
   a copy of each actor at the same path in that package, keeping its label
   and ActorGuid. Only that world steps (``Editor.frame``): an editor body
-  takes forces and impulses but never moves. A force acts for the one step
-  after it is added; an impulse changes the velocity by impulse / mass.
-  Ticker callbacks run once per frame, before the step, and a callback that
-  returns False is removed.
+  takes forces and impulses but never moves. Each frame the world ticks
+  first, advancing game time by the frame and physics by the frame capped at
+  PhysicsSettings' MaxPhysicsDeltaTime (1/30 s), as FChaosScene::SetUpForFrame
+  does, then the ticker callbacks run (FEngineLoop::Tick ticks the core
+  ticker after the engine); a callback that returns False is removed. A force
+  acts for the one step after it is added; an impulse changes the velocity by
+  impulse / mass at once.
+* a destroyed actor stays findable (``find_object``) until garbage
+  collection, and ``SystemLibrary.is_valid`` is False for it and its
+  components.
 
 Every write is logged in ``Editor.writes`` with whether the object had been
 modified in the open transaction, so a test can tell an undoable edit from a
@@ -493,6 +499,8 @@ class Actor:
         self.location = Vector(0.0, 0.0, 300.0)
         # The path's level, for an actor World Partition streamed into a cell.
         self.level: Optional[str] = None
+        # Destroyed: still findable, but SystemLibrary.is_valid is False.
+        self.destroyed = False
         if root is not None:
             root.owner = self
 
@@ -578,6 +586,8 @@ class Editor:
         self.paused = False
         self.sim_time = 0.0
         self.frame_seconds = 1.0 / 120.0
+        # PhysicsSettings: the longest physics step a frame takes (1/30 s, BaseEngine.ini).
+        self.max_physics_delta_time = 1.0 / 30.0
         self.editor_world = World(MAP)
         self.pie_world = World(PIE_MAP)
         self.scripts: List[str] = []
@@ -681,18 +691,28 @@ class Editor:
         for path in [p for p, a in self.actors.items() if a.simulation]:
             del self.actors[path]
 
-    def frame(self, count: int = 1) -> None:
-        """Advance the editor ``count`` frames: tickers run, then the play world steps."""
+    def physics_step(self) -> float:
+        """The physics time one frame simulates: the frame, capped at MaxPhysicsDeltaTime."""
+        return min(self.frame_seconds, self.max_physics_delta_time)
+
+    def frame(self, count: int = 1, frame_seconds: Optional[float] = None) -> None:
+        """Advance the editor ``count`` frames: the play world ticks, then the tickers run."""
+        if frame_seconds is not None:
+            self.frame_seconds = frame_seconds
         for _ in range(count):
+            if self.pie and not self.paused:
+                self.sim_time += self.frame_seconds
+                step = self.physics_step()
+                for actor in list(self.actors.values()):
+                    if (
+                        actor.simulation
+                        and actor.root_component is not None
+                        and not actor.destroyed
+                    ):
+                        actor.root_component.step(step)
             for handle, callback in list(self.tickers.items()):
                 if not callback(self.frame_seconds):
                     self.tickers.pop(handle, None)
-            if not self.pie or self.paused:
-                continue
-            self.sim_time += self.frame_seconds
-            for actor in self.actors.values():
-                if actor.simulation and actor.root_component is not None:
-                    actor.root_component.step(self.frame_seconds)
 
     def world_actors(self, world: World) -> List[Actor]:
         simulation = world is self.pie_world
@@ -779,6 +799,20 @@ class Editor:
                 if cls is Actor or actor.get_class() == cls
             ]
 
+        def is_valid(obj: Any) -> bool:
+            if obj is None:
+                return False
+            owner = obj if isinstance(obj, Actor) else getattr(obj, "owner", None)
+            return not (owner is not None and owner.destroyed)
+
+        settings = {
+            "max_physics_delta_time": editor.max_physics_delta_time,
+            "substepping": False,
+            "max_substep_delta_time": 1.0 / 60.0,
+            "max_substeps": 6,
+        }
+        physics_settings = SimpleNamespace(get_editor_property=settings.__getitem__)
+
         def register_ticker_callback(
             callback: Callable[[float], Any], delay: float = 0.0
         ) -> int:
@@ -825,7 +859,10 @@ class Editor:
             GameplayStatics=gameplay,
             GuidLibrary=guids,
             Vector=Vector,
-            SystemLibrary=SimpleNamespace(is_valid=lambda obj: obj is not None),
+            SystemLibrary=SimpleNamespace(is_valid=is_valid),
+            PhysicsSettings=SimpleNamespace(
+                get_default_object=lambda: physics_settings
+            ),
             get_editor_subsystem=subsystems.__getitem__,
             load_object=load_object,
             find_object=load_object,

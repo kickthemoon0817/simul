@@ -131,6 +131,12 @@ class Actor:
     def get_all_child_actors(self, include_descendants: bool = True) -> List[Any]:
         return []
 
+    def get_attach_parent_actor(self) -> Optional["Actor"]:
+        return None
+
+    def get_attached_actors(self) -> List["Actor"]:
+        return []
+
     def actor_has_tag(self, tag: str) -> bool:
         return tag in self.tags
 
@@ -183,9 +189,11 @@ class Editor:
         for actor in self.level + self.unlisted:
             actor.world = self.editor_world
         self.spawn_calls: List[str] = []
+        self.destroyed: List[str] = []
+        self.refuse_destroy = False
         self.transactions: List[str] = []
         self.calls: List[str] = []
-        # The editor's selection, and the labels set_actor_selection_state got.
+        # The editor's selection, and the labels set_selected_level_actors got.
         self.selection: List[Actor] = []
         self.selection_calls: List[str] = []
         # The level viewport camera, as Remote Control reads and writes it.
@@ -211,21 +219,23 @@ class Editor:
     spawn_actor_from_object = spawn_actor_from_class
 
     def destroy_actor(self, actor: Actor) -> bool:
-        return False if self.pie else True
+        """Refused during PIE; a deleted actor stays loaded, invalid."""
+        if self.pie or self.refuse_destroy:
+            return False
+        actor.valid = False
+        self.destroyed.append(actor.get_actor_label())
+        self.level.remove(actor)
+        return True
 
     def get_selected_level_actors(self) -> List[Actor]:
         return [] if self.pie else list(self.selection)
 
-    def set_actor_selection_state(self, actor: Actor, should_be_selected: bool) -> None:
-        """Not refused during PIE, but what it selects then reads back as
-        nothing above, and Unreal clears it when PIE stops."""
-        self.selection_calls.append(actor.get_actor_label())
-        if not actor.selectable:
-            return
-        if should_be_selected and actor not in self.selection:
-            self.selection.append(actor)
-        elif not should_be_selected and actor in self.selection:
-            self.selection.remove(actor)
+    def set_selected_level_actors(self, actors: List[Actor]) -> None:
+        """Replaces the selection, leaving out an actor Unreal will not
+        select. Not refused during PIE, but what it selects then reads back
+        as nothing above, and Unreal clears it when PIE stops."""
+        self.selection_calls.extend(actor.get_actor_label() for actor in actors)
+        self.selection = [actor for actor in actors if actor.selectable]
 
     # UnrealEditorSubsystem's viewport camera over Remote Control: answered
     # in and out of PIE.
@@ -310,7 +320,7 @@ class Editor:
             SystemLibrary=SimpleNamespace(
                 get_engine_version=lambda: "5.7.4",
                 get_game_name=lambda: "Lab",
-                is_valid=lambda obj: obj is not None,
+                is_valid=lambda obj: obj is not None and getattr(obj, "valid", True),
             ),
             Paths=SimpleNamespace(
                 project_dir=lambda: "../../Lab/",
@@ -325,6 +335,11 @@ class Editor:
             load_object=load_object,
             find_object=find_object,
             load_asset=lambda path: None,
+            Blueprint=type("Blueprint", (), {}),
+            Brush=SimpleNamespace(static_class=lambda: _Class("Brush")),
+            AssetRegistryHelpers=SimpleNamespace(
+                get_asset_registry=lambda: SimpleNamespace(get_assets_by_package_name=lambda package: [])
+            ),
             UsdStageImportFactory=object,
             LevelExporterUSD=object,
         )
@@ -364,7 +379,9 @@ def _session(
     session.scripts = []  # type: ignore[attr-defined]
     session.calls = []  # type: ignore[attr-defined]
 
-    async def execute(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
+    async def execute(
+        code: str, mode: str = "ExecuteFile", timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
         session.scripts.append(code)  # type: ignore[attr-defined]
         return editor.run(code)
 
@@ -457,66 +474,41 @@ def test_a_procedural_scene_during_pie_is_refused_before_its_transaction(
 def test_delete_during_pie_is_refused_instead_of_reporting_deleted_false(
     editor: Editor, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """DestroyActor refuses during PIE; the refusal comes before the lookup."""
     editor.pie = True
     session = _session(editor, monkeypatch)
-    calls: List[str] = []
-
-    async def call_function(
-        object_path: str, function_name: str, parameters: Any = None
-    ) -> Dict[str, Any]:
-        calls.append(function_name)
-        return {"ReturnValue": False}  # DestroyActor refuses during PIE
-
-    monkeypatch.setattr(session, "_call_function", call_function)
     caplog.set_level(logging.INFO, logger="simul")
 
     result = asyncio.run(session.delete_actor(LEVEL + "Crate"))
 
-    assert calls == ["DestroyActor"]
     assert result == pie_refusal("delete actors")
+    assert editor.destroyed == [] and len(session.scripts) == 1
     assert _errors(caplog) == []
 
 
-@pytest.mark.parametrize("reply", [{"ReturnValue": False}, {"ReturnValue": True}])
-def test_delete_outside_pie_reports_what_unreal_did(
-    editor: Editor, monkeypatch: pytest.MonkeyPatch, reply: Dict[str, Any]
-) -> None:
-    session = _session(editor, monkeypatch)
-
-    async def call_function(
-        object_path: str, function_name: str, parameters: Any = None
-    ) -> Dict[str, Any]:
-        return reply
-
-    monkeypatch.setattr(session, "_call_function", call_function)
-
-    result = asyncio.run(session.delete_actor(LEVEL + "Crate"))
-
-    assert result == {"actor_path": LEVEL + "Crate", "deleted": reply["ReturnValue"]}
-    # The PIE state is read only to explain a delete Unreal refused.
-    assert len(session.scripts) == (0 if reply["ReturnValue"] else 1)
-
-
-def test_delete_reports_deleted_false_when_the_pie_state_cannot_be_read(
+def test_delete_outside_pie_deletes_in_one_transaction_and_reads_it_back(
     editor: Editor, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     session = _session(editor, monkeypatch)
 
-    async def call_function(
-        object_path: str, function_name: str, parameters: Any = None
-    ) -> Dict[str, Any]:
-        return {"ReturnValue": False}
+    result = asyncio.run(session.delete_actor(LEVEL + "Crate"))
 
-    async def unreachable(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
-        raise ConnectionError("editor went away")
+    assert result == {"actor_path": LEVEL + "Crate", "deleted": True}
+    assert editor.destroyed == ["Crate"] and editor.transactions == ["simul: delete actor"]
+    # One script resolves, deletes and reads the deletion back.
+    assert len(session.scripts) == 1 and session.calls == []
 
-    monkeypatch.setattr(session, "_call_function", call_function)
-    monkeypatch.setattr(session, "_execute_python", unreachable)
 
-    assert asyncio.run(session.delete_actor(LEVEL + "Crate")) == {
-        "actor_path": LEVEL + "Crate",
-        "deleted": False,
-    }
+def test_a_delete_unreal_refuses_outside_pie_is_an_error(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    editor.refuse_destroy = True
+    session = _session(editor, monkeypatch)
+
+    result = asyncio.run(session.delete_actor(LEVEL + "Crate"))
+
+    assert result["success"] is False and result["error_type"] == "DeleteNotApplied"
+    assert result["error"] == "Unreal did not delete " + LEVEL + "Crate"
 
 
 @pytest.mark.parametrize(
