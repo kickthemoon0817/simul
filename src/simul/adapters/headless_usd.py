@@ -25,6 +25,7 @@ from ..usd import editing, stage_files
 from ..usd.editing import USDEditError
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
+from ..usd.validation import USDLoadError, check_usd_file, open_root_layer
 
 logger = get_logger(__name__)
 
@@ -107,7 +108,6 @@ class HeadlessUSDSession(LoggerMixin):
         owner = self._owner()
         return [stage_id for stage_id, record in self._stage_records.items() if record.owner == owner]
 
-    @monitor_performance("headless_session.load_stage")
     def load_stage(self, file_path: Union[str, Path]) -> Optional[str]:
         """
         Load a USD stage from file.
@@ -121,17 +121,51 @@ class HeadlessUSDSession(LoggerMixin):
             file_path: Path to USD file
 
         Returns:
-            Stage identifier or None if failed
+            Stage identifier or None if failed; ``load_stage_or_raise``
+            reports why.
 
         Raises:
             USDEditError: The caller already holds ``MAX_STAGES_PER_OWNER``
                 stages.
         """
-        file_path = str(Path(file_path).resolve())
-
-        # Validate file
-        if not self._validate_usd_file(file_path):
+        try:
+            return self.load_stage_or_raise(file_path)
+        except USDLoadError as e:
+            self.logger.error(str(e))
             return None
+        except USDEditError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Error loading USD stage {file_path}: {e}")
+            return None
+
+    @monitor_performance("headless_session.load_stage")
+    def load_stage_or_raise(self, file_path: Union[str, Path]) -> str:
+        """
+        Load a USD stage from file, saying why when it cannot.
+
+        Returns the caller's existing stage for the file when it has no
+        unsaved edits and no file it composes changed on disk; otherwise
+        opens a new stage from disk (``stage_files.open_private_stage``),
+        rereading any changed sublayer or referenced file first.
+
+        Args:
+            file_path: Path to USD file
+
+        Returns:
+            Stage identifier
+
+        Raises:
+            USDLoadError: The file failed the access checks shared with
+                validation (missing, not a file, extension outside
+                ``usd.allowed_extensions``, unreadable, empty, over
+                ``usd.max_file_size_mb``) or pxr could not parse it; the
+                error carries pxr's own reason.
+            USDEditError: The caller already holds ``MAX_STAGES_PER_OWNER``
+                stages.
+        """
+        file_path = str(Path(file_path).resolve())
+        facts = check_usd_file(file_path, self.settings.usd)
 
         owner = self._owner()
         for stage_id in self._owned_ids():
@@ -156,12 +190,20 @@ class HeadlessUSDSession(LoggerMixin):
 
         try:
             stage, _ = stage_files.open_private_stage(file_path)
-            reloaded = stage_files.refresh_shared_layers(stage)
-            if reloaded:
-                self.logger.info(f"Reread changed files for {file_path}: {reloaded}")
-        except Exception as e:
-            self.logger.error(f"Error loading USD stage {file_path}: {e}")
-            return None
+        except Exception as exc:
+            # The file is parsed once, into the private root layer. Only when
+            # that fails is it opened again the way validation opens it, so
+            # the error names pxr's reason (ParseError with line and column,
+            # CorruptFile, ...) as validate_usd_file reports it.
+            open_root_layer(file_path, facts.head)
+            raise USDLoadError(
+                file_path,
+                "OpenFailed",
+                f"pxr could not compose a stage from it: {editing.tf_error_reason(exc)}",
+            ) from exc
+        reloaded = stage_files.refresh_shared_layers(stage)
+        if reloaded:
+            self.logger.info(f"Reread changed files for {file_path}: {reloaded}")
 
         stage_id = self._generate_stage_id(file_path)
         self._active_stages[stage_id] = stage
@@ -820,28 +862,6 @@ class HeadlessUSDSession(LoggerMixin):
                 except Exception as e:
                     self.logger.error(f"Error getting mesh info for {prim_path}: {e}")
         return None
-
-    def _validate_usd_file(self, file_path: str) -> bool:
-        """Validate USD file before loading."""
-        path = Path(file_path)
-
-        # Check if file exists
-        if not path.exists():
-            self.logger.error(f"USD file not found: {file_path}")
-            return False
-
-        # Check file extension
-        if not any(file_path.lower().endswith(ext) for ext in self.settings.usd.allowed_extensions):
-            self.logger.error(f"Invalid USD file extension: {file_path}")
-            return False
-
-        # Check file size
-        file_size_mb = path.stat().st_size / (1024 * 1024)
-        if file_size_mb > self.settings.usd.max_file_size_mb:
-            self.logger.error(f"USD file too large: {file_size_mb:.1f}MB > {self.settings.usd.max_file_size_mb}MB")
-            return False
-
-        return True
 
     def _generate_stage_id(self, file_path: str) -> str:
         """Generate a stage identifier: the file's stem and a random, unguessable suffix."""
