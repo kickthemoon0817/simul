@@ -375,13 +375,22 @@ def from_request_model(
 
 
 def describe_constraints(schema: Mapping[str, Any]) -> Dict[str, Any]:
-    """Pick the bounds and choices out of one property's JSON schema (``anyOf`` included)."""
+    """Pick the bounds and choices out of one property's JSON schema (``anyOf`` included).
+
+    The choices of a list's items count as the property's (a list of names
+    drawn from an enum); the items' bounds do not, since they bound each
+    element rather than the property.
+    """
     found: Dict[str, Any] = {}
-    stack = [schema]
+    stack: List[Tuple[Mapping[str, Any], bool]] = [(schema, False)]
     while stack:
-        node = stack.pop()
-        for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "enum"):
+        node, in_items = stack.pop()
+        keys = ("enum",) if in_items else ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "enum")
+        for key in keys:
             if key in node:
                 found[key] = node[key]
-        stack.extend(node.get("anyOf", []))
+        stack.extend((option, in_items) for option in node.get("anyOf", []))
+        items = node.get("items")
+        if isinstance(items, Mapping):
+            stack.append((items, True))
     return found

@@ -360,6 +360,11 @@ your data. Each refusal is a structured `RefusedOperation` error:
   prim unless `allow_root_delete=true`.
 - `create_prim` (headless USD) refuses a path that already holds a prim
   unless `redefine_existing=true`.
+- `save_usd_stage` refuses a file that changed on disk after the stage read
+  it unless `overwrite_external_changes=true`; `export_usd_stage` needs
+  `overwrite=true` to replace an existing file.
+- `reload_usd_stage` and `unload_usd_stage` need `discard_unsaved=true` when
+  the stage has unsaved edits.
 
 ### Rate limiting
 
