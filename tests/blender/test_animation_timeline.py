@@ -377,8 +377,9 @@ class TestTrajectory:
         assert [p["local_rotation"][2] for p in result["points"]] == pytest.approx(
             authored
         )
+        # As precise as the float32 Blender keeps them in.
         assert [p["rotation_euler"][2] for p in result["points"]] == pytest.approx(
-            authored, abs=1e-9
+            authored, rel=1e-7, abs=1e-7
         )
         assert result["points"][-1]["rotation_euler"][2] == pytest.approx(6 * math.pi)
         for point in result["points"]:

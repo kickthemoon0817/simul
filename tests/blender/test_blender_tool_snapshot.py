@@ -253,7 +253,45 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "index": 2,
         },
     },
-    "get_blender_keyframes": {"minimal": {"object_name": "Cube"}},
+    "set_blender_pose_bone_transform": {
+        "minimal": {"object_name": "Rig", "bone_name": "Hand"},
+        "full": {
+            "object_name": "Rig",
+            "bone_name": "Hand",
+            "location": [0, 0.1, 0],
+            "rotation_quaternion": [1, 0, 0, 0],
+            "scale": [1, 1, 2],
+        },
+    },
+    "get_blender_keyframes": {
+        "minimal": {"object_name": "Cube"},
+        "full": {
+            "object_name": "Rig",
+            "data_path": "rotation_quaternion",
+            "bone_name": "Hand",
+            "include_keys": True,
+            "offset": 3,
+            "key_offset": 7,
+            "limit": 2,
+        },
+    },
+    "insert_blender_keyframes": {
+        "minimal": {
+            "object_name": "Cube",
+            "channels": [
+                {"data_path": "location", "frames": [1, 10], "values": [[0, 0, 0], [1, 2, 3]]}
+            ],
+        },
+        "full": {
+            "object_name": "Cube",
+            "channels": [
+                {"data_path": "location", "index": 2, "frames": [1, 5], "values": [0.5, 1.5]},
+                {"data_path": "scale", "frames": [3], "values": [[2, 2, 2]]},
+            ],
+            "interpolation": "LINEAR",
+            "keyframe_type": "EXTREME",
+        },
+    },
     "setup_blender_rigid_body": {
         "minimal": {"object_name": "Cube"},
         "full": {
@@ -295,7 +333,30 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "get_blender_physics_state": {"minimal": {"object_name": "Cube"}},
     "get_blender_object_trajectory": {
         "minimal": {"object_name": "Cube", "start_frame": 1, "end_frame": 10},
-        "full": {"object_name": "Cube", "start_frame": 1, "end_frame": 10, "step": 3},
+        "full": {
+            "object_name": "Rig",
+            "start_frame": 1,
+            "end_frame": 10,
+            "step": 3,
+            "bone_name": "Hand",
+            "fields": ["location", "velocity"],
+            "offset": 2,
+            "limit": 5,
+            "max_simulated_frames": 100,
+        },
+    },
+    "get_blender_trajectories": {
+        "minimal": {"targets": [{"object_name": "Cube"}], "start_frame": 1, "end_frame": 10},
+        "full": {
+            "targets": [{"object_name": "Rig", "bone_name": "Hand"}, {"object_name": "Cube"}],
+            "start_frame": 1,
+            "end_frame": 10,
+            "step": 3,
+            "fields": ["location", "rotation_quaternion"],
+            "offset": 2,
+            "limit": 5,
+            "max_simulated_frames": 100,
+        },
     },
     "bake_blender_simulation": {"minimal": {"frame_start": 1, "frame_end": 50}},
     "free_blender_bake": {"minimal": {}},

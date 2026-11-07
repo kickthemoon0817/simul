@@ -38,7 +38,9 @@
       "play_blender_animation",
       "insert_blender_keyframe",
       "delete_blender_keyframe",
+      "set_blender_pose_bone_transform",
       "get_blender_keyframes",
+      "insert_blender_keyframes",
       "setup_blender_rigid_body",
       "add_blender_force_field",
       "get_blender_force_field_info",
@@ -46,6 +48,7 @@
       "get_blender_constraint_info",
       "get_blender_physics_state",
       "get_blender_object_trajectory",
+      "get_blender_trajectories",
       "bake_blender_simulation",
       "free_blender_bake",
       "execute_blender_script",
@@ -105,7 +108,9 @@
       "play_blender_animation",
       "insert_blender_keyframe",
       "delete_blender_keyframe",
+      "set_blender_pose_bone_transform",
       "get_blender_keyframes",
+      "insert_blender_keyframes",
       "setup_blender_rigid_body",
       "add_blender_force_field",
       "get_blender_force_field_info",
@@ -113,6 +118,7 @@
       "get_blender_constraint_info",
       "get_blender_physics_state",
       "get_blender_object_trajectory",
+      "get_blender_trajectories",
       "bake_blender_simulation",
       "free_blender_bake",
       "execute_blender_script",
@@ -172,7 +178,9 @@
       "play_blender_animation",
       "insert_blender_keyframe",
       "delete_blender_keyframe",
+      "set_blender_pose_bone_transform",
       "get_blender_keyframes",
+      "insert_blender_keyframes",
       "setup_blender_rigid_body",
       "add_blender_force_field",
       "get_blender_force_field_info",
@@ -180,6 +188,7 @@
       "get_blender_constraint_info",
       "get_blender_physics_state",
       "get_blender_object_trajectory",
+      "get_blender_trajectories",
       "bake_blender_simulation",
       "free_blender_bake",
       "create_blender_mesh_from_data",
@@ -1030,17 +1039,163 @@
       "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
-    "get_blender_keyframes": {
-      "name": "get_blender_keyframes",
-      "title": "Get Blender Keyframes",
-      "description": "Get keyframe summary for an object.",
+    "set_blender_pose_bone_transform": {
+      "name": "set_blender_pose_bone_transform",
+      "title": "Set Blender Pose Bone Transform",
+      "description": "Set a pose bone's own location, rotation and/or scale (its pose relative to the rest position); the rotation is written in the bone's rotation mode.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"object_name": {"description": "Name of the object.", "type": "string"}},
+        "properties": {
+          "object_name": {"description": "The armature object.", "type": "string"},
+          "bone_name": {"description": "Its pose bone.", "type": "string"},
+          "location": {
+            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "New location [x, y, z] relative to the rest position, or None to keep it."
+          },
+          "rotation_euler": {
+            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "New rotation as XYZ Euler angles [rx, ry, rz] in radians, converted to the bone's rotation_mode; None to keep it."
+          },
+          "rotation_quaternion": {
+            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "New rotation as a quaternion [w, x, y, z], normalized and converted to the bone's rotation_mode; instead of rotation_euler."
+          },
+          "scale": {
+            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "New scale [sx, sy, sz], or None to keep it."
+          }
+        },
+        "required": ["object_name", "bone_name"]
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "get_blender_keyframes": {
+      "name": "get_blender_keyframes",
+      "title": "Get Blender Keyframes",
+      "description": "List an object's keyed channels a page at a time, filtered by data_path or bone_name, optionally with every key's value, interpolation and handles; next_offset (and next_key_offset) continue a page that stops early.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "Name of the object.", "type": "string"},
+          "data_path": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Only this property's channels: its data path, such as 'location' or 'pose.bones[\"Bone\"].rotation_quaternion', or with bone_name the bone's property, such as 'rotation_quaternion'."
+          },
+          "bone_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Only the channels of this pose bone of an armature."
+          },
+          "include_keys": {
+            "default": false,
+            "description": "Also return each key: frame, value, interpolation and key type, plus the handles of a Bezier key and the easing of an eased one.",
+            "type": "boolean"
+          },
+          "offset": {
+            "default": 0,
+            "description": "Index of the first channel to return, among those the filters keep: the previous page's next_offset.",
+            "type": "integer"
+          },
+          "key_offset": {
+            "default": 0,
+            "description": "With include_keys, index of the first key of that first channel: the previous page's next_key_offset.",
+            "type": "integer"
+          },
+          "limit": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Most channels to return; None returns as many as fit."
+          }
+        },
         "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "insert_blender_keyframes": {
+      "name": "insert_blender_keyframes",
+      "title": "Insert Blender Keyframes",
+      "description": "Insert many keyframes in one call: for each property, a value per frame (up to 10 000 keys), with an optional interpolation and key type.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "Name of the object.", "type": "string"},
+          "channels": {
+            "description": "Up to 10 000 keys in all, as entries with data_path, index (-1, the default, for every element), frames, and values: one per frame, a number for one channel (index >= 0, or a property that is not an array), else one number per element.",
+            "items": {
+              "description": "The keys to insert on one property: a value per frame.",
+              "properties": {
+                "data_path": {
+                  "description": "Property data path, as for insert_blender_keyframe",
+                  "type": "string"
+                },
+                "index": {
+                  "default": -1,
+                  "description": "Array index (-1 for all elements)",
+                  "type": "integer"
+                },
+                "frames": {
+                  "description": "Frames to key, each once",
+                  "items": {"type": "number"},
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "values": {
+                  "description": "One value per frame: a number for one channel, else one number per element",
+                  "items": {"anyOf": [{"type": "number"}, {"items": {"type": "number"}, "type": "array"}]},
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "required": ["data_path", "frames", "values"],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "interpolation": {
+            "anyOf": [
+              {
+                "enum": [
+                  "CONSTANT",
+                  "LINEAR",
+                  "BEZIER",
+                  "SINE",
+                  "QUAD",
+                  "CUBIC",
+                  "QUART",
+                  "QUINT",
+                  "EXPO",
+                  "CIRC",
+                  "BACK",
+                  "BOUNCE",
+                  "ELASTIC"
+                ],
+                "type": "string"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "Interpolation of every inserted key, as for insert_keyframe; None leaves Blender's choice."
+          },
+          "keyframe_type": {
+            "default": "KEYFRAME",
+            "description": "Blender's key type of every inserted key.",
+            "enum": ["KEYFRAME", "BREAKDOWN", "MOVING_HOLD", "EXTREME", "JITTER", "GENERATED"],
+            "type": "string"
+          }
+        },
+        "required": ["object_name", "channels"]
+      },
+      "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "setup_blender_rigid_body": {
@@ -1164,20 +1319,137 @@
     "get_blender_object_trajectory": {
       "name": "get_blender_object_trajectory",
       "title": "Get Blender Object Trajectory",
-      "description": "Sample an object's world pose over a frame range. Not read-only: it steps the scene through the frames (frame-change handlers run, an unbaked rigid-body cache fills) and restores the current frame afterwards.",
+      "description": "Sample the world pose of an object, or of an armature's bone, over a frame range, a page at a time (next_offset continues). Not read-only: it steps the scene through the frames (frame-change handlers run, an unbaked rigid-body cache fills, more than 200 000 bodies x frames only with max_simulated_frames) and restores the current frame afterwards.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "object_name": {"description": "Name of the object to track.", "type": "string"},
+          "object_name": {
+            "description": "Name of the object to track (an armature for bone_name).",
+            "type": "string"
+          },
           "start_frame": {"description": "First frame of trajectory.", "type": "integer"},
           "end_frame": {
             "description": "Last frame of trajectory (inclusive); not before start_frame.",
             "type": "integer"
           },
-          "step": {"default": 1, "description": "Frames between samples; at least 1.", "type": "integer"}
+          "step": {"default": 1, "description": "Frames between samples; at least 1.", "type": "integer"},
+          "bone_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Track this pose bone of the armature instead of the object."
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "time",
+                    "location",
+                    "rotation_euler",
+                    "rotation_quaternion",
+                    "local_rotation",
+                    "velocity"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "What each sample reports besides its frame: any of time, location, rotation_euler, rotation_quaternion, local_rotation and velocity; None reports all. Fewer fields fit more samples a page."
+          },
+          "offset": {
+            "default": 0,
+            "description": "Index of the first sample to return (the previous page's next_offset); the samples are start_frame, start_frame + step, ...",
+            "type": "integer"
+          },
+          "limit": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Most samples to return; None returns as many as fit."
+          },
+          "max_simulated_frames": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Most frames of unbaked rigid-body simulation the call may step through. None steps through up to 200 000 bodies times frames and refuses more, which can take minutes."
+          }
         },
         "required": ["object_name", "start_frame", "end_frame"]
+      },
+      "annotations": {"readOnlyHint": false, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "get_blender_trajectories": {
+      "name": "get_blender_trajectories",
+      "title": "Get Blender Trajectories",
+      "description": "Sample several objects and bones over one frame range in one pass, each as get_blender_object_trajectory samples one; the same paging and side effects.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "targets": {
+            "description": "1 to 32 entries, each an object_name and, for a bone of an armature, its bone_name.",
+            "items": {
+              "description": "An object, or a pose bone of an armature, to sample.",
+              "properties": {
+                "object_name": {"description": "Name of the object (an armature for a bone)", "type": "string"},
+                "bone_name": {
+                  "anyOf": [{"type": "string"}, {"type": "null"}],
+                  "default": null,
+                  "description": "Pose bone of the armature"
+                }
+              },
+              "required": ["object_name"],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "start_frame": {"description": "First frame of trajectory.", "type": "integer"},
+          "end_frame": {
+            "description": "Last frame of trajectory (inclusive); not before start_frame.",
+            "type": "integer"
+          },
+          "step": {"default": 1, "description": "Frames between samples; at least 1.", "type": "integer"},
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "time",
+                    "location",
+                    "rotation_euler",
+                    "rotation_quaternion",
+                    "local_rotation",
+                    "velocity"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "What each sample reports besides its frame, as for get_object_trajectory; None reports all."
+          },
+          "offset": {
+            "default": 0,
+            "description": "Index of the first sample to return (the previous page's next_offset).",
+            "type": "integer"
+          },
+          "limit": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Most samples per target to return; None returns as many as fit."
+          },
+          "max_simulated_frames": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Most frames of unbaked rigid-body simulation the call may step through; None allows up to 200 000 bodies times frames."
+          }
+        },
+        "required": ["targets", "start_frame", "end_frame"]
       },
       "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}

@@ -337,7 +337,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
 | Materials and lights | `get_blender_material_info`, `assign_blender_material`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake` |
-| Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `delete_blender_keyframe`, `get_blender_keyframes`, `get_blender_object_trajectory` |
+| Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `insert_blender_keyframes`, `delete_blender_keyframe`, `get_blender_keyframes`, `set_blender_pose_bone_transform`, `get_blender_object_trajectory`, `get_blender_trajectories` |
 | Camera and viewport | `get_blender_camera_info`, `set_blender_camera_view`, `get_blender_viewport_info`, `focus_blender_on_object`, `capture_blender_viewport`, `capture_blender_viewport_sequence` |
 | UI and attachment | `control_blender_ui`, `attach_blender_window` |
 | SimReady | `get_simready_metadata`, `apply_simready_metadata`, `setup_simready_hierarchy`, `validate_simready_compliance`, `export_simready_usd` |
@@ -525,23 +525,88 @@ Behaviour worth knowing:
   on a curve with two keys or more, else its preference, Bezier by default)
   and `keyframe_type` its key type. The reply's `keyframes` give each keyed
   channel's value, interpolation and type as Blender stored them, and
-  `value_source` says which value was keyed. `get_blender_keyframes` reports
-  `frame_range` in float frames, since a key can sit between frames.
+  `value_source` says which value was keyed.
+- `insert_blender_keyframes` keys many frames in one call: per entry of
+  `channels` a `data_path`, an `index` (-1 for every element), `frames` and a
+  value per frame, up to 10 000 keys (frames times elements) a call. Each value
+  is keyed as `insert_blender_keyframe` keys a given one, and the same
+  `interpolation` and `keyframe_type` go to every key. Every entry is checked
+  first, and a locked or sampled F-curve is refused before anything is keyed;
+  should Blender still refuse a key part way, the error says how many keys went
+  in. On Blender 5.0.1 it inserted 6 000 keys (a 6-DOF arm over 1 000 frames)
+  in 0.09 s, which took some 13 000 calls of 55 ms one key at a time.
+- `get_blender_keyframes` lists the keyed channels a page at a time: each
+  channel's data path, array index, the pose bone it animates (`bone_name`),
+  its key count and `frame_range` (in float frames, since a key can sit between
+  frames). `include_keys` adds every key: frame, value, interpolation and key
+  type, the handles and their types for a Bezier key, and the easing of an
+  eased one. `bone_name` keeps one pose bone's channels, and `data_path` one
+  property's (the bone's, with `bone_name`: `rotation_quaternion`, or its full
+  path, `pose.bones["Bone"].rotation_quaternion`). A page holds what fits in one
+  reply, up to `limit` channels; `next_offset` (and, with `include_keys`,
+  `next_key_offset`, as a long channel can run over several pages) is what the
+  next call passes as `offset` and `key_offset`, and `truncation` says so. They
+  are null on the last page. An 80-bone rig's 800 channels came back as 301,
+  with a hint naming parameters the tool did not have; they now come in four
+  pages.
+- `set_blender_pose_bone_transform` sets a pose bone's own location, rotation
+  and scale: its pose relative to the rest position, before constraints, as the
+  bone's Transform panel in Pose Mode shows it. The rotation is written in the
+  bone's `rotation_mode`, which is kept: `rotation_euler` takes XYZ Euler
+  angles and `rotation_quaternion` a quaternion (w, x, y, z), either converted
+  to that mode (a new bone's is QUATERNION, where Blender ignores
+  `rotation_euler`). The reply gives the transform as stored, the rotation as
+  XYZ Euler angles and as a quaternion, and `world_head` and `world_tail`, where
+  Blender evaluates the bone afterwards. Key it with `insert_blender_keyframe`
+  or `insert_blender_keyframes` on `pose.bones["Bone"].<property>`.
 - `get_blender_object_trajectory` is not read-only: each sample is a frame
   change, so frame-change handlers run, and an unbaked rigid-body world is
-  stepped through every frame from its cache start, which fills its cache. The
-  frame and subframe current before the call are set again afterwards.
-  `step` is at least 1 and `start_frame` not after `end_frame`. `time` counts
-  seconds from the scene's `frame_start` (`time_origin_frame`) at `fps /
-  fps_base`, and `velocity` is the world location change since the previous
-  sample per second (null for the first). Each point gives the world
-  `location`, `rotation_euler` in `euler_order` (the object's Euler order, XYZ
-  for a quaternion or axis-angle object), each sample the equivalent nearest
-  the previous one, so it stays continuous while the object turns less than
-  half a turn between samples, `rotation_quaternion` (w, x, y, z, its sign kept
-  continuous) and `local_rotation`, the object's own rotation channels as its
-  `rotation_mode` stores them, unwrapped: a joint keyed from 0 to 6 pi reads 6
-  pi there.
+  stepped on from the last frame its memory cache holds, which fills the
+  cache. The frame and subframe current before the call are set again
+  afterwards. `step` is at least 1 and `start_frame` not after `end_frame`.
+  `time` counts seconds from the scene's `frame_start` (`time_origin_frame`) at
+  `fps / fps_base`, and `velocity` is the world location change since the
+  sample before, per second (null for the first sample of the request). Each
+  point gives the world `location`, `rotation_euler` in `euler_order` (the
+  target's Euler order, XYZ for a quaternion or axis-angle one), each sample
+  the equivalent nearest the previous one, so it stays continuous while the
+  target turns less than half a turn between samples, `rotation_quaternion`
+  (w, x, y, z, its sign kept continuous) and `local_rotation`, the target's own
+  rotation channels as its `rotation_mode` stores them, unwrapped: a joint
+  keyed from 0 to 6 pi reads 6 pi there. `fields` picks which of these a sample
+  reports (fewer fit more samples a page). Values are the float32 Blender holds,
+  written in their shortest form (0.1, not 0.10000000149011612).
+- `bone_name` samples a pose bone of the armature instead: its world matrix is
+  the armature's times the bone's pose matrix, and its location the bone's head.
+  A bone's name passed as `object_name` fails with the armature to pass.
+  `get_blender_trajectories` samples up to 32 objects and bones in one pass,
+  setting each frame once for all of them, with the same samples, paging and
+  side effects.
+- A trajectory comes a page at a time. A page holds as many samples as fit in
+  one reply at their widest, so the same request always pages the same way, and
+  up to `limit`; `next_offset` (null on the last page) is the next call's
+  `offset`, and the pages join into exactly what one long reply would hold,
+  velocities at their edges included. A 1 000-frame trajectory came back as
+  frames 1-199 before; it is now 15 pages of 70 samples with every field, or 3
+  pages with `fields: ["location"]`.
+- For an unbaked rigid-body world, frames its memory cache already holds are
+  read, not simulated again: the walk jumps to the cache's last frame and steps
+  on from there (`simulated_frames` counts the frames it stepped). What the
+  cache holds is read from its English info text; anything else (outdated,
+  frames skipped, a translated interface) walks from the cache start. A walk
+  over 200 000 bodies times frames is refused before any frame is set, with
+  what it would cost: bake first (`bake_blender_simulation`), sample fewer
+  frames, or pass `max_simulated_frames` to go ahead, which also bounds the
+  walk when given. On Blender 5.0.1 on an M-series Mac a body-frame took about
+  35 microseconds headless and 61 in a GUI Blender, so the bound is some 12 s
+  there, inside the 30 s an attached call waits by default
+  (`BLENDER__CONNECTION_TIMEOUT`); a confirmed walk that takes longer keeps
+  running in Blender after the call times out, and a later call reads what it
+  cached. A 2-point request on 1 000 unbaked bodies over 1 000 frames took 29 s
+  unasked; it is now refused at once, takes 35 s headless once confirmed, and
+  0.01 s when repeated. Samples past the cache end come with a `warning`:
+  Blender simulates nothing later and holds the bodies at their last cached
+  pose.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
   backtracks, and on a long object name such a pattern runs for hours on

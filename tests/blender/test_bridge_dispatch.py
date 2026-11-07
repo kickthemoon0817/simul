@@ -606,8 +606,9 @@ def test_every_operation_is_classified_for_undo(bridge_module: Any) -> None:
             assert spec.operation in {
                 "control_ui",
                 "export_file",
-                # Steps through frames and fills caches, but restores the frame.
+                # Step through frames and fill caches, but restore the frame.
                 "get_object_trajectory",
+                "get_trajectories",
                 "open_blend_file",
                 "play_animation",
                 "save_blend_file",

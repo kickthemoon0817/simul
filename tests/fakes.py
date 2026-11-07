@@ -8,9 +8,10 @@ component keys so the server's own tool listing works against it.
 
 ``StrictBlenderSession`` stands in for a Blender session behind the registered
 tools; ``BlenderSessionAdapter`` hands it to the server.
-``FakeVector``, ``FakeMatrix``, ``FakeEuler`` and ``FakePropArray`` stand in
-for Blender's ``mathutils`` types and ``bpy_prop_array``; ``fake_mathutils``
-packages the first three as the module the Blender runtime imports.
+``FakeVector``, ``FakeMatrix``, ``FakeEuler``, ``FakeQuaternion`` and
+``FakePropArray`` stand in for Blender's ``mathutils`` types and
+``bpy_prop_array``; ``fake_mathutils`` packages the first four as the module
+the Blender runtime imports.
 ``FakeTransformObject`` is an object whose ``matrix_world`` follows its parent,
 rotation mode and ``FakeConstraint`` stack as a Blender object's does;
 ``FakeObjectModifier`` is an entry of its modifier stack.
@@ -232,6 +233,13 @@ class FakeVector:
     def __repr__(self) -> str:
         return f"Vector({self._values!r})"
 
+    @property
+    def length(self) -> float:
+        return float(np.linalg.norm(self._values))
+
+    def normalized(self) -> "FakeVector":
+        return FakeVector(np.asarray(self._values) / self.length)
+
 
 class FakePropArray(tuple):
     """``bpy_prop_array`` stand-in, such as an ``Object.bound_box`` corner: not a Vector."""
@@ -362,6 +370,70 @@ class FakeEuler:
     def to_matrix(self) -> "FakeMatrix":
         return FakeMatrix(euler_matrix(self._angles, self.order))
 
+    def to_quaternion(self) -> "FakeQuaternion":
+        return FakeQuaternion(matrix_quaternion(euler_matrix(self._angles, self.order)))
+
+
+class FakeQuaternion:
+    """``mathutils.Quaternion`` stand-in: (w, x, y, z), or built from an axis and an angle.
+
+    ``Quaternion()`` is no rotation, ``Quaternion(values)`` keeps the four
+    values as given (unnormalized too), and ``Quaternion(axis, angle)`` turns
+    by ``angle`` radians about ``axis``, as mathutils builds them.
+    """
+
+    def __init__(
+        self,
+        values: Iterable[float] = (1.0, 0.0, 0.0, 0.0),
+        angle: Optional[float] = None,
+    ) -> None:
+        if angle is not None:
+            axis = np.asarray(list(values), dtype=float)
+            values = (
+                math.cos(angle / 2),
+                *(axis / np.linalg.norm(axis) * math.sin(angle / 2)),
+            )
+        self._values = tuple(float(v) for v in values)
+
+    def __iter__(self) -> Iterator[float]:
+        return iter(self._values)
+
+    def __getitem__(self, index: int) -> float:
+        return self._values[index]
+
+    def __len__(self) -> int:
+        return 4
+
+    def __repr__(self) -> str:
+        return f"Quaternion({self._values!r})"
+
+    @property
+    def magnitude(self) -> float:
+        return float(np.linalg.norm(self._values))
+
+    def normalized(self) -> "FakeQuaternion":
+        return FakeQuaternion(np.asarray(self._values) / self.magnitude)
+
+    def to_matrix(self) -> "FakeMatrix":
+        return FakeMatrix(quaternion_matrix(self._values))
+
+    def to_euler(self, order: str = "XYZ", compatible: Any = None) -> "FakeEuler":
+        return self.to_matrix().to_euler(order, compatible)
+
+    def to_axis_angle(self) -> Tuple[FakeVector, float]:
+        """(axis, angle), the axis +Y for no rotation, as mathutils returns them."""
+        w, x, y, z = self.normalized()
+        angle = 2 * math.acos(max(-1.0, min(1.0, w)))
+        sine = math.sin(angle / 2)
+        if abs(sine) < 1e-12:
+            return FakeVector((0.0, 1.0, 0.0)), 0.0
+        return FakeVector((x / sine, y / sine, z / sine)), angle
+
+    def make_compatible(self, other: Iterable[float]) -> None:
+        """Negate in place when ``other`` is nearer the opposite quaternion (the same rotation)."""
+        if float(np.dot(self._values, list(other))) < 0:
+            self._values = tuple(-v for v in self._values)
+
 
 class FakeMatrix:
     """``mathutils.Matrix`` stand-in for a 3x3 or 4x4 transform.
@@ -444,10 +516,12 @@ class FakeMatrix:
         lengths = np.linalg.norm(np.asarray(self.rows)[:3, :3], axis=0)
         return FakeVector(-lengths if self.is_negative else lengths)
 
-    def to_quaternion(self) -> Tuple[float, float, float, float]:
+    def to_quaternion(self) -> "FakeQuaternion":
         """The rotation as a quaternion (w, x, y, z), scale divided out, as mathutils gives it."""
         rotation = np.asarray(self.rows)[:3, :3]
-        return matrix_quaternion(rotation / np.linalg.norm(rotation, axis=0))
+        return FakeQuaternion(
+            matrix_quaternion(rotation / np.linalg.norm(rotation, axis=0))
+        )
 
     def to_euler(self, order: str = "XYZ", compatible: Any = None) -> FakeEuler:
         if compatible is not None and not isinstance(compatible, FakeEuler):
@@ -826,6 +900,7 @@ def fake_mathutils() -> ModuleType:
     module.Vector = FakeVector  # type: ignore[attr-defined]
     module.Matrix = FakeMatrix  # type: ignore[attr-defined]
     module.Euler = FakeEuler  # type: ignore[attr-defined]
+    module.Quaternion = FakeQuaternion  # type: ignore[attr-defined]
     return module
 
 
@@ -894,6 +969,8 @@ class FakeDepsgraph:
             rotation_euler=getattr(obj, "rotation_euler", None),
             rotation_quaternion=getattr(obj, "rotation_quaternion", None),
             rotation_axis_angle=getattr(obj, "rotation_axis_angle", None),
+            # An armature's pose bones, as they are after the evaluation.
+            pose=getattr(obj, "pose", None),
         )
 
 

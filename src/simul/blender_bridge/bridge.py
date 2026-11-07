@@ -60,6 +60,7 @@ UNDO_STEPS: dict[str, str] = {
     "free_bake": "free_blender_bake",
     "import_file": "import_blender_file",
     "insert_keyframe": "insert_blender_keyframe",
+    "insert_keyframes": "insert_blender_keyframes",
     "set_camera_view": "set_blender_camera_view",
     # Blender records frame changes as undo steps too.
     "set_frame": "set_blender_frame",
@@ -67,6 +68,7 @@ UNDO_STEPS: dict[str, str] = {
     "set_light_params": "set_blender_light_params",
     "set_object_parent": "set_blender_object_parent",
     "set_object_transform": "set_blender_object_transform",
+    "set_pose_bone_transform": "set_blender_pose_bone_transform",
     "setup_rigid_body": "setup_blender_rigid_body",
     "setup_simready_hierarchy": "setup_simready_hierarchy",
 }
@@ -93,6 +95,7 @@ NO_UNDO_STEP = frozenset(
         "get_object_info",
         "get_object_trajectory",
         "get_physics_state",
+        "get_trajectories",
         "get_runtime_info",
         "get_simready_metadata",
         "get_viewport_info",

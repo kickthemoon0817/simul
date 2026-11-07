@@ -1217,10 +1217,113 @@
         }
       }
     },
+    "set_blender_pose_bone_transform": {
+      "minimal": {
+        "arguments": {"object_name": "Rig", "bone_name": "Hand"},
+        "session_calls": [
+          {
+            "method": "set_pose_bone_transform",
+            "arguments": {
+              "object_name": "'Rig'",
+              "bone_name": "'Hand'",
+              "location": "None",
+              "rotation_euler": "None",
+              "rotation_quaternion": "None",
+              "scale": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetPoseBoneTransformResponse"},
+        "usage": [{"tool": "set_blender_pose_bone_transform", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Rig",
+          "bone_name": "Hand",
+          "location": [0, 0.1, 0],
+          "rotation_quaternion": [1, 0, 0, 0],
+          "scale": [1, 1, 2]
+        },
+        "session_calls": [
+          {
+            "method": "set_pose_bone_transform",
+            "arguments": {
+              "object_name": "'Rig'",
+              "bone_name": "'Hand'",
+              "location": "[0.0, 0.1, 0.0]",
+              "rotation_euler": "None",
+              "rotation_quaternion": "[1.0, 0.0, 0.0, 0.0]",
+              "scale": "[1.0, 1.0, 2.0]"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetPoseBoneTransformResponse"},
+        "usage": [{"tool": "set_blender_pose_bone_transform", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}, "bone_name": "Hand"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetPoseBoneTransformRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "bone_name": "Hand",
+              "location": null,
+              "rotation_euler": null,
+              "rotation_quaternion": null,
+              "scale": null
+            }
+          }
+        }
+      }
+    },
     "get_blender_keyframes": {
       "minimal": {
         "arguments": {"object_name": "Cube"},
-        "session_calls": [{"method": "get_keyframes", "arguments": {"object_name": "'Cube'"}}],
+        "session_calls": [
+          {
+            "method": "get_keyframes",
+            "arguments": {
+              "object_name": "'Cube'",
+              "data_path": "None",
+              "bone_name": "None",
+              "include_keys": "False",
+              "offset": "0",
+              "key_offset": "0",
+              "limit": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderGetKeyframesResponse"},
+        "usage": [{"tool": "get_blender_keyframes", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Rig",
+          "data_path": "rotation_quaternion",
+          "bone_name": "Hand",
+          "include_keys": true,
+          "offset": 3,
+          "key_offset": 7,
+          "limit": 2
+        },
+        "session_calls": [
+          {
+            "method": "get_keyframes",
+            "arguments": {
+              "object_name": "'Rig'",
+              "data_path": "'rotation_quaternion'",
+              "bone_name": "'Hand'",
+              "include_keys": "True",
+              "offset": "3",
+              "key_offset": "7",
+              "limit": "2"
+            }
+          }
+        ],
         "response": {"checked_against": "BlenderGetKeyframesResponse"},
         "usage": [{"tool": "get_blender_keyframes", "success": false}]
       },
@@ -1231,7 +1334,82 @@
           "success": false,
           "error": "1 validation error for BlenderGetKeyframesRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "data_path": null,
+              "bone_name": null,
+              "include_keys": false,
+              "offset": 0,
+              "key_offset": 0,
+              "limit": null
+            }
+          }
+        }
+      }
+    },
+    "insert_blender_keyframes": {
+      "minimal": {
+        "arguments": {
+          "object_name": "Cube",
+          "channels": [{"data_path": "location", "frames": [1, 10], "values": [[0, 0, 0], [1, 2, 3]]}]
+        },
+        "session_calls": [
+          {
+            "method": "insert_keyframes",
+            "arguments": {
+              "object_name": "'Cube'",
+              "channels": "[{'data_path': 'location', 'index': -1, 'frames': [1.0, 10.0], 'values': [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]}]",
+              "interpolation": "None",
+              "keyframe_type": "'KEYFRAME'"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderInsertKeyframesResponse"},
+        "usage": [{"tool": "insert_blender_keyframes", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "channels": [
+            {"data_path": "location", "index": 2, "frames": [1, 5], "values": [0.5, 1.5]},
+            {"data_path": "scale", "frames": [3], "values": [[2, 2, 2]]}
+          ],
+          "interpolation": "LINEAR",
+          "keyframe_type": "EXTREME"
+        },
+        "session_calls": [
+          {
+            "method": "insert_keyframes",
+            "arguments": {
+              "object_name": "'Cube'",
+              "channels": "[{'data_path': 'location', 'index': 2, 'frames': [1.0, 5.0], 'values': [0.5, 1.5]}, {'data_path': 'scale', 'index': -1, 'frames': [3.0], 'values': [[2.0, 2.0, 2.0]]}]",
+              "interpolation": "'LINEAR'",
+              "keyframe_type": "'EXTREME'"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderInsertKeyframesResponse"},
+        "usage": [{"tool": "insert_blender_keyframes", "success": false}]
+      },
+      "invalid": {
+        "arguments": {
+          "object_name": {"bogus": 1},
+          "channels": [{"data_path": "location", "frames": [1, 10], "values": [[0, 0, 0], [1, 2, 3]]}]
+        },
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderInsertKeyframesRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "channels": [{"data_path": "location", "frames": [1, 10], "values": [[0, 0, 0], [1, 2, 3]]}],
+              "interpolation": null,
+              "keyframe_type": "KEYFRAME"
+            }
+          }
         }
       }
     },
@@ -1466,18 +1644,48 @@
         "session_calls": [
           {
             "method": "get_object_trajectory",
-            "arguments": {"object_name": "'Cube'", "start_frame": "1", "end_frame": "10", "step": "1"}
+            "arguments": {
+              "object_name": "'Cube'",
+              "start_frame": "1",
+              "end_frame": "10",
+              "step": "1",
+              "bone_name": "None",
+              "fields": "None",
+              "offset": "0",
+              "limit": "None",
+              "max_simulated_frames": "None"
+            }
           }
         ],
         "response": {"checked_against": "BlenderGetTrajectoryResponse"},
         "usage": [{"tool": "get_blender_object_trajectory", "success": false}]
       },
       "full": {
-        "arguments": {"object_name": "Cube", "start_frame": 1, "end_frame": 10, "step": 3},
+        "arguments": {
+          "object_name": "Rig",
+          "start_frame": 1,
+          "end_frame": 10,
+          "step": 3,
+          "bone_name": "Hand",
+          "fields": ["location", "velocity"],
+          "offset": 2,
+          "limit": 5,
+          "max_simulated_frames": 100
+        },
         "session_calls": [
           {
             "method": "get_object_trajectory",
-            "arguments": {"object_name": "'Cube'", "start_frame": "1", "end_frame": "10", "step": "3"}
+            "arguments": {
+              "object_name": "'Rig'",
+              "start_frame": "1",
+              "end_frame": "10",
+              "step": "3",
+              "bone_name": "'Hand'",
+              "fields": "['location', 'velocity']",
+              "offset": "2",
+              "limit": "5",
+              "max_simulated_frames": "100"
+            }
           }
         ],
         "response": {"checked_against": "BlenderGetTrajectoryResponse"},
@@ -1490,7 +1698,91 @@
           "success": false,
           "error": "1 validation error for BlenderGetTrajectoryRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}, "start_frame": 1, "end_frame": 10, "step": 1}}
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "start_frame": 1,
+              "end_frame": 10,
+              "step": 1,
+              "bone_name": null,
+              "fields": null,
+              "offset": 0,
+              "limit": null,
+              "max_simulated_frames": null
+            }
+          }
+        }
+      }
+    },
+    "get_blender_trajectories": {
+      "minimal": {
+        "arguments": {"targets": [{"object_name": "Cube"}], "start_frame": 1, "end_frame": 10},
+        "session_calls": [
+          {
+            "method": "get_trajectories",
+            "arguments": {
+              "targets": "[{'object_name': 'Cube'}]",
+              "start_frame": "1",
+              "end_frame": "10",
+              "step": "1",
+              "fields": "None",
+              "offset": "0",
+              "limit": "None",
+              "max_simulated_frames": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderGetTrajectoriesResponse"},
+        "usage": [{"tool": "get_blender_trajectories", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "targets": [{"object_name": "Rig", "bone_name": "Hand"}, {"object_name": "Cube"}],
+          "start_frame": 1,
+          "end_frame": 10,
+          "step": 3,
+          "fields": ["location", "rotation_quaternion"],
+          "offset": 2,
+          "limit": 5,
+          "max_simulated_frames": 100
+        },
+        "session_calls": [
+          {
+            "method": "get_trajectories",
+            "arguments": {
+              "targets": "[{'object_name': 'Rig', 'bone_name': 'Hand'}, {'object_name': 'Cube'}]",
+              "start_frame": "1",
+              "end_frame": "10",
+              "step": "3",
+              "fields": "['location', 'rotation_quaternion']",
+              "offset": "2",
+              "limit": "5",
+              "max_simulated_frames": "100"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderGetTrajectoriesResponse"},
+        "usage": [{"tool": "get_blender_trajectories", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"targets": {"bogus": 1}, "start_frame": 1, "end_frame": 10},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderGetTrajectoriesRequest\ntargets\n  Input should be a valid list [type=list_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/list_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "targets": {"bogus": 1},
+              "start_frame": 1,
+              "end_frame": 10,
+              "step": 1,
+              "fields": null,
+              "offset": 0,
+              "limit": null,
+              "max_simulated_frames": null
+            }
+          }
         }
       }
     },
