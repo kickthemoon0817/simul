@@ -538,7 +538,7 @@ class TestUnrealRuntimeSessionPhase2:
             if fn == "ExecuteConsoleCommand":
                 # RC ack — fire-and-forget for HighResShot.
                 return FakeResponse({})
-            if fn == "ExecutePythonCommandEx" and "e.path for e in shots()" in (
+            if fn == "ExecutePythonCommandEx" and "'existing': numbered_shots()" in (
                 json["parameters"]["PythonCommand"]
             ):
                 # Pre-trigger listing of the screenshot directories.
@@ -615,7 +615,7 @@ class TestUnrealRuntimeSessionPhase2:
             fn = (json or {}).get("functionName", "")
             if fn == "ExecuteConsoleCommand":
                 return FakeResponse({})
-            if fn == "ExecutePythonCommandEx" and "e.path for e in shots()" in (
+            if fn == "ExecutePythonCommandEx" and "'existing': numbered_shots()" in (
                 json["parameters"]["PythonCommand"]
             ):
                 return FakeResponse({

@@ -632,12 +632,15 @@ def capture(
     format: str = typer.Option(
         "png", "--format", "-f", help="Image format (png, jpeg)"
     ),
+    view: str = typer.Option(
+        "auto", "--view", help="auto, editor (the level viewport) or game (the Play In Editor player's view)"
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
     """Capture viewport screenshot to a file."""
     session = _session(host, port)
-    result = _run(session.capture_to_file(output, width, height, format), session)
+    result = _run(session.capture_to_file(output, width, height, format, view=view), session)
     if is_json_mode():
         emit(result)
         return

@@ -193,7 +193,7 @@ mode.
 | `list-actors [--class] [--subclasses] [--tag] [--label] [-n] [--offset]`, `actor-info`, `search`, `scene-graph [--root] [--depth] [--components] [--class] [--offset]` | Scene queries, one page at a time (`next_offset` in the JSON) |
 | `spawn PATH [--location x,y,z] [--rotation p,y,r] [--label]` (an Actor class path or an asset path), `delete`, `set-transform ACTOR [--location x,y,z] [--rotation p,y,r] [--scale x,y,z]` (an option left out keeps its value), `set-property`, `set-visibility` | Edit actors |
 | `sim ACTION`, `sim-status` | Play-In-Editor: `start`, `stop`, `pause`, `resume`, `step` |
-| `capture [OUTPUT] [--width] [--height] [--format png\|jpeg]` | Viewport screenshot |
+| `capture [OUTPUT] [--width] [--height] [--format png\|jpeg] [--view auto\|editor\|game]` | Viewport screenshot |
 | `capture-camera ACTOR [--width] [--height] [--format png\|jpeg]` | What a camera or sensor actor sees, with its intrinsics |
 | `wp-load [--min x,y,z --max x,y,z] [--max-actors] [--unload]` | Load a World Partition map's actors in the editor |
 | `materials MATERIAL_PATH` | Parameters (with values and, for an instance, overrides), parent, domain and blend mode of a material or material instance |

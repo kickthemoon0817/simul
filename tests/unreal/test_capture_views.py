@@ -24,6 +24,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import traceback
 from contextlib import asynccontextmanager, redirect_stdout
@@ -142,15 +143,31 @@ class SceneCaptureComponent2D(Component):
     def capture_scene(self) -> None:
         self.properties["texture_target"].pixels = CAPTURE_GREEN
         self.editor.captures.append(self)
+        self.editor.events.append("capture")
+
+
+class Guid:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def to_string(self) -> str:
+        return self.text
 
 
 class Actor:
-    def __init__(self, path: str, label: str, world: Any = None) -> None:
+    def __init__(self, path: str, label: str, world: Any = None, guid: str = "") -> None:
         self.path, self.label, self.world = path, label, world
+        self.guid = guid or label.upper()
         self.components: List[Component] = []
 
     def get_path_name(self) -> str:
         return self.path
+
+    def get_name(self) -> str:
+        return self.path.rsplit(".", 1)[-1]
+
+    def get_editor_property(self, name: str) -> Any:
+        return {"actor_guid": Guid(self.guid)}[name]
 
     def get_world(self) -> Any:
         return self.world
@@ -180,6 +197,7 @@ class SceneCapture2D(Actor):
 
     def destroy_actor(self) -> None:
         self.editor.destroyed.append(self)
+        self.editor.events.append("destroy")
 
 
 class RenderTarget:
@@ -216,14 +234,28 @@ class Editor:
         self.captures: List[SceneCaptureComponent2D] = []
         self.spawned: List[SceneCapture2D] = []
         self.destroyed: List[SceneCapture2D] = []
+        # Transactions, spawns, captures, render target releases and removals, in order.
+        self.events: List[str] = []
+        self.released: List[RenderTarget] = []
+        # A game-world HighResShot during Simulate: written late, by flush_pending().
+        self.pending: Optional[Tuple[str, Tuple[int, int]]] = None
+        # Called as an editor HighResShot fires, after the capture's directory listing.
+        self.before_editor_shot: Optional[Any] = None
         self.camera = {"CameraLocation": {"X": -500.0, "Y": 0.0, "Z": 250.0},
                        "CameraRotation": {"Pitch": -15.0, "Yaw": 0.0, "Roll": 0.0}}
         self.actors: Dict[str, Actor] = {}
         self.editor_world = SimpleNamespace(get_path_name=lambda: WORLD,
                                             get_outermost=lambda: SimpleNamespace(get_name=lambda: "/Game/Maps/Lab"))
-        self.game_world = SimpleNamespace(get_path_name=lambda: PIE_WORLD)
+        self.game_world = SimpleNamespace(
+            get_path_name=lambda: PIE_WORLD,
+            get_outermost=lambda: SimpleNamespace(get_name=lambda: "/Game/Maps/UEDPIE_0_Lab"),
+        )
 
     # -- actors -------------------------------------------------------------
+
+    def add_actor(self, actor: Actor) -> Actor:
+        self.actors[actor.path] = actor
+        return actor
 
     def place_cameras(self, world: str = WORLD) -> Dict[str, Actor]:
         made = {}
@@ -251,22 +283,45 @@ class Editor:
         self.counter += 1
         return str(self.shots / f"HighresScreenshot{self.counter:05d}.png")
 
+    def shot_target(self, command: str, viewport: Tuple[int, int]) -> Tuple[str, Tuple[int, int]]:
+        """Where a HighResShot writes, and at what size: ``filename=`` names the file, else it is numbered."""
+        words = command.split()
+        size = viewport if words[1] == "1" else tuple(int(v) for v in words[1].split("x"))
+        named = [word.split("=", 1)[1] for word in words[2:] if word.startswith("filename=")]
+        return (str(self.shots / (named[0] + ".png")) if named else self.next_shot()), size
+
     def high_res_shot(self, command: str, color: Tuple[int, int, int], viewport: Tuple[int, int]) -> None:
-        argument = command.split()[1]
-        size = viewport if argument == "1" else tuple(int(v) for v in argument.split("x"))
-        write_png(self.next_shot(), size, color, noise=self.noise)
+        path, size = self.shot_target(command, viewport)
+        write_png(path, size, color, noise=self.noise)
 
     def editor_console_command(self, command: str) -> None:
         """Remote Control's ExecuteConsoleCommand: every drawing level viewport pane takes the shot."""
         self.commands.append(("editor", command))
+        if self.before_editor_shot is not None:
+            self.before_editor_shot()
         for _ in range(self.panes_drawing):
             self.high_res_shot(command, EDITOR_BLUE, VIEWPORT_SIZE)
 
     def execute_console_command(self, world: Any, command: str) -> None:
-        """SystemLibrary.execute_console_command: in the game world, to its game viewport."""
+        """SystemLibrary.execute_console_command: in the game world, to its game viewport.
+
+        During Simulate the shot is left pending, as the level viewport showing
+        the simulation wrote it late or not at all on UE 5.7.4.
+        """
         self.commands.append(("game" if world is self.game_world else "other", command))
         if world is self.game_world and self.pie == "play":
             self.high_res_shot(command, GAME_RED, GAME_VIEWPORT_SIZE)
+        elif world is self.game_world and self.pie == "simulate":
+            self.pending = self.shot_target(command, GAME_VIEWPORT_SIZE)
+
+    def flush_pending(self) -> Optional[str]:
+        """The level viewport finally draws a pending Simulate shot."""
+        if self.pending is None:
+            return None
+        path, size = self.pending
+        self.pending = None
+        write_png(path, size, EDITOR_BLUE)
+        return path
 
     # -- the module -------------------------------------------------------------
 
@@ -287,11 +342,28 @@ class Editor:
             assert editor.pie is None, "the editor spawns nothing during PIE"
             actor = SceneCapture2D(editor, WORLD, location, rotation)
             editor.spawned.append(actor)
+            editor.events.append("spawn")
             return actor
 
         def destroy_actor(actor: Any) -> bool:
             editor.destroyed.append(actor)
+            editor.events.append("destroy")
             return True
+
+        def begin_transaction(context: str, description: str, primary: Any) -> int:
+            editor.events.append("begin")
+            return 7
+
+        def cancel_transaction(index: int) -> None:
+            assert index == 7, "cancelled with the index begin_transaction returned"
+            editor.events.append("cancel")
+
+        def release_render_target2d(target: RenderTarget) -> None:
+            editor.released.append(target)
+            editor.events.append("release")
+
+        def all_actors_of_class(world: Any, cls: Any) -> List[Actor]:
+            return [actor for actor in editor.actors.values() if actor.get_world() is world]
 
         def call_method(name: str, args: tuple) -> Any:
             if name == "BeginDeferredActorSpawnFromClass":
@@ -299,6 +371,7 @@ class Editor:
                 assert world is editor.game_world and cls == "SceneCapture2DClass"
                 actor = SceneCapture2D(editor, PIE_WORLD, transform.location, transform.rotation)
                 editor.spawned.append(actor)
+                editor.events.append("spawn")
                 return actor
             if name == "FinishSpawningActor":
                 args[0].finished = True
@@ -354,6 +427,7 @@ class Editor:
             RenderingLibrary=SimpleNamespace(
                 import_file_as_texture2d=lambda world, path: Texture(path),
                 create_render_target2d=lambda world, width, height, fmt, color, mips: RenderTarget(width, height),
+                release_render_target2d=release_render_target2d,
             ),
             WidgetLayoutLibrary=SimpleNamespace(
                 get_viewport_size=lambda world: SimpleNamespace(x=float(GAME_VIEWPORT_SIZE[0]),
@@ -362,10 +436,13 @@ class Editor:
             GameplayStatics=SimpleNamespace(
                 get_player_controller=lambda world, index: object() if world is editor.game_world else None,
                 get_player_camera_manager=camera_manager,
+                get_all_actors_of_class=all_actors_of_class,
             ),
             SystemLibrary=SimpleNamespace(
                 execute_console_command=editor.execute_console_command,
                 is_valid=lambda obj: obj is not None,
+                begin_transaction=begin_transaction,
+                cancel_transaction=cancel_transaction,
             ),
             Paths=SimpleNamespace(
                 project_saved_dir=lambda: str(editor.saved),
@@ -497,7 +574,11 @@ async def test_during_a_play_session_auto_captures_the_players_game_view(editor:
     assert near(color_of(game_images[0]), GAME_RED)
     assert (asked["view"], asked["warnings"]) == ("editor", [EDITOR_VIEW_DURING_PLAY_WARNING])
     assert near(color_of(asked_images[0]), EDITOR_BLUE)
-    assert editor.commands == [("game", "HighResShot 64x36"), ("editor", "HighResShot 64x36")]
+    # The game shot is named for its call; the editor shot keeps Unreal's numbered names.
+    (where, command), editor_shot = editor.commands
+    assert where == "game" and re.fullmatch(r"HighResShot 64x36 filename=SimulShot_[0-9a-f]{16}", command)
+    assert Path(game["path"]).name == command.rsplit("=", 1)[1] + ".png"
+    assert editor_shot == ("editor", "HighResShot 64x36")
 
 
 @pytest.mark.asyncio
@@ -516,6 +597,35 @@ async def test_during_simulate_auto_falls_back_to_the_level_viewport_and_game_is
     assert (auto["view"], auto["pie_active"], auto["warnings"]) == ("editor", True, [GAME_VIEW_FELL_BACK_WARNING])
     assert near(color_of(images[0]), EDITOR_BLUE)
     assert (game["success"], game["error_type"], game["error"]) == (False, "InvalidState", GAME_VIEW_DID_NOT_DRAW)
+    assert Path(game["details"]["pending_path"]).name.startswith("SimulShot_")
+
+
+@pytest.mark.asyncio
+async def test_a_shot_written_after_its_call_gave_up_is_never_taken_by_the_next(editor: Editor) -> None:
+    """During Simulate a refused game shot was written 0.36 s after the reply,
+    as a numbered file the next capture could take (UE 5.7.4)."""
+    editor.pie = "simulate"
+    async with remote_control(editor) as settings:
+        refused, _ = await call_tool(
+            settings, "capture_unreal_viewport", {"resolution_x": 320, "resolution_y": 180, "view": "game"}
+        )
+        # The late shot lands between the next capture's listing and its own shot, and so does a
+        # numbered file of another size.
+        late: List[str] = []
+        editor.before_editor_shot = lambda: (
+            late.append(editor.flush_pending() or ""),
+            write_png(editor.next_shot(), (32, 32), GAME_RED),
+        )
+        taken, images = await call_tool(
+            settings,
+            "capture_unreal_viewport",
+            {"resolution_x": 64, "resolution_y": 36, "inline": True, "view": "editor"},
+        )
+    assert late == [refused["details"]["pending_path"]] and Path(late[0]).exists()
+    assert near(color_of(images[0]), EDITOR_BLUE)
+    assert taken["path"] != late[0] and (taken["view"], taken["pie_active"]) == ("editor", True)
+    # Neither stray counts as another pane.
+    assert not any("panes drew" in warning for warning in taken["warnings"])
 
 
 @pytest.mark.asyncio
@@ -558,6 +668,8 @@ async def test_a_png_over_the_inline_cap_is_inlined_as_jpeg_or_as_a_scaled_copy(
     assert png_images == [] and "pass format \"jpeg\", or pass inline_max_size" in png["inline_skipped"]
     assert png["size_bytes"] > unreal_runtime.MAX_INLINE_CAPTURE_BYTES
     assert jpeg["path"].endswith(".jpg") and jpeg["format"] == "jpeg"
+    # The JPEG replaces the PNG HighResShot wrote.
+    assert not Path(jpeg["path"]).with_suffix(".png").exists()
     assert jpeg_images[0].mime_type == "image/jpeg" and jpeg["size_bytes"] < png["size_bytes"]
     with Image.open(jpeg["path"]) as written:
         assert (written.format, written.size) == ("JPEG", (640, 360))
@@ -604,6 +716,13 @@ async def test_viewport_info_says_what_it_cannot_read_and_measures_the_size_on_r
     assert info["camera_location"] == [-500.0, 0.0, 250.0]
     assert measured["viewport_size"] == list(VIEWPORT_SIZE)
     # The measuring screenshot was deleted.
+    assert list(editor.shots.iterdir()) == []
+    editor.panes_drawing = 3
+    async with remote_control(editor) as settings:
+        three, _ = await call_tool(settings, "get_unreal_viewport_info", {"measure_size": True})
+    assert three["viewport_size"] == list(VIEWPORT_SIZE)
+    assert any("3 viewport panes" in note for note in three["notes"])
+    # Every pane's file is gone, not only the newest.
     assert list(editor.shots.iterdir()) == []
 
 
@@ -659,8 +778,11 @@ async def test_a_camera_actor_is_captured_through_a_transient_scene_capture(edit
     assert capture.properties["fov_angle"] == 90.0
     assert capture.properties["post_process_settings"].name == "post process"
     assert capture.hidden == [cameras["Camera"]]
-    # The capture actor was transient and is gone.
+    # The capture actor was transient and is gone, inside a transaction that was cancelled,
+    # so Undo cannot bring it back; its render target was detached and released.
     assert editor.destroyed == editor.spawned and len(editor.spawned) == 1
+    assert editor.events == ["begin", "spawn", "capture", "release", "destroy", "cancel"]
+    assert capture.properties["texture_target"] is None and len(editor.released) == 1
     assert Path(payload["path"]).name.startswith("SimulCamera_Camera_")
 
 
@@ -725,6 +847,52 @@ async def test_during_pie_the_running_games_counterpart_is_captured(editor: Edit
     )
     (spawned,) = editor.spawned
     assert spawned.world == PIE_WORLD and spawned.finished and editor.destroyed == [spawned]
+    # No editor transaction in the game world; the render target is released there too.
+    assert editor.events == ["spawn", "capture", "release", "destroy"]
+
+
+@pytest.mark.asyncio
+async def test_during_pie_a_camera_streamed_into_a_world_partition_cell_is_found(editor: Editor) -> None:
+    """A spatially loaded camera lives in a cell level of its own during PIE, not
+    under the game world's persistent level, and was refused as PIEActive."""
+    cameras = editor.place_cameras()
+    cell = editor.add_actor(
+        Actor("/Memory/UEDPIE_0_Lab_9LILJQ0OB4CL3P64.Lab:PersistentLevel.Camera", "Camera", editor.game_world)
+    )
+    cell.components.append(CameraComponent(cell, Vector(-200, 0, 150), Rotator(-10, 0, 0)))
+    editor.pie = "play"
+    async with remote_control(editor) as settings:
+        payload, _ = await call_tool(settings, "capture_unreal_camera", {"actor_path": cameras["Camera"].path})
+    assert (payload["world"], payload["captured_actor"]) == ("game", cell.path), payload
+
+
+@pytest.mark.asyncio
+async def test_during_pie_the_same_name_in_two_cells_is_told_apart_by_guid(editor: Editor) -> None:
+    cameras = editor.place_cameras()
+    for cell, guid in (("A", "OTHER"), ("B", cameras["Camera"].guid)):
+        twin = editor.add_actor(Actor(f"/Memory/UEDPIE_0_Lab_{cell}.Lab:PersistentLevel.Camera", "Camera",
+                                      editor.game_world, guid=guid))
+        twin.components.append(CameraComponent(twin, Vector(0, 0, 0), Rotator()))
+    editor.pie = "play"
+    async with remote_control(editor) as settings:
+        payload, _ = await call_tool(settings, "capture_unreal_camera", {"actor_path": cameras["Camera"].path})
+    assert payload["captured_actor"] == "/Memory/UEDPIE_0_Lab_B.Lab:PersistentLevel.Camera"
+
+
+@pytest.mark.asyncio
+async def test_during_pie_a_running_games_camera_is_captured_by_its_path(editor: Editor) -> None:
+    """A camera the game spawned has no editor actor; its PIE path is taken as given."""
+    editor.place_cameras()
+    pawn = editor.add_actor(Actor(PIE_WORLD + ":PersistentLevel.DefaultPawn_0", "DefaultPawn", editor.game_world))
+    pawn.components.append(CameraComponent(pawn, Vector(0, 0, 92), Rotator()))
+    editor.pie = "play"
+    async with remote_control(editor) as settings:
+        payload, _ = await call_tool(settings, "capture_unreal_camera", {"actor_path": pawn.path})
+        editor.pie = None
+        stopped, _ = await call_tool(settings, "capture_unreal_camera", {"actor_path": pawn.path})
+    assert (payload["actor_path"], payload["captured_actor"], payload["world"]) == (pawn.path, pawn.path, "game")
+    # Outside PIE a game actor is no actor of the level open in the editor.
+    assert stopped["error_type"] == "NotFoundError"
 
 
 @pytest.mark.asyncio
@@ -735,5 +903,6 @@ async def test_camera_capture_refusals(editor: Editor) -> None:
         editor.pie = "play"
         no_counterpart, _ = await call_tool(settings, "capture_unreal_camera", {"actor_path": cameras["Camera"].path})
     assert (not_camera["error_type"], editor.spawned) == ("ValidationError", [])
+    assert not_camera["details"]["code"] == "NotACamera"
     assert "has no camera or scene capture component" in not_camera["error"]
     assert no_counterpart["error_type"] == "PIEActive"

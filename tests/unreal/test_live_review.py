@@ -895,6 +895,57 @@ print(json.dumps({'camera': camera.get_path_name(), 'cine': cine.get_path_name()
     asyncio.run(run())
 
 
+def test_camera_captures_leave_no_undo_entry_and_free_their_render_targets():
+    """Each capture outside PIE added an "Add Actor" and a "Delete Actors"
+    transaction, so one Undo brought the capture actor back, and the undo
+    buffer kept every render target (five 3840x2160 captures held 158 MB)."""
+
+    state = """
+import unreal, json
+def _state():
+    unreal.SystemLibrary.collect_garbage()
+    targets = list(unreal.ObjectIterator(unreal.TextureRenderTarget2D))
+    actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors()
+    return {"render_targets": len(targets),
+            "captures": sorted(a.get_path_name() for a in actors if isinstance(a, unreal.SceneCapture2D))}
+print(json.dumps(_state()))
+"""
+
+    async def run():
+        client = session()
+        made = await client._execute_json_script("""
+import unreal, json
+sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+camera = sub.spawn_actor_from_class(unreal.CameraActor, unreal.Vector(-400, 0, 200), unreal.Rotator(pitch=-15))
+print(json.dumps({'camera': camera.get_path_name()}))
+""")
+        assert not made.get("error"), made
+        try:
+            before = await client._execute_json_script(state)
+            moved = await client.set_actor_transform(made["camera"], location=[-400, 0, 900])
+            assert not moved.get("error"), moved
+            for _ in range(5):
+                shot = await client.capture_camera(made["camera"], 3840, 2160, format="jpeg")
+                assert not shot.get("error"), shot
+            await client._execute_json_script(state)  # render targets finish releasing over a frame
+            after = await client._execute_json_script(state)
+            assert after["captures"] == before["captures"], after
+            assert after["render_targets"] <= before["render_targets"], (before, after)
+            # The last transaction is still the move: one Undo puts the camera back and brings no capture actor.
+            await client._execute_python(
+                "import unreal\nunreal.SystemLibrary.execute_console_command(None, 'TRANSACTION UNDO')"
+            )
+            undone = await client._execute_json_script(state)
+            assert undone["captures"] == before["captures"], undone
+            info = await client.get_actor_info(made["camera"])
+            assert info["location"] == pytest.approx([-400, 0, 200])
+        finally:
+            await destroy_actor(client, made["camera"])
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_world_partition_reads_report_unloaded_actors_that_load_on_request():
     """A saved World Partition map opened normally read as two actors, saying
     nothing of the other hundred."""

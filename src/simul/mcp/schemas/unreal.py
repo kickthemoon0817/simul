@@ -746,7 +746,11 @@ class UnrealLoadWorldPartitionResponse(BaseModel):
     requested: int = Field(..., description="Of those, the actors not yet loaded (loaded, for unload)")
     changed: int = Field(..., description="Actors that loaded (or unloaded)")
     not_changed: int = Field(
-        0, description="Requested actors that did not change: unload releases only actors this tool loaded"
+        0,
+        description=(
+            "Requested actors that did not change: unload releases only actors this tool loaded, and World "
+            "Partition keeps an actor with unsaved edits loaded"
+        ),
     )
     actors: List[str] = Field(default_factory=list, description="Paths of the first 50 actors that changed")
     loaded_actors: int = Field(..., description="Actors loaded in the editor world afterwards")

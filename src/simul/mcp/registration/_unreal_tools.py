@@ -757,7 +757,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 "max_actors",
                 int,
                 500,
-                description="Refuse when more actors than this would change (1 to 50000).",
+                description="Refuse when more actors than this would change (1 to 10000; about 2 ms each).",
             ),
             ToolParam(
                 "action",
@@ -797,13 +797,20 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "an actor with a CameraComponent or SceneCaptureComponent2D) through a transient scene capture "
             "with its field of view and post-process settings, and return the image path, the camera pose "
             "and the image's pinhole intrinsics. During Play In Editor the running game's counterpart is "
-            "captured. RGB only."
+            "captured, or a game actor named by its PIE path. Leaves no undo entry. RGB only."
         ),
         response=UnrealCaptureCameraResponse,
         read_only=False,
         method="capture_camera",
         params=(
-            ToolParam("actor_path", str, description="Full object path of the camera or sensor actor."),
+            ToolParam(
+                "actor_path",
+                str,
+                description=(
+                    "Full object path of the camera or sensor actor; during Play In Editor also a "
+                    "running game's actor by its PIE path."
+                ),
+            ),
             ToolParam("resolution_x", int, 1280, description="Width in pixels, 1 to 8192."),
             ToolParam("resolution_y", int, 720, description="Height in pixels, 1 to 8192."),
             ToolParam("format", str, "png", description="png or jpeg."),

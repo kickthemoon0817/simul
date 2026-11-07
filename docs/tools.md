@@ -470,10 +470,13 @@ Behaviour worth knowing:
   loads the actors whose bounds meet a box (`bounds_min`, `bounds_max`), or
   every actor, through `WorldPartitionBlueprintLibrary.load_actors`, which
   loads them at once and leaves the map unmodified; it refuses, changing
-  nothing, when more than `max_actors` (default 500) would load. `action`
-  `unload` releases the actors it loaded (the editor's own loading regions
-  keep theirs: `not_changed`). Loaded actors stay loaded until unloaded or
-  another map opens. During Play In Editor Unreal's World Partition library
+  nothing, when more than `max_actors` (default 500, at most 10,000) would
+  load (`ValidationError`, `details.code: TooManyActors`). Loading takes about
+  2 ms an actor, so the call waits `UNREAL__IMPORT_EXPORT_TIMEOUT` (300 s)
+  rather than `UNREAL__TIMEOUT`. `action` `unload` releases the actors it
+  loaded; the editor's own loading regions keep theirs, and World Partition
+  keeps an actor with unsaved edits loaded (both count in `not_changed`).
+  Loaded actors stay loaded until unloaded or another map opens. During Play In Editor Unreal's World Partition library
   finds no editor world, so `world_partition` and `unloaded_actors` are null
   and loading is refused (`PIEActive`). CLI: `simul unreal wp-load`.
 - `list_unreal_actor_components` lists an actor's components, editor-only
@@ -893,16 +896,21 @@ Behaviour worth knowing:
   HighResShot writes into a JPEG beside it in the editor (about a tenth of the
   size: a 640x360 capture is about 27 KB), and `inline_max_size` inlines a copy
   scaled to that many pixels on its longer side while the file keeps full
-  size. `view` picks what is captured, and the reply says which (`view`,
-  `pie_active`): `editor` is the level editor viewport, whose camera
-  `set_unreal_camera_view` moves; `game` is the player's view during a Play In
-  Editor session (HighResShot run in the game world goes to its game
-  viewport); `auto` (the default) takes the game view when a Play session's
-  game viewport draws. Simulate In Editor (what `control_unreal_simulation`
-  starts) shows the simulation in the level viewport and its game viewport
-  never draws, and Unreal's Python cannot tell it from Play, so `auto` tries
-  the game view for 2 s and then captures the level viewport, with a
-  warning; `game` fails with `InvalidState`. An editor HighResShot goes to
+  size; the JPEG replaces the PNG. `view` picks what is captured, and the
+  reply says which (`view`, `pie_active`): `editor` is the level editor
+  viewport, whose camera `set_unreal_camera_view` moves; `game` is the
+  player's view during a Play In Editor session (HighResShot run in the game
+  world goes to its game viewport); `auto` (the default) takes the game view
+  when the game viewport draws it within 2 s. During Simulate In Editor (what
+  `control_unreal_simulation` starts) the game world's shot goes to the level
+  viewport showing the simulation, which writes it late or not at all, and
+  Unreal's Python cannot tell Simulate from Play: `auto` then captures the
+  level viewport, with a warning, and `game` fails with `InvalidState`.
+  Unreal cannot cancel that shot, so it may still be written later, to
+  `details.pending_path`: every game shot is named for its own call
+  (`SimulShot_<token>.png`), so a late one is never taken for another
+  call's. During Simulate the level viewport is the view of the simulation,
+  so `editor` is the view to ask for. An editor HighResShot goes to
   every level viewport pane that draws, while Unreal's camera calls
   (`set_unreal_camera_view`, `focus_unreal_on_actor`,
   `get_unreal_viewport_info`) read and move only the first perspective pane:
@@ -915,27 +923,42 @@ Behaviour worth knowing:
   viewport's field of view (UE 5.7 keeps it in config-only settings), so `fov`
   is null and `notes` says so; pass the real value to `focus_unreal_on_actor`.
   The viewport's size is not readable either: `measure_size: true` measures
-  it with a HighResShot at the viewport's own size (the file is deleted).
-  During Play In Editor `game_view` is the player camera (location, rotation,
-  field of view) and the game viewport's size, which is also `viewport_size`;
-  `viewports` and `active_viewport` name the layout's panes.
+  it with a HighResShot at the viewport's own size (the files it writes, one
+  per pane that draws, are deleted). During Play In Editor `game_view` is
+  the player controller's camera (location, rotation, field of view) and the
+  game viewport's size, which is also `viewport_size`. Simulate In Editor has
+  a player controller too (a SpectatorPawn at the player start), so
+  `game_view` is filled then as well, but it is not the view the level
+  viewport shows the simulation from. `viewports` and `active_viewport` name
+  the layout's panes.
 - `capture_unreal_camera` renders what a camera or sensor actor sees: a
   CameraActor, CineCameraActor, SceneCapture2D or any actor with a
   CameraComponent or SceneCaptureComponent2D (that one first). A transient
   SceneCapture2D stands at that component with its projection, field of view
   across the width (a CineCamera's from its focal length and filmback; its
   `field_of_view` property can be stale), ortho width and post-process
-  settings, hides the actor itself, and captures final color once; the
-  image is written as PNG or JPEG into the editor's screenshot directory, and
-  the capture actor is destroyed (it is transient, so the map stays
-  unmodified). The reply has the camera's pose, fields of view and lens, and
+  settings, hides the actor itself, and captures final color once. The
+  source's show-only and hidden actor lists and its show flags are not
+  copied. The image is written as PNG or JPEG into the editor's screenshot
+  directory, and the capture actor is destroyed and its render target
+  released. Outside PIE the capture actor is transient and its spawn and
+  removal run in a cancelled transaction, so the map stays unmodified and
+  nothing lands in the undo history (Undo never brings it back, and the undo
+  buffer holds no render target). The reply has the camera's pose, fields of
+  view and lens, and
   `intrinsics`: the pinhole model of this image (square pixels, `cx`, `cy` at
   the image center in OpenCV's pixel-center convention; Unreal's camera +X is
   the optical axis, +Y image right, -Z image down; null for an orthographic
   camera). A capture whose shape differs from a camera that constrains its
-  aspect ratio comes with a warning. During Play In Editor the actor's
-  counterpart in the running game is captured (`world: "game"`); an actor
-  with none there is refused (`PIEActive`). A one-shot scene capture has no
+  aspect ratio comes with a warning; an actor without a camera fails with
+  `ValidationError`, `details.code: NotACamera`. During Play In Editor the
+  actor's counterpart in the running game is captured (`world: "game"`): the
+  game actor of the same name and class, which also finds one World
+  Partition streamed into a cell of its own. A path of the running game's
+  actor, as PIE names it, is captured as given, so a camera the game spawned
+  (the player pawn's, say) can be captured too. An editor actor with no
+  counterpart (not streamed in, or destroyed by the game) is refused
+  (`PIEActive`). A one-shot scene capture has no
   auto-exposure history, so its exposure can differ from the viewport's.
   RGB only: depth, segmentation and other render passes are not captured.
   CLI: `simul unreal capture-camera`.

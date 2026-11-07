@@ -5,6 +5,7 @@ These use the Python API so UObject references and world transforms do not
 depend on Remote Control's property-description wire format.
 """
 
+import textwrap
 from typing import Any, Dict
 
 from ._unreal_errors import (
@@ -1051,6 +1052,20 @@ def world_partition_state(loaded=None):
     return {"world_partition": True, "actor_descriptors": len(descriptors), "unloaded_actors": unloaded}
 """
 
+
+def in_function(body: str) -> str:
+    """``body`` run as the body of a function that is called once.
+
+    A name a script binds at module level (a world, an actor, a render
+    target) lives as long as the namespace the script ran in, which for a
+    script run in the editor's shared Python namespace outlasts the call; a
+    world held that way is a leak Unreal reports, or asserts on, when the map
+    changes. Inside a function the names go when it returns. ``body`` holds no
+    multi-line string literal, which the indentation would change.
+    """
+    return "def _simul_run():\n" + textwrap.indent(body.strip("\n"), "    ") + "\n\n_simul_run()\n"
+
+
 #: Most child actor paths a listing entry names; its ``child_count`` counts
 #: them all, and ``get_unreal_actor_info`` names more.
 LISTED_CHILDREN = 20
@@ -1158,7 +1173,7 @@ def listing_entry(actor, listed):
 # ignoring case) and counted in ``total``; one page of the matches, from
 # ``offset``, is rendered (page). While PIE runs the editor world is read
 # (level_actors) and pie_active says so.
-LIST_ACTORS = ACTOR_HELPERS + SCENE_READ_HELPERS + """
+LIST_ACTORS = ACTOR_HELPERS + SCENE_READ_HELPERS + in_function("""
 actors = level_actors()
 matches_class, warning = class_matcher(args["class_filter"], args["include_subclasses"], actors)
 label = (args["label_filter"] or "").lower()
@@ -1172,14 +1187,14 @@ print(json.dumps(dict({"actors": entries, "count": len(entries), "total": len(fo
                        "next_offset": next_offset, "page_ended_by": ended,
                        "warnings": [warning] if warning else [], "pie_active": pie_active()},
                       **world_partition_state({actor.get_path_name() for actor in actors}))))
-"""
+""")
 
 # Expects ``args`` = {"actor_path", "listed_children"}: actor_info with the
 # attachment hierarchy (hierarchy) and pie_active.
-ACTOR_INFO = ACTOR_HELPERS + SCENE_READ_HELPERS + """
+ACTOR_INFO = ACTOR_HELPERS + SCENE_READ_HELPERS + in_function("""
 actor = actor_at(args["actor_path"])
 print(json.dumps(dict(actor_info(actor), **hierarchy(actor, args["listed_children"]), pie_active=pie_active())))
-"""
+""")
 
 # Expects ``args`` = {"label", "match_mode", "offset", "max_results",
 # "budget", "listed_children"}. Semantic labels are actor tags. Matching
@@ -1188,7 +1203,7 @@ print(json.dumps(dict(actor_info(actor), **hierarchy(actor, args["listed_childre
 # tag for the regular expression. Every match is counted; one page of them,
 # from ``offset``, is returned as listing entries (page). While PIE runs the
 # editor world is searched (level_actors) and pie_active says so.
-FIND_ACTORS_BY_TAG = ACTOR_HELPERS + SCENE_READ_HELPERS + """
+FIND_ACTORS_BY_TAG = ACTOR_HELPERS + SCENE_READ_HELPERS + in_function("""
 label, mode = args["label"], args["match_mode"]
 if mode == "regex":
     pattern = re.compile(label, re.IGNORECASE)
@@ -1209,7 +1224,7 @@ print(json.dumps(dict({"actors": entries, "count": len(entries), "total_matches"
                        "offset": args["offset"], "next_offset": next_offset, "page_ended_by": ended,
                        "label_searched": label, "warnings": [], "pie_active": pie_active()},
                       **world_partition_state({actor.get_path_name() for actor in actors}))))
-"""
+""")
 
 # Expects ``args`` = {"root_path", "max_depth", "include_components",
 # "class_filter", "include_subclasses", "offset", "max_results", "budget"}.
@@ -1231,7 +1246,7 @@ print(json.dumps(dict({"actors": entries, "count": len(entries), "total_matches"
 # component of the same actor they are attached to (None for the root and for
 # components that are not scene components). While PIE runs the editor world is
 # read (level_actors) and pie_active says so.
-SCENE_GRAPH = ACTOR_HELPERS + SCENE_READ_HELPERS + """
+SCENE_GRAPH = ACTOR_HELPERS + SCENE_READ_HELPERS + in_function("""
 actors = level_actors()
 listed = {actor.get_path_name() for actor in actors}
 children, tops = {}, []
@@ -1324,7 +1339,7 @@ print(json.dumps(dict({"root": root, "total_actors": total_actors, "total_depth"
                                          for entry in entries if entry["path"] in shallower],
                        "warnings": [warning] if warning else [], "pie_active": pie_active()},
                       **world_partition_state(listed))))
-"""
+""")
 
 # Expects ``args`` = {"actor_path", "class_filter", "offset", "max_results",
 # "budget"}. Every component of the actor (get_components_by_class
@@ -1336,7 +1351,7 @@ print(json.dumps(dict({"root": root, "total_actors": total_actors, "total_depth"
 # visibility; primitive components also their world bounds
 # (SystemLibrary.get_component_bounds: the box's center and half-size and the
 # bounding sphere's radius, in cm). One page, from ``offset`` (page).
-ACTOR_COMPONENTS = ACTOR_HELPERS + SCENE_READ_HELPERS + """
+ACTOR_COMPONENTS = ACTOR_HELPERS + SCENE_READ_HELPERS + in_function("""
 actor = actor_at(args["actor_path"])
 root = actor.root_component
 found = list(actor.get_components_by_class(unreal.ActorComponent))
@@ -1373,7 +1388,7 @@ print(json.dumps({"actor_path": actor.get_path_name(), "components": entries, "c
                   "total": len(found), "offset": args["offset"], "next_offset": next_offset,
                   "page_ended_by": ended, "warnings": [warning] if warning else [],
                   "pie_active": pie_active()}))
-"""
+""")
 
 # Scene digest in one round trip. Class keys are UClass path names
 # (``/Script/Engine.StaticMeshActor``), the same strings Remote Control's
@@ -2363,12 +2378,13 @@ print(json.dumps({"traversable_surfaces": traversable, "graspable_objects": gras
 """
 
 # The Play In Editor state get_viewport_info adds to the level viewport camera:
-# whether PIE runs, the player's view (PlayerCameraManager location, rotation
+# whether PIE runs, the player camera (PlayerCameraManager location, rotation
 # and field of view, and the game viewport's size from WidgetLayoutLibrary)
-# when a Play session has a player (Simulate In Editor has none), and the level
-# viewport layout's panes.
-VIEWPORT_STATE = """
-import json, unreal
+# whenever the game world has a player controller, and the level viewport
+# layout's panes. Simulate In Editor has one too (a SpectatorPawn at the player
+# start, observed on UE 5.7.4), whose camera is not what the level viewport
+# shows the simulation from.
+VIEWPORT_STATE = "import json, unreal\n" + in_function("""
 level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
 pie = bool(level.is_in_play_in_editor())
 game = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world() if pie else None
@@ -2383,7 +2399,22 @@ if manager is not None:
 print(json.dumps({"pie_active": pie, "game_view": view,
                   "viewports": [str(key) for key in level.get_viewport_config_keys()],
                   "active_viewport": str(level.get_active_viewport_config_key())}))
-"""
+""")
+
+# Expects ``args`` = {"path", "written"}: the newest file of a HighResShot at
+# the viewport's own size, and every file it wrote. Reads the newest one's PNG
+# header for the viewport size and deletes them all.
+MEASURED_SHOT = "import json, os, struct\n" + in_function("""
+with open(args["path"], "rb") as stream:
+    head = stream.read(24)
+for path in args["written"]:
+    if os.path.isfile(path):
+        os.remove(path)
+if head[:8] != b"\\x89PNG\\r\\n\\x1a\\n":
+    raise ValueError("Not a PNG: " + args["path"])
+width, height = struct.unpack(">II", head[16:24])
+print(json.dumps({"width": width, "height": height}))
+""")
 
 #: Most actor paths a World Partition load or unload names; its counts cover all.
 WORLD_PARTITION_LISTED = 50
@@ -2423,7 +2454,8 @@ def change():
                 "error": (str(len(targets)) + " actors would " + args["action"] + ", more than max_actors ("
                           + str(args["max_actors"]) + "); nothing was " + args["action"] + "ed. Narrow "
                           "bounds_min and bounds_max, or raise max_actors"),
-                "details": {"would_change": len(targets), "max_actors": args["max_actors"]}}
+                "details": {"code": "TooManyActors", "would_change": len(targets),
+                            "max_actors": args["max_actors"]}}
     guids = [d.guid for d in targets]
     if guids and load:
         unreal.WorldPartitionBlueprintLibrary.load_actors(guids)
@@ -2450,15 +2482,30 @@ print(json.dumps(change()))
 # width and post-process settings, hides the actor itself, captures final
 # color (tone mapped, opaque alpha) once into a render target, and writes it
 # with ImageWriteBlueprintLibrary.export_to_disk (PNG, or JPEG at ``quality``)
-# into the editor's screenshot directory. Outside PIE the capture is spawned in
-# the editor world through EditorActorSubsystem as a transient actor, which no
-# listing shows and which leaves the map clean, and destroyed afterwards. While
-# PIE runs the actor's counterpart in the game world (same path under the game
-# world's package) is captured instead, through a capture spawned there
-# (GameplayStatics' deferred spawn, which Unreal's Python reaches only through
-# call_method) and destroyed; an actor without a counterpart there is refused,
-# as the editor spawns nothing during PIE. The image is returned as base64 when
-# it is at most ``inline_limit`` bytes (0: never).
+# into the editor's screenshot directory. The source's show-only and hidden
+# actor lists and show flags are not copied.
+#
+# Outside PIE the capture is spawned in the editor world through
+# EditorActorSubsystem as a transient actor, which no listing shows, and
+# destroyed afterwards, all inside one transaction that is cancelled: spawning
+# and destroying are each an undoable editor transaction, and without the
+# cancel one Undo brought the capture actor back and the undo buffer kept its
+# component and render target alive until the map changed (UE 5.7.4: five
+# 3840x2160 captures held 158 MB). The render target is detached and released
+# once the image is written, in every world.
+#
+# While PIE runs, a path of the running game's actor (as PIE names it) is
+# captured as given; an editor actor's counterpart in the game world is the
+# game actor with its object name, of its class, which also finds an actor
+# World Partition streamed into a cell level of its own
+# (/Memory/UEDPIE_0_<map>_<cell>.<map>:PersistentLevel.<name>), with the same
+# actor GUID when several share the name. The capture is spawned in the game
+# world (GameplayStatics' deferred spawn, which Unreal's Python reaches only
+# through call_method) and destroyed; an editor actor without a counterpart
+# (not streamed in, or destroyed by the game) is refused, as the editor
+# spawns nothing during PIE. The image is returned as base64 when it is at
+# most ``inline_limit`` bytes (0: never). Everything runs inside capture(), so
+# no world or render target stays bound in the editor's Python namespace.
 CAMERA_CAPTURE = ACTOR_HELPERS + """
 import base64, math, os, time
 
@@ -2485,83 +2532,133 @@ def lens_of(actor):
                            "sensor_width_mm": filmback.sensor_width, "sensor_height_mm": filmback.sensor_height}
     return lens
 
-def counterpart(actor, editor, game):
-    prefix = editor.get_path_name() if editor is not None else None
-    path = actor.get_path_name()
-    if prefix is None or not path.startswith(prefix + ":"):
-        return None
-    found = unreal.find_object(None, game.get_path_name() + path[len(prefix):])
-    return found if isinstance(found, unreal.Actor) else None
-
-def capture():
-    source = actor_at(args["actor_path"])
-    lens = lens_of(source)
-    if lens is None:
-        return {"success": False, "error_type": "ValidationError",
-                "error": source.get_path_name() + " (a " + source.get_class().get_name() + ") has no camera or "
-                         "scene capture component: pass a CameraActor, CineCameraActor, SceneCapture2D or an actor "
-                         "with a CameraComponent or SceneCaptureComponent2D"}
-    pie = pie_active()
-    editor = editor_world()
-    world, target, world_kind = editor, source, "editor"
-    if pie:
-        game = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
-        target = counterpart(source, editor, game) if game is not None else None
-        if target is None:
-            return pie_refusal("capture an actor that is not in the running game")
-        world, world_kind = game, "game"
-        lens = lens_of(target)
-    component = lens["component"]
-    location, rotation = component.get_world_location(), component.get_world_rotation()
-    transform = unreal.Transform(location=location, rotation=rotation, scale=unreal.Vector(1.0, 1.0, 1.0))
-    if world_kind == "editor":
-        spawned = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).spawn_actor_from_class(
-            unreal.SceneCapture2D, location, rotation, True)
-        capture_component = spawned.capture_component2d if spawned is not None else None
-    else:
-        statics = unreal.get_default_object(unreal.GameplayStatics)
-        spawned = statics.call_method("BeginDeferredActorSpawnFromClass",
-                                      (world, unreal.SceneCapture2D.static_class(), transform))
-        capture_component = spawned.capture_component2d if spawned is not None else None
-    if capture_component is None:
-        return {"success": False, "error_type": "EngineError", "error": "Unreal spawned no scene capture"}
+def guid_of(actor):
     try:
+        return actor.get_editor_property("actor_guid").to_string()
+    except Exception:
+        return None
+
+def counterpart(actor, game):
+    name = actor.get_name()
+    found = [candidate for candidate in unreal.GameplayStatics.get_all_actors_of_class(game, actor.get_class())
+             if candidate.get_name() == name]
+    if len(found) > 1:
+        guid = guid_of(actor)
+        found = [candidate for candidate in found if guid is not None and guid_of(candidate) == guid] or found
+    return found[0] if found else None
+
+def no_camera(source):
+    return {"success": False, "error_type": "ValidationError",
+            "error": source.get_path_name() + " (a " + source.get_class().get_name() + ") has no camera or "
+                     "scene capture component: pass a CameraActor, CineCameraActor, SceneCapture2D or an actor "
+                     "with a CameraComponent or SceneCaptureComponent2D",
+            "details": {"code": "NotACamera", "actor_class": source.get_class().get_name()}}
+
+def write_image(capture_component, target_texture, label):
+    capture_component.capture_scene()
+    directory = unreal.Paths.convert_relative_path_to_full(unreal.Paths.screen_shot_dir())
+    os.makedirs(directory, exist_ok=True)
+    extension = "jpg" if args["format"] == "jpeg" else "png"
+    path = os.path.join(directory, "SimulCamera_%s_%d.%s" % (label, int(time.time() * 1000), extension))
+    options = unreal.ImageWriteOptions()
+    options.format = unreal.DesiredImageFormat.JPG if extension == "jpg" else unreal.DesiredImageFormat.PNG
+    options.compression_quality = args["quality"]
+    options.async_ = False
+    options.overwrite_file = True
+    unreal.ImageWriteBlueprintLibrary.export_to_disk(target_texture, path, options)
+    return path
+
+def configure(capture_component, lens, target, target_texture):
+    capture_component.set_editor_property("texture_target", target_texture)
+    capture_component.set_editor_property("capture_source", unreal.SceneCaptureSource.SCS_FINAL_COLOR_LDR)
+    capture_component.set_editor_property("capture_every_frame", False)
+    capture_component.set_editor_property("capture_on_movement", False)
+    capture_component.set_editor_property("fov_angle", lens["fov"])
+    capture_component.set_editor_property("ortho_width", lens["ortho_width"])
+    capture_component.set_editor_property("projection_type", unreal.CameraProjectionMode.ORTHOGRAPHIC
+                                          if lens["orthographic"] else unreal.CameraProjectionMode.PERSPECTIVE)
+    capture_component.set_editor_property("post_process_settings", lens["post_process"])
+    capture_component.set_editor_property("post_process_blend_weight", lens["weight"])
+    capture_component.hide_actor_components(target, True)
+
+def release(capture_component, target_texture):
+    if capture_component is not None:
+        capture_component.set_editor_property("texture_target", None)
+    if target_texture is not None:
+        unreal.RenderingLibrary.release_render_target2d(target_texture)
+
+def capture_in_editor(world, target, lens, location, rotation, label):
+    actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    transaction = unreal.SystemLibrary.begin_transaction("simul", "simul: capture camera", None)
+    spawned = capture_component = target_texture = None
+    try:
+        spawned = actors.spawn_actor_from_class(unreal.SceneCapture2D, location, rotation, True)
+        if spawned is None:
+            return None
+        capture_component = spawned.capture_component2d
         target_texture = unreal.RenderingLibrary.create_render_target2d(
             world, args["width"], args["height"], unreal.TextureRenderTargetFormat.RTF_RGBA8,
             unreal.LinearColor(0.0, 0.0, 0.0, 1.0), False)
-        capture_component.set_editor_property("texture_target", target_texture)
-        capture_component.set_editor_property("capture_source", unreal.SceneCaptureSource.SCS_FINAL_COLOR_LDR)
-        capture_component.set_editor_property("capture_every_frame", False)
-        capture_component.set_editor_property("capture_on_movement", False)
-        capture_component.set_editor_property("fov_angle", lens["fov"])
-        capture_component.set_editor_property("ortho_width", lens["ortho_width"])
-        capture_component.set_editor_property("projection_type", unreal.CameraProjectionMode.ORTHOGRAPHIC
-                                              if lens["orthographic"] else unreal.CameraProjectionMode.PERSPECTIVE)
-        capture_component.set_editor_property("post_process_settings", lens["post_process"])
-        capture_component.set_editor_property("post_process_blend_weight", lens["weight"])
-        capture_component.hide_actor_components(target, True)
-        if world_kind == "game":
-            spawned = statics.call_method("FinishSpawningActor", (spawned, transform))
-        capture_component.capture_scene()
-        directory = unreal.Paths.convert_relative_path_to_full(unreal.Paths.screen_shot_dir())
-        os.makedirs(directory, exist_ok=True)
-        label = re.sub("[^A-Za-z0-9_-]+", "_", target.get_actor_label())[:48] or "Camera"
-        extension = "jpg" if args["format"] == "jpeg" else "png"
-        path = os.path.join(directory, "SimulCamera_%s_%d.%s" % (label, int(time.time() * 1000), extension))
-        options = unreal.ImageWriteOptions()
-        options.format = unreal.DesiredImageFormat.JPG if extension == "jpg" else unreal.DesiredImageFormat.PNG
-        options.compression_quality = args["quality"]
-        options.async_ = False
-        options.overwrite_file = True
-        unreal.ImageWriteBlueprintLibrary.export_to_disk(target_texture, path, options)
+        configure(capture_component, lens, target, target_texture)
+        return write_image(capture_component, target_texture, label)
     finally:
-        if world_kind == "editor":
-            unreal.get_editor_subsystem(unreal.EditorActorSubsystem).destroy_actor(spawned)
-        elif spawned is not None:
-            spawned.destroy_actor()
+        release(capture_component, target_texture)
+        if spawned is not None:
+            actors.destroy_actor(spawned)
+        unreal.SystemLibrary.cancel_transaction(transaction)
+
+def capture_in_game(world, target, lens, location, rotation, label):
+    transform = unreal.Transform(location=location, rotation=rotation, scale=unreal.Vector(1.0, 1.0, 1.0))
+    statics = unreal.get_default_object(unreal.GameplayStatics)
+    spawned = statics.call_method("BeginDeferredActorSpawnFromClass",
+                                  (world, unreal.SceneCapture2D.static_class(), transform))
+    if spawned is None:
+        return None
+    capture_component = target_texture = None
+    try:
+        capture_component = spawned.capture_component2d
+        target_texture = unreal.RenderingLibrary.create_render_target2d(
+            world, args["width"], args["height"], unreal.TextureRenderTargetFormat.RTF_RGBA8,
+            unreal.LinearColor(0.0, 0.0, 0.0, 1.0), False)
+        configure(capture_component, lens, target, target_texture)
+        statics.call_method("FinishSpawningActor", (spawned, transform))
+        return write_image(capture_component, target_texture, label)
+    finally:
+        release(capture_component, target_texture)
+        spawned.destroy_actor()
+
+def capture():
+    pie = pie_active()
+    game = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world() if pie else None
+    source = actor_at(args["actor_path"], play_world=game is not None)
+    if lens_of(source) is None:
+        return no_camera(source)
+    target, world, world_kind = source, editor_world(), "editor"
+    if game is not None:
+        world, world_kind = game, "game"
+        if source.get_world() != game:
+            target = counterpart(source, game)
+            if target is None:
+                refusal = pie_refusal("capture an actor that is not in the running game")
+                refusal["error"] += (": " + source.get_path_name() + " has no counterpart there (World "
+                                     "Partition has not streamed it in, or the game destroyed it). Pass a "
+                                     "camera of the running game by its path, or stop PIE")
+                return refusal
+    lens = lens_of(target)
+    if lens is None:
+        return no_camera(target)
+    component = lens["component"]
+    location, rotation = component.get_world_location(), component.get_world_rotation()
+    label = re.sub("[^A-Za-z0-9_-]+", "_", target.get_actor_label())[:48] or "Camera"
+    if world_kind == "editor":
+        path = capture_in_editor(world, target, lens, location, rotation, label)
+    else:
+        path = capture_in_game(world, target, lens, location, rotation, label)
+    if path is None:
+        return {"success": False, "error_type": "EngineError", "error": "Unreal spawned no scene capture"}
     size = os.path.getsize(path) if os.path.isfile(path) else 0
     if not size:
-        return {"success": False, "error_type": "CaptureError", "error": "Unreal wrote no image to " + path}
+        return {"success": False, "error_type": "EngineError", "error": "Unreal wrote no image to " + path}
     result = {"path": path, "size_bytes": size, "actor_path": source.get_path_name(),
               "captured_actor": target.get_path_name(), "world": world_kind, "pie_active": pie,
               "component": lens["kind"], "orthographic": lens["orthographic"],

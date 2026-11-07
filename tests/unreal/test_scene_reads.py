@@ -245,6 +245,8 @@ class Editor:
         self.pie = False
         self.descriptors: Optional[List[SimpleNamespace]] = None
         self.stored: Dict[str, Actor] = {}
+        # The timeout each script was run with (None: unreal.timeout).
+        self.timeouts: List[Optional[float]] = []
         self.library_loaded: set = set()
 
     def add(self, *actors: Actor) -> List[Actor]:
@@ -382,7 +384,8 @@ def session(editor: Editor, monkeypatch: pytest.MonkeyPatch) -> UnrealRuntimeSes
     """A session whose Python runs in the fake editor; any other Remote Control call fails."""
     client = UnrealRuntimeSession(Settings())
 
-    async def execute(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
+    async def execute(code: str, mode: str = "ExecuteFile", timeout: Optional[float] = None) -> Dict[str, Any]:
+        editor.timeouts.append(timeout)
         return editor.run_python(code)
 
     async def no_http(*args: Any, **kwargs: Any) -> Dict[str, Any]:
@@ -940,7 +943,10 @@ async def test_loading_more_than_max_actors_is_refused_and_changes_nothing(
     refused = await session.load_world_partition_actors(max_actors=50)
     assert refused["success"] is False and refused["error_type"] == "ValidationError"
     assert "98 actors would load, more than max_actors (50)" in refused["error"]
+    assert refused["details"] == {"code": "TooManyActors", "would_change": 98, "max_actors": 50}
     assert len(editor.actors) == 2
+    # Loading takes about 2 ms an actor: the call waits the import and export timeout.
+    assert editor.timeouts[-1] == float(session.settings.unreal.import_export_timeout)
     everything = await session.load_world_partition_actors(max_actors=98)
     assert (everything["changed"], everything["unloaded_actors"], len(editor.actors)) == (98, 0, 100)
 
@@ -961,7 +967,8 @@ async def test_loading_needs_a_world_partition_map_outside_pie(session: UnrealRu
     ("kwargs", "message"),
     [
         ({"action": "pin"}, "action must be load or unload"),
-        ({"max_actors": 0}, "max_actors must be between 1 and 50000"),
+        ({"max_actors": 0}, "max_actors must be between 1 and 10000"),
+        ({"max_actors": 10001}, "max_actors must be between 1 and 10000"),
         ({"bounds_min": [0, 0, 0]}, "Give bounds_min and bounds_max together"),
         ({"bounds_min": [0, 0, 0], "bounds_max": [1, 1]}, "bounds_max must be three finite numbers"),
         ({"bounds_min": [5, 0, 0], "bounds_max": [1, 1, 1]}, "bounds_min must not exceed bounds_max"),
