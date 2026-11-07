@@ -622,6 +622,18 @@ class FakeObjectModifier:
         return list(self._inputs.values())
 
 
+class FakePoseBones(list):
+    """``Pose.bones`` stand-in: the pose bones in order, and ``get`` by name as on a bpy collection.
+
+    Each pose bone is a namespace with ``name``, ``constraints`` and
+    ``parent`` (the parent pose bone, or None).
+    """
+
+    def get(self, name: str, default: Any = None) -> Any:
+        """The pose bone called ``name``, or ``default``."""
+        return next((bone for bone in self if bone.name == name), default)
+
+
 class FakeLiveMatrix(FakeMatrix):
     """A ``FakeMatrix`` that reads its values from its source whenever it is used.
 
@@ -702,6 +714,8 @@ class FakeTransformObject:
         self.animation_data: Optional["FakeAnimData"] = None
         self.parent = parent
         self.parent_type = "OBJECT"
+        # The bone a BONE parent type names.
+        self.parent_bone = ""
         # What Blender's Parent (Keep Transform) sets.
         self.matrix_parent_inverse = (
             parent.matrix_world.inverted()

@@ -4902,23 +4902,33 @@ class BlenderRuntimeSession:
 
         A child needs its parent's world matrix and the owner of a constraint
         Blender applies its targets', whenever Blender evaluates the child's or
-        the owner's transform. An armature needs the targets of its bones'
+        the owner's transform. A child of a bone (parent type BONE) needs too
+        the targets of the constraints of that bone and of every bone above
+        it, whether its armature is enabled or not: Blender 5.0.1 relates the
+        child to its bone (build_object_parent) and each bone to its parent
+        bone (build_rig). An armature needs the targets of its bones'
         constraints for its pose, and an object those its modifiers read
         (_modifier_transform_sources) for its geometry, which Blender
         evaluates with the whole object. get_camera_info scans the scene once
         for a camera and its parent: on Blender 5.0.1 a scan of 20 000
         objects, 2 000 of them meshes with two modifiers, took 16 ms. Only an
         armature has a pose, and only the types of _MODIFIER_OWNER_TYPES a
-        modifier stack; reading every object's took 6 ms more.
+        modifier stack; reading every object's took 6 ms more. Each bone's
+        chain is read once, however many children its bones have: 5 000
+        empties parented to the bones of a rig of 1 000 constrained bones
+        added 4 ms.
 
         Returns:
-            (dependents, readers): for each object, the children and
-            constraint owners that need it; and the armatures and modifier
-            owners that need it.
+            (dependents, readers): for each object, the children, children of
+            bones and constraint owners that need it; and the armatures and
+            modifier owners that need it.
         """
         blender_module: Any = bpy
         dependents: Dict[Any, List[Any]] = {}
         readers: Dict[Any, List[Any]] = {}
+        # The constraint targets of a pose bone and the bones above it, by
+        # (armature, bone name).
+        chains: Dict[Tuple[Any, str], List[Any]] = {}
 
         def targets(constraints: Any) -> List[Any]:
             return [
@@ -4928,8 +4938,29 @@ class BlenderRuntimeSession:
                 for target, _ in self._constraint_targets(constraint)
             ]
 
+        def bone_targets(armature: Any, name: str) -> List[Any]:
+            if (armature, name) in chains:
+                return chains[(armature, name)]
+            pose = armature.pose if armature.type == "ARMATURE" else None
+            bone = None if pose is None else pose.bones.get(name)
+            below: List[Any] = []
+            while bone is not None and (armature, bone.name) not in chains:
+                below.append(bone)
+                bone = bone.parent
+            found = [] if bone is None else chains[(armature, bone.name)]
+            for chained in reversed(below):
+                # Each target once, however many bones of the chain it has.
+                found = list(dict.fromkeys(targets(chained.constraints) + found))
+                chains[(armature, chained.name)] = found
+            # Also for a bone the pose lacks, which needs nothing.
+            chains[(armature, name)] = found
+            return found
+
         for other in blender_module.context.scene.objects:
-            sources = [] if other.parent is None else [other.parent]
+            parent = other.parent
+            sources = [] if parent is None else [parent]
+            if parent is not None and other.parent_type == "BONE":
+                sources.extend(bone_targets(parent, other.parent_bone))
             for source in sources + targets(other.constraints):
                 dependents.setdefault(source, []).append(other)
             kind = other.type
@@ -4949,8 +4980,8 @@ class BlenderRuntimeSession:
                 readers.setdefault(source, []).append(other)
         return dependents, readers
 
-    @staticmethod
-    def _modifier_transform_sources(modifier: Any) -> List[Any]:
+    @classmethod
+    def _modifier_transform_sources(cls, modifier: Any) -> List[Any]:
         """
         Return the objects whose world matrix a modifier reads.
 
@@ -4966,7 +4997,9 @@ class BlenderRuntimeSession:
         Project the projectors it counts. On Blender 5.0.1 each of these, on a
         visible object, got a disabled camera it read, or a disabled child of
         the camera, evaluated in full; none did short of its condition or
-        disabled in viewports.
+        disabled in viewports. A particle system's modifier reads what its
+        settings name (_particle_transform_sources), enabled in viewports or
+        not: Blender relates the particle system itself.
 
         A Boolean's OBJECT operand and a Data Transfer's use_object_transform
         are left out: Blender rebuilds no relations when operand_type or
@@ -4986,11 +5019,14 @@ class BlenderRuntimeSession:
             modifier: The modifier.
 
         Returns:
-            The objects; empty for a modifier disabled in viewports.
+            The objects; empty for a modifier disabled in viewports, other
+            than a particle system's.
         """
+        kind = modifier.type
+        if kind == "PARTICLE_SYSTEM":
+            return cls._particle_transform_sources(modifier.particle_system.settings)
         if not modifier.show_viewport:
             return []
-        kind = modifier.type
         sources = [
             getattr(modifier, setting)
             for setting in _MODIFIER_TRANSFORM_SETTINGS.get(kind, ())
@@ -5013,6 +5049,60 @@ class BlenderRuntimeSession:
             sources.extend(projector.object for projector in modifier.projectors)
         return [source for source in sources if source is not None]
 
+    @staticmethod
+    def _particle_transform_sources(settings: Any) -> List[Any]:
+        """
+        Return the objects whose world matrix a particle system reads through its settings.
+
+        Blender 5.0.1 relates a particle system to the transform of each Avoid
+        and Follow Leader boid rule's object, in every boid state and whatever
+        the physics type while the settings keep boid data
+        (build_particle_systems), and the settings to an object that a texture
+        slot with a texture maps through, in OBJECT coordinates
+        (build_particle_settings). It builds neither object for them, so it
+        relates one only while the depsgraph holds it for something else
+        (_enabled_dependent). On Blender 5.0.1 each of these, on a visible
+        mesh, got a disabled camera that a muted Hook of another mesh held
+        evaluated in full, its modifier enabled in viewports or not; without
+        the Hook, or for a Goal rule's object or a slot without a texture or
+        in other coordinates, the camera kept a matrix_world 11 m from a
+        render.
+
+        The instance object and collection are left out: Blender relates
+        them only while render_type shows them, and rebuilds no relations
+        when render_type changes. On Blender 5.0.1 a disabled camera named
+        as a visible mesh's instance object while render_type was HALO, which
+        a script switched to OBJECT after an evaluation, kept a matrix_world
+        11 m from a render while a muted Hook of another mesh held it. So are
+        keyed targets, which Blender builds with their particle system's
+        object, without a relation to their transform: on Blender 5.0.1 a
+        disabled camera such a target named kept a stale matrix_world when an
+        object reading that mesh came before it in the view layer.
+
+        Args:
+            settings: The particle system's settings.
+
+        Returns:
+            The objects.
+        """
+        sources: List[Any] = []
+        boids = settings.boids
+        if boids is not None:
+            sources.extend(
+                rule.object
+                for state in boids.states
+                for rule in state.rules
+                if rule.type in ("AVOID", "FOLLOW_LEADER")
+            )
+        sources.extend(
+            slot.object
+            for slot in settings.texture_slots
+            if slot is not None
+            and slot.texture is not None
+            and slot.texture_coords == "OBJECT"
+        )
+        return [source for source in sources if source is not None]
+
     def _evaluated_dependent(
         self, obj: Any, needs: Tuple[Dict[Any, List[Any]], Dict[Any, List[Any]]]
     ) -> Optional[Any]:
@@ -5033,7 +5123,18 @@ class BlenderRuntimeSession:
         left it stale when an object reading the child came first, which
         built the child, and the armature with it, as not visible; a disabled
         mesh's Hook alike. A visible Copy Location of the armature itself left
-        it stale. Blender 5.0.1 kept the matrix_world a render gave a disabled
+        it stale. A child of the constrained bone, or of a bone below it,
+        needs the target through relations instead, as a child needs its
+        parent (_scene_dependents), whatever the armature: Blender 5.0.1
+        evaluated the target for such a child in all 24 orders of it, an
+        object reading it, the armature and the camera, and for a child of
+        the armature itself, of a bone above the constrained one or of another
+        bone only in the 12 where the child came before its reader. What a
+        particle system's settings name counts only while the depsgraph holds
+        it (_particle_transform_sources): on Blender 5.0.1 a visible mesh's
+        Avoid boid rule naming a disabled child of a held camera left the
+        camera stale, and got it evaluated once a muted Hook held the child
+        too. Blender 5.0.1 kept the matrix_world a render gave a disabled
         camera with a child, with a grandchild through a disabled child,
         targeted by another object's Copy Location or by one on a bone of an
         enabled armature, or read by a visible mesh's Hook, its Track To
@@ -5112,9 +5213,13 @@ class BlenderRuntimeSession:
         pending, seen = [obj], {obj}
         while pending:
             source = pending.pop()
-            for reader in readers.get(source, []):
-                if is_enabled(reader):
-                    return reader
+            # Blender builds what a constraint or a modifier names, but not
+            # what a particle system's settings name: it relates that only to
+            # an object it holds for something else.
+            if source.evaluated_get(depsgraph).is_evaluated:
+                for reader in readers.get(source, []):
+                    if is_enabled(reader):
+                        return reader
             for dependent in dependents.get(source, []):
                 if dependent in seen:
                     continue
