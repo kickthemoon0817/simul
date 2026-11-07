@@ -1817,7 +1817,11 @@ class SimulMCPServer(LoggerMixin):
         @register_resource(
             "simul://isaac-sim/api/core",
             name="Isaac Sim Core API",
-            description="SimulationContext, PhysicsContext, Articulation, RigidPrim, XFormPrim reference.",
+            description=(
+                "Isaac Sim 5.1 SimulationContext, PhysicsContext, Articulation, RigidPrim, "
+                "XFormPrim reference (deprecated on 6.0), with the isaacsim.core.experimental "
+                "equivalents to use on 6.0."
+            ),
         )
         def api_core() -> str:
             return _read_packaged_doc("docs", "api", "core.md")

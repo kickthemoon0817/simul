@@ -273,6 +273,42 @@ Notes:
   Kit work may still complete; check the state before retrying.
 - A tool whose script shared Kit's stdout with another callback returns its
   result with the other text under `foreign_output` and a note in `warnings`.
+- Pose and velocity readers (`get_isaac_prim_detail` transform, info,
+  bounding_box and rigid_body aspects, `find_isaac_prims_in_area`,
+  `get_isaac_camera_info`) read USD. Under GPU physics Isaac Sim's
+  SimulationManager stops PhysX writing to USD (`/physics/updateToUsd` and
+  `/physics/updateVelocitiesToUsd` false, `omni.physx.fabric` on). While the
+  simulation runs, those results then carry `stale_under_fabric: true`,
+  `usd_readback` and a warning: the values are from before play. Read the
+  simulated state with `execute_isaac_script` through a physics view (see
+  [isaac-sim.md](isaac-sim.md#reading-simulated-state)).
+- `step_isaac_simulation` advances N timeline frames. Each frame runs
+  `frame_dt / physics_dt` physics steps, reported under `physics`. The call's
+  budget grows with N up to 110 s, and a step that runs out stops, pauses
+  and says how far it got. The timeline stays paused, and with
+  `/physics/resetOnStop` on (Isaac Sim's default) the next stop or reset
+  restores simulated prims to their pre-play state. Edits made in between
+  (`set_isaac_prim_transform`, `set_isaac_prim_attribute`,
+  `create_isaac_object`) are reverted with them, so those tools add a
+  warning while paused.
+- `raycast_isaac_scene` normalizes the direction and returns both the
+  collision shape hit (`collision_path`) and its body (`rigid_body_path`).
+  PhysX holds colliders only once the simulation has started, so a miss on a
+  stopped timeline is `SimulationNotRunning`, not "no hit".
+- `focus_isaac_viewport` frames the prim the way Edit > Focus Prim does and
+  restores the selection. `focused` is true only when the camera moved or
+  the framing call said so.
+- `read_isaac_aovs` handles annotators that return `{data, info}`
+  (segmentation, bounding boxes, pointcloud): it reports the array's stats,
+  plus per-field ranges and counts for bounding boxes, and an `info`
+  summary such as `idToLabels`.
+- `get_isaac_logs` reads this instance's log (Kit's `/log/file`). When Kit
+  does not name it, the tool falls back to the newest Kit log and warns that
+  it may be another process's.
+- `set_isaac_carb_settings` refuses the transport namespaces (bridge,
+  python_server, 5.x VS Code). It refuses `/persistent/` keys, which Kit saves
+  for later sessions, unless `allow_persistent=true`. `get_isaac_carb_settings`
+  reads `auth_token` values back as `***`.
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or
