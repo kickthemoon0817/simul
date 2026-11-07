@@ -1189,6 +1189,15 @@ class UnrealImportUsdResponse(BaseModel):
         description="Level actors the import replaced (only with replace_existing)",
     )
     warnings: List[str] = Field(default_factory=list, description="Import warnings")
+    dirty_engine_packages: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Packages outside /Game (engine or plugin content, shared by every project) the editor holds "
+            "modified when the import finishes, which imports leave (sometimes a moment after they "
+            "return); simul saves none of them, but the editor's Save All would write them into the "
+            "engine install"
+        ),
+    )
 
 
 class UnrealExportUsdResponse(BaseModel):
@@ -1218,6 +1227,13 @@ class UnrealExportUsdResponse(BaseModel):
     overwritten_files: List[str] = Field(
         default_factory=list, description="Those of written_files that existed before"
     )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "What the export wrote differently from the level, such as DynamicMeshActors written as "
+            "empty Xforms without their mesh"
+        ),
+    )
 
 
 class UnrealImportAssetResponse(BaseModel):
@@ -1233,10 +1249,23 @@ class UnrealImportAssetResponse(BaseModel):
     )
     kept_assets: List[str] = Field(
         default_factory=list,
-        description="Existing assets the import left as they were (replace_existing false)",
+        description=(
+            "Existing assets the import left as they were: any that existed with replace_existing false, "
+            "and with it true the textures and materials an earlier import of the file made, which "
+            "Unreal's reimport keeps"
+        ),
     )
     warnings: List[str] = Field(
         default_factory=list, description="Warnings and errors the editor logged during the import"
+    )
+    dirty_engine_packages: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Packages outside /Game (engine or plugin content, shared by every project) the editor holds "
+            "modified when the import finishes, which imports leave (sometimes a moment after they "
+            "return); simul saves none of them, but the editor's Save All would write them into the "
+            "engine install"
+        ),
     )
 
 

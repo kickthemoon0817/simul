@@ -13,6 +13,7 @@ import importlib
 import json
 import logging
 import math
+import os
 import re
 import socket
 import tempfile
@@ -24,7 +25,12 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
-from ..utils.paths import PathPolicy
+from ..utils.asset_references import (
+    UncheckableReferences,
+    fbx_relative_file_names,
+    interchange_outside_references,
+)
+from ..utils.paths import PathPolicy, SandboxDenied
 from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
@@ -53,6 +59,7 @@ from ._unreal_scripts import (
     ASSIGN_MATERIAL,
     CREATE_MATERIAL_INSTANCE,
     DELETE_ACTOR,
+    EDITOR_RELATIVE_PATHS,
     EDITOR_WORLD,
     ENABLE_PHYSICS,
     ENGINE_METADATA,
@@ -962,6 +969,19 @@ def _outside_project_refusal(path: str, action: str, hint: str) -> Dict[str, Any
         ),
         "details": {"content_path": path, "allowed_root": PROJECT_CONTENT_ROOT, "hint": hint},
     }
+
+
+#: An Unreal object path as Unreal's USD exporter writes one into an asset-valued
+#: attribute: ``/Engine``, ``/Game`` or ``/Script``, folders, then
+#: ``<Name>.<Name>`` (a package and its asset of the same name).
+_UNREAL_OBJECT_PATH = re.compile(r"^/(?:Engine|Game|Script)(?:/[A-Za-z0-9_ -]+)*/([A-Za-z0-9_-]+)\.\1$")
+
+#: Suffixes that make ``<Name>.<Name>`` a file name rather than an object path.
+_FILE_SUFFIXES = frozenset(
+    {"usd", "usda", "usdc", "usdz", "png", "jpg", "jpeg", "exr", "tga", "tif", "tiff", "bmp", "hdr", "dds",
+     "tx", "psd", "mdl", "mtlx", "abc", "vdb", "obj", "fbx", "gltf", "glb", "bin", "json", "txt", "uasset",
+     "umap", "wav", "mp4", "mov"}
+)
 
 
 def _usd_import_options(options: Any) -> Tuple[Dict[str, Any], List[str]]:
@@ -3652,7 +3672,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         }
         return await self._execute_json_script(
             f"args = {args!r}\n" + ASSIGN_MATERIAL,
-            expected_errors=("NotFoundError", "ValidationError"),
+            expected_errors=("NotFoundError", "ValidationError", "InvalidAssetType"),
         )
 
     async def set_light_params(
@@ -4239,6 +4259,170 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 },
             }
 
+    @staticmethod
+    def _names_unreal_content(entry: Dict[str, Any]) -> bool:
+        """Whether a path the composition check refused is an Unreal object path, which reads no file.
+
+        Unreal's USD exporter writes the source material of each mesh as an
+        asset-valued attribute holding a content path,
+        ``info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@``,
+        and its importer loads that object from the editor's content; it opens
+        no file by the name. Only such a value passes: an asset-valued
+        attribute (not a sublayer, reference, payload or clip) holding
+        ``/Engine``, ``/Game`` or ``/Script``, folders and
+        ``<Name>.<Name>``, where the suffix is no file extension
+        (``/Engine/x.usda`` stays a file), naming no file on disk.
+        """
+        if entry.get("kind") != "asset":
+            return False
+        match = _UNREAL_OBJECT_PATH.match(str(entry.get("asset_path", "")))
+        if match is None or match.group(1).lower() in _FILE_SUFFIXES:
+            return False
+        return not os.path.lexists(str(entry.get("location", "")))
+
+    def _check_usd_composition(self, usd_path: str) -> None:
+        """Refuse a USD file whose composition draws on files outside the sandbox.
+
+        Unreal's USD importer composes the stage with its own copy of pxr and
+        the default asset resolver, so a layer inside the sandbox could
+        sublayer, reference or pay load ``../outside/ref.usda``, or name an
+        outside texture, and the editor read it. ``CompositionSandbox``
+        walks the layers from the root the way composition finds them (every
+        variant, value clips and asset-valued attributes too) before the file
+        reaches the editor; a refused file is never opened. A file pxr cannot
+        open here is refused too, since nothing then vouches for what it
+        names; a file the simul host does not have is left to the editor to
+        report.
+
+        Raises:
+            SandboxDenied: With ``details.outside_sandbox`` (each path, its
+                kind and the layer naming it), ``references_outside`` (the
+                locations) and ``referenced_by``.
+        """
+        if not self._path_policy.enabled or not Path(usd_path).exists():
+            return
+        from ..usd import sandbox as usd_sandbox
+
+        try:
+            layer = usd_sandbox.Sdf.Layer.FindOrOpen(usd_path)
+        except Exception as exc:  # pxr's parse error (Tf.ErrorException)
+            layer, reason = None, str(exc).strip().splitlines()[-1:] or [type(exc).__name__]
+        else:
+            reason = ["pxr opened no layer"]
+        if layer is None:
+            details = self._path_policy.denial_details(usd_path)
+            details.update(
+                referenced_by=usd_path,
+                hint=(
+                    f"Could not open {Path(usd_path).name} to check the files its composition draws on "
+                    f"against the sandbox ({reason[0]}), so it is not imported"
+                ),
+            )
+            raise SandboxDenied(
+                usd_path,
+                details,
+                error_message=f"USD file {usd_path} could not be checked against the sandbox: {reason[0]}",
+            )
+        try:
+            usd_sandbox.CompositionSandbox(self._path_policy).check_layers(layer)
+        except SandboxDenied as exc:
+            entries = list(exc.details.get("outside_sandbox", []))
+            files = [entry for entry in entries if not self._names_unreal_content(entry)]
+            listed_all = exc.details.get("outside_count", len(entries)) == len(entries)
+            if not files and listed_all:
+                return  # only Unreal content paths, as in Unreal's own USD exports
+            if listed_all and len(files) < len(entries):
+                exc.details["outside_sandbox"] = files
+                exc.details["outside_count"] = len(files)
+                shown = ", ".join(entry["location"] for entry in files[:3])
+                more = f" and {len(files) - 3} more" if len(files) > 3 else ""
+                exc.error_message = (
+                    f"USD file {usd_path} draws on {len(files)} file(s) outside the sandbox: {shown}{more}"
+                )
+                exc.args = (exc.error_message,)
+            exc.details["referenced_by"] = usd_path
+            exc.details["references_outside"] = list(
+                dict.fromkeys(entry["location"] for entry in exc.details.get("outside_sandbox", []))
+            )[:20]
+            raise
+
+    async def _interchange_sources(self, file_path: str) -> List[str]:
+        """The files an Interchange import of ``file_path`` reads, every one held to the sandbox.
+
+        Interchange reads what the model names besides itself: a glTF's
+        buffers and images, an OBJ's MTL libraries and their textures, an
+        FBX's textures, and the UDIM tiles beside a texture named like one.
+        Each is found where Unreal 5.7's translators look for it
+        (``simul.utils.asset_references``); an FBX's relative texture names
+        are resolved in the editor, where its FBX SDK opens them. A file
+        missing on the simul host is left to the editor to report.
+
+        Returns:
+            ``file_path`` and the files inside the sandbox it reads, resolved:
+            the asset import script tells an earlier import's assets apart by
+            them.
+
+        Raises:
+            SandboxDenied: A referenced file outside the sandbox exists, with
+                ``details.references_outside`` and ``referenced_by``; or the
+                references cannot be listed (a binary FBX this cannot parse).
+        """
+        path = Path(file_path)
+        policy = self._path_policy
+        if not path.is_file():
+            return [file_path]
+        try:
+            relative = fbx_relative_file_names(path) if path.suffix.lower() == ".fbx" else []
+            opened: Dict[str, List[str]] = {}
+            if relative:
+                answer = await self._execute_json_script(
+                    f"args = {{'names': {relative!r}}}\n" + EDITOR_RELATIVE_PATHS
+                )
+                answered = answer.get("paths") if answer.get("success", True) else None
+                # Only absolute paths say where the editor opens a name; without one it stays unchecked.
+                opened = {
+                    name: [found for found in paths if isinstance(found, str) and os.path.isabs(found)]
+                    for name, paths in (answered or {}).items()
+                    if isinstance(paths, list)
+                }
+            outside, inside = interchange_outside_references(path, policy, opened.get)
+        except UncheckableReferences as exc:
+            if not policy.enabled:
+                return [file_path]
+            details = policy.denial_details(file_path)
+            details.update(
+                referenced_by=file_path,
+                hint=(
+                    f"Could not check the files {path.name} refers to against the sandbox ({exc}), "
+                    "so it is not imported"
+                ),
+            )
+            raise SandboxDenied(
+                file_path,
+                details,
+                error_message=f"{path.name} could not be checked against the sandbox: {exc}",
+            ) from exc
+        if outside:
+            details = policy.denial_details(outside[0])
+            details.update(
+                referenced_by=file_path,
+                references_outside=outside[:20],
+                hint=(
+                    f"{path.name} refers to files outside the sandbox, which Unreal's importer would read: "
+                    f"{', '.join(outside[:5])}. Copy them under an allowed root and point {path.name} at "
+                    "the copies, or widen security.allowed_paths"
+                ),
+            )
+            raise SandboxDenied(
+                outside[0],
+                details,
+                error_message=(
+                    f"{path.name} refers to {len(outside)} file(s) outside the sandbox, so it was not "
+                    f"imported: {', '.join(outside[:3])}"
+                ),
+            )
+        return [file_path] + [found for found in inside if found != file_path]
+
     def _import_destination(self, destination_path: str) -> Tuple[str, Optional[Dict[str, Any]]]:
         """The content folder an import writes to, or the envelope refusing it.
 
@@ -4273,7 +4457,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         import's actors and customized assets included. Every option is set
         on every import (to Unreal's default unless given) without saving it
         to the project's config, where the editor's own import dialog would
-        read it. The call waits ``unreal.import_export_timeout``.
+        read it. Every layer and asset the stage draws on must be inside the
+        sandbox (``_check_usd_composition``). The call waits
+        ``unreal.import_export_timeout``.
 
         Args:
             usd_path: Path to the USD file on disk.
@@ -4290,11 +4476,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         Returns:
             Dict with imported_assets, actor_paths (actors added to the level),
-            removed_actor_paths (actors the import replaced) and warnings (the
+            removed_actor_paths (actors the import replaced), warnings (the
             warnings and errors the editor logged during the import, and
-            saved import settings that differ from Unreal's defaults), or an
-            error envelope: ``ValidationError`` for an option, value or
-            folder Unreal does not take, ``SandboxError`` for a folder
+            saved import settings that differ from Unreal's defaults) and
+            dirty_engine_packages (engine or plugin packages the editor
+            holds modified when it finishes), or an error envelope:
+            ``ValidationError`` for an option, value or folder Unreal does
+            not take, ``SandboxError`` for a folder
             outside /Game, ``InvalidState`` when the folder already holds
             assets and ``replace_existing`` is false (nothing is imported),
             ``NotFoundError`` for a file the editor host does not have,
@@ -4303,7 +4491,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             ``TimeoutError``.
 
         Raises:
-            SandboxDenied: If ``usd_path`` is outside the sandbox.
+            SandboxDenied: If ``usd_path``, or a layer or asset its
+                composition draws on, is outside the sandbox.
         """
 
         usd_path = self._path_policy.authorize(usd_path)
@@ -4315,6 +4504,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         options, problems = _usd_import_options(import_options or {})
         if problems:
             return {"success": False, "error_type": "ValidationError", "error": "; ".join(problems)}
+        self._check_usd_composition(usd_path)
         args = {
             "path": usd_path,
             "destination": destination,
@@ -4343,28 +4533,33 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         back from the written stage: Unreal's exporter leaves out what it does
         not export (editor helpers such as WorldSettings or PlayerStart)
         without an error, and an export that wrote none of them fails. Unreal
-        also writes a file per mesh and material, and MaterialOverrides, next
-        to the output; every file written is reported. The call waits
-        ``unreal.import_export_timeout``, since the first USD export of an
-        editor session loads the USD Python modules (25-40 s).
+        also writes a file per mesh and material, into ``<output name>_assets``
+        beside the output, and with export_sublayers a layer per sublevel and
+        MaterialOverrides beside it; every file written is reported. The call
+        waits ``unreal.import_export_timeout``, since the first USD export of
+        an editor session loads the USD Python modules (25-40 s).
 
         Args:
             actor_paths: Actor paths to export.
             output_path: Output USD file path.
             export_options: Export pipeline options.
-            overwrite: Replace an existing output file; otherwise the export
-                is refused when it exists.
+            overwrite: Replace the files the export writes; otherwise the
+                export is refused when the output, a file in its asset
+                folder, or (with export_sublayers) a sublevel layer or
+                MaterialOverrides exists.
 
         Returns:
             Dict with output_path, actors_exported (the actors the stage has a
             prim for), exported_prims (each one's actor_path and prim_path),
             skipped_actors (the actors it has none for), file_size_bytes,
             written_files (every file the export created or changed under the
-            output's folder) and overwritten_files (those that existed
-            before), or an error envelope: ``InvalidState`` when the output
-            exists and ``overwrite`` is false, ``EngineError`` when Unreal
-            exported nothing or failed, ``PIEActive``, ``PluginUnavailable``
-            and ``TimeoutError``.
+            output's folder), overwritten_files (those that existed before)
+            and warnings (DynamicMeshActors, which Unreal writes as empty
+            Xforms), or an error envelope: ``InvalidState`` when a file it
+            would write exists and ``overwrite`` is false (with
+            ``details.existing_files``), ``EngineError`` when Unreal exported
+            nothing or failed, ``PIEActive``, ``PluginUnavailable`` and
+            ``TimeoutError``.
 
         Raises:
             SandboxDenied: If ``output_path`` is outside the sandbox.
@@ -4402,21 +4597,27 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Uses Unreal's Interchange importer with the project's default content
         pipelines, as the Content Browser's Import does: meshes, materials
         and textures are created and saved under ``destination_path``, and no
-        actor is placed. Without ``replace_existing`` an asset that already
-        exists is kept (Interchange skips it), and a file whose every asset
-        exists imports nothing (``InvalidState``). The call waits
-        ``unreal.import_export_timeout``.
+        actor is placed. Every file the model names must be inside the
+        sandbox too (``_interchange_sources``). Without ``replace_existing``
+        an asset that already exists is kept (Interchange skips it), and a
+        file whose every asset exists imports nothing (``InvalidState``).
+        With it, Interchange reimports the asset named after the file and
+        keeps the other assets an earlier import of the file made, which are
+        reported. The call waits ``unreal.import_export_timeout``.
 
         Args:
             file_path: Path of the file on disk; must be inside the sandbox.
             destination_path: Content folder under /Game, /Game included.
-            replace_existing: Replace assets of the same name in the folder.
+            replace_existing: Reimport the asset named after the file.
 
         Returns:
             Dict with imported_assets, replaced_assets (those that existed
-            before), kept_assets (existing assets left as they were) and
-            warnings (what the editor logged during the import), or an error
-            envelope: ``ValidationError`` for an unsupported file type or a
+            before), kept_assets (existing assets left as they were),
+            warnings (what the editor logged during the import, and the
+            assets a reimport kept) and dirty_engine_packages (engine or
+            plugin packages the editor holds modified when it finishes), or
+            an error envelope:
+            ``ValidationError`` for an unsupported file type or a
             malformed folder, ``SandboxError`` for a folder outside /Game,
             ``InvalidState`` when every asset exists and ``replace_existing``
             is false, ``NotFoundError`` for a file the editor host does not
@@ -4424,7 +4625,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             logged reasons), ``PIEActive`` and ``TimeoutError``.
 
         Raises:
-            SandboxDenied: If ``file_path`` is outside the sandbox.
+            SandboxDenied: If ``file_path``, or a file it names that exists,
+                is outside the sandbox, or its references cannot be listed.
         """
         file_path = self._path_policy.authorize(file_path)
         suffix = Path(file_path).suffix.lower()
@@ -4442,7 +4644,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             return refusal
         if type(replace_existing) is not bool:
             raise ValueError("replace_existing must be true or false")
-        args = {"path": file_path, "destination": destination, "replace": replace_existing}
+        sources = await self._interchange_sources(file_path)
+        args = {"path": file_path, "destination": destination, "replace": replace_existing, "sources": sources}
         return await self._run_import_export(
             f"args = {args!r}\n" + ASSET_IMPORT,
             f"the import of {file_path}",

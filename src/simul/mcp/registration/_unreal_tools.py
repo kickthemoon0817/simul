@@ -685,8 +685,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="import_unreal_asset",
         description=(
             "Import an FBX, glTF, GLB or OBJ file as assets (meshes, materials, textures) under a /Game folder "
-            "through Unreal's Interchange importer, saved, placing no actor. Without replace_existing, assets "
-            "that already exist are kept, and a file whose every asset exists imports nothing."
+            "through Unreal's Interchange importer, saved, placing no actor. Every file the model names (glTF "
+            "buffers and images, OBJ MTL libraries and textures, FBX textures, UDIM tiles) must be inside the "
+            "sandbox too, else SandboxError with details.references_outside. Without replace_existing, assets "
+            "that already exist are kept, and a file whose every asset exists imports nothing; with it, "
+            "Unreal reimports the mesh and keeps the other assets, listed in kept_assets."
         ),
         response=UnrealImportAssetResponse,
         read_only=False,
@@ -709,8 +712,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 bool,
                 False,
                 description=(
-                    "Replace assets of the same name in the folder. Default false keeps them, and refuses "
-                    "(InvalidState) a file whose every asset exists."
+                    "Reimport the asset named after the file. Unreal keeps the textures and materials an "
+                    "earlier import made (kept_assets, with a warning). Default false keeps every existing "
+                    "asset, and refuses (InvalidState) a file whose every asset exists."
                 ),
             ),
         ),
@@ -1411,7 +1415,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "<destination_path>/<file name>, and actors into the level being edited. Without "
             "replace_existing it is refused when that folder already holds assets, and existing actors are "
             "kept; with it, those assets and the level's actors from an earlier import of the file are "
-            "replaced."
+            "replaced. Every layer and asset the stage draws on (sublayers, references, payloads, clips, "
+            "textures) must be inside the sandbox too, else SandboxError naming them."
         ),
         response=UnrealImportUsdResponse,
         read_only=False,
@@ -1455,7 +1460,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="export_unreal_usd",
         description=(
             "Export actors of the level being edited with the optional USDImporter plugin's "
-            "LevelExporterUSD; actors_exported counts the actors the written stage has a prim for."
+            "LevelExporterUSD; actors_exported counts the actors the written stage has a prim for. Mesh and "
+            "material files go to <output name>_assets beside the output. DynamicMeshActors export as empty "
+            "Xforms, reported in warnings."
         ),
         response=UnrealExportUsdResponse,
         read_only=False,
@@ -1480,8 +1487,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 bool,
                 False,
                 description=(
-                    "Replace an existing output file. Default false refuses the export (InvalidState). Mesh and "
-                    "material files are written next to it and listed in written_files."
+                    "Replace the files the export writes. Default false refuses it (InvalidState, with "
+                    "details.existing_files) when the output exists, its <output name>_assets folder holds "
+                    "files, or, with export_sublayers, a sublevel layer or MaterialOverrides file beside it "
+                    "exists. Every file written is listed in written_files."
                 ),
             ),
         ),

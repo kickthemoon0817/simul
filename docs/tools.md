@@ -761,7 +761,42 @@ Behaviour worth knowing:
     each new actor once. `warnings` holds the warnings and errors the editor
     logged during the import (read back from its log file; they can include a
     line from other editor activity at the same time), and a file the
-    importer cannot read fails with `EngineError` carrying those lines.
+    importer cannot read fails with `EngineError` carrying those lines. The
+    log file is the one this editor writes, found by a marker line the script
+    logs first: a second editor of the same project writes
+    `<Project>_2.log`, and the lines used to come from `<Project>.log`, the
+    other editor's.
+  - The USD file's composition must stay inside the sandbox, as in the
+    headless USD tools: before the file reaches the editor, simul walks its
+    layers with `simul.usd.sandbox.CompositionSandbox` (every sublayer,
+    reference, payload, value clip and asset-valued attribute such as a
+    texture, in every variant). A stage inside the sandbox whose
+    `references = @../../outside/ref.usda@` names a file outside it used to
+    import that file's prims; it is now refused with `SandboxError`, whose
+    `details.outside_sandbox` names each path, its kind and the layer that
+    authors it, and `details.references_outside` the locations. A file pxr
+    cannot open on the simul host is refused too, since nothing then vouches
+    for what it names. An Unreal content path that Unreal's own exporter
+    writes into an asset-valued attribute
+    (`info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@`)
+    is not a file: the importer loads that object from the editor's content.
+    Only that shape passes: an asset-valued attribute (not a sublayer,
+    reference, payload or clip) whose value is under `/Engine`, `/Game` or
+    `/Script` and ends in `<Name>.<Name>` with no file extension, naming no
+    file on disk. `@/Engine/x.usda@`, a relative path and another content
+    root (a plugin's) are refused like any path outside the sandbox.
+  - An import can leave engine or plugin packages modified in memory: on UE
+    5.7.4 Interchange set `bUsedWithNanite` on its shared parent material
+    `/InterchangeAssets/Materials/PBRSurfaceMaterial_MR`. Unreal does that on
+    a later editor frame, up to several imports after the one whose mesh
+    needed it, so each import lists in `dirty_engine_packages`, with a
+    warning, every package outside `/Game` the editor holds modified when it
+    finishes, whichever call left it so. Python can neither clear that flag
+    nor save one package of it safely: simul saves none of them
+    (`save_unreal_assets` skips them, and its `dry_run` lists them too), but
+    the editor's **Save All** would write them into the engine install.
+    Discard them when the editor asks, or restart it. `import_unreal_asset`
+    reports the same.
   - The import options are set without saving them. Unreal's
     UsdStageImportOptions saves its settings to the project's
     `Saved/Config/<Platform>Editor/EditorPerProjectUserSettings.ini` whenever
@@ -778,14 +813,23 @@ Behaviour worth knowing:
     (`exported_prims` gives each one's prim), since Unreal's exporter leaves
     out editor helpers such as WorldSettings or PlayerStart without an error;
     they are listed in `skipped_actors`, and an export that wrote none of the
-    actors fails with `EngineError`. An existing output file is refused with
-    `InvalidState` unless `overwrite` is true. Unreal writes a file per mesh
-    and material, and `MaterialOverrides`, next to the output, replacing one
-    of the same name; `written_files` lists every file the export created or
-    changed under the output's folder and `overwritten_files` those that
-    existed before. Export into a folder of its own to keep exports apart.
-    With `overwrite`, a file whose content would not change is left as it is
-    (Unreal skips identical files), so it is not in `written_files`.
+    actors fails with `EngineError`. Unreal writes a file per mesh and
+    material into the export's asset folder, `<output name>_assets` beside
+    the output, so two exports into one folder keep their meshes apart; with
+    `export_sublayers` it also writes a layer per sublevel and
+    `MaterialOverrides` beside the output. Without `overwrite` the export is
+    refused with `InvalidState`, listing `details.existing_files`, when any
+    of them exists: the output, a file in its asset folder, or a sublevel
+    layer or `MaterialOverrides`. The gate used to cover the output alone, and
+    the mesh files beside it were replaced. `written_files` lists every file
+    the export created or changed under the output's folder and
+    `overwritten_files` those that existed before. With `overwrite`, a file
+    whose content would not change is left as it is (Unreal skips identical
+    files), so it is not in `written_files`. Unreal's exporter writes a
+    DynamicMeshActor as an empty Xform, without its mesh; `warnings` names
+    them, and `convert_unreal_mesh_format` with `target_format`
+    `static_mesh` and `replace_actor` true makes them StaticMeshActors, which
+    export with their geometry.
   - Both wait `unreal.import_export_timeout` (default 300 s,
     `UNREAL__IMPORT_EXPORT_TIMEOUT`) instead of `unreal.timeout`: the first
     USD export of an editor session loads Unreal's USD Python modules and
@@ -802,12 +846,34 @@ Behaviour worth knowing:
   as the Content Browser's **Import** does: the meshes, materials and textures
   are created and saved under `destination_path` (a `/Game` folder; glTF files
   get a folder of their own), and no actor is placed. The file must be inside
-  the sandbox, like a USD file. Without `replace_existing` an asset that
-  already exists is kept (`kept_assets`), and a file whose every asset exists
-  imports nothing (`InvalidState`); with it they are replaced
-  (`replaced_assets`). `warnings` holds what the editor logged, and a file
-  Unreal cannot read fails with `EngineError` and its logged reasons. It waits
-  `unreal.import_export_timeout`. USD files go through `import_unreal_usd`.
+  the sandbox, like a USD file, and so must every file it names, which
+  Interchange reads too: a glTF's buffers and images, an OBJ's MTL libraries
+  and their textures, an FBX's textures, and the other UDIM tiles of a
+  texture named like one (`wood.1001.png`). Each is looked for where Unreal
+  5.7's translators look (`simul.utils.asset_references`, shared with the
+  Blender import): an OBJ's textures are joined to the OBJ's folder even when
+  the MTL is elsewhere, glTF URIs are URL-decoded, an FBX texture is tried as
+  its stored name (a relative one where the editor opens it) and joined to
+  the FBX's folder, and `..` is judged both as Unreal collapses it and as the
+  file system follows it. A referenced file outside the sandbox that exists
+  refuses the import with `SandboxError`, naming it in
+  `details.references_outside` (and the model in `referenced_by`), before
+  the editor reads anything; one that does not exist reads nothing and
+  passes. A binary FBX simul cannot parse is refused, since nothing then
+  vouches for its textures. Without `replace_existing` an asset that already
+  exists is kept (`kept_assets`), and a file whose every asset exists imports
+  nothing (`InvalidState`, listing the meshes, materials and textures in
+  `details.existing_assets`). With it, Unreal reimports the asset named after
+  the file and keeps the other assets an earlier import of the file made, as
+  they were, even when their source changed (a 32 px texture redrawn at 48
+  px stayed 32 px): the reimported asset is in `replaced_assets`, the ones
+  kept in `kept_assets`, with a warning. Delete them, or import into another
+  folder, to import them anew. An earlier import's assets are told apart by
+  the files their import data names. `warnings` holds what the editor logged,
+  `dirty_engine_packages` the engine or plugin packages the import left
+  modified, and a file Unreal cannot read fails with `EngineError` and its
+  logged reasons. It waits `unreal.import_export_timeout`. USD files go
+  through `import_unreal_usd`.
 - `save_unreal_assets` saves modified packages to disk: the packages of
   `asset_paths`, the level being edited with `save_level` (its map package
   and, in a World Partition level, its actors' and objects' packages), or
@@ -824,8 +890,10 @@ Behaviour worth knowing:
   Partition level, the actor's package), so saving keeps the assignment and
   Undo reverts it; the slot is read back, and `previous_material_path` is what
   it rendered with before. The actor must be in the level being edited: a path
-  in another map is refused without loading that map, as is a map path given
-  as the material. `component_name` picks the mesh component by name (or
+  in another map is refused without loading that map. A material path that
+  names something other than a material (a level, which is never loaded, or
+  a mesh) is an `InvalidAssetType`, as in `create_unreal_material_instance`,
+  and one that names nothing a `NotFoundError`. `component_name` picks the mesh component by name (or
   path); without it the actor's mesh root component is used, else its only
   mesh component, and an actor with several is a `ValidationError` naming
   them. `slot_name` picks the material slot by the name the Details panel

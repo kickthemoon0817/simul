@@ -37,6 +37,7 @@ import ast
 import asyncio
 import io
 import json
+import os
 import sys
 from contextlib import contextmanager, redirect_stdout
 from types import SimpleNamespace
@@ -46,9 +47,11 @@ from unittest.mock import AsyncMock
 import pytest
 from fastmcp import Client
 
+import simul.usd.sandbox  # noqa: F401 - imported with the real pxr, before the fake editor's pxr
 from simul.adapters import unreal_runtime
 from simul.adapters.unreal_runtime import MAX_ASSET_SEARCH_RESULTS, UnrealRuntimeSession
 from simul.config import Settings
+from simul.utils.paths import PathPolicy
 from simul.mcp import server as server_module
 from simul.mcp.registration import _unreal_tools
 from simul.mcp.schemas.unreal import (
@@ -115,6 +118,8 @@ UE_DEFAULTS: Dict[str, Any] = {
 #: UsdStageImportOptions properties that are not saved settings.
 NOT_SAVED = {"prims_to_import": ["/"], "stage_options": None}
 LOG_TIME = "[2026.11.07-18.46.14:701][753]"
+#: The editor's base directory, which FPaths::ConvertRelativePathToFull resolves against.
+ENGINE_BINARIES = "/Users/Shared/Epic Games/UE_5.7/Engine/Binaries/Mac"
 
 
 # ---------------------------------------------------------------------------
@@ -194,13 +199,30 @@ class MeshComponent(SceneComponent):
         self.materials[index] = material
 
 
+class DynamicMeshComponent(MeshComponent):
+    pass
+
+
+class Level(UObject):
+    def __init__(self, path: str, outer: World) -> None:
+        super().__init__(path)
+        self.outer = outer
+
+    def get_outer(self) -> World:
+        return self.outer
+
+
 class Actor(UObject):
     def __init__(self, path: str, world: World, editor: "Editor", exported: bool = True,
-                 meshes: Optional[Dict[str, Tuple[str, ...]]] = None, mesh_root: bool = True) -> None:
+                 meshes: Optional[Dict[str, Tuple[str, ...]]] = None, mesh_root: bool = True,
+                 dynamic: bool = False, level_world: Optional[World] = None) -> None:
         super().__init__(path)
         self.world = world
+        # The level holding the actor: the persistent level's outer is the world, a sublevel's its own.
+        self.level = Level(path.split(":", 1)[0] + ":PersistentLevel", level_world or world)
         meshes = meshes or {"StaticMeshComponent0": ("Default",)}
-        self.components = [MeshComponent(path + "." + name, editor, slots) for name, slots in meshes.items()]
+        kind = DynamicMeshComponent if dynamic else MeshComponent
+        self.components = [kind(path + "." + name, editor, slots) for name, slots in meshes.items()]
         for component in self.components:
             component.owner = self  # type: ignore[attr-defined]
         self.root_component: Any = self.components[0] if mesh_root else SceneComponent(path + ".Root")
@@ -209,6 +231,9 @@ class Actor(UObject):
 
     def get_world(self) -> World:
         return self.world
+
+    def get_level(self) -> Any:
+        return self.level
 
     def get_actor_label(self) -> str:
         return self.get_name()
@@ -341,6 +366,10 @@ class Editor:
         self.export_cdo = SimpleNamespace(inner=Inner())
         self.log_path = tmp_path / "Fake.log"
         self.log_path.write_text("")
+        # The files each imported asset's AssetImportData names (extract_filenames).
+        self.import_sources: Dict[str, List[str]] = {}
+        # Packages outside /Game the next import leaves dirty, as Interchange did its shared material.
+        self.import_dirties: List[str] = []
         # The console namespace Remote Control runs every script in.
         self.console: Dict[str, Any] = {}
         self.scripts: List[str] = []
@@ -350,6 +379,11 @@ class Editor:
     def log(self, category: str, verbosity: str, message: str) -> None:
         with open(self.log_path, "a") as handle:
             handle.write(f"{LOG_TIME}{category}: {verbosity}: {message}\n")
+
+    def log_python(self, message: str) -> None:
+        """unreal.log: a LogPython line, at Display verbosity."""
+        with open(self.log_path, "a") as handle:
+            handle.write(f"{LOG_TIME}LogPython: {message}\n")
 
     def level_actors(self) -> List[Actor]:
         actors = list(self.actors.values())
@@ -373,6 +407,12 @@ class Editor:
         if kind == "World":
             self.maps_loaded.append(path)
             return World(path)
+        if package in self.import_sources:
+            sources = list(self.import_sources[package])
+            imported = UObject(package + "." + package.rsplit("/", 1)[1])
+            data = SimpleNamespace(extract_filenames=lambda: sources)
+            imported.get_editor_property = lambda name: data  # type: ignore[attr-defined]
+            return imported
         if kind == "StaticMesh":
             return StaticMesh(package + "." + package.rsplit("/", 1)[1])
         return {BASIC: self.basic, RED: self.red}.get(package)
@@ -388,9 +428,17 @@ class Editor:
         for actor in exported:
             with open(folder + "/" + actor.get_actor_label() + "_Mesh.usda", "w") as handle:
                 handle.write("#usda 1.0\n")
+        if task.options.inner.export_sublayers:
+            beside = os.path.dirname(task.filename)
+            names = {"MaterialOverrides"} | {actor.level.get_outer().get_name() for actor in exported
+                                             if actor.level.get_outer() is not task.object}
+            for name in names:
+                with open(beside + "/" + name + ".usda", "w") as handle:
+                    handle.write("#usda 1.0\n")
         return True
 
     def run_import(self, tasks: List[AssetImportTask]) -> None:
+        self.dirty.update(self.import_dirties)
         for task in tasks:
             self.import_tasks.append(task)
             for line in self.import_log:
@@ -429,7 +477,14 @@ class Editor:
             task.factory.scene_actor = scene
 
     def run_interchange(self, task: AssetImportTask) -> None:
-        """Interchange: a mesh named after the file, kept when it exists and replace_existing is false."""
+        """Interchange: a mesh named after the file, its material and a texture.
+
+        An existing asset is kept, with a log line, when replace_existing is
+        false. When it is true, an existing mesh named after the file turns
+        the import into a reimport of that mesh alone (UE 5.7's
+        convert-to-reimport), which keeps the earlier material and texture
+        without a word.
+        """
         stem = task.filename.rsplit("/", 1)[1].rsplit(".", 1)[0]
         if stem == "garbage":
             self.log("LogInterchangeEngine", "Error", "Cannot open FBX file '" + task.filename + "'.")
@@ -437,8 +492,15 @@ class Editor:
             return
         mesh = task.destination_path + "/" + stem
         material = task.destination_path + "/M_" + stem
+        texture = task.destination_path + "/T_" + stem
+        reimport = task.replace_existing and mesh in self.content
         task.imported_object_paths = []
-        for path, kind in ((material, "MaterialInstanceConstant"), (mesh, "StaticMesh")):
+        made = [(material, "MaterialInstanceConstant", task.filename), (mesh, "StaticMesh", task.filename)]
+        if os.path.exists(self.texture_source(task.filename)):
+            made.insert(0, (texture, "Texture2D", self.texture_source(task.filename)))
+        for path, kind, source in made:
+            if reimport and path != mesh and path in self.content:
+                continue
             if path in self.content and not task.replace_existing:
                 self.log("LogInterchangeEngine", "Warning", "The option bReplaceExisting is false, we are not "
                          f"overriding the asset named '{kind} {path}.{path.rsplit('/', 1)[1]}'.")
@@ -446,7 +508,15 @@ class Editor:
             if path in self.content:
                 self.replaced_assets.append(path)
             self.content[path] = kind
+            self.import_sources[path] = [source]
+            # UAssetImportData's registry tag, which lists the source files relative to the package.
+            self.tags[path] = {"AssetImportData": json.dumps([{"RelativeFilename": "../../" + source}])}
             task.imported_object_paths.append(path + "." + path.rsplit("/", 1)[1])
+
+    @staticmethod
+    def texture_source(model: str) -> str:
+        """The texture Interchange reads for a model, when it is there: the image named after it."""
+        return model.rsplit(".", 1)[0] + ".png"
 
     def create_asset(self, name: str, folder: str, cls: type, factory: Any) -> Any:
         package = folder + "/" + name
@@ -587,6 +657,7 @@ class Editor:
         return SimpleNamespace(
             Actor=Actor,
             MeshComponent=MeshComponent,
+            DynamicMeshComponent=DynamicMeshComponent,
             MaterialInterface=MaterialInterface,
             Material=Material,
             StaticMesh=StaticMesh,
@@ -638,7 +709,10 @@ class Editor:
                 get_supported_formats=lambda kind: formats[kind])),
             InterchangeTranslatorType=SimpleNamespace(ASSETS="ASSETS", SCENES="SCENES", ACTORS="ACTORS"),
             InterchangeProjectSettings=InterchangeProjectSettings,
-            Paths=SimpleNamespace(project_log_dir=lambda: str(editor.tmp_path) + "/"),
+            Paths=SimpleNamespace(project_log_dir=lambda: str(editor.tmp_path) + "/",
+                                  convert_relative_path_to_full=lambda path: (
+                                      path if os.path.isabs(path) else os.path.join(ENGINE_BINARIES, path))),
+            log=editor.log_python,
             SystemLibrary=SimpleNamespace(
                 is_valid=lambda obj: obj is not None,
                 get_game_name=lambda: "Fake",
@@ -656,9 +730,13 @@ class Editor:
 
     def pxr(self) -> SimpleNamespace:
         editor = self
-        return SimpleNamespace(Usd=SimpleNamespace(Stage=SimpleNamespace(
-            LoadNone="LoadNone", Open=lambda path, load=None: Stage(editor.stages.get(path, [])),
-        )))
+        return SimpleNamespace(
+            Usd=SimpleNamespace(Stage=SimpleNamespace(
+                LoadNone="LoadNone", Open=lambda path, load=None: Stage(editor.stages.get(path, [])),
+            )),
+            Tf=SimpleNamespace(MakeValidIdentifier=lambda name: "".join(
+                char if char.isalnum() or char == "_" else "_" for char in name)),
+        )
 
     def leaked(self) -> List[Any]:
         """Objects referencing the world, or a scene actor, left in the console namespace."""
@@ -850,6 +928,144 @@ def _import(editor: SimpleNamespace, **kwargs: Any) -> Dict[str, Any]:
     return _run(editor.session.import_usd(**kwargs))
 
 
+def test_a_usd_file_referencing_a_layer_outside_the_sandbox_is_refused(
+    editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's fixture: references = @../../outside/ref.usda@ imported the outside layer's prims."""
+    sbx, outside = _confine(editor)
+    (outside / "ref.usda").write_text('#usda 1.0\ndef Xform "Secret" {}\n')
+    (sbx / "usd").mkdir()
+    stage = sbx / "usd" / "refin.usda"
+    stage.write_text('#usda 1.0\ndef Xform "Root" (\n    references = @../../outside/ref.usda@\n) {}\n')
+
+    payload = json.loads(_call_tool(editor.session, monkeypatch, "import_unreal_usd", {
+        "usd_path": str(stage), "destination_path": "/Game/Imports",
+    }).content[-1].text)
+
+    assert payload["error_type"] == "SandboxError", payload
+    (entry,) = payload["details"]["outside_sandbox"]
+    assert (entry["kind"], entry["asset_path"]) == ("reference", "../../outside/ref.usda")
+    assert payload["details"]["references_outside"] == [os.path.realpath(outside / "ref.usda")]
+    assert payload["details"]["referenced_by"] == str(stage)
+    assert editor.fake.scripts == [] and editor.fake.import_tasks == []
+
+
+def test_a_usd_file_whose_texture_is_outside_is_refused(editor: SimpleNamespace) -> None:
+    sbx, outside = _confine(editor)
+    stage = sbx / "tex.usda"
+    stage.write_text(
+        '#usda 1.0\ndef Shader "Tex" {\n    asset inputs:file = @../outside/secret.png@\n}\n'
+    )
+
+    with pytest.raises(unreal_runtime.SandboxDenied) as denied:
+        _import(editor, usd_path=str(stage))
+
+    assert denied.value.details["references_outside"] == [os.path.realpath(outside / "secret.png")]
+    assert editor.fake.scripts == []
+
+
+def test_a_usd_file_drawing_only_on_the_sandbox_imports(editor: SimpleNamespace) -> None:
+    sbx, _ = _confine(editor)
+    (sbx / "part.usda").write_text('#usda 1.0\ndef Xform "Part" {}\n')
+    stage = sbx / "scene.usda"
+    stage.write_text('#usda 1.0\n(\n    subLayers = [@./part.usda@]\n)\n')
+
+    result = _import(editor, usd_path=str(stage))
+
+    assert result["imported_assets"], result
+
+
+UNREAL_EXPORT = (
+    '#usda 1.0\ndef Xform "Root" {{\n    def Material "M" {{\n'
+    '        uniform asset info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@\n'
+    "{extra}    }}\n}}\n"
+)
+
+
+def test_unreal_content_paths_in_its_own_exports_are_not_files_outside_the_sandbox(editor: SimpleNamespace) -> None:
+    """Unreal's exporter names each mesh's source material by content path; the round trip was refused."""
+    sbx, _ = _confine(editor)
+    stage = sbx / "export.usda"
+    stage.write_text(UNREAL_EXPORT.format(extra=""))
+
+    result = _import(editor, usd_path=str(stage))
+
+    assert result["imported_assets"], result
+
+
+@pytest.mark.parametrize(
+    "authored",
+    [
+        "asset inputs:file = @/Engine/x.usda@",  # a file name under a content root's name
+        "asset inputs:file = @/Engine/usda.usda@",  # Name.Name, but the suffix is a file extension
+        "asset inputs:file = @/Engine/BasicShapes/Cube.Sphere@",  # not a package and its own asset
+        "asset inputs:file = @/MyPlugin/Materials/M_Wood.M_Wood@",  # only /Engine, /Game and /Script
+        "asset inputs:file = @../outside/BasicShapeMaterial.BasicShapeMaterial@",  # relative
+        "asset inputs:file = @../../Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@",  # relative
+    ],
+)
+def test_only_unreal_object_paths_pass_as_content(editor: SimpleNamespace, authored: str) -> None:
+    """The exemption is narrow: anything else naming a place outside the sandbox is refused."""
+    sbx, _ = _confine(editor)
+    stage = sbx / "export.usda"
+    stage.write_text(UNREAL_EXPORT.format(extra="        " + authored + "\n"))
+
+    with pytest.raises(unreal_runtime.SandboxDenied) as denied:
+        _import(editor, usd_path=str(stage))
+
+    assert [entry["asset_path"] for entry in denied.value.details["outside_sandbox"]] == [
+        authored.split("@")[1]
+    ]
+    assert editor.fake.scripts == []
+
+
+def test_a_layer_named_like_an_unreal_object_path_is_still_refused(editor: SimpleNamespace) -> None:
+    """A reference is a file read whatever its shape."""
+    sbx, _ = _confine(editor)
+    stage = sbx / "export.usda"
+    stage.write_text('#usda 1.0\ndef "Root" (\n    references = @/Engine/Ref.Ref@\n) {}\n')
+
+    with pytest.raises(unreal_runtime.SandboxDenied) as denied:
+        _import(editor, usd_path=str(stage))
+
+    assert [entry["kind"] for entry in denied.value.details["outside_sandbox"]] == ["reference"]
+
+
+def test_a_file_outside_beside_unreal_content_paths_is_still_refused(editor: SimpleNamespace) -> None:
+    sbx, outside = _confine(editor)
+    stage = sbx / "export.usda"
+    stage.write_text(UNREAL_EXPORT.format(extra="        asset inputs:file = @../outside/secret.png@\n"))
+
+    with pytest.raises(unreal_runtime.SandboxDenied) as denied:
+        _import(editor, usd_path=str(stage))
+
+    assert [entry["asset_path"] for entry in denied.value.details["outside_sandbox"]] == ["../outside/secret.png"]
+    assert denied.value.details["outside_count"] == 1
+    assert denied.value.error_message.endswith(
+        "draws on 1 file(s) outside the sandbox: " + os.path.realpath(outside / "secret.png")
+    )
+    assert editor.fake.scripts == []
+
+
+def test_a_usd_file_pxr_cannot_open_is_not_vouched_for(editor: SimpleNamespace) -> None:
+    sbx, _ = _confine(editor)
+    (sbx / "broken.usda").write_text("#usda 1.0\ndef Xform \"Root\" (\n")
+
+    with pytest.raises(unreal_runtime.SandboxDenied, match="could not be checked against the sandbox"):
+        _import(editor, usd_path=str(sbx / "broken.usda"))
+
+    assert editor.fake.scripts == []
+
+
+def test_the_usd_import_reports_engine_packages_it_dirtied(editor: SimpleNamespace) -> None:
+    editor.fake.import_dirties = ["/InterchangeAssets/Materials/PBRSurfaceMaterial_MR"]
+
+    result = _import(editor)
+
+    assert result["dirty_engine_packages"] == ["/InterchangeAssets/Materials/PBRSurfaceMaterial_MR"]
+    assert "Save All" in result["warnings"][-1]
+
+
 def test_an_import_saves_none_of_its_options_to_the_project_config(editor: SimpleNamespace) -> None:
     """set_editor_property notified UsdStageImportOptions, which saved bImportActors=False."""
     result = _import(editor, import_options={"import_actors": False})
@@ -1034,11 +1250,23 @@ def test_assigning_to_an_actor_of_an_unopened_map_loads_nothing(editor: SimpleNa
     assert editor.fake.events == []
 
 
-def test_a_map_path_given_as_the_material_is_not_loaded(editor: SimpleNamespace) -> None:
-    result = _run(editor.session.assign_material(CUBE, "/Game/Maps/Other"))
+@pytest.mark.parametrize(
+    ("material", "error_type", "error"),
+    [
+        ("/Game/Maps/Other", "InvalidAssetType", "/Game/Maps/Other is a level, not a material"),
+        ("/Engine/BasicShapes/Cube", "InvalidAssetType", "/Engine/BasicShapes/Cube is a StaticMesh, not a material"),
+        ("/Game/Nope/M_Nope", "NotFoundError", "No material at '/Game/Nope/M_Nope'"),
+    ],
+)
+def test_a_material_path_that_is_no_material_is_typed_as_in_create_instance(
+    editor: SimpleNamespace, material: str, error_type: str, error: str
+) -> None:
+    """A level given as the material was NotFoundError here and InvalidAssetType in create-instance."""
+    result = _run(editor.session.assign_material(CUBE, material))
 
-    assert result["error_type"] == "NotFoundError"
-    assert editor.fake.maps_loaded == []
+    assert result["error_type"] == error_type
+    assert error in result["error"]
+    assert editor.fake.maps_loaded == []  # a level is never loaded as an asset
     assert editor.fake.events == []
 
 
@@ -1422,9 +1650,79 @@ def test_the_mesh_files_written_next_to_the_output_are_reported(editor: SimpleNa
     result = _run(editor.session.export_usd([CUBE, SPHERE], str(folder / "pair.usda")))
 
     assert result["written_files"] == [
-        str(folder / "Cube_Mesh.usda"), str(folder / "Sphere_Mesh.usda"), str(folder / "pair.usda"),
+        str(folder / "pair.usda"), str(folder / "pair_assets" / "Cube_Mesh.usda"),
+        str(folder / "pair_assets" / "Sphere_Mesh.usda"),
     ]
     assert result["overwritten_files"] == []
+    assert result["warnings"] == []
+
+
+def test_an_export_beside_another_keeps_its_meshes_apart(editor: SimpleNamespace) -> None:
+    """Two exports into one folder wrote their mesh files over each other's."""
+    folder = editor.tmp_path / "out"
+    _run(editor.session.export_usd([CUBE], str(folder / "a.usda")))
+
+    second = _run(editor.session.export_usd([CUBE], str(folder / "b.usda")))
+
+    assert second["written_files"] == [str(folder / "b.usda"), str(folder / "b_assets" / "Cube_Mesh.usda")]
+    assert (folder / "a_assets" / "Cube_Mesh.usda").exists()
+
+
+def test_a_mesh_file_left_in_the_asset_folder_is_kept_unless_overwrite(editor: SimpleNamespace) -> None:
+    """The overwrite gate covered the output alone; the mesh files beside it were replaced."""
+    folder = editor.tmp_path / "out"
+    (folder / "cube_assets").mkdir(parents=True)
+    mesh = folder / "cube_assets" / "Cube_Mesh.usda"
+    mesh.write_text("#usda 1.0\n# the user's mesh\n")
+
+    refused = _run(editor.session.export_usd([CUBE], str(folder / "cube.usda")))
+
+    assert refused["error_type"] == "InvalidState"
+    assert refused["details"]["existing_files"] == [str(mesh)]
+    assert editor.fake.export_tasks == []
+    assert not (folder / "cube.usda").exists()
+    replaced = _run(editor.session.export_usd([CUBE], str(folder / "cube.usda"), overwrite=True))
+    assert replaced["overwritten_files"] == [str(mesh)]
+
+
+def test_the_sublevel_layers_and_material_overrides_are_gated_too(editor: SimpleNamespace) -> None:
+    """export_sublayers writes a layer per sublevel, and MaterialOverrides, beside the output."""
+    sub_world = World("/Game/Maps/Sub.Sub")
+    editor.fake.actors[LEVEL + "Lamp"] = Actor(LEVEL + "Lamp", editor.fake.world, editor.fake, level_world=sub_world)
+    folder = editor.tmp_path / "out"
+    folder.mkdir()
+    (folder / "Sub.usda").write_text("#usda 1.0\n# the user's layer\n")
+
+    refused = _run(editor.session.export_usd(
+        [CUBE, LEVEL + "Lamp"], str(folder / "scene.usda"), export_options={"export_sublayers": True}
+    ))
+
+    assert refused["error_type"] == "InvalidState"
+    assert refused["details"]["existing_files"] == [str(folder / "Sub.usda")]
+    assert editor.fake.export_tasks == []
+    (folder / "Sub.usda").unlink()
+    done = _run(editor.session.export_usd(
+        [CUBE, LEVEL + "Lamp"], str(folder / "scene.usda"), export_options={"export_sublayers": True}
+    ))
+    assert {str(folder / "MaterialOverrides.usda"), str(folder / "Sub.usda")} <= set(done["written_files"])
+    again = _run(editor.session.export_usd(
+        [CUBE], str(folder / "other.usda"), export_options={"export_sublayers": True}
+    ))
+    assert again["details"]["existing_files"] == [str(folder / "MaterialOverrides.usda")]
+
+
+def test_a_dynamic_mesh_actor_exported_without_its_mesh_is_a_warning(editor: SimpleNamespace) -> None:
+    """Unreal's USD exporter writes a DynamicMeshActor as an empty Xform, and said nothing."""
+    blob = LEVEL + "Blob"
+    editor.fake.actors[blob] = Actor(blob, editor.fake.world, editor.fake, dynamic=True)
+
+    result = _run(editor.session.export_usd([CUBE, blob], str(editor.tmp_path / "out" / "blob.usda")))
+
+    assert result["warnings"] == [
+        "Unreal's USD exporter writes DynamicMeshActors as empty Xforms, without their mesh: " + blob
+        + ". convert_unreal_mesh_format with target_format static_mesh and replace_actor true makes them "
+        "StaticMeshActors, which export with their geometry."
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1572,23 +1870,49 @@ def _asset_import(editor: SimpleNamespace, name: str = "crate.fbx", **kwargs: An
     return _run(editor.session.import_asset(str(path), **kwargs))
 
 
+def _textured_obj(editor: SimpleNamespace) -> str:
+    """crate.obj, whose MTL library names crate.png beside it."""
+    (editor.tmp_path / "crate.obj").write_text("mtllib crate.mtl\nv 0 0 0\n")
+    (editor.tmp_path / "crate.mtl").write_text("newmtl Wood\nmap_Kd crate.png\n")
+    (editor.tmp_path / "crate.png").write_bytes(b"\x89PNG")
+    return "crate.obj"
+
+
 def test_an_fbx_file_imports_its_assets_and_leaves_nothing_in_the_console(editor: SimpleNamespace) -> None:
     result = _asset_import(editor)
 
     assert result["imported_assets"] == ["/Game/Props/M_crate.M_crate", "/Game/Props/crate.crate"]
     assert (result["replaced_assets"], result["kept_assets"]) == ([], [])
+    assert result["dirty_engine_packages"] == []
     (task,) = editor.fake.import_tasks
     assert (task.automated, task.save, task.replace_existing) == (True, True, False)
+    assert _script_args(editor.fake.scripts[-1])["sources"] == [str(editor.tmp_path / "crate.fbx")]
     assert editor.fake.leaked() == []
 
 
-def test_a_file_whose_assets_all_exist_imports_nothing_without_replace(editor: SimpleNamespace) -> None:
-    _asset_import(editor)
+def test_the_files_a_model_reads_are_passed_as_its_sources(editor: SimpleNamespace) -> None:
+    """The texture an OBJ's MTL names is how its texture asset is told apart from others."""
+    result = _asset_import(editor, _textured_obj(editor))
 
-    again = _asset_import(editor)
+    assert result["imported_assets"] == [
+        "/Game/Props/T_crate.T_crate", "/Game/Props/M_crate.M_crate", "/Game/Props/crate.crate",
+    ]
+    real = os.path.realpath(editor.tmp_path)
+    assert _script_args(editor.fake.scripts[-1])["sources"] == [
+        str(editor.tmp_path / "crate.obj"), real + "/crate.mtl", real + "/crate.png",
+    ]
+
+
+def test_a_file_whose_assets_all_exist_imports_nothing_without_replace(editor: SimpleNamespace) -> None:
+    """The texture and the material are listed with the mesh: existing_assets used to omit them."""
+    _asset_import(editor, _textured_obj(editor))
+
+    again = _asset_import(editor, "crate.obj")
 
     assert again["error_type"] == "InvalidState"
-    assert again["details"]["existing_assets"] == ["/Game/Props/M_crate.M_crate", "/Game/Props/crate.crate"]
+    assert again["details"]["existing_assets"] == [
+        "/Game/Props/M_crate.M_crate", "/Game/Props/T_crate.T_crate", "/Game/Props/crate.crate",
+    ]
     assert editor.fake.replaced_assets == []
 
 
@@ -1601,12 +1925,176 @@ def test_existing_assets_are_kept_and_reported_beside_the_new_ones(editor: Simpl
     assert result["kept_assets"] == ["/Game/Props/M_crate.M_crate"]
 
 
-def test_replace_existing_replaces_them_and_says_which(editor: SimpleNamespace) -> None:
+def test_replace_existing_reports_the_assets_unreals_reimport_kept(editor: SimpleNamespace) -> None:
+    """replace_existing replaced the mesh alone and kept the texture and material without a word."""
+    _asset_import(editor, _textured_obj(editor))
+
+    result = _asset_import(editor, "crate.obj", replace_existing=True)
+
+    assert result["imported_assets"] == ["/Game/Props/crate.crate"]
+    assert result["replaced_assets"] == ["/Game/Props/crate.crate"]
+    assert result["kept_assets"] == ["/Game/Props/M_crate.M_crate", "/Game/Props/T_crate.T_crate"]
+    (warning,) = result["warnings"]
+    assert warning.startswith("replace_existing reimported /Game/Props/crate.crate, but Unreal's Interchange "
+                              "reimport keeps the other assets an earlier import of this file made, as they were: "
+                              "/Game/Props/M_crate.M_crate, /Game/Props/T_crate.T_crate.")
+    assert editor.fake.replaced_assets == ["/Game/Props/crate"]
+
+
+def test_an_asset_another_file_imported_is_not_reported_as_kept(editor: SimpleNamespace) -> None:
+    _asset_import(editor, "barrel.fbx")
     _asset_import(editor)
 
     result = _asset_import(editor, replace_existing=True)
 
-    assert result["replaced_assets"] == ["/Game/Props/M_crate.M_crate", "/Game/Props/crate.crate"]
+    assert result["kept_assets"] == ["/Game/Props/M_crate.M_crate"]
+
+
+def test_engine_packages_an_import_dirties_are_reported(editor: SimpleNamespace) -> None:
+    """Interchange set bUsedWithNanite on its shared plugin material and left it dirty, unreported."""
+    shared = "/InterchangeAssets/Materials/PBRSurfaceMaterial_MR"
+    editor.fake.import_dirties = [shared, "/Game/Props/Scratch"]
+
+    result = _asset_import(editor)
+
+    assert result["dirty_engine_packages"] == [shared]
+    assert result["warnings"][-1].startswith(
+        f"The editor holds 1 package(s) outside /Game modified in memory: {shared}. They belong to the engine "
+        "or a plugin"
+    )
+    assert shared not in editor.fake.saved_packages
+
+
+def test_an_engine_package_dirtied_after_an_earlier_import_returned_is_reported_by_the_next(
+    editor: SimpleNamespace,
+) -> None:
+    """Unreal set the flag frames after the import whose mesh needed it: the later call names it."""
+    shared = "/InterchangeAssets/Materials/PBRSurfaceMaterial_MR"
+    first = _asset_import(editor)
+    editor.fake.dirty.add(shared)  # a later editor frame
+
+    second = _asset_import(editor, "barrel.fbx")
+
+    assert first["dirty_engine_packages"] == []
+    assert second["dirty_engine_packages"] == [shared]
+
+
+def test_the_warnings_come_from_this_editors_log_not_a_sibling_editors(editor: SimpleNamespace) -> None:
+    """A second editor of the project writes <Project>_2.log; <Project>.log was the other editor's."""
+    other = editor.tmp_path / "Fake_2.log"
+    other.write_text("")
+    editor.fake.log_path, sibling = other, editor.fake.log_path
+    sibling.write_text(f"{LOG_TIME}LogInterchangeEngine: Error: the other editor's import failed\n")
+    editor.fake.content["/Game/Props/M_crate"] = "MaterialInstanceConstant"
+
+    result = _asset_import(editor)
+
+    assert "the other editor's import failed" not in " ".join(result["warnings"])
+    assert any("we are not overriding the asset named" in line for line in result["warnings"])
+
+
+def _confine(editor: SimpleNamespace) -> Tuple[Any, Any]:
+    """Allow only ``sbx`` under the test's folder; ``outside`` beside it holds a secret image."""
+    sbx, outside = editor.tmp_path / "sbx", editor.tmp_path / "outside"
+    sbx.mkdir()
+    outside.mkdir()
+    (outside / "secret.png").write_bytes(b"\x89PNG secret")
+    base = Settings()
+    settings = base.model_copy(update={
+        "security": base.security.model_copy(update={"allowed_paths": [str(sbx)]}),
+    })
+    editor.session._path_policy = PathPolicy.from_settings(settings)
+    return sbx, outside
+
+
+def _refused_before_the_editor(editor: SimpleNamespace, payload: Dict[str, Any], *outside: Any) -> None:
+    assert payload["error_type"] == "SandboxError", payload
+    assert payload["details"]["references_outside"] == [os.path.realpath(path) for path in outside]
+    assert editor.fake.import_tasks == []
+
+
+@pytest.mark.parametrize(
+    ("name", "write"),
+    [
+        ("relcube.obj", lambda sbx, out: (
+            (sbx / "relcube.obj").write_text("mtllib relcube.mtl\nv 0 0 0\n"),
+            (sbx / "relcube.mtl").write_text("newmtl M\nmap_Kd ../outside/secret.png\n"))),
+        ("mtlcube.obj", lambda sbx, out: (
+            (sbx / "mtlcube.obj").write_text("mtllib ../outside/evil.mtl\nv 0 0 0\n"),
+            (out / "evil.mtl").write_text("newmtl M\nmap_Kd secret.png\n"))),
+        ("relball.gltf", lambda sbx, out: (sbx / "relball.gltf").write_text(json.dumps(
+            {"asset": {"version": "2.0"}, "images": [{"uri": "../outside/secret.png"}]}))),
+    ],
+)
+def test_a_model_naming_a_file_outside_the_sandbox_is_refused_before_the_editor_reads_it(
+    editor: SimpleNamespace, name: str, write: Any
+) -> None:
+    """The review's fixtures: a texture or an MTL library outside the sandbox was imported."""
+    sbx, outside = _confine(editor)
+    write(sbx, outside)
+    culprit = outside / ("evil.mtl" if name == "mtlcube.obj" else "secret.png")
+
+    with pytest.raises(unreal_runtime.SandboxDenied) as denied:
+        _run(editor.session.import_asset(str(sbx / name), "/Game/Props"))
+
+    assert denied.value.details["referenced_by"] == str(sbx / name)
+    _refused_before_the_editor(editor, {"error_type": "SandboxError", **vars(denied.value)}, culprit)
+    assert editor.fake.scripts == []
+
+
+def test_the_refusal_reaches_the_agent_as_a_sandbox_error(
+    editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sbx, outside = _confine(editor)
+    document = {"asset": {"version": "2.0"}, "images": [{"uri": "../outside/secret.png"}]}
+    (sbx / "ball.gltf").write_text(json.dumps(document))
+
+    payload = json.loads(_call_tool(editor.session, monkeypatch, "import_unreal_asset", {
+        "file_path": str(sbx / "ball.gltf"), "destination_path": "/Game/Props",
+    }).content[-1].text)
+
+    _refused_before_the_editor(editor, payload, outside / "secret.png")
+    assert payload["details"]["referenced_by"] == str(sbx / "ball.gltf")
+    assert payload["error"].startswith("ball.gltf refers to 1 file(s) outside the sandbox, so it was not imported")
+
+
+def test_an_fbx_relative_texture_name_is_resolved_where_the_editor_opens_it(
+    editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The FBX SDK opens a relative FileName from the editor's working directory."""
+    sbx, outside = _confine(editor)
+    model = sbx / "crate.fbx"
+    model.write_text('; FBX 7.4.0 project file\nTexture: 1, "Texture::W", "" {\n  FileName: "secret.png"\n}\n')
+    monkeypatch.chdir(outside)  # the fake editor runs in this process: its working directory is outside
+
+    with pytest.raises(unreal_runtime.SandboxDenied) as denied:
+        _run(editor.session.import_asset(str(model), "/Game/Props"))
+
+    assert denied.value.details["references_outside"] == [os.path.realpath(outside / "secret.png")]
+    (script,) = editor.fake.scripts
+    assert _script_args(script) == {"names": ["secret.png"]}
+    assert editor.fake.import_tasks == []
+
+
+def test_a_binary_fbx_that_cannot_be_parsed_is_refused(editor: SimpleNamespace) -> None:
+    sbx, _ = _confine(editor)
+    (sbx / "crate.fbx").write_bytes(b"Kaydara FBX Binary  \x00\x1a\x00" + b"\xff" * 9)
+
+    with pytest.raises(unreal_runtime.SandboxDenied, match="could not be checked against the sandbox"):
+        _run(editor.session.import_asset(str(sbx / "crate.fbx"), "/Game/Props"))
+
+    assert editor.fake.scripts == []
+
+
+def test_without_the_sandbox_a_model_imports_whatever_it_names(editor: SimpleNamespace) -> None:
+    base = Settings()
+    settings = base.model_copy(update={"security": base.security.model_copy(update={"sandbox_enabled": False})})
+    editor.session._path_policy = PathPolicy.from_settings(settings)
+    (editor.tmp_path / "crate.obj").write_text("mtllib ../elsewhere.mtl\n")
+
+    result = _asset_import(editor, "crate.obj")
+
+    assert result["imported_assets"] == ["/Game/Props/M_crate.M_crate", "/Game/Props/crate.crate"]
 
 
 def test_a_file_unreal_cannot_read_fails_with_the_logged_reason(editor: SimpleNamespace) -> None:

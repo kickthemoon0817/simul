@@ -215,21 +215,47 @@ print(json.dumps({
 # lines the log file gained meanwhile, after FLUSHLOG writes out the buffered
 # ones. They are whatever the editor logged in that time, so a line from other
 # editor activity can appear. Defines log_mark() and logged_since(mark).
+#
+# The file is found by a marker this editor logs, not by name: a second editor
+# of the same project writes <Project>_2.log beside <Project>.log, and the log
+# named after the project alone was the other editor's, so its lines were
+# reported for this one. log_mark() logs a unique line, flushes, and takes the
+# project's log file (<Project>.log or <Project>_<n>.log) whose end holds it.
 EDITOR_LOG = r"""
-import os as _simul_os, re as _simul_re
+import os as _simul_os, re as _simul_re, uuid as _simul_uuid
 _LOG_LINE = _simul_re.compile(r"^\[[^\]]*\]\[[^\]]*\](\w+): (Warning|Error): (.*)$")
 _LOG_LIMIT = 20
+_LOG_TAIL = 1 << 16
+
+def _log_files():
+    folder = unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_log_dir())
+    name = _simul_re.compile(_simul_re.escape(unreal.SystemLibrary.get_game_name()) + r"(_[0-9]+)?\.log$")
+    try:
+        return [_simul_os.path.join(folder, entry) for entry in _simul_os.listdir(folder) if name.match(entry)]
+    except OSError:
+        return []
 
 def log_mark():
-    path = _simul_os.path.join(unreal.Paths.project_log_dir(), unreal.SystemLibrary.get_game_name() + ".log")
-    try:
-        return path, _simul_os.path.getsize(path)
-    except OSError:
-        return path, None
+    marker = "simul-log-mark-" + _simul_uuid.uuid4().hex
+    unreal.log(marker)
+    unreal.SystemLibrary.execute_console_command(None, "FLUSHLOG")
+    token = marker.encode()
+    for path in _log_files():
+        try:
+            size = _simul_os.path.getsize(path)
+            with open(path, "rb") as handle:
+                handle.seek(max(0, size - _LOG_TAIL))
+                tail = handle.read()
+        except OSError:
+            continue
+        at = tail.find(token)
+        if at >= 0:
+            return path, size - len(tail) + at + len(token)
+    return None, None
 
 def logged_since(mark):
     path, start = mark
-    if start is None:
+    if path is None:
         return []
     unreal.SystemLibrary.execute_console_command(None, "FLUSHLOG")
     try:
@@ -244,6 +270,44 @@ def logged_since(mark):
         if match and match.group(1) != "LogPython":
             found.append(match.group(1) + ": " + match.group(2) + ": " + match.group(3).strip())
     return list(dict.fromkeys(found))[:_LOG_LIMIT]
+"""
+
+# Packages outside /Game the editor holds modified (dirty) in memory, which a
+# Save All would write into the engine install or a plugin. Imports leave them
+# so: on UE 5.7.4 Interchange set bUsedWithNanite on its shared parent material
+# (/InterchangeAssets/Materials/PBRSurfaceMaterial_MR, "needed to have new
+# flag set bUsedWithNanite"), leaving the plugin's package dirty. Unreal does
+# that on a later editor frame, up to several imports after the one whose
+# mesh needed it (observed: two frames after a reimport, seven after the first
+# import), so no import can tell which one it was; each reports every such
+# package the editor holds when it finishes. Python can neither save them
+# selectively nor clear their dirty flag, so they are reported. Defines
+# dirty_engine_packages() and dirty_engine_warning(names).
+DIRTY_PACKAGES = """
+def dirty_engine_packages():
+    utils = unreal.EditorLoadingAndSavingUtils
+    names = {package.get_name() for package in list(utils.get_dirty_map_packages())
+             + list(utils.get_dirty_content_packages())}
+    return sorted(name for name in names
+                  if not (name == "/Game" or name.startswith("/Game/") or name.startswith("/Temp/")))
+
+def dirty_engine_warning(names):
+    return ("The editor holds " + str(len(names)) + " package(s) outside /Game modified in memory: "
+            + ", ".join(names) + ". They belong to the engine or a plugin, shared by every project using it, "
+            "and Unreal's importers mark them so, sometimes a moment after an import returns. simul saved none "
+            "of them, and save_unreal_assets skips them, but the editor's Save All would write them into the "
+            "engine install. Discard them when the editor asks, or restart it.")
+"""
+
+# Expects ``args`` = {"names": [...]}: relative file names an FBX stores for
+# its textures. Prints where the editor opens each as given: from its working
+# directory, as the FBX SDK's fopen does, and from its base directory, as
+# Unreal's FPaths::ConvertRelativePathToFull does; import_asset holds both to
+# the sandbox.
+EDITOR_RELATIVE_PATHS = """
+import json, os, unreal
+print(json.dumps({"paths": {name: sorted({os.path.abspath(name), unreal.Paths.convert_relative_path_to_full(name)})
+                            for name in args["names"]}}))
 """
 
 # Both USD scripts keep every editor object they create inside a function, so
@@ -284,7 +348,7 @@ def logged_since(mark):
 # (a customized mesh lost its collision and lightmap resolution) and deleted
 # its actors even though AssetImportTask.replace_existing was False, which the
 # USD importer does not read. With replace, both policies are Replace.
-USD_IMPORT = EDITOR_WORLD + EDITOR_LOG + """
+USD_IMPORT = EDITOR_WORLD + EDITOR_LOG + DIRTY_PACKAGES + """
 import os
 
 # UsdStageImportOptions' constructor defaults (UE 5.7) for the options simul sets on every import,
@@ -390,6 +454,9 @@ def import_usd(path, destination, name, options, replace):
                          + (": " + "; ".join(logged) if logged else "; see the editor log"),
                 "details": {"log": logged}}
     warnings = list(logged)
+    dirtied = dirty_engine_packages()
+    if dirtied:
+        warnings.append(dirty_engine_warning(dirtied))
     saved_after = saved_settings()
     if saved_after != saved_before:
         warnings.append("The import changed this project's saved USD import settings: "
@@ -405,7 +472,7 @@ def import_usd(path, destination, name, options, replace):
             "Earlier simul versions saved the options an import was given, so an import with "
             "import_actors false left bImportActors=False there.")
     return {"imported_assets": assets, "actor_paths": actors, "removed_actor_paths": removed,
-            "warnings": warnings}
+            "warnings": warnings, "dirty_engine_packages": dirtied}
 
 print(json.dumps(import_usd(**args)))
 """
@@ -413,19 +480,28 @@ print(json.dumps(import_usd(**args)))
 # Expects ``args`` = {"path", "actors", "options", "overwrite"}. The export
 # selects the actors and exports the editor world, neither of which Unreal
 # allows while PIE runs, so the export is refused then. Each actor path must
-# name an actor of the level being edited (actor_at). An existing output
-# file is refused without ``overwrite``. Unreal's USD level exporter writes
+# name an actor of the level being edited (actor_at). Unreal's USD level exporter writes
 # what it accepts and leaves out the rest without an error (actors of another
 # world, editor helpers such as a WorldSettings or PlayerStart), so the actors
 # exported are read back from the written stage: the prim each actor's root
 # component went to (UsdConversionLibrary.get_prim_path_for_object, which the
 # exporter names it by, with the exporter's _<n> suffix for a name already
-# used). An export that wrote none of them fails. The exporter also writes a
-# file per mesh and material, and MaterialOverrides, next to the output, so
-# the files under the output's folder that are new or changed afterwards are
-# reported as written; one that was there before is listed as overwritten.
+# used). An export that wrote none of them fails.
+#
+# The exporter writes a file per mesh and material into its asset folder,
+# which is <output name>_assets beside the output, so that two exports into
+# one folder do not write over each other's meshes; with export_sublayers it
+# also writes a layer per sublevel and MaterialOverrides beside the output.
+# Without ``overwrite`` the export is refused when any of those exists: the
+# output, a file in its asset folder, or (with export_sublayers) a sublevel
+# layer or MaterialOverrides. The files under the output's folder that are new
+# or changed afterwards are reported as written; one that was there before is
+# listed as overwritten. Unreal's exporter writes a DynamicMeshActor as an
+# empty Xform, without its mesh, which is reported in warnings.
 USD_EXPORT = ACTOR_HELPERS + """
 import os
+
+LISTED_FILES = 20
 
 def files_under(folder):
     found = {}
@@ -469,12 +545,28 @@ def export_usd(path, actor_paths, values, overwrite):
                 "error": "USD export requires the USDImporter plugin enabled at editor startup."}
     if pie_active():
         return pie_refusal("export actors to USD")
-    if os.path.exists(path) and not overwrite:
-        return {"success": False, "error_type": "InvalidState",
-                "error": path + " already exists and overwrite is false, so nothing was exported",
-                "details": {"hint": "Pass another output_path, or overwrite=true to replace the file"}}
     actors = [actor_at(actor_path) for actor_path in actor_paths]
     folder = os.path.dirname(path)
+    stem, extension = os.path.splitext(os.path.basename(path))
+    asset_folder = os.path.join(folder, stem + "_assets")
+    beside = []
+    if values.get("export_sublayers"):
+        from pxr import Tf
+        world = editor_world()
+        beside.append(os.path.join(folder, "MaterialOverrides" + extension))
+        levels = {actor.get_level().get_path_name(): actor.get_level() for actor in actors}
+        for level in levels.values():
+            outer = level.get_outer()
+            if outer != world:
+                beside.append(os.path.join(folder, Tf.MakeValidIdentifier(outer.get_name()) + extension))
+    if not overwrite:
+        existing = [p for p in [path] + beside if os.path.exists(p)] + sorted(files_under(asset_folder))
+        if existing:
+            return {"success": False, "error_type": "InvalidState",
+                    "error": ("The export would write over " + str(len(existing)) + " existing file(s) and "
+                              "overwrite is false, so nothing was exported: " + ", ".join(existing[:5])),
+                    "details": {"existing_files": existing[:LISTED_FILES],
+                                "hint": "Pass another output_path, or overwrite=true to replace them"}}
     before = files_under(folder)
     subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     previous_selection = subsystem.get_selected_level_actors()
@@ -486,7 +578,7 @@ def export_usd(path, actor_paths, values, overwrite):
         inner.set_editor_property(key, value)
     inner.selection_only = True
     # Secondary assets must stay under the authorized output directory too.
-    inner.asset_folder = unreal.DirectoryPath(folder)
+    inner.asset_folder = unreal.DirectoryPath(asset_folder)
     task = unreal.AssetExportTask()
     try:
         task.object = editor_world()
@@ -498,7 +590,7 @@ def export_usd(path, actor_paths, values, overwrite):
         task.exporter = unreal.LevelExporterUSD()
         task.options = options
         options.inner = inner
-        os.makedirs(folder, exist_ok=True)
+        os.makedirs(asset_folder, exist_ok=True)
         subsystem.set_selected_level_actors(actors)
         if not unreal.Exporter.run_asset_export_task(task):
             return {"success": False, "error_type": "EngineError",
@@ -509,6 +601,10 @@ def export_usd(path, actor_paths, values, overwrite):
         task.options = None
         subsystem.set_selected_level_actors(previous_selection)
         options.inner = previous_inner
+        try:
+            os.rmdir(asset_folder)  # only when the export put nothing in it
+        except OSError:
+            pass
     after = files_under(folder)
     written = sorted(p for p, stamp in after.items() if before.get(p) != stamp)
     size = os.path.getsize(path) if os.path.isfile(path) else 0
@@ -518,7 +614,14 @@ def export_usd(path, actor_paths, values, overwrite):
     exported, skipped = exported_prims(path, actors, inner)
     result = {"output_path": path, "actors_exported": len(exported), "exported_prims": exported,
               "skipped_actors": skipped, "file_size_bytes": size, "written_files": written,
-              "overwritten_files": [p for p in written if p in before]}
+              "overwritten_files": [p for p in written if p in before], "warnings": []}
+    meshless = [actor.get_path_name() for actor in actors
+                if hasattr(unreal, "DynamicMeshComponent")
+                and actor.get_components_by_class(unreal.DynamicMeshComponent)]
+    if meshless:
+        result["warnings"] = ["Unreal's USD exporter writes DynamicMeshActors as empty Xforms, without their mesh: "
+                              + ", ".join(meshless) + ". convert_unreal_mesh_format with target_format static_mesh "
+                              "and replace_actor true makes them StaticMeshActors, which export with their geometry."]
     if not exported:
         result.update(success=False, error_type="EngineError",
                       error="Unreal's USD exporter wrote no prim for any actor given (it leaves out editor "
@@ -568,28 +671,60 @@ def info():
 print(json.dumps(info()))
 """
 
-# Expects ``args`` = {"path", "destination", "replace"}. Imports an FBX, glTF,
-# GLB or OBJ file as assets through Interchange, Unreal 5.7's importer for
-# them, with the project's default content pipelines, the way the Content
-# Browser's Import does: no actor is placed. Interchange keeps an existing
-# asset when AssetImportTask.replace_existing is false and says so only in the
-# log ("The option bReplaceExisting is false, we are not overriding the asset
-# named '<class> <path>'"), so those lines are read back as the assets kept. A
-# file whose every asset already exists then imports nothing, which is
-# reported as InvalidState rather than as a failed import. The import is
-# synchronous (AssetImportTask.async_ is false) and saves what it creates.
-ASSET_IMPORT = EDITOR_WORLD + EDITOR_LOG + """
+# Expects ``args`` = {"path", "destination", "replace", "sources"}. Imports an
+# FBX, glTF, GLB or OBJ file as assets through Interchange, Unreal 5.7's
+# importer for them, with the project's default content pipelines, the way the
+# Content Browser's Import does: no actor is placed. The import is synchronous
+# (AssetImportTask.async_ is false) and saves what it creates.
+#
+# What an earlier import of the same file left is reported as kept. An asset
+# in the destination folder came from this file when its import data names
+# one of ``sources``: the file itself (meshes, materials) or a file it
+# references (textures), resolved on the simul host. Only an asset whose
+# registry tag (AssetImportData, which loads nothing) mentions one of their
+# file names is loaded to read its import data exactly. Interchange keeps an
+# existing asset when replace_existing is false, and also when it is true for
+# all but the asset named after the file: replace_existing turns the import
+# into a reimport of that one asset (UInterchangeManager's convert-to-reimport),
+# which leaves the textures and materials it made before as they were, even
+# when their source changed (observed on UE 5.7.4: a 32 px texture redrawn at
+# 48 px stayed 32 px). Interchange also logs "The option bReplaceExisting is
+# false, we are not overriding the asset named '<class> <path>'", which is
+# read back too. A file whose every asset already exists imports nothing,
+# which is reported as InvalidState rather than as a failed import.
+ASSET_IMPORT = EDITOR_WORLD + EDITOR_LOG + DIRTY_PACKAGES + """
 import os, re
 
 KEPT = re.compile(r"we are not overriding the asset named '(?:\\S+ )?([^']+)'")
 
-def import_asset(path, destination, replace):
+def same_file(path):
+    return os.path.normcase(os.path.realpath(path))
+
+def import_sources(asset, names):
+    tag = str(asset.get_tag_value("AssetImportData") or "").lower()
+    if not any(name in tag for name in names):
+        return []
+    try:
+        loaded = unreal.load_asset(str(asset.package_name) + "." + str(asset.asset_name))
+        data = loaded.get_editor_property("asset_import_data") if loaded is not None else None
+        return [same_file(name) for name in data.extract_filenames()] if data is not None else []
+    except Exception:
+        return []
+
+def import_asset(path, destination, replace, sources):
     if pie_active():
         return pie_refusal("import assets")
     if not os.path.isfile(path):
         return {"success": False, "error_type": "NotFoundError", "error": "File not found on the editor host: " + path}
     registry = unreal.AssetRegistryHelpers.get_asset_registry()
-    before = {str(asset.package_name) for asset in registry.get_assets_by_path(destination, recursive=True)}
+    wanted = {same_file(source) for source in sources}
+    names = {os.path.basename(source).lower() for source in sources}
+    before, from_this_file = {}, []
+    for asset in registry.get_assets_by_path(destination, recursive=True):
+        package = str(asset.package_name)
+        before[package] = package + "." + str(asset.asset_name)
+        if wanted.intersection(import_sources(asset, names)):
+            from_this_file.append(before[package])
     mark = log_mark()
     task = unreal.AssetImportTask()
     try:
@@ -604,19 +739,31 @@ def import_asset(path, destination, replace):
         task.factory = None
         task.options = None
     logged = logged_since(mark)
-    kept = sorted({match.group(1) for line in logged for match in [KEPT.search(line)] if match})
+    dirtied = dirty_engine_packages()
+    done = set(imported)
+    kept = sorted({match.group(1) for line in logged for match in [KEPT.search(line)] if match}
+                  | {found for found in from_this_file if found not in done})
+    warnings = list(logged)
+    if dirtied:
+        warnings.append(dirty_engine_warning(dirtied))
     if not imported:
         if kept:
             return {"success": False, "error_type": "InvalidState",
                     "error": ("Every asset " + os.path.basename(path) + " would create already exists and "
                               "replace_existing is false, so nothing was imported: " + ", ".join(kept)),
-                    "details": {"existing_assets": kept,
+                    "details": {"existing_assets": kept, "dirty_engine_packages": dirtied,
                                 "hint": "Pass another destination_path, or replace_existing=true to replace them"}}
         return {"success": False, "error_type": "EngineError",
                 "error": "Unreal imported nothing from " + path + (": " + "; ".join(logged) if logged else ""),
-                "details": {"log": logged}}
+                "details": {"log": logged, "dirty_engine_packages": dirtied}}
     replaced = [p for p in imported if p.split(".", 1)[0] in before]
-    return {"imported_assets": imported, "replaced_assets": replaced, "kept_assets": kept, "warnings": logged}
+    if replace and kept:
+        warnings.append(
+            "replace_existing reimported " + ", ".join(replaced or imported) + ", but Unreal's Interchange "
+            "reimport keeps the other assets an earlier import of this file made, as they were: "
+            + ", ".join(kept) + ". Delete them, or import into another destination_path, to import them anew.")
+    return {"imported_assets": imported, "replaced_assets": replaced, "kept_assets": kept,
+            "warnings": warnings, "dirty_engine_packages": dirtied}
 
 print(json.dumps(import_asset(**args)))
 """
@@ -1787,7 +1934,9 @@ print(json.dumps(create(**args)))
 # mesh root component, else its only mesh component: an actor with several
 # used to fail with a traceback. The slot is the one named (a material slot
 # name, as the Details panel shows it), else slot_index. The slot is read back
-# after the write.
+# after the write. A path that names something other than a material (a level,
+# a mesh) is InvalidAssetType, as in create_unreal_material_instance; a path
+# that names nothing is NotFoundError.
 ASSIGN_MATERIAL = ACTOR_HELPERS + MATERIAL_AT + """
 def described(components):
     return ", ".join(c.get_name() + " (" + c.get_class().get_name() + ")" for c in components)
@@ -1816,11 +1965,13 @@ def path_of(material):
 def assign(actor_path, material_path, slot_index, slot_name, component_name):
     actor = actor_at(actor_path)
     material, reason = material_at(material_path, False)
+    if reason is not None:
+        return {"success": False, "error_type": "InvalidAssetType",
+                "error": reason + "; pass a Material or Material Instance as material_path"}
     if material is None:
         return {"success": False, "error_type": "NotFoundError",
-                "error": (reason or "No material at " + repr(material_path))
-                         + ": pass a Material or Material Instance asset path such as "
-                           "/Engine/BasicShapes/BasicShapeMaterial"}
+                "error": "No material at " + repr(material_path) + ": pass a Material or Material Instance "
+                         "asset path such as /Engine/BasicShapes/BasicShapeMaterial"}
     component, problem = pick_component(actor, component_name)
     if component is None:
         return {"success": False, "error_type": "ValidationError", "error": problem}
