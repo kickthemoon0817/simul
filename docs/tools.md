@@ -201,6 +201,12 @@ and unsaved edits are lost when the server exits.
   session, and unauthenticated sessionless (2026-07-28) requests all share
   one anonymous scope (see AGENTS.md, Runtime Notes). A session can hold
   up to 32 stages; unload stages to load more.
+- **When a session ends, its stages are unloaded.** An initialize-handshake
+  connection that closes takes its stages with it, unsaved edits included
+  (the server logs a warning naming the stages that had unsaved edits).
+  Save or export before disconnecting. Stages of a session whose end the
+  server cannot observe (stdio's single session, the anonymous scope) stay
+  until they are unloaded or the server exits.
 - **`list_usd_stages`** shows the session's stages, whether each has
   unsaved edits, and which of its files changed on disk since it read them.
 - **`save_usd_stage`** writes the root layer back to its own file, which

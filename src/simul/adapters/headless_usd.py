@@ -245,11 +245,46 @@ class HeadlessUSDSession(LoggerMixin):
                 stage_id=stage_id,
                 override="discard_unsaved",
             )
-        del self._active_stages[stage_id]
-        self._bbox_caches.pop(stage_id, None)
-        self._stage_records.pop(stage_id, None)
+        self._drop(stage_id)
         self.logger.info(f"Unloaded USD stage: {stage_id}")
         return True
+
+    def _drop(self, stage_id: str) -> None:
+        self._active_stages.pop(stage_id, None)
+        self._bbox_caches.pop(stage_id, None)
+        self._stage_records.pop(stage_id, None)
+
+    def release_owner(self, owner: Optional[str]) -> List[str]:
+        """
+        Unload every stage an MCP session loaded, once that session has ended.
+
+        Nothing could reach those stages afterwards (their ids are random and
+        their owner is gone), so they would otherwise stay in memory until the
+        server exits. Unsaved edits are dropped with them; a warning names the
+        stages that had any.
+
+        Args:
+            owner: The ended session's id
+
+        Returns:
+            The ids of the stages released
+        """
+        released = [stage_id for stage_id, record in self._stage_records.items() if record.owner == owner]
+        dirty = [
+            f"{stage_id} ({self._stage_records[stage_id].file_path})"
+            for stage_id in released
+            if self._active_stages[stage_id].GetRootLayer().dirty
+        ]
+        for stage_id in released:
+            self._drop(stage_id)
+        if dirty:
+            self.logger.warning(
+                f"MCP session {owner} ended with unsaved edits in {len(dirty)} USD stage(s), which "
+                f"are dropped: {', '.join(dirty)}"
+            )
+        if released:
+            self.logger.info(f"Released {len(released)} USD stage(s) of ended MCP session {owner}")
+        return released
 
     def get_stage(self, stage_id: str) -> Optional[Usd.Stage]:
         """
@@ -920,6 +955,10 @@ class HeadlessUSDAdapter(LoggerMixin):
     def set_owner_resolver(self, resolver: Callable[[], Optional[str]]) -> None:
         """Scope stages to the MCP session ``resolver`` names for each call."""
         self._session.set_owner_resolver(resolver)
+
+    def release_session(self, session_id: str) -> None:
+        """Unload the stages of an MCP session that has ended."""
+        self._session.release_owner(session_id)
 
     def is_available(self) -> bool:
         """

@@ -252,6 +252,6 @@ error names the prim, each rejected attribute and the reason.
 
 - **Using headless tools on a live stage**: Do not use `get_prim_info` (headless) when Isaac Sim is running and you want live data — use `get_isaac_prim_detail` with `aspects=["info"]` instead.
 - **Forgetting `stage_id`**: Every headless call requires the `stage_id` from `load_usd_file`. Calling `get_prim_info` without it will fail.
-- **Stage ID is session-scoped**: A `stage_id` belongs to the MCP session that loaded it (other sessions get `NotFoundError`) and does not survive a server restart. If the session resets, call `load_usd_file` again, after saving any edits you need with `save_usd_stage` or `export_usd_stage`.
+- **Stage ID is session-scoped**: A `stage_id` belongs to the MCP session that loaded it (other sessions get `NotFoundError`). When an HTTP session ends, its stages are unloaded with their unsaved edits, and no stage survives a server restart. Save edits you need with `save_usd_stage` or `export_usd_stage` before the session ends; after a reset, call `load_usd_file` again.
 - **Large scenes**: `summarize_scene` with `include_meshes: true` on a scene with thousands of meshes can be slow. Use `include_meshes: false` for a quick overview first.
 - **`by_name` is a case-insensitive substring match** by default: `"link"` matches `base_link`, `ARM_LINK_1`, etc. Use `match: "exact"`, `"glob"` or `"regex"` (and `case_sensitive`) to narrow it.

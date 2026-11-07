@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Dict, List
 
 import pytest
@@ -160,3 +163,53 @@ def test_each_mcp_session_sees_only_its_own_stages(sandbox: Path) -> None:
     assert theirs["stage_id"] != ids["mine"]
     assert theirs["total_prims"] == 2  # the first session's unsaved delete is not visible
     assert [stage["stage_id"] for stage in listed["stages"]] == [theirs["stage_id"]]
+
+
+def test_an_ended_session_releases_its_stages(
+    sandbox: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Six handshake sessions each load and edit, then end: nothing is left behind."""
+    server = _server(sandbox)
+    robot = str(sandbox / "robot.usda")
+    loaded: List[str] = []
+
+    async def _main() -> None:
+        for index in range(6):
+            async with Client(server.mcp, mode="legacy") as client:
+                stage_id = (await _call(client, "load_usd_file", file_path=robot))["stage_id"]
+                loaded.append(stage_id)
+                if index % 2 == 0:
+                    await _call(
+                        client, "create_prim", stage_id=stage_id, prim_path="/Robot/Extra", prim_type="Xform"
+                    )
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_main())
+
+    session = server.headless_adapter._session
+    assert len(set(loaded)) == 6
+    assert session._active_stages == {} and session._stage_records == {}
+    assert server._watched_sessions == set()
+    warnings = [record.getMessage() for record in caplog.records if "unsaved edits" in record.getMessage()]
+    assert len(warnings) == 3
+    assert all(loaded[index] in " ".join(warnings) for index in (0, 2, 4))
+
+
+def test_stage_tools_run_in_the_foreground_even_with_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A background task would run without the request, so it could not name the owning session."""
+    from simul.mcp import server as server_module
+    from tests.fakes import FakeFastMCP
+
+    tasks = ModuleType("fastmcp_tasks")
+    tasks.TasksExtension = type("TasksExtension", (), {})  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fastmcp_tasks", tasks)
+    monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
+    instance = server_module.SimulMCPServer(Settings(), backends={"usd"})
+
+    usd_tools = set(instance.tools_by_backend()["USD / Headless"])
+    assert {"load_usd_file", "summarize_scene"} <= usd_tools
+    assert [
+        tool.name for tool in instance.mcp.tools if tool.name in usd_tools and tool.kwargs.get("task")
+    ] == []

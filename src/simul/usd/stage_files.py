@@ -145,7 +145,8 @@ def export_stage(stage: Usd.Stage, destination: str, *, flatten: bool) -> Dict[s
     paths re-anchored to the new location. With ``flatten`` the composed
     stage is written as one layer. A .usdz package is built with
     ``UsdUtils.CreateNewUsdzPackage`` from an intermediate .usdc in a
-    temporary directory, so it carries the files the layer depends on.
+    temporary directory beside ``destination`` (removed afterwards), so it
+    carries the files the layer depends on.
 
     Returns:
         ``rewritten_asset_paths``: how many asset paths were re-anchored.
@@ -167,7 +168,9 @@ def export_stage(stage: Usd.Stage, destination: str, *, flatten: bool) -> Dict[s
         if not layer.Export(destination):
             raise RuntimeError(f"pxr could not write {destination}")
         return {"rewritten_asset_paths": rewritten}
-    with tempfile.TemporaryDirectory(prefix="simul-usdz-") as scratch:
+    # The intermediate goes next to the package, inside the directory the
+    # sandbox authorized for the write, never into the system temp dir.
+    with tempfile.TemporaryDirectory(prefix=".simul-usdz-", dir=os.path.dirname(destination)) as scratch:
         intermediate = os.path.join(scratch, f"{Path(destination).stem or 'stage'}.usdc")
         if not layer.Export(intermediate):
             raise RuntimeError(f"pxr could not write the intermediate layer for {destination}")

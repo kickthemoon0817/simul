@@ -97,10 +97,19 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     """Register USD-related tools."""
     from ...usd.editing import USDEditError
 
-    # Stages belong to the MCP session that loaded them (see HeadlessUSDSession).
+    # Stages belong to the MCP session that loaded them (see HeadlessUSDSession),
+    # and are released when that session ends.
     adapter = server.headless_adapter
     if adapter is not None and hasattr(adapter, "set_owner_resolver"):
-        adapter.set_owner_resolver(server._get_request_session_id)
+
+        def _stage_owner() -> Optional[str]:
+            session_id = server._get_request_session_id()
+            if session_id is not None:
+                server._watch_session_end(session_id)
+            return session_id
+
+        adapter.set_owner_resolver(_stage_owner)
+        server.add_session_end_hook(adapter.release_session)
 
     @server.mcp.tool(
         name="load_usd_file",
@@ -120,7 +129,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=False
         ),
         output_schema=None,
-        task=server._task_optional(),
+        # Foreground only: a stage belongs to the MCP session read from the
+        # request as the call runs, which a background task would run without.
     )
     @with_param_descriptions()
     async def load_usd_file(file_path: str) -> ToolResult:
@@ -964,7 +974,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=False
         ),
         output_schema=None,
-        task=server._task_optional(),
+        # Foreground only, like load_usd_file: the stage is looked up for the
+        # MCP session of the request.
     )
     @with_param_descriptions()
     async def summarize_scene(

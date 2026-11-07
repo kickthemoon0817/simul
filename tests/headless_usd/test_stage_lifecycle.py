@@ -21,6 +21,7 @@ from pxr import Sdf, Usd, UsdGeom  # noqa: E402
 
 from simul.adapters import headless_usd  # noqa: E402
 from simul.adapters.headless_usd import HeadlessUSDSession  # noqa: E402
+from simul.usd import stage_files  # noqa: E402
 from simul.usd.editing import USDEditError  # noqa: E402
 
 
@@ -146,6 +147,23 @@ class TestIsolation:
         assert first.startswith("robot_") and second.startswith("robot_")
         assert first != second
 
+    def test_an_ended_session_releases_only_its_stages(self, session, files, owner, caplog) -> None:
+        mine = session.load_stage(files["robot"])
+        session.create_prim(mine, "/Robot/Unsaved", "Xform")
+        clean = session.load_stage(files["scene"])
+        owner["id"] = "session-b"
+        theirs = session.load_stage(files["robot"])
+
+        with caplog.at_level("WARNING"):
+            released = session.release_owner("session-a")
+
+        assert sorted(released) == sorted([mine, clean])
+        assert session.list_stages() == [theirs]
+        owner["id"] = "session-a"
+        assert session.list_stages() == []
+        dropped = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(dropped) == 1 and mine in dropped[0] and clean not in dropped[0]
+
     def test_a_session_cannot_hold_unlimited_stages(self, session, files, monkeypatch) -> None:
         monkeypatch.setattr(headless_usd, "MAX_STAGES_PER_OWNER", 2)
         robot = session.load_stage(files["robot"])
@@ -267,6 +285,24 @@ class TestExport:
         assert list(layer.subLayerPaths) == []
         assert layer.GetPrimAtPath("/World/Robot_ref/link2") is not None
         assert layer.GetPrimAtPath("/World/FromSub") is not None
+
+    def test_usdz_intermediate_stays_beside_the_package(self, session, files, tmp_path, monkeypatch) -> None:
+        """The sandbox authorized the package's directory, not the system temp dir."""
+        real = stage_files.tempfile.TemporaryDirectory
+        used = []
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            used.append(kwargs.get("dir"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(stage_files.tempfile, "TemporaryDirectory", spy)
+        (tmp_path / "out").mkdir()
+        destination = tmp_path / "out" / "pkg.usdz"
+
+        session.export_stage(session.load_stage(files["robot"]), str(destination))
+
+        assert used == [str(destination.parent.resolve())]
+        assert sorted(p.name for p in destination.parent.iterdir()) == ["pkg.usdz"]
 
     @pytest.mark.parametrize("flatten", [False, True])
     def test_usdz_package(self, session, files, tmp_path, flatten) -> None:

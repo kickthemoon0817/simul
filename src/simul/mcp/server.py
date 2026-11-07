@@ -334,6 +334,9 @@ class SimulMCPServer(LoggerMixin):
         # Handshake-era sessions whose end is hooked to drop their state; see
         # _watch_session_end.
         self._watched_sessions: Set[str] = set()
+        # Backends that keep their own per-session state (the headless USD
+        # stages) drop it here; see add_session_end_hook.
+        self._session_end_hooks: List[Callable[[str], None]] = []
         self._read_only_tools: Dict[str, bool] = {}
         self._isaac_instance_locks: Dict[str, asyncio.Lock] = {}
         # Token buckets keyed by (agent, tool); the per-agent ceiling across
@@ -602,6 +605,30 @@ class SimulMCPServer(LoggerMixin):
         label = default_agent_label(session_id)
         for key in [key for key in self._rate_limiters if key[0] == label]:
             del self._rate_limiters[key]
+        for hook in self._session_end_hooks:
+            try:
+                hook(session_id)
+            except Exception as exc:
+                self.logger.warning(
+                    "Session-end cleanup %s failed for session %s: %s",
+                    getattr(hook, "__qualname__", hook),
+                    session_id,
+                    exc,
+                )
+
+    def add_session_end_hook(self, hook: Callable[[str], None]) -> None:
+        """Have ``hook(session_id)`` run when a handshake-era MCP session ends.
+
+        For a backend that keeps state of its own per session: it registers
+        the hook once, and calls ``_watch_session_end`` for the request's
+        session whenever it creates such state, so the end is observed. A
+        session whose end cannot be observed (see ``_watch_session_end``)
+        keeps its state for the life of the server.
+
+        Args:
+            hook: Called with the ended session's id; an exception is logged.
+        """
+        self._session_end_hooks.append(hook)
 
     def _check_rate_limit(
         self, tool_name: str, agent_id: Optional[str] = None
