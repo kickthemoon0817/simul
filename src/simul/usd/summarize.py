@@ -7,7 +7,7 @@ concise, LLM-friendly descriptions of USD scenes and their contents.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 import json
 
@@ -15,10 +15,11 @@ from ._pxr import Usd, UsdGeom
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import monitor_performance
-from ..utils.math import BBox, bbox_center, bbox_size, bbox_volume
-from .reader import USDReader, USDStageInfo, USDPrimInfo, PrimType
+from ..utils.math import bbox_center, bbox_size, bbox_volume
+from .reader import USDReader, USDStageInfo
 from .bbox import BBoxCache
 from .mesh_ops import MeshOperations, MeshInfo
+from .search import iter_prims
 
 logger = get_logger(__name__)
 
@@ -75,21 +76,21 @@ class SceneSummary:
 class SceneSummarizer(LoggerMixin):
     """
     USD scene summarizer for generating LLM-friendly scene descriptions.
-    
+
     Provides functionality to analyze USD scenes and generate concise summaries
     suitable for consumption by language models.
     """
-    
+
     def __init__(self):
         """Initialize scene summarizer."""
         self.usd_reader = USDReader()
         self.mesh_ops = MeshOperations()
         self.logger.info("Scene summarizer initialized")
-    
+
     @monitor_performance("summarizer.summarize_stage")
     def summarize_stage(
-        self, 
-        stage: Usd.Stage, 
+        self,
+        stage: Usd.Stage,
         file_path: str = "",
         include_meshes: bool = True,
         include_materials: bool = True,
@@ -97,14 +98,14 @@ class SceneSummarizer(LoggerMixin):
     ) -> SceneSummary:
         """
         Generate a comprehensive summary of a USD stage.
-        
+
         Args:
             stage: USD Stage to summarize
             file_path: Path to the USD file
             include_meshes: Include detailed mesh information
             include_materials: Include material information
             max_depth: Maximum hierarchy depth to analyze
-            
+
         Returns:
             SceneSummary object
         """
@@ -121,38 +122,38 @@ class SceneSummarizer(LoggerMixin):
             prim_type_counts = scan["prim_type_counts"]
 
             stage_info = self.usd_reader.get_stage_info(stage, prim_count=total_prims)
-            
+
             bbox_cache = BBoxCache(stage)
-            
+
             scene_bbox = bbox_cache.get_stage_bbox()
             scene_bbox_dict = None
             scene_center = None
             scene_size = None
             scene_volume = None
-            
+
             if scene_bbox:
                 from .bbox import bbox_to_dict
                 scene_bbox_dict = bbox_to_dict(scene_bbox)
                 scene_center = bbox_center(scene_bbox)
                 scene_size = bbox_size(scene_bbox)
                 scene_volume = bbox_volume(scene_bbox)
-            
+
             root_prims = []
             for prim in stage.GetPseudoRoot().GetChildren():
                 prim_summary = self.summarize_prim(
-                    prim, 
+                    prim,
                     bbox_cache=bbox_cache,
                     include_mesh_info=include_meshes,
                     max_depth=max_depth
                 )
                 root_prims.append(prim_summary)
-            
+
             materials = scan["materials"]
             mesh_statistics = scan["mesh_statistics"]
             hierarchy_depth = scan["hierarchy_depth"]
-            
+
             animation_info = self._get_animation_info(stage_info)
-            
+
             summary = SceneSummary(
                 file_path=file_path,
                 stage_info={
@@ -176,17 +177,17 @@ class SceneSummarizer(LoggerMixin):
                 hierarchy_depth=hierarchy_depth,
                 animation_info=animation_info
             )
-            
+
             self.logger.info(f"Generated scene summary: {total_prims} prims, {len(root_prims)} root prims")
             return summary
-            
+
         except Exception as e:
             self.logger.error(f"Error summarizing stage: {e}")
             raise
-    
+
     @monitor_performance("summarizer.summarize_prim")
     def summarize_prim(
-        self, 
+        self,
         prim: Usd.Prim,
         bbox_cache: Optional[BBoxCache] = None,
         include_mesh_info: bool = True,
@@ -195,40 +196,40 @@ class SceneSummarizer(LoggerMixin):
     ) -> PrimSummary:
         """
         Generate a summary of a USD prim.
-        
+
         Args:
             prim: USD Prim to summarize
             bbox_cache: Bounding box cache (created if None)
             include_mesh_info: Include detailed mesh information
             max_depth: Maximum recursion depth
             current_depth: Current recursion depth
-            
+
         Returns:
             PrimSummary object
         """
         try:
             prim_info = self.usd_reader.get_prim_info(prim)
-            
+
             if bbox_cache is None:
                 bbox_cache = BBoxCache(prim.GetStage())
-            
+
             bbox = bbox_cache.compute_world_bbox(prim)
             bbox_dict = None
             bbox_center_val = None
             bbox_size_val = None
             bbox_volume_val = None
-            
+
             if bbox:
                 from .bbox import bbox_to_dict
                 bbox_dict = bbox_to_dict(bbox)
                 bbox_center_val = bbox_center(bbox)
                 bbox_size_val = bbox_size(bbox)
                 bbox_volume_val = bbox_volume(bbox)
-            
+
             transform_info = None
             if prim.IsA(UsdGeom.Xformable):
                 transform_info = self._get_transform_info(prim)
-            
+
             mesh_info_dict = None
             if include_mesh_info and prim.IsA(UsdGeom.Mesh):
                 try:
@@ -246,17 +247,17 @@ class SceneSummarizer(LoggerMixin):
                     }
                 except Exception as e:
                     self.logger.debug(f"Could not get mesh info for {prim.GetPath()}: {e}")
-            
+
             children_types = {}
             children_count = len(prim_info.children)
-            
+
             if current_depth < max_depth:
                 for child in prim.GetChildren():
                     child_type = child.GetTypeName()
                     children_types[child_type] = children_types.get(child_type, 0) + 1
-            
+
             important_attributes = self._filter_important_attributes(prim_info.attributes)
-            
+
             summary = PrimSummary(
                 path=prim_info.path,
                 name=prim_info.name,
@@ -275,13 +276,13 @@ class SceneSummarizer(LoggerMixin):
                 attributes=important_attributes,
                 metadata=prim_info.metadata
             )
-            
+
             return summary
-            
+
         except Exception as e:
             self.logger.error(f"Error summarizing prim {prim.GetPath()}: {e}")
             raise
-    
+
     @staticmethod
     def _empty_mesh_statistics() -> Dict[str, Any]:
         return {
@@ -302,7 +303,12 @@ class SceneSummarizer(LoggerMixin):
         include_meshes: bool = True,
         include_materials: bool = True,
     ) -> Dict[str, Any]:
-        """Walk ``stage.Traverse()`` once and fill every per-prim accumulator.
+        """Walk the stage once and fill every per-prim accumulator.
+
+        The walk is ``search.iter_prims``: the prims every listing counts,
+        instance proxies included, so ``total_prims`` agrees with
+        ``load_usd_file`` and a match-everything search. An instanced mesh is
+        measured once per prototype and counted once per instance.
 
         Returns ``total_prims``, ``prim_type_counts``, ``materials`` (empty
         unless ``include_materials``), ``mesh_statistics`` (empty dict unless
@@ -314,7 +320,8 @@ class SceneSummarizer(LoggerMixin):
         mesh_stats = self._empty_mesh_statistics() if include_meshes else {}
         hierarchy_depth = 0
 
-        for prim in stage.Traverse():
+        prototype_stats: Dict[str, Optional[MeshInfo]] = {}
+        for prim in iter_prims(stage):
             total_prims += 1
             prim_type = prim.GetTypeName()
             prim_type_counts[prim_type] = prim_type_counts.get(prim_type, 0) + 1
@@ -334,7 +341,7 @@ class SceneSummarizer(LoggerMixin):
                 ))
 
             if include_meshes and prim.IsA(UsdGeom.Mesh):
-                self._accumulate_mesh_statistics(mesh_stats, prim)
+                self._accumulate_mesh_statistics(mesh_stats, prim, prototype_stats)
 
         return {
             'total_prims': total_prims,
@@ -344,10 +351,25 @@ class SceneSummarizer(LoggerMixin):
             'hierarchy_depth': hierarchy_depth,
         }
 
-    def _accumulate_mesh_statistics(self, stats: Dict[str, Any], prim: Usd.Prim) -> None:
-        """Fold one mesh prim's statistics into ``stats``."""
+    def _accumulate_mesh_statistics(
+        self,
+        stats: Dict[str, Any],
+        prim: Usd.Prim,
+        prototype_stats: Optional[Dict[str, Optional[MeshInfo]]] = None,
+    ) -> None:
+        """Fold one mesh prim's statistics into ``stats``.
+
+        ``prototype_stats`` memoises instance proxies by the prototype prim
+        they stand for, so each instanced mesh is measured once.
+        """
         try:
-            mesh_info = self.mesh_ops.get_mesh_statistics(prim)
+            if prototype_stats is not None and prim.IsInstanceProxy():
+                key = prim.GetPrimInPrototype().GetPath().pathString
+                if key not in prototype_stats:
+                    prototype_stats[key] = self.mesh_ops.get_mesh_statistics(prim)
+                mesh_info = prototype_stats[key]
+            else:
+                mesh_info = self.mesh_ops.get_mesh_statistics(prim)
             stats['total_meshes'] += 1
             stats['total_vertices'] += mesh_info.vertex_count
             stats['total_faces'] += mesh_info.face_count
@@ -363,7 +385,7 @@ class SceneSummarizer(LoggerMixin):
             stats['total_volume'] += mesh_info.volume
         except Exception as e:
             self.logger.debug(f"Error getting mesh stats for {prim.GetPath()}: {e}")
-    
+
     def _get_animation_info(self, stage_info: USDStageInfo) -> Dict[str, Any]:
         """Get animation information from stage info."""
         return {
@@ -374,34 +396,34 @@ class SceneSummarizer(LoggerMixin):
             'frame_rate': stage_info.frame_rate,
             'time_codes_per_second': stage_info.time_codes_per_second
         }
-    
+
     def _get_transform_info(self, prim: Usd.Prim) -> Dict[str, Any]:
         """Get transform information for a prim."""
         try:
             if prim.IsA(UsdGeom.Xformable):
                 xformable = UsdGeom.Xformable(prim)
                 transform = xformable.GetLocalTransformation()
-                
+
                 # Extract translation, rotation, scale
                 translation = transform.ExtractTranslation()
                 rotation = transform.ExtractRotation()
                 scale = transform.ExtractScale()
-                
+
                 return {
                     'translation': [translation[0], translation[1], translation[2]],
-                    'rotation': [rotation.GetReal(), rotation.GetImaginary()[0], 
-                               rotation.GetImaginary()[1], rotation.GetImaginary()[2]],
+                    'rotation': [rotation.GetReal(), rotation.GetImaginary()[0],
+                                 rotation.GetImaginary()[1], rotation.GetImaginary()[2]],
                     'scale': [scale[0], scale[1], scale[2]]
                 }
         except Exception as e:
             self.logger.debug(f"Could not get transform info for {prim.GetPath()}: {e}")
-        
+
         return None
-    
+
     def _get_material_bindings(self, prim: Usd.Prim) -> List[str]:
         """Get material bindings for a prim."""
         bindings = []
-        
+
         try:
             if hasattr(UsdGeom, 'MaterialBindingAPI'):
                 binding_api = UsdGeom.MaterialBindingAPI(prim)
@@ -412,13 +434,13 @@ class SceneSummarizer(LoggerMixin):
                         bindings = [str(target) for target in targets]
         except Exception as e:
             self.logger.debug(f"Could not get material bindings for {prim.GetPath()}: {e}")
-        
+
         return bindings
-    
+
     def _filter_important_attributes(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
         """Filter attributes to keep only important ones for summary."""
         important_attrs = {}
-        
+
         # List of attribute names that are typically important
         important_names = [
             'points', 'normals', 'primvars:st', 'displayColor',
@@ -426,7 +448,7 @@ class SceneSummarizer(LoggerMixin):
             'focalLength', 'horizontalAperture', 'verticalAperture',
             'intensity', 'color', 'temperature', 'exposure'
         ]
-        
+
         for name, value in attributes.items():
             if any(important in name for important in important_names):
                 # Truncate large arrays for summary
@@ -434,63 +456,63 @@ class SceneSummarizer(LoggerMixin):
                     important_attrs[name] = f"Array[{len(value)}]"
                 else:
                     important_attrs[name] = value
-        
+
         return important_attrs
 
 
 def generate_scene_digest(summary: SceneSummary) -> str:
     """
     Generate a concise text digest of the scene summary.
-    
+
     Args:
         summary: SceneSummary object
-        
+
     Returns:
         Human-readable scene digest
     """
     digest_parts = []
-    
+
     # Basic scene info
     digest_parts.append(f"USD Scene: {summary.file_path}")
     digest_parts.append(f"Total prims: {summary.total_prims}")
-    
+
     # Scene dimensions
     if summary.scene_size:
         size = summary.scene_size
         digest_parts.append(f"Scene size: {size[0]:.2f} x {size[1]:.2f} x {size[2]:.2f} units")
-    
+
     # Prim type breakdown
     if summary.prim_type_counts:
         top_types = sorted(summary.prim_type_counts.items(), key=lambda x: x[1], reverse=True)[:5]
         type_str = ", ".join([f"{count} {ptype}" for ptype, count in top_types])
         digest_parts.append(f"Main content: {type_str}")
-    
+
     # Mesh statistics
     if summary.mesh_statistics and summary.mesh_statistics.get('total_meshes', 0) > 0:
         mesh_stats = summary.mesh_statistics
         digest_parts.append(f"Meshes: {mesh_stats['total_meshes']} total, "
-                          f"{mesh_stats['total_vertices']} vertices, "
-                          f"{mesh_stats['total_faces']} faces")
-    
+                            f"{mesh_stats['total_vertices']} vertices, "
+                            f"{mesh_stats['total_faces']} faces")
+
     # Materials
     if summary.materials:
         digest_parts.append(f"Materials: {len(summary.materials)}")
-    
+
     # Animation
     if summary.animation_info.get('has_animation', False):
         anim_info = summary.animation_info
         digest_parts.append(f"Animation: {anim_info['duration']:.1f}s at {anim_info['frame_rate']:.1f} FPS")
-    
+
     return "\n".join(digest_parts)
 
 
 def format_summary_for_llm(summary: SceneSummary) -> str:
     """
     Format scene summary for LLM consumption.
-    
+
     Args:
         summary: SceneSummary object
-        
+
     Returns:
         JSON string formatted for LLM
     """
@@ -513,7 +535,7 @@ def format_summary_for_llm(summary: SceneSummary) -> str:
         'mesh_statistics': summary.mesh_statistics,
         'stage_settings': summary.stage_info
     }
-    
+
     return json.dumps(llm_summary, indent=2)
 
 
