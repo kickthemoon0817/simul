@@ -59,7 +59,14 @@ from .registration import register_stats_tools
 from .registration._helpers import apply_success_from_error
 from .result_budget import encode_result_budget
 from .schemas.common import ErrorResponse
-from .session_manager import CLAIM_TTL_SECONDS, SessionManager
+from .session_manager import (
+    CLAIM_TTL_SECONDS,
+    ClaimConflict,
+    ClaimStoreError,
+    ClaimView,
+    SessionManager,
+    claim_is_orphaned,
+)
 from ..utils.discovery import DiscoveryDir
 from .tools.isaac_tools import IsaacTools
 from .usage_tracker import ToolUsageTracker
@@ -152,6 +159,12 @@ _CONTEXT_NETWORK_TRANSPORTS: Tuple[str, ...] = ("streamable-http", "sse")
 # ``SimulMCPServer._request_is_anonymous``). Nothing tells such clients apart,
 # so they share this agent's rate-limit buckets and keep no per-client state.
 _ANONYMOUS_AGENT: str = "anonymous"
+
+# Rate-limit buckets kept before idle ones are swept. A bucket that has
+# refilled to its burst is indistinguishable from a new one, so dropping it
+# changes nothing; the sweep only bounds the table for identities that never
+# end a session (authenticated sessionless clients).
+_RATE_LIMITER_SWEEP_SIZE: int = 512
 
 
 def default_agent_label(session_id: str) -> str:
@@ -319,6 +332,9 @@ class SimulMCPServer(LoggerMixin):
         # protocol (2026-07-28) share over stdio, where this server serves a
         # single client; see _get_request_session_id.
         self._sessionless_session_id = str(uuid.uuid4())
+        # Handshake-era sessions whose end is hooked to drop their state; see
+        # _watch_session_end.
+        self._watched_sessions: Set[str] = set()
         self._read_only_tools: Dict[str, bool] = {}
         self._isaac_instance_locks: Dict[str, asyncio.Lock] = {}
         # Token buckets keyed by (agent, tool); the per-agent ceiling across
@@ -493,6 +509,8 @@ class SimulMCPServer(LoggerMixin):
         key = (agent_id, tool_name)
         limiter = self._rate_limiters.get(key)
         if limiter is None:
+            if len(self._rate_limiters) >= _RATE_LIMITER_SWEEP_SIZE:
+                self._sweep_idle_rate_limiters()
             if tool_name == _GLOBAL_RATE_BUCKET:
                 limiter = RateLimiter(
                     self._global_rate_limit_rate, self._global_rate_limit_burst
@@ -500,7 +518,91 @@ class SimulMCPServer(LoggerMixin):
             else:
                 limiter = RateLimiter(self._rate_limit_rate, self._rate_limit_burst)
             self._rate_limiters[key] = limiter
+            session_id = self._get_request_session_id()
+            if session_id is not None:
+                self._watch_session_end(session_id)
         return limiter
+
+    def _sweep_idle_rate_limiters(self) -> None:
+        """Drop the buckets that have refilled to their burst size.
+
+        Such a bucket would be rebuilt identical on the agent's next call, so
+        the sweep never changes a verdict; it keeps the table from growing
+        with every identity that has ever called.
+        """
+        now = time.monotonic()
+        idle = [
+            key
+            for key, limiter in self._rate_limiters.items()
+            if limiter.tokens + (now - limiter.last_update) * limiter.rate >= limiter.burst
+        ]
+        for key in idle:
+            del self._rate_limiters[key]
+
+    def _request_connection(self) -> Any:
+        """Return the handshake-era MCP connection the current request arrived on.
+
+        Only such a connection is one client session whose end can be
+        observed: on the sessionless protocol every request is its own
+        connection, closed when the request returns.
+
+        Returns:
+            The SDK ``Connection`` (it carries the ``exit_stack`` unwound when
+            the session closes), or None.
+        """
+        ctx = self._get_request_context()
+        request = getattr(ctx, "request_context", None) if ctx is not None else None
+        if request is None:
+            return None
+        if getattr(request, "protocol_version", None) in MODERN_PROTOCOL_VERSIONS:
+            return None
+        # FastMCP reads the same private attribute for its per-session state.
+        connection = getattr(getattr(request, "session", None), "_connection", None)
+        if getattr(connection, "exit_stack", None) is None:
+            return None
+        return connection
+
+    def _watch_session_end(self, session_id: str) -> None:
+        """Arrange for the state kept for ``session_id`` to be dropped when its session closes.
+
+        Called whenever per-session state (a rate-limit bucket, an Isaac
+        route) is created, so each handshake-era session is hooked once. A
+        request whose session end cannot be observed (stdio's sessionless
+        session, an authenticated sessionless user) keeps its state for the
+        life of the server, bounded by the number of such identities.
+        """
+        if session_id in self._watched_sessions:
+            return
+        connection = self._request_connection()
+        if connection is None:
+            return
+        self._watched_sessions.add(session_id)
+        connection.exit_stack.callback(self._forget_session, session_id)
+
+    def _forget_session(self, session_id: str) -> None:
+        """Drop what the server keeps for an ended MCP session.
+
+        Its Isaac route and bindings and its rate-limit buckets go. Its claims
+        stay in the session records until they expire, so another agent cannot
+        take the instance from one that is reconnecting, but they are marked
+        orphaned, which lets the same ``agent_id`` reclaim them at once.
+        """
+        self._watched_sessions.discard(session_id)
+        route = self._session_routes.pop(session_id, None)
+        if route is not None:
+            owner = self._owner_for_session(session_id)
+            for port in {binding.port for binding in route.bindings.values()}:
+                try:
+                    self.session_manager.get_instance_session(port).mark_orphaned(owner)
+                except Exception as exc:
+                    self.logger.warning(
+                        "Could not mark the ended session's claims on port %s orphaned: %s",
+                        port,
+                        exc,
+                    )
+        label = default_agent_label(session_id)
+        for key in [key for key in self._rate_limiters if key[0] == label]:
+            del self._rate_limiters[key]
 
     def _check_rate_limit(
         self, tool_name: str, agent_id: Optional[str] = None
@@ -652,6 +754,7 @@ class SimulMCPServer(LoggerMixin):
                 active_instance=self._active_instance,
             )
             self._session_routes[session_id] = route
+            self._watch_session_end(session_id)
         return route
 
     def _get_request_route(self) -> Optional[IsaacSessionRoute]:
@@ -756,6 +859,17 @@ class SimulMCPServer(LoggerMixin):
             return binding.agent_id
         return self._resolve_agent_id(None)
 
+    def _recorded_agent_id(self, session_agent_id: str) -> str:
+        """Return the agent a usage record names: the active claim's label, else the session's.
+
+        Reads the session's route without creating one, so a call that never
+        touched Isaac adds no routing state.
+        """
+        session_id = self._get_request_session_id()
+        route = self._session_routes.get(session_id) if session_id is not None else None
+        binding = route.bindings.get(route.active_instance) if route is not None else None
+        return binding.agent_id if binding is not None else session_agent_id
+
     def _claim_owner(self) -> str:
         """Return the opaque owner token for claims made by the current request.
 
@@ -765,35 +879,40 @@ class SimulMCPServer(LoggerMixin):
         session id, so publishing it in session records reveals nothing, or of
         this server process when the request carries no session.
         """
-        session_id = self._get_request_session_id()
+        return self._owner_for_session(self._get_request_session_id())
+
+    def _owner_for_session(self, session_id: Optional[str]) -> str:
+        """Return the opaque claim owner token of ``session_id`` (see ``_claim_owner``)."""
         source = f"session:{session_id}" if session_id else f"process:{os.getpid()}:{id(self):x}"
         return hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
 
-    def _foreign_claim(
-        self, instance_name: str, caller_agent_id: str
+    def _find_foreign(
+        self,
+        sessions: List[Dict[str, Any]],
+        caller_agent_id: str,
+        *,
+        allow_takeover: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        """Return the live claim another agent holds on ``instance_name``, when enforced.
+        """Return the first record in ``sessions`` that is not the caller's own claim.
+
+        A claim is foreign when its ``agent_id`` differs from the caller's or
+        when a different MCP session made it (its ``owner`` token differs), so
+        passing another agent's ``agent_id`` does not inherit that agent's
+        claim. A request without a client identity holds no claim, so every
+        record is foreign to it.
 
         Args:
-            instance_name: Registry name of the Isaac instance being used.
+            sessions: Live session records of one instance.
             caller_agent_id: The agent making the request.
+            allow_takeover: The caller is claiming: a record of the same
+                ``agent_id`` that is orphaned (its session ended or its server
+                process exited, so nothing else can renew it) is not foreign.
+                This is how an agent reclaims its own instance after a
+                reconnect or a server restart instead of waiting out the TTL.
 
         Returns:
-            The holder's session record when ``isaac_sim.enforce_claims`` is on
-            and a live claim by a different agent exists, otherwise ``None``.
-            A claim is foreign when its ``agent_id`` differs from the caller's
-            or when a different MCP session made it (its ``owner`` token
-            differs), so passing another agent's ``agent_id`` does not inherit
-            that agent's claim. A request without a client identity holds no
-            claim, so every live claim is foreign to it. Expired claims are
-            pruned by the session manager, so a stale holder never blocks.
+            The blocking record, or None.
         """
-        if not self.settings.isaac_sim.enforce_claims:
-            return None
-        client = self._isaac_clients.get(instance_name)
-        if client is None:
-            return None
-        sessions = self.session_manager.get_instance_session(client._port).get_status()["sessions"]
         if self._request_is_anonymous():
             return sessions[0] if sessions else None
         owner = self._claim_owner()
@@ -807,7 +926,121 @@ class SimulMCPServer(LoggerMixin):
             if session.get("agent_id") != caller_agent_id:
                 return session
             if holder_owner is not None and holder_owner != owner:
+                if allow_takeover and claim_is_orphaned(session):
+                    continue
                 return session
+        return None
+
+    def _holds_claim(self, view: ClaimView, instance_name: str, caller_agent_id: str) -> bool:
+        """Report whether the caller can show a claim of its own on the instance.
+
+        Used while a damaged record file is being repaired: a caller passes
+        when the store already holds its record, or when its session's binding
+        to the instance (kept in this process) shows it held one.
+        """
+        if self._request_is_anonymous():
+            return False
+        owner = self._claim_owner()
+        if any(
+            s.get("agent_id") == caller_agent_id and s.get("owner") == owner
+            for s in view.sessions
+        ):
+            return True
+        route = self._get_request_route()
+        binding = route.bindings.get(instance_name) if route is not None else None
+        return binding is not None and binding.agent_id == caller_agent_id
+
+    @staticmethod
+    def _unverified_holder(view: ClaimView) -> Dict[str, Any]:
+        """Stand in for the claim a repaired record file may have lost."""
+        return {
+            "agent_id": None,
+            "purpose": "",
+            "last_active": view.repaired_at,
+            "unverified": True,
+        }
+
+    def _claim_conflict(self, instance_name: str, caller_agent_id: str) -> ClaimConflict:
+        """Build the check ``InstanceSession.register`` runs, under the store lock, for a claim.
+
+        The caller may claim when no other agent holds a live claim
+        (an orphaned claim of its own ``agent_id`` it may take over) and, while
+        the record file is being repaired, only when it can show a claim of
+        its own (``_holds_claim``).
+        """
+
+        def conflict(view: ClaimView) -> Optional[Dict[str, Any]]:
+            holder = self._find_foreign(view.sessions, caller_agent_id, allow_takeover=True)
+            if holder is not None:
+                return holder
+            if view.repaired_at is not None and not self._holds_claim(
+                view, instance_name, caller_agent_id
+            ):
+                return self._unverified_holder(view)
+            return None
+
+        return conflict
+
+    def _foreign_claim(
+        self, instance_name: str, caller_agent_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the live claim another agent holds on ``instance_name``, when enforced.
+
+        Enforcement fails closed. Records that cannot be read stand for a
+        claim nobody can verify, and so does the TTL after a damaged record
+        file was repaired, for every caller that cannot show a claim of its
+        own; a caller whose binding shows it held one re-asserts its record
+        here, so the holders of the lost claims keep working through the
+        repair.
+
+        Args:
+            instance_name: Registry name of the Isaac instance being used.
+            caller_agent_id: The agent making the request.
+
+        Returns:
+            The holder's session record when ``isaac_sim.enforce_claims`` is on
+            and a live claim by a different agent exists (see
+            ``_find_foreign``); a record with ``unverified`` set, and an
+            ``error`` when the store could not be read, when the claims cannot
+            be verified; otherwise ``None``. Expired claims are pruned by the
+            session manager, so a stale holder never blocks.
+        """
+        if not self.settings.isaac_sim.enforce_claims:
+            return None
+        client = self._isaac_clients.get(instance_name)
+        if client is None:
+            return None
+        store = self.session_manager.get_instance_session(client._port)
+        try:
+            view = store.view()
+        except ClaimStoreError as exc:
+            return {"agent_id": None, "purpose": "", "unverified": True, "error": str(exc)}
+        holder = self._find_foreign(view.sessions, caller_agent_id)
+        if holder is not None or view.repaired_at is None:
+            return holder
+        if not self._holds_claim(view, instance_name, caller_agent_id):
+            return self._unverified_holder(view)
+        route = self._get_request_route()
+        binding = route.bindings.get(instance_name) if route is not None else None
+        if binding is not None and not any(
+            s.get("agent_id") == caller_agent_id for s in view.sessions
+        ):
+            try:
+                result = store.register(
+                    caller_agent_id,
+                    binding.purpose or "",
+                    owner=self._claim_owner(),
+                    conflict=self._claim_conflict(instance_name, caller_agent_id),
+                )
+            except ClaimStoreError as exc:
+                return {"agent_id": None, "purpose": "", "unverified": True, "error": str(exc)}
+            if result["status"] == "refused":
+                return cast(Dict[str, Any], result["holder"])
+            self.logger.warning(
+                "Re-asserted the claim of agent %r on port %s after its records were repaired",
+                caller_agent_id,
+                client._port,
+            )
         return None
 
     def _claimed_error(
@@ -816,14 +1049,48 @@ class SimulMCPServer(LoggerMixin):
         holder: Dict[str, Any],
         caller_agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Build the InstanceClaimed payload naming the holder and the way forward."""
+        """Build the InstanceClaimed payload naming the holder and the way forward.
+
+        A holder with ``unverified`` set stands for claims that cannot be
+        checked: unreadable records (``ClaimStoreError``) or a repaired record
+        file (InstanceClaimed with no holder until the TTL passes).
+        """
+        port = self._port_of(instance_name)
+        clear_hint = (
+            "An operator can list and clear claims with `simul isaac claims` "
+            f"(`simul isaac claims --clear --port {port}`)."
+        )
+        if holder.get("unverified"):
+            return self._unverified_claims_error(instance_name, holder, clear_hint)
         expires_in = max(0.0, CLAIM_TTL_SECONDS - (time.time() - float(holder.get("last_active", 0.0))))
+        same_label = caller_agent_id is not None and holder.get("agent_id") == caller_agent_id
         impersonation = (
             f" The agent_id {caller_agent_id!r} is bound to a different MCP session;"
             " pick a unique agent_id or omit it."
-            if caller_agent_id is not None and holder.get("agent_id") == caller_agent_id
+            if same_label
             else ""
         )
+        orphaned = claim_is_orphaned(holder)
+        hint = (
+            "Read-only tools still work. Ask the holder to call "
+            "release_isaac_instance, or wait for the claim to expire "
+            f"({int(CLAIM_TTL_SECONDS)} s without activity), then call "
+            "claim_isaac_instance yourself. list_isaac_instances shows other instances."
+        )
+        if orphaned:
+            hint += (
+                " The holder's MCP session has ended: calling claim_isaac_instance with "
+                f"agent_id {holder.get('agent_id')!r} takes the claim over now."
+            )
+        details: Dict[str, Any] = {
+            "instance": instance_name,
+            "holder_agent_id": holder.get("agent_id"),
+            "holder_purpose": holder.get("purpose", ""),
+            "claim_expires_in_seconds": round(expires_in, 1),
+            "hint": f"{hint} {clear_hint}",
+        }
+        if orphaned:
+            details["holder_orphaned"] = True
         return ErrorResponse(
             error=(
                 f"Isaac instance {instance_name!r} is claimed by agent "
@@ -832,16 +1099,69 @@ class SimulMCPServer(LoggerMixin):
                 "that claim is live." + impersonation
             ),
             error_type="InstanceClaimed",
+            details=details,
+        ).model_dump()
+
+    def _unverified_claims_error(
+        self, instance_name: str, holder: Dict[str, Any], clear_hint: str
+    ) -> Dict[str, Any]:
+        """Build the refusal for claims enforcement cannot verify (see ``_claimed_error``)."""
+        if holder.get("error"):
+            return ErrorResponse(
+                error=(
+                    f"The claims on Isaac instance {instance_name!r} cannot be read, so "
+                    "isaac_sim.enforce_claims refuses mutating tools: "
+                    f"{holder['error']}"
+                ),
+                error_type=ClaimStoreError.error_type,
+                details={
+                    "instance": instance_name,
+                    "hint": (
+                        "Read-only tools still work. Check that the session directory "
+                        f"({self.session_manager.session_dir}) is writable by this user."
+                    ),
+                },
+            ).model_dump()
+        repaired_at = holder.get("last_active")
+        expires_in = (
+            max(0.0, CLAIM_TTL_SECONDS - (time.time() - float(repaired_at)))
+            if isinstance(repaired_at, (int, float))
+            else CLAIM_TTL_SECONDS
+        )
+        return ErrorResponse(
+            error=(
+                f"The claim records of Isaac instance {instance_name!r} were damaged and "
+                "repaired, and a claim they held may still be live, so "
+                "isaac_sim.enforce_claims refuses mutating tools from agents without a "
+                "claim of their own until the claim TTL has passed."
+            ),
+            error_type="InstanceClaimed",
             details={
                 "instance": instance_name,
-                "holder_agent_id": holder.get("agent_id"),
-                "holder_purpose": holder.get("purpose", ""),
+                "holder_agent_id": None,
+                "holder_purpose": "",
                 "claim_expires_in_seconds": round(expires_in, 1),
+                "hint": f"Read-only tools still work. Retry after the claim TTL. {clear_hint}",
+            },
+        ).model_dump()
+
+    def _port_of(self, instance_name: str) -> Optional[int]:
+        """Return the socket port the session records of ``instance_name`` are keyed on."""
+        client = self._isaac_clients.get(instance_name)
+        return client._port if client is not None else None
+
+    def _claim_store_error(self, exc: ClaimStoreError, instance_name: str) -> Dict[str, Any]:
+        """Build the error envelope for a claim tool whose records could not be saved."""
+        self.logger.error("Claim records for %r could not be saved: %s", instance_name, exc)
+        return ErrorResponse(
+            error=f"The claim was not saved: {exc}",
+            error_type=ClaimStoreError.error_type,
+            details={
+                "instance": instance_name,
+                "path": str(exc.path),
                 "hint": (
-                    "Read-only tools still work. Ask the holder to call "
-                    "release_isaac_instance, or wait for the claim to expire "
-                    f"({int(CLAIM_TTL_SECONDS)} s without activity), then call "
-                    "claim_isaac_instance yourself. list_isaac_instances shows other instances."
+                    "Check that the session directory "
+                    f"({self.session_manager.session_dir}) is writable by this user."
                 ),
             },
         ).model_dump()
@@ -925,6 +1245,9 @@ class SimulMCPServer(LoggerMixin):
             The payload as one JSON content block, plus an image block when it
             carries one.
         """
+        # The rate limit keys on the session, which the caller cannot choose;
+        # the usage record names the agent the way list_isaac_instances shows
+        # it, by its claim's label when the session holds one.
         agent_id = self._resolve_agent_id(None)
         call_started = False
 
@@ -940,7 +1263,7 @@ class SimulMCPServer(LoggerMixin):
                 success,
                 params=params,
                 error=error,
-                agent_id=agent_id,
+                agent_id=self._recorded_agent_id(agent_id),
                 script_sha256=script_sha256,
             )
 
@@ -1636,7 +1959,16 @@ class SimulMCPServer(LoggerMixin):
             try:
                 with open(filepath, "r") as f:
                     data = json.loads(f.read())
-            except (OSError, json.JSONDecodeError):
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                # Valid JSON that is not a discovery record (a list, a bare
+                # string) must not take the whole listing down with it.
+                self.logger.warning(
+                    "Skipping Isaac discovery file %s: expected a JSON object, got %s",
+                    filepath,
+                    type(data).__name__,
+                )
                 continue
 
             pid = data.get("pid")
@@ -1952,10 +2284,21 @@ class SimulMCPServer(LoggerMixin):
             if transport == "stdio":
                 await self.mcp.run_async(transport="stdio")
             elif transport in NETWORK_TRANSPORTS:
+                from .http_security import resolve_http_security
+
+                # Resolved before the listener opens: a public bind without
+                # --allow-public or a bad token file stops here (see http_security).
+                http_security = resolve_http_security(self.settings.server)
+                for warning in http_security.warnings:
+                    self.logger.warning(warning)
+                auth = http_security.build_auth()
+                if auth is not None:
+                    self.mcp.auth = auth
                 await self.mcp.run_async(
                     transport=cast(Literal["http", "sse"], transport),
                     host=self.settings.server.host,
                     port=self.settings.server.port,
+                    **http_security.run_kwargs(),
                 )
             else:
                 raise ValueError(
