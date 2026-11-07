@@ -7,6 +7,7 @@ from ._shared import (
     APPLY_COLLISION_CORE,
     APPLY_RIGID_BODY_CORE,
     SET_MASS_PROPERTIES_CORE,
+    UNSET_CENTER_OF_MASS_NOTE,
     FloatList,
     _compose_script,
     _pyval,
@@ -74,8 +75,11 @@ class PhysicsMixin:
 
         Returns:
             Dict with mass, velocity, angular velocity, kinematic state, etc.
+            ``center_of_mass`` is null with ``center_of_mass_note`` when it
+            is not authored.
         """
         _prim_path = _pyval(prim_path)
+        _com_note = _pyval(UNSET_CENTER_OF_MASS_NOTE)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -100,12 +104,18 @@ class PhysicsMixin:
                     mass_api = None
                     mass = None
                     com = None
+                    com_note = None
                     inertia = None
                     if prim.HasAPI(UsdPhysics.MassAPI):
                         mass_api = UsdPhysics.MassAPI(prim)
                         mass = mass_api.GetMassAttr().Get()
                         com_attr = mass_api.GetCenterOfMassAttr().Get()
-                        com = list(com_attr) if com_attr else None
+                        # The schema fallback (-inf, -inf, -inf) means "derive
+                        # it"; json.dumps spells it -Infinity, which is not JSON.
+                        if com_attr is not None and all(abs(c) != float("inf") and c == c for c in com_attr):
+                            com = list(com_attr)
+                        else:
+                            com_note = {_com_note}
                         inertia_attr = mass_api.GetDiagonalInertiaAttr().Get()
                         inertia = list(inertia_attr) if inertia_attr else None
 
@@ -118,6 +128,7 @@ class PhysicsMixin:
                         "has_mass_api": prim.HasAPI(UsdPhysics.MassAPI),
                         "mass": mass,
                         "center_of_mass": com,
+                        "center_of_mass_note": com_note,
                         "diagonal_inertia": inertia,
                     }}))
         """)
@@ -327,8 +338,11 @@ class PhysicsMixin:
 
         Returns:
             Dict with mass, density, center of mass, and inertia tensor.
+            ``center_of_mass`` is null with ``center_of_mass_note`` when it
+            is not authored.
         """
         _prim_path = _pyval(prim_path)
+        _com_note = _pyval(UNSET_CENTER_OF_MASS_NOTE)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -348,15 +362,22 @@ class PhysicsMixin:
                     mass = mass_api.GetMassAttr().Get()
                     density = mass_api.GetDensityAttr().Get()
                     com = mass_api.GetCenterOfMassAttr().Get()
+                    # The schema fallback (-inf, -inf, -inf) means "derive it";
+                    # json.dumps spells it -Infinity, which is not JSON.
+                    com_set = com is not None and all(abs(c) != float("inf") and c == c for c in com)
                     inertia = mass_api.GetDiagonalInertiaAttr().Get()
                     principal_axes = mass_api.GetPrincipalAxesAttr().Get()
                     print(json.dumps({{
                         "prim_path": {_prim_path},
                         "mass": mass,
                         "density": density,
-                        "center_of_mass": list(com) if com else None,
+                        "center_of_mass": list(com) if com_set else None,
+                        "center_of_mass_note": None if com_set else {_com_note},
                         "diagonal_inertia": list(inertia) if inertia else None,
-                        "principal_axes": [principal_axes.GetReal()] + list(principal_axes.GetImaginary()) if principal_axes else None,
+                        "principal_axes": (
+                            [principal_axes.GetReal()] + list(principal_axes.GetImaginary())
+                            if principal_axes else None
+                        ),
                     }}))
         """)
         return await self._execute_json_script(script)
@@ -669,4 +690,3 @@ class PhysicsMixin:
                         print(json.dumps(result))
         """)
         return await self._execute_json_script(script)
-

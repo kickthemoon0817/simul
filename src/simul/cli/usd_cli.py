@@ -11,14 +11,18 @@ JSON output on stdout.
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import typer
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 
 from simul.cli.output import console, emit, emit_error, fail, is_json_mode
 from simul.config import get_settings, load_settings
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from simul.adapters.headless_usd import HeadlessUSDSession
 
 app = typer.Typer(
     name="usd",
@@ -34,6 +38,25 @@ def _require_usd() -> None:
 
     if not is_headless_available():
         fail("pxr library not available -- cannot perform USD operations.", "DependencyError")
+
+
+def _load_or_fail(session: "HeadlessUSDSession", file_path: Path) -> str:
+    """Load ``file_path`` in ``session`` or exit 1 with pxr's reason."""
+    from simul.usd.validation import USDLoadError
+
+    try:
+        stage_id: str = session.load_stage_or_raise(file_path)
+    except USDLoadError as exc:
+        fail(str(exc), exc.error_type, exc.details)
+    return stage_id
+
+
+def _load_warnings(session: "HeadlessUSDSession", stage_id: str) -> List[Dict[str, Any]]:
+    """The composition problems a loaded stage carries (missing references, ...)."""
+    from simul.usd.validation import WARNING, composition_issues
+
+    stage = session.get_stage(stage_id)
+    return [issue.to_dict() for issue in composition_issues(stage, WARNING)] if stage else []
 
 
 # ---------------------------------------------------------------------------
@@ -66,15 +89,14 @@ def info(
     with adapter.create_session() as session:
         if not is_json_mode():
             console.print(f"[cyan]Loading[/cyan] {file_path}")
-        stage_id = session.load_stage(file_path)
-        if not stage_id:
-            fail("Failed to load USD file", "LoadError", {"file_path": str(file_path)})
+        stage_id = _load_or_fail(session, file_path)
 
         stage_info = session.get_stage_info(stage_id)
         if not stage_info:
             fail("Failed to read stage info", "ReadError")
 
         summary = session.summarize_stage(stage_id, include_meshes=True)
+        warnings = _load_warnings(session, stage_id)
 
         if is_json_mode():
             data = {
@@ -92,8 +114,12 @@ def info(
             if summary:
                 data["prim_type_counts"] = summary.prim_type_counts or {}
                 data["mesh_statistics"] = summary.mesh_statistics or {}
+            data["warnings"] = warnings
             emit(data)
             return
+
+        for warning in warnings:
+            console.print(f"[yellow]Warning[/yellow] {rich_escape(warning['message'])}")
 
         table = Table(title="Stage Information")
         table.add_column("Property", style="cyan")
@@ -139,6 +165,20 @@ def info(
 # ---------------------------------------------------------------------------
 # validate
 # ---------------------------------------------------------------------------
+_SEVERITY_STYLE = {"error": "red", "warning": "yellow", "info": "cyan"}
+
+
+def _location_text(location: Dict[str, Any]) -> str:
+    """Render an issue's location for the human table."""
+    where = location.get("property_path") or location.get("prim_path") or ""
+    if location.get("line") is not None:
+        where = f"line {location['line']}, column {location.get('column', '?')}"
+    asset = location.get("asset_path")
+    if asset and asset not in where:
+        where = f"{where} @{asset}@".strip()
+    return where
+
+
 @app.command()
 def validate(
     file_path: Path = typer.Argument(
@@ -146,54 +186,60 @@ def validate(
         help="Path to USD file to validate",
     ),
 ) -> None:
-    """Validate a USD file without fully loading it."""
-    valid_extensions = {".usd", ".usda", ".usdc", ".usdz"}
-    path = Path(file_path)
+    """Open a USD file with pxr and report what is wrong with it.
 
-    checks: list[tuple[str, bool, str]] = [
-        ("Exists", path.exists(), "File not found"),
-        ("Is file", path.is_file() if path.exists() else False, "Not a regular file"),
-        ("Extension", path.suffix.lower() in valid_extensions, f"Expected one of {valid_extensions}"),
-    ]
+    Exits 1 when the file is invalid: pxr cannot open it, or a check reports
+    an error (a missing sublayer, reference or payload, a dangling
+    defaultPrim, a physics error, a pxr validator error). Warnings alone
+    leave the file valid.
+    """
+    _require_usd()
+    settings = get_settings()
 
-    if path.exists() and path.is_file():
-        size_mb = path.stat().st_size / (1024 * 1024)
-        settings = get_settings()
-        max_mb = settings.usd.max_file_size_mb
-        checks.append(("Size", size_mb <= max_mb, f"{size_mb:.1f} MB exceeds {max_mb} MB limit"))
+    from simul.usd.validation import validate_usd_file
 
-    all_passed = all(passed for _, passed, _ in checks)
+    resolved = str(file_path.expanduser().resolve())
+    report = validate_usd_file(resolved, settings.usd)
+    data = report.to_dict()
+    errors = data["error_count"]
 
     if is_json_mode():
-        results = []
-        for name, passed, detail in checks:
-            entry = {"check": name, "passed": passed}
-            if not passed:
-                entry["detail"] = detail
-            results.append(entry)
-        emit({
-            "file_path": str(path),
-            "valid": all_passed,
-            "checks": results,
-        })
-        if not all_passed:
+        # ``valid`` is the key this command reported before issues existed.
+        data["valid"] = report.is_valid
+        data["success"] = report.is_valid
+        if not report.is_valid:
+            data["error"] = (
+                f"{resolved} is not valid USD: {errors} error(s); see issues"
+                if report.can_read
+                else f"{resolved} could not be opened; see issues"
+            )
+            data["error_type"] = "ValidationFailed"
+        print(json.dumps(data))
+        if not report.is_valid:
             raise typer.Exit(1)
         return
 
-    table = Table(title=f"Validation: {path.name}")
-    table.add_column("Check", style="cyan")
-    table.add_column("Result")
-    table.add_column("Detail")
+    table = Table(title=f"Validation: {file_path.name}")
+    table.add_column("Severity")
+    table.add_column("Code", style="cyan")
+    table.add_column("Where")
+    table.add_column("Message")
+    for issue in data["issues"]:
+        style = _SEVERITY_STYLE.get(issue["severity"], "white")
+        table.add_row(
+            f"[{style}]{issue['severity'].upper()}[/{style}]",
+            issue["code"],
+            rich_escape(_location_text(issue["location"])),
+            rich_escape(issue["message"]),
+        )
+    if data["issues"]:
+        console.print(table)
 
-    for name, passed, detail in checks:
-        symbol = "[green]PASS[/green]" if passed else "[red]FAIL[/red]"
-        table.add_row(name, symbol, "" if passed else detail)
-    console.print(table)
-
-    if all_passed:
-        console.print("[green]File is valid[/green]")
+    counts = f"{errors} error(s), {data['warning_count']} warning(s), {data['info_count']} info"
+    if report.is_valid:
+        console.print(f"[green]File is valid[/green] ({counts})")
     else:
-        console.print("[red]Validation failed[/red]")
+        console.print(f"[red]Validation failed[/red] ({counts})")
         raise typer.Exit(1)
 
 
@@ -226,11 +272,14 @@ def summary(
     adapter = HeadlessUSDAdapter(settings)
 
     with adapter.create_session() as session:
-        stage_id = session.load_stage(file_path)
-        if not stage_id:
+        from simul.usd.validation import USDLoadError
+
+        try:
+            stage_id = session.load_stage_or_raise(file_path)
+        except USDLoadError as exc:
             if is_json_mode() or format == "json":
-                emit_error("Failed to load USD file", "LoadError", {"file_path": str(file_path)})
-            console.print("[red]Failed to load USD file[/red]")
+                emit_error(str(exc), exc.error_type, exc.details)
+            console.print(f"[red]{rich_escape(str(exc))}[/red]")
             raise typer.Exit(1)
 
         result = session.summarize_stage(stage_id, include_meshes=True)
