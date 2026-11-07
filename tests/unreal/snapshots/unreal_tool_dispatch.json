@@ -155,7 +155,10 @@
       "resolution_x": 1920,
       "resolution_y": 1080,
       "format": "png",
-      "inline": false
+      "inline": false,
+      "view": "auto",
+      "jpeg_quality": 85,
+      "inline_max_size": 0
      }
     }
    ],
@@ -166,7 +169,10 @@
       "resolution_x": 1920,
       "resolution_y": 1080,
       "format": "png",
-      "inline": false
+      "inline": false,
+      "view": "auto",
+      "jpeg_quality": 85,
+      "inline_max_size": 0
      }
     }
    ],
@@ -184,7 +190,10 @@
       "resolution_x": 1920,
       "resolution_y": 1080,
       "format": "png",
-      "inline": false
+      "inline": false,
+      "view": "auto",
+      "jpeg_quality": 85,
+      "inline_max_size": 0
      }
     }
    ]
@@ -195,8 +204,11 @@
    "arguments": {
     "resolution_x": 640,
     "resolution_y": 360,
-    "format": "png",
-    "inline": true
+    "format": "jpeg",
+    "inline": true,
+    "view": "game",
+    "jpeg_quality": 70,
+    "inline_max_size": 320
    },
    "envelope": [
     {
@@ -206,8 +218,11 @@
      "params": {
       "resolution_x": 640,
       "resolution_y": 360,
-      "format": "png",
-      "inline": true
+      "format": "jpeg",
+      "inline": true,
+      "view": "game",
+      "jpeg_quality": 70,
+      "inline_max_size": 320
      }
     }
    ],
@@ -217,8 +232,11 @@
      "arguments": {
       "resolution_x": 640,
       "resolution_y": 360,
-      "format": "png",
-      "inline": true
+      "format": "jpeg",
+      "inline": true,
+      "view": "game",
+      "jpeg_quality": 70,
+      "inline_max_size": 320
      }
     }
    ],
@@ -235,8 +253,11 @@
      "params": {
       "resolution_x": 640,
       "resolution_y": 360,
-      "format": "png",
-      "inline": true
+      "format": "jpeg",
+      "inline": true,
+      "view": "game",
+      "jpeg_quality": 70,
+      "inline_max_size": 320
      }
     }
    ]
@@ -918,6 +939,91 @@
    ]
   },
   {
+   "tool": "load_unreal_world_partition_actors",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "load_unreal_world_partition_actors",
+     "label": "Unreal",
+     "response_model": "UnrealLoadWorldPartitionResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "load_world_partition_actors",
+     "arguments": {
+      "bounds_min": null,
+      "bounds_max": null,
+      "max_actors": 500,
+      "action": "load"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "load_world_partition_actors"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "load_unreal_world_partition_actors",
+   "case": "every argument",
+   "arguments": {
+    "bounds_min": "-100, -100,0",
+    "bounds_max": "100,100,50",
+    "max_actors": 20,
+    "action": "unload"
+   },
+   "envelope": [
+    {
+     "tool": "load_unreal_world_partition_actors",
+     "label": "Unreal",
+     "response_model": "UnrealLoadWorldPartitionResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "load_world_partition_actors",
+     "arguments": {
+      "bounds_min": [
+       -100.0,
+       -100.0,
+       0.0
+      ],
+      "bounds_max": [
+       100.0,
+       100.0,
+       50.0
+      ],
+      "max_actors": 20,
+      "action": "unload"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "load_world_partition_actors"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
    "tool": "get_unreal_viewport_info",
    "case": "required",
    "arguments": {},
@@ -932,7 +1038,9 @@
    "session": [
     {
      "method": "get_viewport_info",
-     "arguments": {}
+     "arguments": {
+      "measure_size": false
+     }
     }
    ],
    "result": {
@@ -945,6 +1053,163 @@
    "usage": [
     {
      "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_viewport_info",
+   "case": "every argument",
+   "arguments": {
+    "measure_size": true
+   },
+   "envelope": [
+    {
+     "tool": "get_unreal_viewport_info",
+     "label": "Unreal",
+     "response_model": "UnrealViewportInfoResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_viewport_info",
+     "arguments": {
+      "measure_size": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_viewport_info"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "capture_unreal_camera",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "capture_unreal_camera",
+     "label": "Unreal",
+     "response_model": "UnrealCaptureCameraResponse",
+     "params": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "resolution_x": 1280,
+      "resolution_y": 720,
+      "format": "png",
+      "inline": false,
+      "jpeg_quality": 85,
+      "inline_max_size": 0
+     }
+    }
+   ],
+   "session": [
+    {
+     "method": "capture_camera",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "resolution_x": 1280,
+      "resolution_y": 720,
+      "format": "png",
+      "inline": false,
+      "jpeg_quality": 85,
+      "inline_max_size": 0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "capture_camera"
+    }
+   },
+   "usage": [
+    {
+     "success": true,
+     "params": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "resolution_x": 1280,
+      "resolution_y": 720,
+      "format": "png",
+      "inline": false,
+      "jpeg_quality": 85,
+      "inline_max_size": 0
+     }
+    }
+   ]
+  },
+  {
+   "tool": "capture_unreal_camera",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "resolution_x": 320,
+    "resolution_y": 240,
+    "format": "jpeg",
+    "inline": true,
+    "jpeg_quality": 60,
+    "inline_max_size": 160
+   },
+   "envelope": [
+    {
+     "tool": "capture_unreal_camera",
+     "label": "Unreal",
+     "response_model": "UnrealCaptureCameraResponse",
+     "params": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "resolution_x": 320,
+      "resolution_y": 240,
+      "format": "jpeg",
+      "inline": true,
+      "jpeg_quality": 60,
+      "inline_max_size": 160
+     }
+    }
+   ],
+   "session": [
+    {
+     "method": "capture_camera",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "resolution_x": 320,
+      "resolution_y": 240,
+      "format": "jpeg",
+      "inline": true,
+      "jpeg_quality": 60,
+      "inline_max_size": 160
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "capture_camera"
+    }
+   },
+   "usage": [
+    {
+     "success": true,
+     "params": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "resolution_x": 320,
+      "resolution_y": 240,
+      "format": "jpeg",
+      "inline": true,
+      "jpeg_quality": 60,
+      "inline_max_size": 160
+     }
     }
    ]
   },
@@ -4205,7 +4470,10 @@
       "resolution_x": 1920,
       "resolution_y": 1080,
       "format": "jpg",
-      "inline": false
+      "inline": false,
+      "view": "auto",
+      "jpeg_quality": 85,
+      "inline_max_size": 0
      }
     }
    ],
@@ -4214,14 +4482,17 @@
     "is_error": false,
     "payload": {
      "success": false,
-     "error": "Invalid format 'jpg'. Must be one of ['png']",
+     "error": "Invalid format 'jpg'. Must be one of ['jpeg', 'png']",
      "error_type": "ValidationError",
      "details": {
       "input": {
        "resolution_x": 1920,
        "resolution_y": 1080,
        "format": "jpg",
-       "inline": false
+       "inline": false,
+       "view": "auto",
+       "jpeg_quality": 85,
+       "inline_max_size": 0
       }
      }
     }
@@ -4233,9 +4504,161 @@
       "resolution_x": 1920,
       "resolution_y": 1080,
       "format": "jpg",
-      "inline": false
+      "inline": false,
+      "view": "auto",
+      "jpeg_quality": 85,
+      "inline_max_size": 0
      },
-     "error": "Invalid format 'jpg'. Must be one of ['png']"
+     "error": "Invalid format 'jpg'. Must be one of ['jpeg', 'png']"
+    }
+   ]
+  },
+  {
+   "tool": "capture_unreal_viewport",
+   "case": "invalid",
+   "arguments": {
+    "view": "player"
+   },
+   "envelope": [
+    {
+     "tool": "capture_unreal_viewport",
+     "label": "Unreal",
+     "response_model": "UnrealCaptureViewportResponse",
+     "params": {
+      "resolution_x": 1920,
+      "resolution_y": 1080,
+      "format": "png",
+      "inline": false,
+      "view": "player",
+      "jpeg_quality": 85,
+      "inline_max_size": 0
+     }
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Invalid view 'player'. Must be one of ['auto', 'editor', 'game']",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "resolution_x": 1920,
+       "resolution_y": 1080,
+       "format": "png",
+       "inline": false,
+       "view": "player",
+       "jpeg_quality": 85,
+       "inline_max_size": 0
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "params": {
+      "resolution_x": 1920,
+      "resolution_y": 1080,
+      "format": "png",
+      "inline": false,
+      "view": "player",
+      "jpeg_quality": 85,
+      "inline_max_size": 0
+     },
+     "error": "Invalid view 'player'. Must be one of ['auto', 'editor', 'game']"
+    }
+   ]
+  },
+  {
+   "tool": "capture_unreal_camera",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "jpeg_quality": 0
+   },
+   "envelope": [
+    {
+     "tool": "capture_unreal_camera",
+     "label": "Unreal",
+     "response_model": "UnrealCaptureCameraResponse",
+     "params": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "resolution_x": 1280,
+      "resolution_y": 720,
+      "format": "png",
+      "inline": false,
+      "jpeg_quality": 0,
+      "inline_max_size": 0
+     }
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "jpeg_quality must be between 1 and 100",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "resolution_x": 1280,
+       "resolution_y": 720,
+       "format": "png",
+       "inline": false,
+       "jpeg_quality": 0,
+       "inline_max_size": 0
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "params": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "resolution_x": 1280,
+      "resolution_y": 720,
+      "format": "png",
+      "inline": false,
+      "jpeg_quality": 0,
+      "inline_max_size": 0
+     },
+     "error": "jpeg_quality must be between 1 and 100"
+    }
+   ]
+  },
+  {
+   "tool": "load_unreal_world_partition_actors",
+   "case": "invalid",
+   "arguments": {
+    "bounds_min": "1,x,3",
+    "bounds_max": "2,2,2"
+   },
+   "envelope": [
+    {
+     "tool": "load_unreal_world_partition_actors",
+     "label": "Unreal",
+     "response_model": "UnrealLoadWorldPartitionResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "could not convert string to float: 'x'",
+     "error_type": "ValueError",
+     "details": null
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "could not convert string to float: 'x'"
     }
    ]
   },

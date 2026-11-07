@@ -210,6 +210,9 @@ class Actor:
     def get_attached_actors(self) -> List["Actor"]:
         return list(self.attached)
 
+    def is_editable(self) -> bool:
+        return True
+
 
 def native(cls: Class) -> type:
     """The Python type Unreal's module exposes for a native class."""
@@ -217,15 +220,40 @@ def native(cls: Class) -> type:
 
 
 class Editor:
-    """The level and the editor subsystems the scene reads use."""
+    """The level and the editor subsystems the scene reads use.
+
+    ``partition`` makes the level a World Partition map: every actor gets a
+    descriptor, and the actors not loaded leave the level listing, as in a
+    saved World Partition map opened in UE 5.7.4. WorldPartitionBlueprintLibrary
+    answers as UE 5.7.4's does: no descriptors (None) outside such a map or
+    while PIE runs, load_actors loads at once, and unload_actors releases only
+    the actors load_actors loaded.
+    """
 
     def __init__(self) -> None:
         self.actors: List[Actor] = []
-        self.world = SimpleNamespace(get_name=lambda: "Lab", get_path_name=lambda: WORLD)
+        self.world = SimpleNamespace(
+            get_name=lambda: "Lab",
+            get_path_name=lambda: WORLD,
+            get_outermost=lambda: SimpleNamespace(get_name=lambda: "/Game/Maps/Lab"),
+        )
+        self.pie = False
+        self.descriptors: Optional[List[SimpleNamespace]] = None
+        self.stored: Dict[str, Actor] = {}
+        self.library_loaded: set = set()
 
     def add(self, *actors: Actor) -> List[Actor]:
         self.actors.extend(actors)
         return list(actors)
+
+    def partition(self, loaded: int) -> None:
+        """Make the level a World Partition map with only its first ``loaded`` actors loaded."""
+        self.descriptors = [
+            SimpleNamespace(guid=actor.label, actor_path=actor.path, is_spatially_loaded=True, location=actor.location)
+            for actor in self.actors
+        ]
+        self.stored = {actor.label: actor for actor in self.actors}
+        self.actors = self.actors[:loaded]
 
     def load_object(self, outer: Any, path: str) -> Any:
         return next((actor for actor in self.actors if actor.path == path), None)
@@ -233,10 +261,52 @@ class Editor:
     def load_class(self, outer: Any, path: str) -> Optional[Class]:
         return CLASSES.get(path)
 
+    def world_partition(self) -> SimpleNamespace:
+        editor = self
+
+        def descriptors() -> Optional[List[SimpleNamespace]]:
+            return None if editor.descriptors is None or editor.pie else list(editor.descriptors)
+
+        def intersecting(box: SimpleNamespace) -> Optional[List[SimpleNamespace]]:
+            found = descriptors()
+            if found is None:
+                return None
+            return [
+                d
+                for d in found
+                if all(
+                    getattr(box.min, axis) <= getattr(d.location, axis) <= getattr(box.max, axis)
+                    for axis in "xyz"
+                )
+            ]
+
+        def load_actors(guids: List[str]) -> None:
+            for guid in guids:
+                actor = editor.stored[guid]
+                if actor not in editor.actors:
+                    editor.actors.append(actor)
+                    editor.library_loaded.add(guid)
+
+        def unload_actors(guids: List[str]) -> None:
+            for guid in guids:
+                if guid in editor.library_loaded:
+                    editor.actors.remove(editor.stored[guid])
+                    editor.library_loaded.discard(guid)
+
+        return SimpleNamespace(
+            get_actor_descs=descriptors,
+            get_intersecting_actor_descs=intersecting,
+            load_actors=load_actors,
+            unload_actors=unload_actors,
+        )
+
     def module(self) -> SimpleNamespace:
-        actor_subsystem = SimpleNamespace(get_all_level_actors=lambda: list(self.actors))
-        level_editor = SimpleNamespace(is_in_play_in_editor=lambda: False)
-        editor = SimpleNamespace(get_editor_world=lambda: self.world, get_game_world=lambda: None)
+        actor_subsystem = SimpleNamespace(get_all_level_actors=lambda: [] if self.pie else list(self.actors))
+        level_editor = SimpleNamespace(is_in_play_in_editor=lambda: self.pie)
+        editor = SimpleNamespace(
+            get_editor_world=lambda: None if self.pie else self.world,
+            get_game_world=lambda: SimpleNamespace() if self.pie else None,
+        )
         return SimpleNamespace(
             Actor=Actor,
             ActorComponent=ActorComponent,
@@ -256,9 +326,15 @@ class Editor:
                 "actors": actor_subsystem,
                 "level": level_editor,
                 "editor": editor,
+                # GWorld: the editor world wherever Remote Control runs a script.
+                "layers": SimpleNamespace(get_world=lambda: self.world),
             }[name],
             load_object=self.load_object,
             load_class=self.load_class,
+            Box=lambda min, max: SimpleNamespace(min=min, max=max),
+            Vector=Vector,
+            GameplayStatics=SimpleNamespace(get_all_actors_of_class=lambda world, cls: list(self.actors)),
+            WorldPartitionBlueprintLibrary=self.world_partition(),
             MathLibrary=SimpleNamespace(class_is_child_of=class_is_child_of),
             SystemLibrary=SimpleNamespace(
                 get_component_bounds=lambda component: (
@@ -759,6 +835,136 @@ async def test_components_of_a_missing_actor_is_an_error(session: UnrealRuntimeS
 
 
 # ---------------------------------------------------------------------------
+# World Partition: unloaded actors are reported, and can be loaded
+# ---------------------------------------------------------------------------
+
+
+def world_partition_level(editor: Editor, count: int = 100, loaded: int = 2) -> List[Actor]:
+    """A saved World Partition map opened normally: ``count`` tagged crates, ``loaded`` of them loaded.
+
+    The audit's map: 100 crates 200 m apart, of which a map opened in UE 5.7.4
+    loads none but its two always-loaded helper actors.
+    """
+    crates = [
+        Actor(f"WPCrate_{i:03d}", STATIC_MESH_ACTOR, ("wp_prop",), x=(i % 10) * 20000.0) for i in range(count)
+    ]
+    for i, crate in enumerate(crates):
+        crate.location = Vector((i % 10) * 20000.0, (i // 10) * 20000.0, 100.0)
+    editor.add(*crates)
+    editor.partition(loaded)
+    return crates
+
+
+@pytest.mark.asyncio
+async def test_reads_of_a_world_partition_map_report_and_warn_of_unloaded_actors(editor: Editor) -> None:
+    """A saved World Partition map with 102 descriptors read as "Total actors:
+    2" and found 0 of its 100 tagged actors, saying nothing of the rest."""
+    world_partition_level(editor)
+    async with remote_control(editor) as settings:
+        summary = await call_tool(settings, "summarize_unreal_scene", {})
+        listing = await call_tool(settings, "list_unreal_actors", {})
+        search = await call_tool(settings, "get_unreal_actor_by_semantic_label", {"label": "wp_prop"})
+        graph = await call_tool(settings, "query_unreal_scene_graph", {})
+    for reply in (summary, listing, search, graph):
+        assert (reply["world_partition"], reply["unloaded_actors"]) == (True, 98), reply
+    assert "98 of this map's 100 saved actors are not loaded" in summary["summary_text"]
+    assert "load_unreal_world_partition_actors" in summary["summary_text"]
+    for reply in (listing, search, graph):
+        assert any("load_unreal_world_partition_actors" in warning for warning in reply["warnings"]), reply
+    assert (listing["total"], search["total_matches"], graph["total_actors"]) == (2, 2, 2)
+
+
+@pytest.mark.asyncio
+async def test_a_level_that_is_not_world_partition_reports_no_unloaded_actors(
+    session: UnrealRuntimeSession, editor: Editor
+) -> None:
+    family(editor)
+    listing = await session.list_actors()
+    assert (listing["world_partition"], listing["unloaded_actors"], listing["warnings"]) == (False, None, [])
+    summary = await session.summarize_scene()
+    assert (summary["world_partition"], summary["unloaded_actors"]) == (False, None)
+    assert "World Partition" not in summary["summary_text"]
+
+
+@pytest.mark.asyncio
+async def test_during_pie_world_partition_is_unknown_not_reported_as_loaded(
+    session: UnrealRuntimeSession, editor: Editor
+) -> None:
+    world_partition_level(editor)
+    editor.pie = True
+    listing = await session.list_actors()
+    assert (listing["pie_active"], listing["world_partition"], listing["unloaded_actors"]) == (True, None, None)
+
+
+@pytest.mark.asyncio
+async def test_loading_a_region_loads_its_actors_and_unloading_releases_them(editor: Editor) -> None:
+    crates = world_partition_level(editor)
+    async with remote_control(editor) as settings:
+        loaded = await call_tool(
+            settings,
+            "load_unreal_world_partition_actors",
+            {"bounds_min": "-100,-100,-1000", "bounds_max": "30000, 30000, 1000"},
+        )
+        after = await call_tool(settings, "get_unreal_actor_by_semantic_label", {"label": "wp_prop"})
+        released = await call_tool(
+            settings,
+            "load_unreal_world_partition_actors",
+            {"bounds_min": "-100,-100,-1000", "bounds_max": "30000,30000,1000", "action": "unload"},
+        )
+    assert loaded["success"] is True, loaded
+    # Crates 0, 1, 10 and 11 stand in the box; 0 and 1 were loaded already.
+    assert (loaded["matched"], loaded["requested"], loaded["changed"], loaded["not_changed"]) == (4, 2, 2, 0)
+    assert loaded["actors"] == [crates[10].path, crates[11].path]
+    assert (loaded["loaded_actors"], loaded["unloaded_actors"]) == (4, 96)
+    assert (after["total_matches"], after["unloaded_actors"]) == (4, 96)
+    # Unload releases only what the tool loaded: crates 0 and 1 stay.
+    assert (released["requested"], released["changed"], released["not_changed"]) == (4, 2, 2)
+    assert (released["loaded_actors"], released["unloaded_actors"]) == (2, 98)
+
+
+@pytest.mark.asyncio
+async def test_loading_more_than_max_actors_is_refused_and_changes_nothing(
+    session: UnrealRuntimeSession, editor: Editor
+) -> None:
+    world_partition_level(editor)
+    refused = await session.load_world_partition_actors(max_actors=50)
+    assert refused["success"] is False and refused["error_type"] == "ValidationError"
+    assert "98 actors would load, more than max_actors (50)" in refused["error"]
+    assert len(editor.actors) == 2
+    everything = await session.load_world_partition_actors(max_actors=98)
+    assert (everything["changed"], everything["unloaded_actors"], len(editor.actors)) == (98, 0, 100)
+
+
+@pytest.mark.asyncio
+async def test_loading_needs_a_world_partition_map_outside_pie(session: UnrealRuntimeSession, editor: Editor) -> None:
+    family(editor)
+    not_partitioned = await session.load_world_partition_actors()
+    assert (not_partitioned["success"], not_partitioned["error_type"]) == (False, "InvalidState")
+    world_partition_level(editor)
+    editor.pie = True
+    during_pie = await session.load_world_partition_actors()
+    assert (during_pie["success"], during_pie["error_type"]) == (False, "PIEActive")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"action": "pin"}, "action must be load or unload"),
+        ({"max_actors": 0}, "max_actors must be between 1 and 50000"),
+        ({"bounds_min": [0, 0, 0]}, "Give bounds_min and bounds_max together"),
+        ({"bounds_min": [0, 0, 0], "bounds_max": [1, 1]}, "bounds_max must be three finite numbers"),
+        ({"bounds_min": [5, 0, 0], "bounds_max": [1, 1, 1]}, "bounds_min must not exceed bounds_max"),
+    ],
+)
+async def test_loading_refuses_bad_input_before_any_request(
+    session: UnrealRuntimeSession, kwargs: Dict[str, Any], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        await session.load_world_partition_actors(**kwargs)
+
+
+# ---------------------------------------------------------------------------
 # simul unreal list-actors / scene-graph
 # ---------------------------------------------------------------------------
 
@@ -782,6 +988,16 @@ class _RecordingSession:
     async def query_scene_graph(self, **kwargs: Any) -> Dict[str, Any]:
         self.calls.append(("query_scene_graph", kwargs))
         return {"root": {"name": "Lab", "children": []}, "total_actors": 0}
+
+    async def load_world_partition_actors(self, **kwargs: Any) -> Dict[str, Any]:
+        self.calls.append(("load_world_partition_actors", kwargs))
+        return {"action": kwargs["action"], "changed": 4, "requested": 4, "unloaded_actors": 96,
+                "actor_descriptors": 102}
+
+    async def capture_camera(self, *args: Any) -> Dict[str, Any]:
+        self.calls.append(("capture_camera", args))
+        return {"path": "/shots/SimulCamera_Cam_1.png", "camera": {"horizontal_fov": 90.0},
+                "intrinsics": {"fx": 640.0}}
 
     async def close(self) -> None:
         pass
@@ -830,4 +1046,36 @@ def test_the_cli_pages_and_filters_the_listing(monkeypatch: pytest.MonkeyPatch) 
                 "max_results": 5,
             },
         ),
+    ]
+
+
+def test_the_cli_loads_world_partition_actors_and_captures_cameras(monkeypatch: pytest.MonkeyPatch) -> None:
+    from typer.testing import CliRunner
+
+    from simul.cli import unreal_cli
+    from simul.cli.main import app
+
+    stub = _RecordingSession()
+    monkeypatch.setattr(unreal_cli, "_session", lambda *args, **kwargs: stub)
+    runner = CliRunner()
+    loaded = runner.invoke(
+        app, ["--json", "unreal", "wp-load", "--min", "0,0,0", "--max", "100,100,50", "--max-actors", "9"]
+    )
+    assert loaded.exit_code == 0, loaded.stdout
+    assert json.loads(loaded.stdout)["unloaded_actors"] == 96
+    released = runner.invoke(app, ["--json", "unreal", "wp-load", "--unload"])
+    assert released.exit_code == 0, released.stdout
+    captured = runner.invoke(
+        app, ["--json", "unreal", "capture-camera", LEVEL + "Cam", "-W", "320", "--height", "240"]
+    )
+    assert captured.exit_code == 0, captured.stdout
+    assert json.loads(captured.stdout)["intrinsics"] == {"fx": 640.0}
+    assert stub.calls == [
+        (
+            "load_world_partition_actors",
+            {"bounds_min": [0.0, 0.0, 0.0], "bounds_max": [100.0, 100.0, 50.0], "max_actors": 9, "action": "load"},
+        ),
+        ("load_world_partition_actors", {"bounds_min": None, "bounds_max": None, "max_actors": 500,
+                                         "action": "unload"}),
+        ("capture_camera", (LEVEL + "Cam", 320, 240, "png")),
     ]

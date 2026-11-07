@@ -92,7 +92,7 @@ Requires an editor with Remote Control and Python enabled; run
 | `ping_unreal` | Reachability and latency |
 | `list_unreal_instances` | Editors on the scanned ports: identity, viewports, active and attached flags. Same payload as `simul unreal instances`; see [unreal-attachment.md](unreal-attachment.md#discover-and-select) |
 | `control_unreal_ui` | Named editor controls and per-agent viewport pointers in attached mode; works with script execution disabled. See [unreal-attachment.md](unreal-attachment.md) |
-| `capture_unreal_viewport` | Viewport screenshot (PNG) |
+| `capture_unreal_viewport` | Viewport screenshot (PNG or JPEG): the level editor viewport, or the player's view during Play In Editor |
 | `execute_unreal_script` | Run Python inside the editor |
 
 The rest of the operation set is available from the CLI
@@ -104,10 +104,10 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 
 | Group | Tools |
 |---|---|
-| Engine and scene | `get_unreal_engine_info`, `get_unreal_loaded_map`, `summarize_unreal_scene`, `query_unreal_scene_graph`, `analyze_unreal_scene_for_robotics`, `get_unreal_viewport_info` |
+| Engine and scene | `get_unreal_engine_info`, `get_unreal_loaded_map`, `summarize_unreal_scene`, `load_unreal_world_partition_actors`, `query_unreal_scene_graph`, `analyze_unreal_scene_for_robotics`, `get_unreal_viewport_info` |
 | Actors | `list_unreal_actors`, `get_unreal_actor_info`, `list_unreal_actor_components`, `describe_unreal_object`, `get_unreal_actor_by_semantic_label`, `get_unreal_actor_thumbnail`, `spawn_unreal_actor`, `delete_unreal_actor`, `set_unreal_actor_transform`, `set_unreal_actor_property`, `set_unreal_actor_visibility`, `set_unreal_actor_parent`, `add_unreal_component`, `focus_unreal_on_actor` |
 | Assets | `search_unreal_assets` |
-| Camera, lights, rendering | `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
+| Camera, lights, rendering | `capture_unreal_camera`, `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
 | Materials | `get_unreal_material_info`, `assign_unreal_material`, `create_unreal_material_instance`, `set_unreal_material_params` |
 | Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `apply_unreal_force`, `control_unreal_simulation`, `get_unreal_simulation_status` |
 | Mesh operations | `generate_unreal_mesh_primitive`, `generate_unreal_procedural_scene`, `validate_unreal_mesh`, `simplify_unreal_mesh`, `remesh_unreal_mesh`, `subdivide_unreal_mesh`, `edit_unreal_mesh_topology`, `apply_unreal_mesh_boolean`, `cut_unreal_mesh_plane`, `compute_unreal_convex_hull`, `decompose_unreal_convex_hull`, `compute_unreal_mesh_uv`, `convert_unreal_mesh_format` |
@@ -145,6 +145,22 @@ Behaviour worth knowing:
   `class_filter` keeps the matching actors and the actors above them, which
   carry `matches_filter: false`; `include_components` adds each actor's
   components (name, class, root flag, the component it is attached to).
+- In a World Partition map the editor loads only some regions' actors, and
+  the scene reads see only loaded actors. `summarize_unreal_scene`,
+  `list_unreal_actors`, `get_unreal_actor_by_semantic_label` and
+  `query_unreal_scene_graph` report `world_partition` and `unloaded_actors`
+  (the map's saved actors, from its World Partition actor descriptors, that
+  are not loaded) and warn when some are unloaded; a saved map opened
+  normally can have nearly all of them unloaded. `load_unreal_world_partition_actors`
+  loads the actors whose bounds meet a box (`bounds_min`, `bounds_max`), or
+  every actor, through `WorldPartitionBlueprintLibrary.load_actors`, which
+  loads them at once and leaves the map unmodified; it refuses, changing
+  nothing, when more than `max_actors` (default 500) would load. `action`
+  `unload` releases the actors it loaded (the editor's own loading regions
+  keep theirs: `not_changed`). Loaded actors stay loaded until unloaded or
+  another map opens. During Play In Editor Unreal's World Partition library
+  finds no editor world, so `world_partition` and `unloaded_actors` are null
+  and loading is refused (`PIEActive`). CLI: `simul unreal wp-load`.
 - `list_unreal_actor_components` lists an actor's components, editor-only
   ones included: class, root and editor-only flags, and for scene components
   the component they are attached to (its path when it belongs to another
@@ -306,6 +322,58 @@ Behaviour worth knowing:
     starts) the camera stays where it was put; when a Play session in the
     level viewport stops, Unreal replaces the editor camera, by default with
     the game camera's last view.
+- `capture_unreal_viewport` writes the image into the editor's
+  `Saved/Screenshots` and returns its path on the editor host; `inline` also
+  sends it as an image block, up to 256 KB. `format: "jpeg"` converts the PNG
+  HighResShot writes into a JPEG beside it in the editor (about a tenth of the
+  size: a 640x360 capture is about 27 KB), and `inline_max_size` inlines a copy
+  scaled to that many pixels on its longer side while the file keeps full
+  size. `view` picks what is captured, and the reply says which (`view`,
+  `pie_active`): `editor` is the level editor viewport, whose camera
+  `set_unreal_camera_view` moves; `game` is the player's view during a Play In
+  Editor session (HighResShot run in the game world goes to its game
+  viewport); `auto` (the default) takes the game view when a Play session's
+  game viewport draws. Simulate In Editor (what `control_unreal_simulation`
+  starts) shows the simulation in the level viewport and its game viewport
+  never draws, and Unreal's Python cannot tell it from Play, so `auto` tries
+  the game view for 2 s and then captures the level viewport, with a
+  warning; `game` fails with `InvalidState`. An editor HighResShot goes to
+  every level viewport pane that draws, while Unreal's camera calls
+  (`set_unreal_camera_view`, `focus_unreal_on_actor`,
+  `get_unreal_viewport_info`) read and move only the first perspective pane:
+  when several panes write a screenshot the newest is returned with a
+  warning that it may not be that pane, so maximize the pane or use a
+  one-pane layout. (The headless editor `simul unreal setup` starts has a
+  four-pane layout in which only the perspective pane draws.)
+- `get_unreal_viewport_info` returns the first perspective pane's camera, so
+  `projection_type` is `Perspective`. Editor Python cannot read a level
+  viewport's field of view (UE 5.7 keeps it in config-only settings), so `fov`
+  is null and `notes` says so; pass the real value to `focus_unreal_on_actor`.
+  The viewport's size is not readable either: `measure_size: true` measures
+  it with a HighResShot at the viewport's own size (the file is deleted).
+  During Play In Editor `game_view` is the player camera (location, rotation,
+  field of view) and the game viewport's size, which is also `viewport_size`;
+  `viewports` and `active_viewport` name the layout's panes.
+- `capture_unreal_camera` renders what a camera or sensor actor sees: a
+  CameraActor, CineCameraActor, SceneCapture2D or any actor with a
+  CameraComponent or SceneCaptureComponent2D (that one first). A transient
+  SceneCapture2D stands at that component with its projection, field of view
+  across the width (a CineCamera's from its focal length and filmback; its
+  `field_of_view` property can be stale), ortho width and post-process
+  settings, hides the actor itself, and captures final color once; the
+  image is written as PNG or JPEG into the editor's screenshot directory, and
+  the capture actor is destroyed (it is transient, so the map stays
+  unmodified). The reply has the camera's pose, fields of view and lens, and
+  `intrinsics`: the pinhole model of this image (square pixels, `cx`, `cy` at
+  the image center in OpenCV's pixel-center convention; Unreal's camera +X is
+  the optical axis, +Y image right, -Z image down; null for an orthographic
+  camera). A capture whose shape differs from a camera that constrains its
+  aspect ratio comes with a warning. During Play In Editor the actor's
+  counterpart in the running game is captured (`world: "game"`); an actor
+  with none there is refused (`PIEActive`). A one-shot scene capture has no
+  auto-exposure history, so its exposure can differ from the viewport's.
+  RGB only: depth, segmentation and other render passes are not captured.
+  CLI: `simul unreal capture-camera`.
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.

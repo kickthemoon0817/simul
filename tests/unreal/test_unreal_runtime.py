@@ -542,7 +542,8 @@ class TestUnrealRuntimeSessionPhase2:
                     "ReturnValue": True,
                     "LogOutput": [{
                         "Type": "Info",
-                        "Output": '@@SIMUL_SCREENSHOT@@{"existing": ["/proj/Saved/Screenshots/old.png"]}',
+                        "Output": ('@@SIMUL_SCREENSHOT@@{"existing": ["/proj/Saved/Screenshots/old.png"], '
+                                   '"pie_active": false, "player": false, "view": "editor"}'),
                     }],
                 })
             if fn == "ExecutePythonCommandEx":
@@ -577,6 +578,7 @@ class TestUnrealRuntimeSessionPhase2:
         assert result["resolution_x"] == 1280
         assert result["resolution_y"] == 720
         assert result["format"] == "png"
+        assert (result["view"], result["pie_active"], result["warnings"]) == ("editor", False, [])
 
     def test_capture_viewport_no_screenshot_data(
         self, monkeypatch: pytest.MonkeyPatch
@@ -614,7 +616,11 @@ class TestUnrealRuntimeSessionPhase2:
             ):
                 return FakeResponse({
                     "ReturnValue": True,
-                    "LogOutput": [{"Type": "Info", "Output": '@@SIMUL_SCREENSHOT@@{"existing": []}'}],
+                    "LogOutput": [{
+                        "Type": "Info",
+                        "Output": ('@@SIMUL_SCREENSHOT@@{"existing": [], "pie_active": false, "player": false, '
+                                   '"view": "editor"}'),
+                    }],
                 })
             if fn == "ExecutePythonCommandEx":
                 # Marker present but with an empty payload: the read script
@@ -658,10 +664,14 @@ class TestUnrealRuntimeSessionPhase2:
 
         assert result["camera_location"] == (100.0, 200.0, 300.0)
         assert result["camera_rotation"] == (-15.0, 45.0, 0.0)
-        # Remote Control exposes none of these; they are not guessed.
+        # Neither is readable here; they are not guessed, and notes say why.
         assert result["viewport_size"] is None
         assert result["fov"] is None
-        assert result["projection_type"] is None
+        assert result["notes"][0] == unreal_runtime.VIEWPORT_FOV_NOTE
+        # GetLevelViewportCameraInfo reads only perspective panes.
+        assert result["projection_type"] == "Perspective"
+        # The Python state read was refused (404 here): the camera still comes back.
+        assert any("Could not read the Play In Editor state" in note for note in result["notes"])
 
     # -- set_camera_view --
 

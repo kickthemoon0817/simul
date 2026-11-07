@@ -40,6 +40,7 @@ from ..schemas.unreal import (
     UnrealAssignMaterialResponse,
     UnrealBatchOperationsResponse,
     UnrealCallActorFunctionResponse,
+    UnrealCaptureCameraResponse,
     UnrealCaptureViewportResponse,
     UnrealComputeConvexHullResponse,
     UnrealComputeMeshUvResponse,
@@ -71,6 +72,7 @@ from ..schemas.unreal import (
     UnrealListActorsResponse,
     UnrealListInstancesResponse,
     UnrealLoadedMapResponse,
+    UnrealLoadWorldPartitionResponse,
     UnrealPingResponse,
     UnrealQuerySceneGraphResponse,
     UnrealRemeshMeshResponse,
@@ -222,12 +224,30 @@ def _optional_json(value: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _png_format(request: Any) -> Optional[str]:
-    """Viewport captures are written as PNG; ``simul unreal capture`` converts."""
-    formats = {"png"}
-    if request.format not in formats:
-        return f"Invalid format '{request.format}'. Must be one of {sorted(formats)}"
+def _capture_options(request: Any) -> Optional[str]:
+    """The image formats, views, JPEG quality and inline size the capture tools take."""
+    from ...adapters.unreal_runtime import CAPTURE_FORMATS, CAPTURE_VIEWS
+
+    if request.format not in CAPTURE_FORMATS:
+        return f"Invalid format '{request.format}'. Must be one of {sorted(CAPTURE_FORMATS)}"
+    view = getattr(request, "view", "auto")
+    if view not in CAPTURE_VIEWS:
+        return f"Invalid view '{view}'. Must be one of {list(CAPTURE_VIEWS)}"
+    if not 1 <= request.jpeg_quality <= 100:
+        return "jpeg_quality must be between 1 and 100"
+    if request.inline_max_size and not 16 <= request.inline_max_size <= 16384:
+        return "inline_max_size must be 0 or between 16 and 16384"
     return None
+
+
+def _world_partition_arguments(request: Any) -> Dict[str, Any]:
+    """The box corners as number triples (None for every actor), the limit and the action."""
+    return {
+        "bounds_min": _optional_floats(request.bounds_min),
+        "bounds_max": _optional_floats(request.bounds_max),
+        "max_actors": request.max_actors,
+        "action": request.action,
+    }
 
 
 def _exec_mode(request: Any) -> Optional[str]:
@@ -370,7 +390,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "Capture a viewport screenshot via HighResScreenshot and return "
             "its path on the editor host. Pass inline=true to also receive "
             "the image itself as an image content block; captures above the "
-            "inline size cap return the path alone."
+            "inline size cap return the path alone, unless format jpeg or "
+            "inline_max_size makes them fit. view picks the level editor "
+            "viewport or, during Play In Editor, the player's game view; the "
+            "reply says which (view, pie_active)."
         ),
         response=UnrealCaptureViewportResponse,
         read_only=False,
@@ -378,10 +401,35 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         params=(
             ToolParam("resolution_x", int, 1920, description="Width in pixels."),
             ToolParam("resolution_y", int, 1080, description="Height in pixels."),
-            ToolParam("format", str, "png", description="Image format (png). Use CLI capture to convert to JPEG."),
+            ToolParam(
+                "format",
+                str,
+                "png",
+                description="png, or jpeg (converted in the editor; about a tenth of the size).",
+            ),
             ToolParam("inline", bool, False, description="Also return the image as an image content block."),
+            ToolParam(
+                "view",
+                str,
+                "auto",
+                description=(
+                    "editor: the level editor viewport, whose camera set_unreal_camera_view moves. game: the "
+                    "Play In Editor player's view. auto: game when a Play session's game viewport draws, else "
+                    "editor (Simulate In Editor shows the simulation in the level viewport)."
+                ),
+            ),
+            ToolParam("jpeg_quality", int, 85, description="JPEG quality, 1 to 100."),
+            ToolParam(
+                "inline_max_size",
+                int,
+                0,
+                description=(
+                    "Above 0, inline a copy scaled down to at most this many pixels on its longer side "
+                    "(16 to 16384); the file keeps full resolution."
+                ),
+            ),
         ),
-        check=_png_format,
+        check=_capture_options,
         usage=_all_arguments,
     ),
     UnrealTool(
@@ -637,20 +685,107 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="summarize_unreal_scene",
-        description="Generate an LLM-friendly digest of the current Unreal scene.",
+        description=(
+            "Generate an LLM-friendly digest of the current Unreal scene. In a World Partition map it "
+            "reports the saved actors not loaded in the editor (unloaded_actors), which it does not count."
+        ),
         response=UnrealSceneSummaryResponse,
         read_only=True,
         idempotent=True,
         method="summarize_scene",
     ),
+    UnrealTool(
+        name="load_unreal_world_partition_actors",
+        description=(
+            "Load (or unload) a World Partition map's actors in the editor: those in a box, or every one. "
+            "A World Partition map opened in the editor loads only some regions, and the scene reads see "
+            "only loaded actors (they report unloaded_actors). Refused, changing nothing, above max_actors."
+        ),
+        response=UnrealLoadWorldPartitionResponse,
+        read_only=False,
+        idempotent=True,
+        method="load_world_partition_actors",
+        params=(
+            ToolParam(
+                "bounds_min",
+                str,
+                "",
+                description="Minimum corner as comma-separated x,y,z in cm; empty with bounds_max for every actor.",
+            ),
+            ToolParam(
+                "bounds_max",
+                str,
+                "",
+                description="Maximum corner as comma-separated x,y,z in cm; empty with bounds_min for every actor.",
+            ),
+            ToolParam(
+                "max_actors",
+                int,
+                500,
+                description="Refuse when more actors than this would change (1 to 50000).",
+            ),
+            ToolParam(
+                "action",
+                str,
+                "load",
+                description="load, or unload (releases only actors this tool loaded).",
+            ),
+        ),
+        arguments=_world_partition_arguments,
+    ),
     # -- Viewport and visual observation --------------------------------------
     UnrealTool(
         name="get_unreal_viewport_info",
-        description="Get active viewport camera and render information.",
+        description=(
+            "Get the level viewport camera (the first perspective pane, which set_unreal_camera_view moves) "
+            "and, during Play In Editor, the player's view with its field of view and viewport size. The "
+            "level viewport's field of view is not readable from editor Python (notes says so); "
+            "measure_size measures its size with a HighResShot."
+        ),
         response=UnrealViewportInfoResponse,
         read_only=True,
         idempotent=True,
         method="get_viewport_info",
+        params=(
+            ToolParam(
+                "measure_size",
+                bool,
+                False,
+                description="Measure the level viewport's size with a HighResShot at its own size.",
+            ),
+        ),
+    ),
+    UnrealTool(
+        name="capture_unreal_camera",
+        description=(
+            "Render what a camera or sensor actor sees (CameraActor, CineCameraActor, SceneCapture2D, or "
+            "an actor with a CameraComponent or SceneCaptureComponent2D) through a transient scene capture "
+            "with its field of view and post-process settings, and return the image path, the camera pose "
+            "and the image's pinhole intrinsics. During Play In Editor the running game's counterpart is "
+            "captured. RGB only."
+        ),
+        response=UnrealCaptureCameraResponse,
+        read_only=False,
+        method="capture_camera",
+        params=(
+            ToolParam("actor_path", str, description="Full object path of the camera or sensor actor."),
+            ToolParam("resolution_x", int, 1280, description="Width in pixels, 1 to 8192."),
+            ToolParam("resolution_y", int, 720, description="Height in pixels, 1 to 8192."),
+            ToolParam("format", str, "png", description="png or jpeg."),
+            ToolParam("inline", bool, False, description="Also return the image as an image content block."),
+            ToolParam("jpeg_quality", int, 85, description="JPEG quality, 1 to 100."),
+            ToolParam(
+                "inline_max_size",
+                int,
+                0,
+                description=(
+                    "Above 0, inline a copy scaled down to at most this many pixels on its longer side "
+                    "(16 to 16384); the file keeps full resolution."
+                ),
+            ),
+        ),
+        check=_capture_options,
+        usage=_all_arguments,
     ),
     UnrealTool(
         name="set_unreal_camera_view",

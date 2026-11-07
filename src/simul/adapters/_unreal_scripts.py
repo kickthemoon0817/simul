@@ -435,6 +435,30 @@ def spawn(path, location, rotation, label):
 print(json.dumps(spawn(**args)))
 """
 
+# world_partition_state(loaded): whether the editor world is a World Partition
+# map and, if so, how many of its actors are not loaded in the editor, after
+# EDITOR_WORLD. A World Partition map keeps an actor descriptor for every
+# saved actor and loads only the actors of the regions the editor has loaded,
+# so a map opened normally may have most of them unloaded, and Unreal's level
+# listing (get_all_level_actors) leaves those out. Descriptors whose actor path
+# is not among ``loaded`` (paths of level actors; None reads them) are the
+# unloaded ones. WorldPartitionBlueprintLibrary returns no descriptors (None)
+# outside a World Partition map, and finds no world while PIE runs (it asks
+# UnrealEditorSubsystem.get_editor_world, which answers None then), so during
+# PIE every field is None (observed on UE 5.7.4).
+WORLD_PARTITION_HELPERS = """
+def world_partition_state(loaded=None):
+    if pie_active():
+        return {"world_partition": None, "actor_descriptors": None, "unloaded_actors": None}
+    descriptors = unreal.WorldPartitionBlueprintLibrary.get_actor_descs()
+    if descriptors is None:
+        return {"world_partition": False, "actor_descriptors": None, "unloaded_actors": None}
+    if loaded is None:
+        loaded = {actor.get_path_name() for actor in level_actors()}
+    unloaded = sum(1 for descriptor in descriptors if str(descriptor.actor_path) not in loaded)
+    return {"world_partition": True, "actor_descriptors": len(descriptors), "unloaded_actors": unloaded}
+"""
+
 #: Most child actor paths a listing entry names; its ``child_count`` counts
 #: them all, and ``get_unreal_actor_info`` names more.
 LISTED_CHILDREN = 20
@@ -533,7 +557,7 @@ def listing_entry(actor, listed):
     entry = {key: value for key, value in actor_info(actor).items() if key != "components"}
     entry.update(hierarchy(actor, listed))
     return entry
-"""
+""" + WORLD_PARTITION_HELPERS
 
 # Expects ``args`` = {"class_filter", "include_subclasses", "tag_filter",
 # "label_filter", "offset", "max_results", "budget", "listed_children"}. Every
@@ -552,9 +576,10 @@ found = [actor for actor in actors
          and (not label or label in actor.get_actor_label().lower())]
 entries, next_offset, ended = page(found, args["offset"], args["max_results"], args["budget"],
                                    lambda actor: listing_entry(actor, args["listed_children"]))
-print(json.dumps({"actors": entries, "count": len(entries), "total": len(found), "offset": args["offset"],
-                  "next_offset": next_offset, "page_ended_by": ended,
-                  "warnings": [warning] if warning else [], "pie_active": pie_active()}))
+print(json.dumps(dict({"actors": entries, "count": len(entries), "total": len(found), "offset": args["offset"],
+                       "next_offset": next_offset, "page_ended_by": ended,
+                       "warnings": [warning] if warning else [], "pie_active": pie_active()},
+                      **world_partition_state({actor.get_path_name() for actor in actors}))))
 """
 
 # Expects ``args`` = {"actor_path", "listed_children"}: actor_info with the
@@ -583,13 +608,15 @@ def matches(tag):
         return label.lower() in tag.lower()
     return tag.lower() == label.lower()
 
-found = [actor for actor in level_actors()
+actors = level_actors()
+found = [actor for actor in actors
          if any(matches(str(tag)) for tag in actor.get_editor_property("tags"))]
 entries, next_offset, ended = page(found, args["offset"], args["max_results"], args["budget"],
                                    lambda actor: listing_entry(actor, args["listed_children"]))
-print(json.dumps({"actors": entries, "count": len(entries), "total_matches": len(found),
-                  "offset": args["offset"], "next_offset": next_offset, "page_ended_by": ended,
-                  "label_searched": label, "pie_active": pie_active()}))
+print(json.dumps(dict({"actors": entries, "count": len(entries), "total_matches": len(found),
+                       "offset": args["offset"], "next_offset": next_offset, "page_ended_by": ended,
+                       "label_searched": label, "warnings": [], "pie_active": pie_active()},
+                      **world_partition_state({actor.get_path_name() for actor in actors}))))
 """
 
 # Expects ``args`` = {"root_path", "max_depth", "include_components",
@@ -697,13 +724,14 @@ root["children"] = entries
 def count_nodes(entry):
     return 1 + sum(count_nodes(child) for child in entry["children"])
 
-print(json.dumps({"root": root, "total_actors": total_actors, "total_depth": total_depth,
-                  "returned_actors": sum(count_nodes(entry) for entry in entries),
-                  "count": len(entries), "total": len(top), "offset": args["offset"],
-                  "next_offset": next_offset, "page_ended_by": ended,
-                  "depth_limited": [{"path": entry["path"], "depth": shallower[entry["path"]]}
-                                    for entry in entries if entry["path"] in shallower],
-                  "warnings": [warning] if warning else [], "pie_active": pie_active()}))
+print(json.dumps(dict({"root": root, "total_actors": total_actors, "total_depth": total_depth,
+                       "returned_actors": sum(count_nodes(entry) for entry in entries),
+                       "count": len(entries), "total": len(top), "offset": args["offset"],
+                       "next_offset": next_offset, "page_ended_by": ended,
+                       "depth_limited": [{"path": entry["path"], "depth": shallower[entry["path"]]}
+                                         for entry in entries if entry["path"] in shallower],
+                       "warnings": [warning] if warning else [], "pie_active": pie_active()},
+                      **world_partition_state(listed))))
 """
 
 # Expects ``args`` = {"actor_path", "class_filter", "offset", "max_results",
@@ -758,7 +786,7 @@ print(json.dumps({"actor_path": actor.get_path_name(), "components": entries, "c
 # Scene digest in one round trip. Class keys are UClass path names
 # (``/Script/Engine.StaticMeshActor``), the same strings Remote Control's
 # ``/remote/object/describe`` reports as ``Class``.
-SCENE_SUMMARY = EDITOR_WORLD + """
+SCENE_SUMMARY = EDITOR_WORLD + WORLD_PARTITION_HELPERS + """
 world = editor_world()
 counts = {}
 total = 0
@@ -771,6 +799,7 @@ print(json.dumps({
     "total_actors": total,
     "actor_class_counts": counts,
     "pie_active": pie_active(),
+    **world_partition_state(),
 }))
 """
 
@@ -1298,4 +1327,219 @@ if pie:
 print(json.dumps({"traversable_surfaces": traversable, "graspable_objects": graspable,
                   "collision_summary": summary if "collision_complexity" in analyses else {},
                   "total_actors_analyzed": summary["total_actors"], "pie_active": pie}))
+"""
+
+# The Play In Editor state get_viewport_info adds to the level viewport camera:
+# whether PIE runs, the player's view (PlayerCameraManager location, rotation
+# and field of view, and the game viewport's size from WidgetLayoutLibrary)
+# when a Play session has a player (Simulate In Editor has none), and the level
+# viewport layout's panes.
+VIEWPORT_STATE = """
+import json, unreal
+level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+pie = bool(level.is_in_play_in_editor())
+game = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world() if pie else None
+manager = unreal.GameplayStatics.get_player_camera_manager(game, 0) if game is not None else None
+view = None
+if manager is not None:
+    location, rotation = manager.get_camera_location(), manager.get_camera_rotation()
+    size = unreal.WidgetLayoutLibrary.get_viewport_size(game)
+    view = {"camera_location": [location.x, location.y, location.z],
+            "camera_rotation": [rotation.pitch, rotation.yaw, rotation.roll],
+            "fov": manager.get_fov_angle(), "viewport_size": [int(round(size.x)), int(round(size.y))]}
+print(json.dumps({"pie_active": pie, "game_view": view,
+                  "viewports": [str(key) for key in level.get_viewport_config_keys()],
+                  "active_viewport": str(level.get_active_viewport_config_key())}))
+"""
+
+#: Most actor paths a World Partition load or unload names; its counts cover all.
+WORLD_PARTITION_LISTED = 50
+
+# Expects ``args`` = {"action", "bounds_min", "bounds_max", "max_actors",
+# "listed"}: action "load" or "unload", the box as [x, y, z] corners in cm (both
+# None for every actor descriptor of the map). Loads (or unloads) the actors of
+# the World Partition descriptors whose editor bounds intersect the box,
+# through WorldPartitionBlueprintLibrary.load_actors / unload_actors, the
+# library's own loader: it loads them in the editor as the World Partition
+# editor's Load does, at once, and leaves the map package clean (observed on UE
+# 5.7.4). Unloading asks only for spatially loaded actors (the others are
+# always loaded), and unload_actors only unloads actors that load_actors
+# loaded, so an actor a loading region of the editor keeps loaded stays loaded
+# and is reported in not_changed. Refused when more than max_actors would change (nothing is
+# done), outside a World Partition map (InvalidState) and while PIE runs, when
+# the library finds no editor world (PIEActive).
+WORLD_PARTITION_LOAD = EDITOR_WORLD + WORLD_PARTITION_HELPERS + """
+def change():
+    if pie_active():
+        return pie_refusal("load or unload World Partition actors")
+    library = unreal.WorldPartitionBlueprintLibrary
+    descriptors = library.get_actor_descs()
+    if descriptors is None:
+        return {"success": False, "error_type": "InvalidState",
+                "error": "The editor world is not a World Partition map: every actor is loaded already"}
+    if args["bounds_min"] is not None:
+        box = unreal.Box(min=unreal.Vector(*args["bounds_min"]), max=unreal.Vector(*args["bounds_max"]))
+        descriptors = library.get_intersecting_actor_descs(box) or []
+    loaded = {actor.get_path_name() for actor in level_actors()}
+    load = args["action"] == "load"
+    # Always-loaded actors (not spatially loaded) cannot be unloaded.
+    targets = [d for d in descriptors if (str(d.actor_path) in loaded) != load
+               and (load or d.is_spatially_loaded)]
+    if len(targets) > args["max_actors"]:
+        return {"success": False, "error_type": "ValidationError",
+                "error": (str(len(targets)) + " actors would " + args["action"] + ", more than max_actors ("
+                          + str(args["max_actors"]) + "); nothing was " + args["action"] + "ed. Narrow "
+                          "bounds_min and bounds_max, or raise max_actors"),
+                "details": {"would_change": len(targets), "max_actors": args["max_actors"]}}
+    guids = [d.guid for d in targets]
+    if guids and load:
+        unreal.WorldPartitionBlueprintLibrary.load_actors(guids)
+    elif guids:
+        unreal.WorldPartitionBlueprintLibrary.unload_actors(guids)
+    after = {actor.get_path_name() for actor in level_actors()}
+    changed = [str(d.actor_path) for d in targets if (str(d.actor_path) in after) == load]
+    state = world_partition_state(after)
+    return {"action": args["action"], "matched": len(descriptors), "requested": len(targets),
+            "changed": len(changed), "not_changed": len(targets) - len(changed),
+            "actors": changed[:args["listed"]], "loaded_actors": len(after),
+            "actor_descriptors": state["actor_descriptors"], "unloaded_actors": state["unloaded_actors"]}
+
+print(json.dumps(change()))
+"""
+
+# Expects ``args`` = {"actor_path", "width", "height", "format", "quality",
+# "inline_limit"}. Renders what a camera or sensor actor sees into a
+# width x height image: a transient SceneCapture2D stands where the actor's
+# SceneCaptureComponent2D (preferred) or CameraComponent is, with its
+# projection, field of view across the width (a CineCamera's from its focal
+# length and filmback, get_horizontal_field_of_view: its field_of_view
+# property can be stale, observed 90 for a 35 mm lens on UE 5.7.4), ortho
+# width and post-process settings, hides the actor itself, captures final
+# color (tone mapped, opaque alpha) once into a render target, and writes it
+# with ImageWriteBlueprintLibrary.export_to_disk (PNG, or JPEG at ``quality``)
+# into the editor's screenshot directory. Outside PIE the capture is spawned in
+# the editor world through EditorActorSubsystem as a transient actor, which no
+# listing shows and which leaves the map clean, and destroyed afterwards. While
+# PIE runs the actor's counterpart in the game world (same path under the game
+# world's package) is captured instead, through a capture spawned there
+# (GameplayStatics' deferred spawn, which Unreal's Python reaches only through
+# call_method) and destroyed; an actor without a counterpart there is refused,
+# as the editor spawns nothing during PIE. The image is returned as base64 when
+# it is at most ``inline_limit`` bytes (0: never).
+CAMERA_CAPTURE = ACTOR_HELPERS + EDITOR_WORLD + """
+import base64, math, os, time
+
+def lens_of(actor):
+    capture = actor.get_component_by_class(unreal.SceneCaptureComponent2D)
+    if capture is not None:
+        return {"component": capture, "kind": "SceneCaptureComponent2D",
+                "orthographic": capture.projection_type == unreal.CameraProjectionMode.ORTHOGRAPHIC,
+                "fov": capture.fov_angle, "ortho_width": capture.ortho_width,
+                "post_process": capture.post_process_settings, "weight": capture.post_process_blend_weight,
+                "aspect": None, "details": {}}
+    camera = actor.get_component_by_class(unreal.CameraComponent)
+    if camera is None:
+        return None
+    lens = {"component": camera, "kind": camera.get_class().get_name(),
+            "orthographic": camera.projection_mode == unreal.CameraProjectionMode.ORTHOGRAPHIC,
+            "fov": camera.field_of_view, "ortho_width": camera.ortho_width,
+            "post_process": camera.post_process_settings, "weight": camera.post_process_blend_weight,
+            "aspect": camera.aspect_ratio if camera.constrain_aspect_ratio else None, "details": {}}
+    if isinstance(camera, unreal.CineCameraComponent):
+        filmback = camera.filmback
+        lens["fov"] = camera.get_horizontal_field_of_view()
+        lens["details"] = {"focal_length_mm": camera.current_focal_length,
+                           "sensor_width_mm": filmback.sensor_width, "sensor_height_mm": filmback.sensor_height}
+    return lens
+
+def counterpart(actor, editor, game):
+    prefix = editor.get_path_name() if editor is not None else None
+    path = actor.get_path_name()
+    if prefix is None or not path.startswith(prefix + ":"):
+        return None
+    found = unreal.find_object(None, game.get_path_name() + path[len(prefix):])
+    return found if isinstance(found, unreal.Actor) else None
+
+def capture():
+    source = actor_at(args["actor_path"])
+    lens = lens_of(source)
+    if lens is None:
+        return {"success": False, "error_type": "ValidationError",
+                "error": source.get_path_name() + " (a " + source.get_class().get_name() + ") has no camera or "
+                         "scene capture component: pass a CameraActor, CineCameraActor, SceneCapture2D or an actor "
+                         "with a CameraComponent or SceneCaptureComponent2D"}
+    pie = pie_active()
+    editor = editor_world()
+    world, target, world_kind = editor, source, "editor"
+    if pie:
+        game = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+        target = counterpart(source, editor, game) if game is not None else None
+        if target is None:
+            return pie_refusal("capture an actor that is not in the running game")
+        world, world_kind = game, "game"
+        lens = lens_of(target)
+    component = lens["component"]
+    location, rotation = component.get_world_location(), component.get_world_rotation()
+    transform = unreal.Transform(location=location, rotation=rotation, scale=unreal.Vector(1.0, 1.0, 1.0))
+    if world_kind == "editor":
+        spawned = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).spawn_actor_from_class(
+            unreal.SceneCapture2D, location, rotation, True)
+        capture_component = spawned.capture_component2d if spawned is not None else None
+    else:
+        statics = unreal.get_default_object(unreal.GameplayStatics)
+        spawned = statics.call_method("BeginDeferredActorSpawnFromClass",
+                                      (world, unreal.SceneCapture2D.static_class(), transform))
+        capture_component = spawned.capture_component2d if spawned is not None else None
+    if capture_component is None:
+        return {"success": False, "error_type": "EngineError", "error": "Unreal spawned no scene capture"}
+    try:
+        target_texture = unreal.RenderingLibrary.create_render_target2d(
+            world, args["width"], args["height"], unreal.TextureRenderTargetFormat.RTF_RGBA8,
+            unreal.LinearColor(0.0, 0.0, 0.0, 1.0), False)
+        capture_component.set_editor_property("texture_target", target_texture)
+        capture_component.set_editor_property("capture_source", unreal.SceneCaptureSource.SCS_FINAL_COLOR_LDR)
+        capture_component.set_editor_property("capture_every_frame", False)
+        capture_component.set_editor_property("capture_on_movement", False)
+        capture_component.set_editor_property("fov_angle", lens["fov"])
+        capture_component.set_editor_property("ortho_width", lens["ortho_width"])
+        capture_component.set_editor_property("projection_type", unreal.CameraProjectionMode.ORTHOGRAPHIC
+                                              if lens["orthographic"] else unreal.CameraProjectionMode.PERSPECTIVE)
+        capture_component.set_editor_property("post_process_settings", lens["post_process"])
+        capture_component.set_editor_property("post_process_blend_weight", lens["weight"])
+        capture_component.hide_actor_components(target, True)
+        if world_kind == "game":
+            spawned = statics.call_method("FinishSpawningActor", (spawned, transform))
+        capture_component.capture_scene()
+        directory = unreal.Paths.convert_relative_path_to_full(unreal.Paths.screen_shot_dir())
+        os.makedirs(directory, exist_ok=True)
+        label = re.sub("[^A-Za-z0-9_-]+", "_", target.get_actor_label())[:48] or "Camera"
+        extension = "jpg" if args["format"] == "jpeg" else "png"
+        path = os.path.join(directory, "SimulCamera_%s_%d.%s" % (label, int(time.time() * 1000), extension))
+        options = unreal.ImageWriteOptions()
+        options.format = unreal.DesiredImageFormat.JPG if extension == "jpg" else unreal.DesiredImageFormat.PNG
+        options.compression_quality = args["quality"]
+        options.async_ = False
+        options.overwrite_file = True
+        unreal.ImageWriteBlueprintLibrary.export_to_disk(target_texture, path, options)
+    finally:
+        if world_kind == "editor":
+            unreal.get_editor_subsystem(unreal.EditorActorSubsystem).destroy_actor(spawned)
+        elif spawned is not None:
+            spawned.destroy_actor()
+    size = os.path.getsize(path) if os.path.isfile(path) else 0
+    if not size:
+        return {"success": False, "error_type": "CaptureError", "error": "Unreal wrote no image to " + path}
+    result = {"path": path, "size_bytes": size, "actor_path": source.get_path_name(),
+              "captured_actor": target.get_path_name(), "world": world_kind, "pie_active": pie,
+              "component": lens["kind"], "orthographic": lens["orthographic"],
+              "horizontal_fov": lens["fov"], "ortho_width": lens["ortho_width"],
+              "constrained_aspect_ratio": lens["aspect"], "lens": lens["details"],
+              "camera_location": [location.x, location.y, location.z],
+              "camera_rotation": [rotation.pitch, rotation.yaw, rotation.roll]}
+    if 0 < size <= args["inline_limit"]:
+        with open(path, "rb") as stream:
+            result["image_base64"] = base64.b64encode(stream.read()).decode("ascii")
+    return result
+
+print(json.dumps(capture()))
 """

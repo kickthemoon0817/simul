@@ -84,7 +84,7 @@
   {
    "name": "capture_unreal_viewport",
    "title": "Capture Unreal Viewport",
-   "description": "Capture a viewport screenshot via HighResScreenshot and return its path on the editor host. Pass inline=true to also receive the image itself as an image content block; captures above the inline size cap return the path alone.",
+   "description": "Capture a viewport screenshot via HighResScreenshot and return its path on the editor host. Pass inline=true to also receive the image itself as an image content block; captures above the inline size cap return the path alone, unless format jpeg or inline_max_size makes them fit. view picks the level editor viewport or, during Play In Editor, the player's game view; the reply says which (view, pie_active).",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -101,13 +101,28 @@
      },
      "format": {
       "default": "png",
-      "description": "Image format (png). Use CLI capture to convert to JPEG.",
+      "description": "png, or jpeg (converted in the editor; about a tenth of the size).",
       "type": "string"
      },
      "inline": {
       "default": false,
       "description": "Also return the image as an image content block.",
       "type": "boolean"
+     },
+     "view": {
+      "default": "auto",
+      "description": "editor: the level editor viewport, whose camera set_unreal_camera_view moves. game: the Play In Editor player's view. auto: game when a Play session's game viewport draws, else editor (Simulate In Editor shows the simulation in the level viewport).",
+      "type": "string"
+     },
+     "jpeg_quality": {
+      "default": 85,
+      "description": "JPEG quality, 1 to 100.",
+      "type": "integer"
+     },
+     "inline_max_size": {
+      "default": 0,
+      "description": "Above 0, inline a copy scaled down to at most this many pixels on its longer side (16 to 16384); the file keeps full resolution.",
+      "type": "integer"
      }
     }
    },
@@ -593,7 +608,7 @@
   {
    "name": "summarize_unreal_scene",
    "title": "Summarize Unreal Scene",
-   "description": "Generate an LLM-friendly digest of the current Unreal scene.",
+   "description": "Generate an LLM-friendly digest of the current Unreal scene. In a World Partition map it reports the saved actors not loaded in the editor (unloaded_actors), which it does not count.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -616,13 +631,65 @@
    }
   },
   {
-   "name": "get_unreal_viewport_info",
-   "title": "Get Unreal Viewport Info",
-   "description": "Get active viewport camera and render information.",
+   "name": "load_unreal_world_partition_actors",
+   "title": "Load Unreal World Partition Actors",
+   "description": "Load (or unload) a World Partition map's actors in the editor: those in a box, or every one. A World Partition map opened in the editor loads only some regions, and the scene reads see only loaded actors (they report unloaded_actors). Refused, changing nothing, above max_actors.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+     "bounds_min": {
+      "default": "",
+      "description": "Minimum corner as comma-separated x,y,z in cm; empty with bounds_max for every actor.",
+      "type": "string"
+     },
+     "bounds_max": {
+      "default": "",
+      "description": "Maximum corner as comma-separated x,y,z in cm; empty with bounds_min for every actor.",
+      "type": "string"
+     },
+     "max_actors": {
+      "default": 500,
+      "description": "Refuse when more actors than this would change (1 to 50000).",
+      "type": "integer"
+     },
+     "action": {
+      "default": "load",
+      "description": "load, or unload (releases only actors this tool loaded).",
+      "type": "string"
+     }
+    }
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": false,
+    "destructiveHint": null,
+    "idempotentHint": true,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "get_unreal_viewport_info",
+   "title": "Get Unreal Viewport Info",
+   "description": "Get the level viewport camera (the first perspective pane, which set_unreal_camera_view moves) and, during Play In Editor, the player's view with its field of view and viewport size. The level viewport's field of view is not readable from editor Python (notes says so); measure_size measures its size with a HighResShot.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "measure_size": {
+      "default": false,
+      "description": "Measure the level viewport's size with a HighResShot at its own size.",
+      "type": "boolean"
+     }
+    }
    },
    "execution": null,
    "outputSchema": null,
@@ -632,6 +699,69 @@
     "readOnlyHint": true,
     "destructiveHint": null,
     "idempotentHint": true,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "capture_unreal_camera",
+   "title": "Capture Unreal Camera",
+   "description": "Render what a camera or sensor actor sees (CameraActor, CineCameraActor, SceneCapture2D, or an actor with a CameraComponent or SceneCaptureComponent2D) through a transient scene capture with its field of view and post-process settings, and return the image path, the camera pose and the image's pinhole intrinsics. During Play In Editor the running game's counterpart is captured. RGB only.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "actor_path": {
+      "description": "Full object path of the camera or sensor actor.",
+      "type": "string"
+     },
+     "resolution_x": {
+      "default": 1280,
+      "description": "Width in pixels, 1 to 8192.",
+      "type": "integer"
+     },
+     "resolution_y": {
+      "default": 720,
+      "description": "Height in pixels, 1 to 8192.",
+      "type": "integer"
+     },
+     "format": {
+      "default": "png",
+      "description": "png or jpeg.",
+      "type": "string"
+     },
+     "inline": {
+      "default": false,
+      "description": "Also return the image as an image content block.",
+      "type": "boolean"
+     },
+     "jpeg_quality": {
+      "default": 85,
+      "description": "JPEG quality, 1 to 100.",
+      "type": "integer"
+     },
+     "inline_max_size": {
+      "default": 0,
+      "description": "Above 0, inline a copy scaled down to at most this many pixels on its longer side (16 to 16384); the file keeps full resolution.",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "actor_path"
+    ]
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": false,
+    "destructiveHint": null,
+    "idempotentHint": null,
     "openWorldHint": null
    },
    "_meta": {
@@ -2970,7 +3100,9 @@
    "describe_unreal_object",
    "get_unreal_actor_thumbnail",
    "summarize_unreal_scene",
+   "load_unreal_world_partition_actors",
    "get_unreal_viewport_info",
+   "capture_unreal_camera",
    "set_unreal_camera_view",
    "focus_unreal_on_actor",
    "spawn_unreal_actor",
@@ -3032,7 +3164,9 @@
    "describe_unreal_object",
    "get_unreal_actor_thumbnail",
    "summarize_unreal_scene",
+   "load_unreal_world_partition_actors",
    "get_unreal_viewport_info",
+   "capture_unreal_camera",
    "set_unreal_camera_view",
    "focus_unreal_on_actor",
    "spawn_unreal_actor",
@@ -3093,7 +3227,9 @@
    "describe_unreal_object",
    "get_unreal_actor_thumbnail",
    "summarize_unreal_scene",
+   "load_unreal_world_partition_actors",
    "get_unreal_viewport_info",
+   "capture_unreal_camera",
    "set_unreal_camera_view",
    "focus_unreal_on_actor",
    "spawn_unreal_actor",
@@ -3152,7 +3288,9 @@
    "describe_unreal_object",
    "get_unreal_actor_thumbnail",
    "summarize_unreal_scene",
+   "load_unreal_world_partition_actors",
    "get_unreal_viewport_info",
+   "capture_unreal_camera",
    "set_unreal_camera_view",
    "focus_unreal_on_actor",
    "spawn_unreal_actor",

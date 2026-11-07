@@ -80,7 +80,15 @@ def test_a_short_script_is_echoed_whole(tmp_path: Any) -> None:
 
 
 def test_other_tools_still_echo_their_arguments(tmp_path: Any) -> None:
-    arguments = {"resolution_x": 640, "resolution_y": 360, "format": "jpg", "inline": False}
+    arguments = {
+        "resolution_x": 640,
+        "resolution_y": 360,
+        "format": "jpg",
+        "inline": False,
+        "view": "auto",
+        "jpeg_quality": 85,
+        "inline_max_size": 0,
+    }
 
     outcome = _call(_server(tmp_path), "capture_unreal_viewport", arguments)
 

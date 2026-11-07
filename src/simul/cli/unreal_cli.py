@@ -645,6 +645,59 @@ def capture(
 
 
 # ---------------------------------------------------------------------------
+# capture-camera
+# ---------------------------------------------------------------------------
+@app.command("capture-camera")
+def capture_camera(
+    actor_path: str = typer.Argument(..., help="Camera, CineCamera, SceneCapture2D or sensor actor path"),
+    width: int = typer.Option(1280, "--width", "-W", help="Width in pixels"),
+    height: int = typer.Option(720, "--height", help="Height in pixels"),
+    format: str = typer.Option("png", "--format", "-f", help="Image format (png, jpeg)"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Render what a camera or sensor actor sees; prints the path on the editor host and the intrinsics."""
+    session = _session(host, port)
+    result = _run(session.capture_camera(actor_path, width, height, format), session)
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(f"[green]Captured[/green] {result['path']}")
+    console.print(Syntax(json.dumps({k: result[k] for k in ("camera", "intrinsics")}, indent=2), "json"))
+
+
+# ---------------------------------------------------------------------------
+# wp-load
+# ---------------------------------------------------------------------------
+@app.command("wp-load")
+def wp_load(
+    bounds_min: Optional[str] = typer.Option(None, "--min", help="Minimum corner x,y,z in cm (with --max)"),
+    bounds_max: Optional[str] = typer.Option(None, "--max", help="Maximum corner x,y,z in cm (with --min)"),
+    max_actors: int = typer.Option(500, "--max-actors", help="Refuse when more actors would change"),
+    unload: bool = typer.Option(False, "--unload", help="Unload the actors this command loaded"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Load a World Partition map's actors in the editor: those in a box, or every one."""
+    low = _vector_option(bounds_min, "--min", "x,y,z")
+    high = _vector_option(bounds_max, "--max", "x,y,z")
+    session = _session(host, port)
+    result = _run(session.load_world_partition_actors(
+        bounds_min=low,
+        bounds_max=high,
+        max_actors=max_actors,
+        action="unload" if unload else "load",
+    ), session)
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(
+        f"[green]{result['action'].title()}ed[/green] {result['changed']} of {result['requested']} actors; "
+        f"{result['unloaded_actors']} of {result['actor_descriptors']} remain unloaded"
+    )
+
+
+# ---------------------------------------------------------------------------
 # exec
 # ---------------------------------------------------------------------------
 @app.command("exec")

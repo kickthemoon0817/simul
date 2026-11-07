@@ -670,6 +670,135 @@ print(json.dumps({{'paths': paths}}))
     asyncio.run(run())
 
 
+def test_viewport_capture_says_which_view_and_inlines_jpeg_and_scaled_copies():
+    """A capture during a Play session showed the editor camera and did not
+    say PIE ran, and a 640x360 PNG was too large to inline."""
+
+    async def run():
+        client = session()
+        try:
+            png = await client.capture_viewport(640, 360, inline=True)
+            assert not png.get("error"), png
+            assert (png["view"], png["pie_active"]) == ("editor", False)
+            jpeg = await client.capture_viewport(640, 360, format="jpeg", inline=True)
+            assert jpeg["path"].endswith(".jpg") and "image_base64" in jpeg, jpeg.keys()
+            with Image.open(io.BytesIO(base64.b64decode(jpeg["image_base64"]))) as image:
+                assert (image.format, image.size) == ("JPEG", (640, 360))
+            scaled = await client.capture_viewport(1920, 1080, inline=True, inline_max_size=480)
+            assert (scaled["inline_width"], scaled["inline_height"]) == (480, 270), scaled.get("inline_skipped")
+            info = await client.get_viewport_info(measure_size=True)
+            assert info["projection_type"] == "Perspective" and info["fov"] is None
+            assert info["viewport_size"] and min(info["viewport_size"]) > 0, info["notes"]
+            begun = await client._execute_json_script(
+                "import unreal, json\n"
+                "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_begin_play()\n"
+                "print(json.dumps({'requested': True}))"
+            )
+            assert not begun.get("error"), begun
+            for _ in range(100):
+                if (await client.get_simulation_status())["is_playing"]:
+                    break
+                await asyncio.sleep(0.2)
+            await asyncio.sleep(1.0)
+            game = await client.capture_viewport(320, 180, inline=True)
+            assert (game["view"], game["pie_active"]) == ("game", True), game
+            editor_view = await client.capture_viewport(320, 180, view="editor")
+            assert editor_view["warnings"], editor_view
+            playing = await client.get_viewport_info()
+            assert playing["game_view"] and playing["game_view"]["fov"] > 0, playing
+        finally:
+            await client.control_simulation("stop")
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_camera_capture_renders_a_camera_with_its_intrinsics():
+    async def run():
+        client = session()
+        made = await client._execute_json_script("""
+import unreal, json
+sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+camera = sub.spawn_actor_from_class(unreal.CameraActor, unreal.Vector(-400, 0, 200), unreal.Rotator(pitch=-15))
+cine = sub.spawn_actor_from_class(unreal.CineCameraActor, unreal.Vector(-400, 300, 200))
+print(json.dumps({'camera': camera.get_path_name(), 'cine': cine.get_path_name(),
+                  'actors': len(sub.get_all_level_actors())}))
+""")
+        assert not made.get("error"), made
+        try:
+            shot = await client.capture_camera(made["camera"], 640, 360, inline=True)
+            assert not shot.get("error"), shot
+            assert shot["world"] == "editor" and shot["intrinsics"]["fx"] == pytest.approx(320.0)
+            assert "image_base64" in shot or shot.get("inline_skipped")
+            cine = await client.capture_camera(made["cine"], 320, 180, format="jpeg", inline=True)
+            assert cine["camera"]["lens"]["focal_length_mm"] > 0, cine
+            assert cine["camera"]["horizontal_fov"] < 90.0
+            with Image.open(io.BytesIO(base64.b64decode(cine["image_base64"]))) as image:
+                assert (image.format, image.size) == ("JPEG", (320, 180))
+                assert image.convert("L").getextrema()[1] > 0, "an image, not a black frame"
+            after = await client._execute_json_script(
+                "import unreal, json\n"
+                "print(json.dumps({'actors': len(unreal.get_editor_subsystem("
+                "unreal.EditorActorSubsystem).get_all_level_actors())}))"
+            )
+            assert after["actors"] == made["actors"], "the transient capture actor was left behind"
+        finally:
+            for path in (made["camera"], made["cine"]):
+                await destroy_actor(client, path)
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_world_partition_reads_report_unloaded_actors_that_load_on_request():
+    """A saved World Partition map opened normally read as two actors, saying
+    nothing of the other hundred."""
+
+    async def run():
+        client = session()
+        name = "SimulReviewWP_" + uuid.uuid4().hex[:8]
+        folder = "/Game/" + name
+        built = await client._execute_json_script(f"""
+import unreal, json
+les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+les.new_level({folder + '/Map'!r}, True)
+sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+cube = unreal.load_asset('/Engine/BasicShapes/Cube')
+for i in range(20):
+    actor = sub.spawn_actor_from_object(cube, unreal.Vector((i % 5) * 30000.0, (i // 5) * 30000.0, 100))
+    actor.set_editor_property('tags', [unreal.Name({name!r})])
+saved = les.save_current_level()
+les.new_level({folder + '/Other'!r}, False)
+reopened = les.load_level({folder + '/Map'!r})
+print(json.dumps({{'saved': saved, 'reopened': reopened}}))
+""")
+        assert built.get("saved") and built.get("reopened"), built
+        try:
+            summary = await client.summarize_scene()
+            assert summary["world_partition"] is True and summary["unloaded_actors"] >= 20, summary
+            search = await client.get_actor_by_semantic_label(name)
+            assert search["unloaded_actors"] >= 20 and search["warnings"], search
+            loaded = await client.load_world_partition_actors(max_actors=1000)
+            assert loaded["changed"] >= 20 and loaded["unloaded_actors"] == 0, loaded
+            found = await client.get_actor_by_semantic_label(name, max_results=50)
+            assert found["total_matches"] == 20 and found["warnings"] == [], found
+            released = await client.load_world_partition_actors(action="unload", max_actors=1000)
+            assert released["unloaded_actors"] >= 20, released
+        finally:
+            # Leave the map before deleting it, with its external actor packages.
+            await client._execute_python(
+                "import unreal\n"
+                "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).new_level("
+                f"{'/Game/' + name + '_Scratch/Scratch'!r}, False)\n"
+                f"for path in ({folder!r}, '/Game/__ExternalActors__/{name}', '/Game/__ExternalObjects__/{name}'):\n"
+                "    if unreal.EditorAssetLibrary.does_directory_exist(path):\n"
+                "        unreal.EditorAssetLibrary.delete_directory(path)\n"
+            )
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_simulation_lifecycle():
     async def run():
         client = session()

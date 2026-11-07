@@ -292,6 +292,25 @@ def _page_hint_field() -> Any:
     return Field(None, description="How to get the rest, when this page did not reach the end")
 
 
+def _world_partition_field() -> Any:
+    """The ``world_partition`` field of the reads that see only loaded actors."""
+    return Field(
+        None,
+        description="Whether the editor world is a World Partition map; null while Play In Editor runs",
+    )
+
+
+def _unloaded_actors_field() -> Any:
+    """The ``unloaded_actors`` field of the reads that see only loaded actors."""
+    return Field(
+        None,
+        description=(
+            "Saved actors of a World Partition map that are not loaded in the editor, so not read "
+            "(load_unreal_world_partition_actors loads them); null outside one and during Play In Editor"
+        ),
+    )
+
+
 class UnrealListActorsResponse(BaseModel):
     """One page of the level's actors that pass the filters."""
 
@@ -315,6 +334,8 @@ class UnrealListActorsResponse(BaseModel):
     )
     hint: Optional[str] = _page_hint_field()
     warnings: List[str] = Field(default_factory=list, description="What the listing could not do as asked")
+    world_partition: Optional[bool] = _world_partition_field()
+    unloaded_actors: Optional[int] = _unloaded_actors_field()
     pie_active: bool = _pie_active_field()
 
 
@@ -512,6 +533,8 @@ class UnrealSceneSummaryResponse(BaseModel):
         "", description="Human-readable scene summary for LLM consumption"
     )
     pie_active: bool = _pie_active_field()
+    world_partition: Optional[bool] = _world_partition_field()
+    unloaded_actors: Optional[int] = _unloaded_actors_field()
 
 
 # ---------------------------------------------------------------------------
@@ -562,9 +585,31 @@ class UnrealCaptureViewportResponse(BaseModel):
     inline_skipped: Optional[str] = Field(
         None, description="Why inline data was omitted, when it was"
     )
+    inline_width: Optional[int] = Field(None, description="Width of the inline image, when one was sent")
+    inline_height: Optional[int] = Field(None, description="Height of the inline image, when one was sent")
     resolution_x: int = Field(..., description="Actual capture width")
     resolution_y: int = Field(..., description="Actual capture height")
-    format: str = Field(..., description="Image format used")
+    format: str = Field(..., description="Format of the file at path: png or jpeg")
+    view: Optional[str] = Field(
+        None,
+        description=(
+            "What was captured: editor (the level editor viewport, whose camera set_unreal_camera_view "
+            "moves) or game (the Play In Editor player's view)"
+        ),
+    )
+    pie_active: bool = Field(False, description="Whether Play In Editor (or Simulate) was running")
+    warnings: List[str] = Field(default_factory=list, description="What may make the image not the one expected")
+
+
+class UnrealGameView(BaseModel):
+    """The Play In Editor player's view."""
+
+    camera_location: Tuple[float, float, float] = Field(..., description="Player camera position in cm")
+    camera_rotation: Tuple[float, float, float] = Field(
+        ..., description="Player camera rotation (Pitch, Yaw, Roll) in degrees"
+    )
+    fov: float = Field(..., description="Player camera field of view across the width, in degrees")
+    viewport_size: Tuple[int, int] = Field(..., description="Game viewport size (width, height) in pixels")
 
 
 class UnrealViewportInfoResponse(BaseModel):
@@ -582,15 +627,30 @@ class UnrealViewportInfoResponse(BaseModel):
     )
     viewport_size: Optional[Tuple[int, int]] = Field(
         None,
-        description="Viewport dimensions (width, height); None when Remote Control does not expose them",
+        description=(
+            "Viewport size (width, height) in pixels: the game viewport's while a Play session has a player, "
+            "else the level viewport's when measure_size measured it; null otherwise"
+        ),
     )
     fov: Optional[float] = Field(
-        None, description="Field of view in degrees; None when Remote Control does not expose it"
+        None,
+        description="Level viewport field of view; always null, as editor Python cannot read it (see notes)",
     )
     projection_type: Optional[str] = Field(
         None,
-        description="Perspective or Orthographic; None when Remote Control does not expose it",
+        description="Perspective: the camera read is the first perspective level viewport pane's",
     )
+    pie_active: bool = Field(False, description="Whether Play In Editor (or Simulate) was running")
+    game_view: Optional[UnrealGameView] = Field(
+        None,
+        description=(
+            "The player camera while Play In Editor runs (Simulate In Editor has one too, but its level "
+            "viewport shows the simulation from the editor camera); null otherwise"
+        ),
+    )
+    viewports: List[str] = Field(default_factory=list, description="Level viewport pane config keys")
+    active_viewport: Optional[str] = Field(None, description="Config key of the active level viewport pane")
+    notes: List[str] = Field(default_factory=list, description="What the reply cannot say, and why")
 
 
 class UnrealSetCameraViewResponse(BaseModel):
@@ -606,6 +666,92 @@ class UnrealSetCameraViewResponse(BaseModel):
     rotation: Optional[Tuple[float, float, float]] = Field(
         None, description="Applied camera rotation; None when left unchanged"
     )
+
+
+class UnrealCameraIntrinsics(BaseModel):
+    """Pinhole intrinsics of a captured image."""
+
+    fx: float = Field(..., description="Focal length across, in pixels")
+    fy: float = Field(..., description="Focal length up, in pixels (square pixels: equal to fx)")
+    cx: float = Field(
+        ..., description="Principal point x in pixels: (width - 1) / 2, the top-left pixel's center being 0"
+    )
+    cy: float = Field(..., description="Principal point y in pixels: (height - 1) / 2")
+    width: int = Field(..., description="Image width in pixels")
+    height: int = Field(..., description="Image height in pixels")
+
+
+class UnrealCapturedCamera(BaseModel):
+    """The camera a capture was taken from."""
+
+    location: Tuple[float, float, float] = Field(..., description="Camera position (X, Y, Z) in cm")
+    rotation: Tuple[float, float, float] = Field(..., description="Camera rotation (Pitch, Yaw, Roll) in degrees")
+    component: str = Field(..., description="Class of the component whose view was captured")
+    projection: str = Field(..., description="perspective or orthographic")
+    horizontal_fov: Optional[float] = Field(None, description="Field of view across the width, in degrees")
+    vertical_fov: Optional[float] = Field(None, description="Field of view up the height, in degrees")
+    ortho_width: Optional[float] = Field(None, description="Width the view spans in cm, when orthographic")
+    lens: Dict[str, float] = Field(
+        default_factory=dict,
+        description="A CineCamera's focal_length_mm, sensor_width_mm and sensor_height_mm",
+    )
+
+
+class UnrealCaptureCameraResponse(BaseModel):
+    """What a camera or sensor actor sees, as an image file and optionally an image block."""
+
+    success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    path: str = Field(..., description="Image path on the Unreal editor host")
+    size_bytes: int = Field(..., description="Size of the image file in bytes")
+    image_base64: SkipJsonSchema[Optional[str]] = Field(
+        None, description="Session-side image data, lifted into the image content block"
+    )
+    encoding: SkipJsonSchema[Optional[str]] = Field(
+        None, description="Encoding of image_base64; dropped with it"
+    )
+    image_attached: bool = Field(False, description="True when the image was sent as an MCP image content block")
+    inline_skipped: Optional[str] = Field(None, description="Why inline data was omitted, when it was")
+    inline_width: Optional[int] = Field(None, description="Width of the inline image, when one was sent")
+    inline_height: Optional[int] = Field(None, description="Height of the inline image, when one was sent")
+    resolution_x: int = Field(..., description="Image width in pixels")
+    resolution_y: int = Field(..., description="Image height in pixels")
+    format: str = Field(..., description="png or jpeg")
+    actor_path: str = Field(..., description="The actor asked for")
+    captured_actor: str = Field(..., description="The actor captured: its game counterpart during Play In Editor")
+    world: str = Field(..., description="editor, or game (the running Play In Editor world)")
+    pie_active: bool = Field(False, description="Whether Play In Editor (or Simulate) was running")
+    camera: UnrealCapturedCamera = Field(..., description="The camera the image was taken from")
+    intrinsics: Optional[UnrealCameraIntrinsics] = Field(
+        None,
+        description=(
+            "Pinhole intrinsics of this image (OpenCV pixel-center convention); null for an orthographic "
+            "camera. Optical axis is Unreal's camera +X, image right +Y, image down -Z"
+        ),
+    )
+    warnings: List[str] = Field(default_factory=list, description="Where the image differs from the camera's own view")
+
+
+class UnrealLoadWorldPartitionResponse(BaseModel):
+    """What loading or unloading World Partition actors did."""
+
+    success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    action: str = Field(..., description="load or unload")
+    matched: int = Field(..., description="Actor descriptors in the box (every one without a box)")
+    requested: int = Field(..., description="Of those, the actors not yet loaded (loaded, for unload)")
+    changed: int = Field(..., description="Actors that loaded (or unloaded)")
+    not_changed: int = Field(
+        0, description="Requested actors that did not change: unload releases only actors this tool loaded"
+    )
+    actors: List[str] = Field(default_factory=list, description="Paths of the first 50 actors that changed")
+    loaded_actors: int = Field(..., description="Actors loaded in the editor world afterwards")
+    actor_descriptors: Optional[int] = Field(None, description="Saved actors of the map")
+    unloaded_actors: Optional[int] = Field(None, description="Saved actors still not loaded afterwards")
 
 
 class UnrealFocusActorResponse(BaseModel):
@@ -1158,6 +1304,8 @@ class UnrealQuerySceneGraphResponse(BaseModel):
         default_factory=list, description="Subtrees drawn shallower than max_depth to fit the page"
     )
     warnings: List[str] = Field(default_factory=list, description="What the query could not do as asked")
+    world_partition: Optional[bool] = _world_partition_field()
+    unloaded_actors: Optional[int] = _unloaded_actors_field()
     pie_active: bool = _pie_active_field()
 
 
@@ -1248,6 +1396,9 @@ class UnrealGetActorBySemanticLabelResponse(BaseModel):
     )
     hint: Optional[str] = _page_hint_field()
     label_searched: str = Field(..., description="Label that was searched")
+    warnings: List[str] = Field(default_factory=list, description="What the search could not do as asked")
+    world_partition: Optional[bool] = _world_partition_field()
+    unloaded_actors: Optional[int] = _unloaded_actors_field()
     pie_active: bool = _pie_active_field()
 
 

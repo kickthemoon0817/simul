@@ -10,6 +10,7 @@ import base64
 import errno
 import hashlib
 import importlib
+import io
 import json
 import logging
 import math
@@ -33,6 +34,7 @@ from ._unreal_scripts import (
     ACTOR_COMPONENTS,
     ACTOR_HELPERS,
     ACTOR_INFO,
+    CAMERA_CAPTURE,
     CREATE_MATERIAL_INSTANCE,
     EDITOR_WORLD,
     ENGINE_METADATA,
@@ -56,6 +58,9 @@ from ._unreal_scripts import (
     SPAWN_ACTOR,
     USD_EXPORT,
     USD_IMPORT,
+    VIEWPORT_STATE,
+    WORLD_PARTITION_LISTED,
+    WORLD_PARTITION_LOAD,
     pie_refusal,
 )
 
@@ -142,6 +147,131 @@ _CAPTURE_POLL_SECONDS = 0.1
 # returned 16 MiB script output intact; 1-2 MiB chunks had the best
 # throughput (~115 ms per MiB vs ~255 ms per MiB at 128 KiB).
 _CAPTURE_CHUNK_BYTES = 2 * 1024 * 1024
+# Largest capture file read to the server to scale an inline copy.
+_SCALED_INLINE_SOURCE_LIMIT = 64 * 1024 * 1024
+
+#: Image formats the capture tools write: HighResShot writes a PNG, which
+#: "jpeg" converts in the editor (ImageWriteBlueprintLibrary).
+CAPTURE_FORMATS: Tuple[str, ...] = ("png", "jpeg")
+
+#: What ``capture_viewport`` captures: the game view whenever a Play session
+#: has a player, the level editor viewport, or the player's game view.
+CAPTURE_VIEWS: Tuple[str, ...] = ("auto", "editor", "game")
+
+#: ``capture_viewport``'s error for view "game" without a Play session.
+GAME_VIEW_UNAVAILABLE = (
+    "view 'game' needs a Play In Editor session with a player, and none runs. control_unreal_simulation "
+    "starts Simulate In Editor, which renders in the level editor viewport: capture that with view 'editor' "
+    "or 'auto'."
+)
+
+#: Seconds the game view's screenshot may take before the game viewport counts
+#: as not drawing. A Play session's game viewport wrote it in under 0.2 s on UE
+#: 5.7.4; during Simulate In Editor the player's game viewport exists but never
+#: draws (the level viewport shows the simulation), and Unreal's Python cannot
+#: tell the two apart beforehand.
+_GAME_VIEW_WAIT_SECONDS = 2.0
+
+#: ``capture_viewport``'s error for view "game" when the game viewport drew nothing.
+GAME_VIEW_DID_NOT_DRAW = (
+    "Play In Editor runs, but its game viewport drew no screenshot: during Simulate In Editor (what "
+    "control_unreal_simulation starts) the level editor viewport shows the simulation. Capture it with view "
+    "'editor' or 'auto'."
+)
+
+#: ``capture_viewport``'s warning when view "auto" fell back to the editor view.
+GAME_VIEW_FELL_BACK_WARNING = (
+    "Play In Editor runs, but its game viewport drew no screenshot (as during Simulate In Editor, which shows "
+    "the simulation in the level editor viewport), so the level editor viewport was captured."
+)
+
+#: ``capture_viewport``'s warning when several level viewport panes wrote a screenshot.
+MULTIPLE_PANES_WARNING = (
+    "{count} level viewport panes drew this HighResShot, and the newest file is returned, which may not be "
+    "the pane set_unreal_camera_view moves (Unreal's camera calls move only the first perspective pane). "
+    "Maximize that pane, or use a one-pane layout, to capture it alone."
+)
+
+#: ``capture_viewport``'s warning for the editor view asked for during PIE.
+EDITOR_VIEW_DURING_PLAY_WARNING = (
+    "Play In Editor is running, and this is the level editor viewport, whose camera set_unreal_camera_view "
+    "moves. In a Play session the player sees the game view instead, which view 'game' or 'auto' captures."
+)
+
+#: ``get_viewport_info``'s note on the field of view it cannot read.
+VIEWPORT_FOV_NOTE = (
+    "fov is null: Unreal's editor Python cannot read a level viewport's field of view (UE 5.7 keeps it in "
+    "config-only per-viewport settings). It is 90 degrees across the width unless changed in the viewport's "
+    "View options; pass the real value to focus_unreal_on_actor's fov."
+)
+
+#: ``get_viewport_info``'s note on a layout of several panes.
+VIEWPORT_PANES_NOTE = (
+    "The layout has {count} level viewport panes. camera_location and camera_rotation are the first "
+    "perspective pane's: Unreal's camera calls read and move only that pane, while an editor capture is taken "
+    "in every pane that draws."
+)
+
+
+def _check_image_options(jpeg_quality: int, inline_max_size: int) -> None:
+    """Refuse a JPEG quality or inline size out of range before anything is sent."""
+    if not 1 <= jpeg_quality <= 100:
+        raise ValueError("jpeg_quality must be between 1 and 100")
+    if inline_max_size and not 16 <= inline_max_size <= 16384:
+        raise ValueError("inline_max_size must be 0 or between 16 and 16384")
+
+
+def camera_fields_of_view(
+    horizontal_fov: float, width: int, height: int, orthographic: bool
+) -> Dict[str, Optional[float]]:
+    """A perspective image's fields of view across and up, in degrees.
+
+    Unreal keeps the field of view across the width, so the vertical one
+    follows from the image's shape. None for an orthographic camera.
+    """
+    if orthographic:
+        return {"horizontal_fov": None, "vertical_fov": None}
+    half = math.radians(horizontal_fov) / 2
+    return {
+        "horizontal_fov": horizontal_fov,
+        "vertical_fov": math.degrees(2 * math.atan(math.tan(half) * height / width)),
+    }
+
+
+def camera_intrinsics(
+    horizontal_fov: float, width: int, height: int, orthographic: bool
+) -> Optional[Dict[str, float]]:
+    """The pinhole intrinsics of a width x height image with this field of view across.
+
+    Square pixels and the optical axis through the image center, in the pixel
+    center convention (OpenCV's: the top-left pixel's center is (0, 0), so the
+    center is at ((width - 1) / 2, (height - 1) / 2)). In Unreal's camera
+    frame the optical axis is +X, image right +Y and image down -Z. None for an
+    orthographic camera.
+    """
+    if orthographic:
+        return None
+    focal = (width / 2) / math.tan(math.radians(horizontal_fov) / 2)
+    return {
+        "fx": focal,
+        "fy": focal,
+        "cx": (width - 1) / 2,
+        "cy": (height - 1) / 2,
+        "width": width,
+        "height": height,
+    }
+
+
+def _world_partition_warning(result: Dict[str, Any]) -> Optional[str]:
+    """The warning for a reply that leaves out actors World Partition has not loaded, or None."""
+    unloaded = result.get("unloaded_actors")
+    if not unloaded:
+        return None
+    return (
+        f"World Partition: {unloaded} of this map's {result.get('actor_descriptors')} saved actors are not "
+        "loaded in the editor, so this reply leaves them out. Load a region, or every actor, with "
+        "load_unreal_world_partition_actors (CLI: simul unreal wp-load)."
+    )
 
 
 #: Prints whether Play In Editor runs, as ``{"pie_active": bool}``.
@@ -1508,6 +1638,9 @@ class UnrealRuntimeSession(LoggerMixin):
         if result.get("error"):
             return result
         ended = result.pop("page_ended_by", None)
+        unloaded = _world_partition_warning(result)
+        if unloaded:
+            result.setdefault("warnings", []).append(unloaded)
         next_offset = result.get("next_offset")
         result["truncated"] = next_offset is not None
         if next_offset is not None:
@@ -1633,6 +1766,68 @@ class UnrealRuntimeSession(LoggerMixin):
             "max_results": max_results,
         }
         return await self._paged_read(ACTOR_COMPONENTS, args, "components", "total")
+
+    async def load_world_partition_actors(
+        self,
+        bounds_min: Optional[Sequence[float]] = None,
+        bounds_max: Optional[Sequence[float]] = None,
+        max_actors: int = 500,
+        action: str = "load",
+    ) -> Dict[str, Any]:
+        """Load (or unload) a World Partition map's actors in a box, or all of them, in the editor.
+
+        A World Partition map opened in the editor loads only the actors of
+        the regions the editor has loaded, and the listings read only loaded
+        actors (they warn when some are not). This loads the actors whose
+        descriptors' bounds intersect the box through
+        ``WorldPartitionBlueprintLibrary.load_actors``, which loads them at
+        once and leaves the map unmodified (``_unreal_scripts.WORLD_PARTITION_LOAD``).
+        Unloading releases only actors this loaded; the editor's own loading
+        regions keep theirs (``not_changed``). They stay loaded until unloaded
+        or another map opens.
+
+        Args:
+            bounds_min: Minimum corner [x, y, z] in cm; with bounds_max, or
+                neither for every actor of the map.
+            bounds_max: Maximum corner [x, y, z] in cm.
+            max_actors: Refuse, changing nothing, when more actors than this
+                would load or unload (1 to 50000).
+            action: "load" or "unload".
+
+        Returns:
+            ``action``, ``matched`` (descriptors in the box), ``requested``,
+            ``changed``, ``not_changed``, ``actors`` (the first 50 paths
+            changed), ``loaded_actors``, ``actor_descriptors`` and
+            ``unloaded_actors``; or an InvalidState (not a World Partition
+            map), ValidationError (over max_actors) or PIEActive envelope.
+
+        Raises:
+            ValueError: An unknown action, max_actors out of range, one corner
+                without the other, or a corner that is not three finite
+                numbers or exceeds the other on an axis.
+        """
+        if action not in ("load", "unload"):
+            raise ValueError(f"action must be load or unload, not {action!r}")
+        if not 1 <= max_actors <= 50000:
+            raise ValueError("max_actors must be between 1 and 50000")
+        if (bounds_min is None) != (bounds_max is None):
+            raise ValueError("Give bounds_min and bounds_max together, or neither for every actor")
+        low = high = None
+        if bounds_min is not None and bounds_max is not None:
+            low = _vector3("bounds_min", bounds_min, "x, y, z")
+            high = _vector3("bounds_max", bounds_max, "x, y, z")
+            if any(a > b for a, b in zip(low, high)):
+                raise ValueError("bounds_min must not exceed bounds_max on any axis")
+        args = {
+            "action": action,
+            "bounds_min": low,
+            "bounds_max": high,
+            "max_actors": max_actors,
+            "listed": WORLD_PARTITION_LISTED,
+        }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + WORLD_PARTITION_LOAD, expected_errors=("InvalidState", "ValidationError")
+        )
 
     async def search_assets(
         self,
@@ -1770,6 +1965,9 @@ class UnrealRuntimeSession(LoggerMixin):
         parts: list = [f"Map: {map_path}", f"Total actors: {total_actors}"]
         if pie_active:
             parts.append("Play In Editor is running; these are the editor world's actors")
+        unloaded = _world_partition_warning(scene)
+        if unloaded:
+            parts.append(unloaded)
         for cls, cnt in sorted(class_counts.items(), key=lambda x: -x[1])[:10]:
             parts.append(f"  {cls}: {cnt}")
 
@@ -1782,53 +1980,59 @@ class UnrealRuntimeSession(LoggerMixin):
             "cameras": cameras,
             "summary_text": "\n".join(parts),
             "pie_active": pie_active,
+            "world_partition": scene.get("world_partition"),
+            "unloaded_actors": scene.get("unloaded_actors"),
         }
 
     # ------------------------------------------------------------------
     # Phase 2 — Viewport & Visual Observation
     # ------------------------------------------------------------------
 
-    async def capture_viewport(
+    async def _high_res_shot(
         self,
-        resolution_x: int = 1920,
-        resolution_y: int = 1080,
-        format: str = "png",
-        inline: bool = False,
+        command: str,
+        view: str,
+        jpeg_quality: Optional[int] = None,
+        inline_limit: int = 0,
     ) -> Dict[str, Any]:
-        """
-        Capture viewport screenshot via HighResScreenshot console command.
+        """Run a HighResShot command and wait for the file it writes.
 
-        The command writes a file to ``Project/Saved/Screenshots/``.
-        We then read it back and return base64-encoded data.
+        ``view`` "editor" sends the command through Remote Control's
+        ExecuteConsoleCommand, which goes to the level editor's viewports;
+        "game" runs it in the Play In Editor game world
+        (SystemLibrary.execute_console_command with that world), which sends it
+        through the player controller to the game viewport; "auto" is "game"
+        while PIE has a player controller, else "editor". Python's
+        execute_console_command without a game world does not fire an editor
+        HighResShot, so the editor path stays on Remote Control. Simulate In
+        Editor has a player controller and a game viewport too, but that
+        viewport never draws (the level viewport shows the simulation), and
+        Unreal's Python cannot tell Simulate from Play: when the game viewport
+        writes nothing within ``_GAME_VIEW_WAIT_SECONDS``, "auto" falls back to
+        the editor view (``fell_back``) and "game" fails with InvalidState.
+
+        New files are recognised by name: the editor's screenshot directories
+        are listed once before the trigger, and each poll considers only names
+        absent from that snapshot. That needs no clock agreement between this
+        process and the editor host, and a coarse filesystem mtime can't hide
+        the new file. A PNG is complete once its IEND chunk is on disk. Unreal
+        sends an editor HighResShot to every level viewport pane that draws, so
+        several files can appear: the newest is taken and ``others`` counts the
+        rest.
 
         Args:
-            resolution_x: Capture width in pixels.
-            resolution_y: Capture height in pixels.
-            format: Image format — ``png``. The CLI can convert to JPEG.
+            command: The console command, e.g. ``HighResShot 640x360``.
+            view: "auto", "editor" or "game".
+            jpeg_quality: Convert the PNG to a JPEG of this quality next to it
+                (ImageWriteBlueprintLibrary) and return that; None keeps the PNG.
+            inline_limit: Return the file as base64 when it is at most this
+                many bytes; 0 never.
 
         Returns:
-            Dictionary with image_base64, resolution_x, resolution_y, format.
+            ``path``, ``size_bytes``, ``others``, ``view``, ``pie_active``,
+            ``player``, and ``image_base64`` or ``inline_skipped``; or a
+            CaptureError or InvalidState envelope.
         """
-        if format != "png":
-            return {
-                "success": False,
-                "error_type": "UnsupportedFormat",
-                "error": "Unreal HighResShot captures PNG. Use CLI capture --format jpeg to convert locally.",
-            }
-        if not 1 <= resolution_x <= 16384 or not 1 <= resolution_y <= 16384:
-            raise ValueError("Capture dimensions must be between 1 and 16384")
-        # The trigger goes through Remote Control's ExecuteConsoleCommand
-        # RPC (NOT through Python's unreal.SystemLibrary.execute_console_command
-        # — empirically that path doesn't fire HighResShot in the editor).
-        # The read is a separate ExecutePythonCommandEx call so UE's main
-        # thread stays free between trigger and read; the adapter, not the
-        # embedded script, owns the wait via asyncio.sleep.
-        #
-        # New files are recognised by name: the editor's screenshot
-        # directories are listed once before the trigger, and each poll
-        # considers only names absent from that snapshot. That needs no
-        # clock agreement between this process and the editor host, and a
-        # coarse filesystem mtime can't hide the new file.
         marker = "@@SIMUL_SCREENSHOT@@"
         prelude = f"""
 import os, base64, json, unreal
@@ -1838,19 +2042,28 @@ def shots():
     for subdir in {_SCREENSHOT_SUBDIRS!r}:
         try:
             with os.scandir(os.path.join(ss_root, subdir)) as entries:
-                found.extend(e for e in entries if e.name.endswith('.{format}') and e.is_file())
+                found.extend(e for e in entries if e.name.endswith('.png') and not e.name.startswith('SimulCamera_')
+                             and e.is_file())
         except OSError:
             pass
     return found
 """
+        snapshot_code = prelude + f"""
+level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+pie = bool(level.is_in_play_in_editor())
+game = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world() if pie else None
+player = game is not None and unreal.GameplayStatics.get_player_controller(game, 0) is not None
+view = {view!r}
+if view == 'auto':
+    view = 'game' if player else 'editor'
+payload = {{'existing': [e.path for e in shots()], 'pie_active': pie, 'player': player, 'view': view}}
+if view == 'game' and player:
+    unreal.SystemLibrary.execute_console_command(game, {command!r})
+print({marker!r} + json.dumps(payload))
+"""
         try:
             snapshot = self._parse_marker_json(
-                await self._execute_python(
-                    prelude
-                    + f"print({marker!r} + json.dumps({{'existing': [e.path for e in shots()]}}))\n",
-                    mode="ExecuteFile",
-                ),
-                marker,
+                await self._execute_python(snapshot_code, mode="ExecuteFile"), marker
             )
         except Exception as exc:
             snapshot = {"error": str(exc)}
@@ -1861,29 +2074,40 @@ def shots():
                 "error": "Could not list the editor screenshot directory before capture: "
                 + str(snapshot.get("error", "no listing returned")),
             }
+        if snapshot["view"] == "game" and not snapshot["player"]:
+            return {
+                "success": False,
+                "error_type": "InvalidState",
+                "error": GAME_VIEW_UNAVAILABLE,
+                "pie_active": snapshot["pie_active"],
+            }
         existing: List[str] = snapshot["existing"]
-        try:
-            await self._call_function(
-                "/Script/Engine.Default__KismetSystemLibrary",
-                "ExecuteConsoleCommand",
-                {
-                    "WorldContextObject": "",
-                    "Command": f"HighResShot {resolution_x}x{resolution_y}",
-                },
-            )
-        except Exception as exc:
-            return {"success": False, "error_type": "CaptureError", "error": str(exc)}
 
-        max_inline = MAX_INLINE_CAPTURE_BYTES
-        # A PNG is complete once its IEND chunk is on disk; checking the tail
-        # keeps a poll from returning a file the editor is still writing.
-        read_code = prelude + f"""
+        async def fire_in_editor() -> Optional[Dict[str, Any]]:
+            try:
+                await self._call_function(
+                    "/Script/Engine.Default__KismetSystemLibrary",
+                    "ExecuteConsoleCommand",
+                    {"WorldContextObject": "", "Command": command},
+                )
+            except Exception as exc:
+                return {"success": False, "error_type": "CaptureError", "error": str(exc)}
+            return None
+
+        taken = snapshot["view"]
+        if taken == "editor":
+            failed = await fire_in_editor()
+            if failed is not None:
+                return failed
+
+        read_code = prelude + EDITOR_WORLD + f"""
 existing = set({existing!r})
+quality = {jpeg_quality!r}
+inline_limit = {inline_limit!r}
+new = [entry for entry in shots() if entry.path not in existing]
 target = None
 target_mtime = None
-for entry in shots():
-    if entry.path in existing:
-        continue
+for entry in new:
     try:
         mtime = entry.stat().st_mtime
     except OSError:
@@ -1900,56 +2124,255 @@ if target:
     except OSError:
         complete = False
     if complete:
-        payload = {{'path': target, 'size_bytes': size}}
-        if {inline!r} and size <= {max_inline}:
-            with open(target, 'rb') as f:
+        path = target
+        if quality is not None:
+            world = editor_world() or unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+            texture = unreal.RenderingLibrary.import_file_as_texture2d(world, target)
+            path = os.path.splitext(target)[0] + '.jpg'
+            options = unreal.ImageWriteOptions()
+            options.format = unreal.DesiredImageFormat.JPG
+            options.compression_quality = quality
+            options.async_ = False
+            options.overwrite_file = True
+            unreal.ImageWriteBlueprintLibrary.export_to_disk(texture, path, options)
+            size = os.path.getsize(path) if os.path.isfile(path) else 0
+        payload = {{'path': path, 'size_bytes': size, 'others': len(new) - 1}}
+        if size and inline_limit and size <= inline_limit:
+            with open(path, 'rb') as f:
                 payload['image_base64'] = base64.b64encode(f.read()).decode()
-        elif {inline!r}:
+        elif size and inline_limit:
             payload['inline_skipped'] = (
-                'Capture is %d bytes, above the %d byte inline cap. '
-                'Read the file at path, or lower the resolution.'
-                % (size, {max_inline})
-            )
+                'Capture is %d bytes, above the %d byte inline cap. Read the file at path, lower the '
+                'resolution, pass format "jpeg", or pass inline_max_size to inline a smaller copy.'
+                % (size, inline_limit))
 print({marker!r} + json.dumps(payload))
 """
 
-        capture_payload: Dict[str, Any] = {}
-        # Short first wait so UE's frame loop runs HighResShot, then poll.
-        await asyncio.sleep(_CAPTURE_POLL_SECONDS)
-        deadline = asyncio.get_event_loop().time() + 15.0
-        while True:
-            try:
-                capture_payload = self._parse_marker_json(
-                    await self._execute_python(read_code, mode="ExecuteFile"),
-                    marker,
-                )
-            except Exception:
-                capture_payload = {}
-            if capture_payload.get("path"):
-                break
-            if asyncio.get_event_loop().time() >= deadline:
-                break
+        async def written(seconds: float) -> Dict[str, Any]:
+            payload: Dict[str, Any] = {}
+            # Short first wait so UE's frame loop runs HighResShot, then poll.
             await asyncio.sleep(_CAPTURE_POLL_SECONDS)
+            deadline = asyncio.get_event_loop().time() + seconds
+            while True:
+                try:
+                    payload = self._parse_marker_json(
+                        await self._execute_python(read_code, mode="ExecuteFile"),
+                        marker,
+                    )
+                except Exception:
+                    payload = {}
+                if payload.get("path") or asyncio.get_event_loop().time() >= deadline:
+                    return payload
+                await asyncio.sleep(_CAPTURE_POLL_SECONDS)
 
-        result: Dict[str, Any] = {
-            "path": capture_payload.get("path", ""),
-            "size_bytes": capture_payload.get("size_bytes", 0),
-            "resolution_x": resolution_x,
-            "resolution_y": resolution_y,
-            "format": format,
-        }
-        if not result["path"] or not result["size_bytes"]:
+        fell_back = False
+        capture_payload = await written(_GAME_VIEW_WAIT_SECONDS if taken == "game" else 15.0)
+        if taken == "game" and not capture_payload.get("path"):
+            # A game viewport that does not draw, as during Simulate In
+            # Editor, never writes the screenshot.
+            if view != "auto":
+                return {
+                    "success": False,
+                    "error_type": "InvalidState",
+                    "error": GAME_VIEW_DID_NOT_DRAW,
+                    "pie_active": bool(snapshot["pie_active"]),
+                }
+            failed = await fire_in_editor()
+            if failed is not None:
+                return failed
+            taken, fell_back = "editor", True
+            capture_payload = await written(15.0)
+        if not capture_payload.get("path") or not capture_payload.get("size_bytes"):
             return {
                 "success": False,
                 "error_type": "CaptureError",
                 "error": "Unreal did not produce a nonempty screenshot before the capture deadline.",
             }
-        if "image_base64" in capture_payload:
-            result["image_base64"] = capture_payload["image_base64"]
+        return {
+            **capture_payload,
+            "view": taken,
+            "fell_back": fell_back,
+            "pie_active": bool(snapshot["pie_active"]),
+            "player": bool(snapshot["player"]),
+        }
+
+    async def capture_viewport(
+        self,
+        resolution_x: int = 1920,
+        resolution_y: int = 1080,
+        format: str = "png",
+        inline: bool = False,
+        view: str = "auto",
+        jpeg_quality: int = 85,
+        inline_max_size: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Capture a viewport screenshot with HighResShot and return where it is.
+
+        The image is written into the editor's screenshot directory
+        (``Project/Saved/Screenshots/``), whose path on the editor host is
+        returned; ``inline`` also returns the image. ``format`` "jpeg" converts
+        the PNG HighResShot writes into a JPEG beside it, which is the file
+        returned, and is about a tenth of the size. ``view`` picks what is
+        captured (``_high_res_shot``): the level editor viewport, whose camera
+        ``set_camera_view`` moves, or, during a Play In Editor session, the
+        player's game view; ``auto`` takes the game view when the game
+        viewport draws, and the level viewport, which shows the simulation,
+        during Simulate In Editor (it learns which by trying the game view
+        first, about 2 s). Unreal sends an editor HighResShot to every
+        level viewport pane that draws, while the camera tools move only the
+        first perspective pane; when several panes wrote a file the reply warns
+        that the newest one, which is returned, may not be that pane.
+
+        Args:
+            resolution_x: Capture width in pixels, 1 to 16384.
+            resolution_y: Capture height in pixels, 1 to 16384.
+            format: "png" or "jpeg".
+            inline: Also return the image as base64 (the MCP layer sends it
+                as an image block) when it fits the inline cap.
+            view: "auto", "editor" (the level editor viewport) or "game" (the
+                Play In Editor player's view; an InvalidState error when no
+                Play session's game viewport draws).
+            jpeg_quality: JPEG quality, 1 to 100.
+            inline_max_size: Above 0, inline a copy scaled down to at most
+                this many pixels on its longer side (16 to 16384); the file
+                keeps the full resolution.
+
+        Returns:
+            ``path``, ``size_bytes``, ``resolution_x``, ``resolution_y``,
+            ``format``, ``view`` ("editor" or "game"), ``pie_active`` and
+            ``warnings``; with ``inline``, ``image_base64`` and
+            ``inline_width`` / ``inline_height``, or ``inline_skipped``; or a
+            CaptureError, InvalidState or UnsupportedFormat envelope.
+        """
+        if format not in CAPTURE_FORMATS:
+            return {
+                "success": False,
+                "error_type": "UnsupportedFormat",
+                "error": f"format must be one of {', '.join(CAPTURE_FORMATS)}, not {format!r}",
+            }
+        if not 1 <= resolution_x <= 16384 or not 1 <= resolution_y <= 16384:
+            raise ValueError("Capture dimensions must be between 1 and 16384")
+        if view not in CAPTURE_VIEWS:
+            raise ValueError(f"view must be one of {', '.join(CAPTURE_VIEWS)}, not {view!r}")
+        _check_image_options(jpeg_quality, inline_max_size)
+        shot = await self._high_res_shot(
+            f"HighResShot {resolution_x}x{resolution_y}",
+            view,
+            jpeg_quality=jpeg_quality if format == "jpeg" else None,
+            inline_limit=MAX_INLINE_CAPTURE_BYTES if inline and not inline_max_size else 0,
+        )
+        if shot.get("error"):
+            return shot
+        warnings: List[str] = []
+        if shot.get("others"):
+            warnings.append(MULTIPLE_PANES_WARNING.format(count=shot["others"] + 1))
+        if shot.get("fell_back"):
+            warnings.append(GAME_VIEW_FELL_BACK_WARNING)
+        elif view == "editor" and shot["player"]:
+            warnings.append(EDITOR_VIEW_DURING_PLAY_WARNING)
+        result: Dict[str, Any] = {
+            "path": shot["path"],
+            "size_bytes": shot["size_bytes"],
+            "resolution_x": resolution_x,
+            "resolution_y": resolution_y,
+            "format": format,
+            "view": shot["view"],
+            "pie_active": shot["pie_active"],
+            "warnings": warnings,
+        }
+        if "image_base64" in shot:
+            result["image_base64"] = shot["image_base64"]
             result["encoding"] = "base64"
-        if "inline_skipped" in capture_payload:
-            result["inline_skipped"] = capture_payload["inline_skipped"]
+            result["inline_width"], result["inline_height"] = resolution_x, resolution_y
+        if "inline_skipped" in shot:
+            result["inline_skipped"] = shot["inline_skipped"]
+        if inline and inline_max_size:
+            result.update(await self._scaled_inline(result["path"], result["size_bytes"], format, jpeg_quality,
+                                                    inline_max_size))
         return result
+
+    async def _capture_chunks(self, capture_path: str, size: int) -> Any:
+        """Yield a capture on the editor host in bounded chunks.
+
+        Each chunk is one editor script that reads only inside the editor's
+        screenshot directory.
+
+        Raises:
+            IOError: A chunk came back shorter than asked (the file changed).
+            RuntimeError: The editor refused a read; its error is the message.
+        """
+        for offset in range(0, size, _CAPTURE_CHUNK_BYTES):
+            length = min(_CAPTURE_CHUNK_BYTES, size - offset)
+            chunk = await self._execute_json_script(f"""
+import os, json, base64, unreal
+root = os.path.realpath(os.path.join(unreal.Paths.project_saved_dir(), 'Screenshots'))
+path = os.path.realpath({capture_path!r})
+if os.path.commonpath([root, path]) != root:
+    raise ValueError('Capture path is outside the editor screenshot directory')
+with open(path, 'rb') as stream:
+    stream.seek({offset!r})
+    data = stream.read({length!r})
+print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
+""")
+            if chunk.get("error"):
+                raise RuntimeError(chunk["error"])
+            data = base64.b64decode(chunk["data"], validate=True)
+            if len(data) != length:
+                raise IOError("Screenshot changed or was truncated during transfer")
+            yield data
+
+    async def _scaled_inline(
+        self, path: str, size: int, format: str, jpeg_quality: int, max_size: int
+    ) -> Dict[str, Any]:
+        """A copy of a capture scaled to ``max_size`` pixels on its longer side, for inlining.
+
+        The file is read from the editor host in chunks and scaled here
+        (Pillow, Lanczos), in the capture's own format; a capture already that
+        small is sent as it is. A copy still above the inline cap, or a file
+        above ``_SCALED_INLINE_SOURCE_LIMIT``, is not inlined, and
+        ``inline_skipped`` says why.
+
+        Returns:
+            ``image_base64``, ``encoding``, ``inline_width``,
+            ``inline_height``; or ``inline_skipped``.
+        """
+        if size > _SCALED_INLINE_SOURCE_LIMIT:
+            return {
+                "inline_skipped": f"Capture is {size} bytes, above the {_SCALED_INLINE_SOURCE_LIMIT} byte limit "
+                "for scaling an inline copy. Read the file at path, or lower the resolution."
+            }
+        from PIL import Image
+
+        data = b"".join([chunk async for chunk in self._capture_chunks(path, size)])
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+            width, height = image.size
+            scale = min(1.0, max_size / max(width, height))
+            scaled: Image.Image = image
+            if scale < 1.0:
+                scaled = image.resize(
+                    (max(1, round(width * scale)), max(1, round(height * scale))), Image.Resampling.LANCZOS
+                )
+            buffer = io.BytesIO()
+            if format == "jpeg":
+                scaled.convert("RGB").save(buffer, format="JPEG", quality=jpeg_quality)
+            else:
+                scaled.save(buffer, format="PNG", optimize=True)
+            inline_width, inline_height = scaled.size
+        encoded = buffer.getvalue()
+        if len(encoded) > MAX_INLINE_CAPTURE_BYTES:
+            return {
+                "inline_skipped": f"The {inline_width}x{inline_height} copy is {len(encoded)} bytes, above the "
+                f"{MAX_INLINE_CAPTURE_BYTES} byte inline cap. Pass a smaller inline_max_size, or format \"jpeg\"."
+            }
+        return {
+            "image_base64": base64.b64encode(encoded).decode("ascii"),
+            "encoding": "base64",
+            "inline_width": inline_width,
+            "inline_height": inline_height,
+            "inline_skipped": None,
+        }
 
     async def capture_to_file(
         self,
@@ -1971,33 +2394,15 @@ print({marker!r} + json.dumps(payload))
             return result
         output = Path(output).expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
-        capture_path = result["path"]
-        size = result["size_bytes"]
         temporary: Optional[Path] = None
         try:
             with tempfile.NamedTemporaryFile(dir=output.parent, delete=False) as stream:
                 temporary = Path(stream.name)
-                for offset in range(0, size, _CAPTURE_CHUNK_BYTES):
-                    length = min(_CAPTURE_CHUNK_BYTES, size - offset)
-                    chunk = await self._execute_json_script(f"""
-import os, json, base64, unreal
-root = os.path.realpath(os.path.join(unreal.Paths.project_saved_dir(), 'Screenshots'))
-path = os.path.realpath({capture_path!r})
-if os.path.commonpath([root, path]) != root:
-    raise ValueError('Capture path is outside the editor screenshot directory')
-with open(path, 'rb') as stream:
-    stream.seek({offset!r})
-    data = stream.read({length!r})
-print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
-""")
-                    if chunk.get("error"):
-                        return chunk
-                    data = base64.b64decode(chunk["data"], validate=True)
-                    if len(data) != length:
-                        raise IOError(
-                            "Screenshot changed or was truncated during transfer"
-                        )
-                    stream.write(data)
+                try:
+                    async for data in self._capture_chunks(result["path"], result["size_bytes"]):
+                        stream.write(data)
+                except RuntimeError as exc:
+                    return self._script_error(str(exc))
             from PIL import Image
 
             with Image.open(temporary) as captured:
@@ -2015,18 +2420,193 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
-    async def get_viewport_info(self) -> Dict[str, Any]:
+    async def capture_camera(
+        self,
+        actor_path: str,
+        resolution_x: int = 1280,
+        resolution_y: int = 720,
+        format: str = "png",
+        inline: bool = False,
+        jpeg_quality: int = 85,
+        inline_max_size: int = 0,
+    ) -> Dict[str, Any]:
         """
-        Get active editor viewport camera and render information.
+        Render what a camera or sensor actor sees, with its intrinsics.
 
-        Reads the camera through ``UnrealEditorSubsystem.GetLevelViewportCameraInfo``.
-        Remote Control exposes no viewport size, field of view or projection
-        type, so those are reported as None rather than guessed. A failed
-        read is an error, never a default camera.
+        One editor script (``_unreal_scripts.CAMERA_CAPTURE``) puts a transient
+        SceneCapture2D where the actor's SceneCaptureComponent2D or
+        CameraComponent is, with its projection, field of view and
+        post-process settings, captures the scene once (final color, tone
+        mapped) and writes the image into the editor's screenshot directory.
+        The actor itself is hidden from the capture. During Play In Editor the
+        actor's counterpart in the running game is captured. The capture has
+        the field of view across its width, so ``intrinsics`` is the pinhole
+        model of this image (square pixels, principal point at the center).
+
+        Args:
+            actor_path: A CameraActor, CineCameraActor, SceneCapture2D, or any
+                actor with a CameraComponent or SceneCaptureComponent2D.
+            resolution_x: Image width in pixels, 1 to 8192.
+            resolution_y: Image height in pixels, 1 to 8192.
+            format: "png" or "jpeg".
+            inline: Also return the image when it fits the inline cap.
+            jpeg_quality: JPEG quality, 1 to 100.
+            inline_max_size: Above 0, inline a copy scaled down to at most
+                this many pixels on its longer side (16 to 16384).
 
         Returns:
-            Dictionary with camera_location, camera_rotation, viewport_size,
-            fov, projection_type.
+            ``path``, ``size_bytes``, ``resolution_x``, ``resolution_y``,
+            ``format``, ``actor_path``, ``captured_actor``, ``world``
+            ("editor" or "game"), ``pie_active``, ``camera`` (location,
+            rotation, projection, fields of view, component, lens),
+            ``intrinsics`` (fx, fy, cx, cy in pixels; null for an
+            orthographic camera) and ``warnings``; with ``inline``,
+            ``image_base64`` or ``inline_skipped``; or an error envelope
+            (ValidationError for an actor without a camera, PIEActive for one
+            not in the running game).
+        """
+        if format not in CAPTURE_FORMATS:
+            return {
+                "success": False,
+                "error_type": "UnsupportedFormat",
+                "error": f"format must be one of {', '.join(CAPTURE_FORMATS)}, not {format!r}",
+            }
+        if not 1 <= resolution_x <= 8192 or not 1 <= resolution_y <= 8192:
+            raise ValueError("Camera capture dimensions must be between 1 and 8192")
+        _check_image_options(jpeg_quality, inline_max_size)
+        args = {
+            "actor_path": actor_path,
+            "width": resolution_x,
+            "height": resolution_y,
+            "format": format,
+            "quality": jpeg_quality,
+            "inline_limit": MAX_INLINE_CAPTURE_BYTES if inline and not inline_max_size else 0,
+        }
+        shot = await self._execute_json_script(
+            f"args = {args!r}\n" + CAMERA_CAPTURE, expected_errors=("ValidationError",)
+        )
+        if shot.get("error"):
+            return shot
+        result = {
+            key: shot[key]
+            for key in ("path", "size_bytes", "actor_path", "captured_actor", "world", "pie_active")
+        }
+        result.update(resolution_x=resolution_x, resolution_y=resolution_y, format=format)
+        result["camera"] = {
+            "location": shot["camera_location"],
+            "rotation": shot["camera_rotation"],
+            "component": shot["component"],
+            "projection": "orthographic" if shot["orthographic"] else "perspective",
+            "ortho_width": shot["ortho_width"] if shot["orthographic"] else None,
+            "lens": shot.get("lens") or {},
+        }
+        result["camera"].update(camera_fields_of_view(shot["horizontal_fov"], resolution_x, resolution_y,
+                                                      shot["orthographic"]))
+        result["intrinsics"] = camera_intrinsics(shot["horizontal_fov"], resolution_x, resolution_y,
+                                                 shot["orthographic"])
+        warnings: List[str] = []
+        aspect = shot.get("constrained_aspect_ratio")
+        if aspect and abs(aspect - resolution_x / resolution_y) > 0.01:
+            warnings.append(
+                f"The camera constrains its view to an aspect ratio of {aspect:.3f}, and this capture is "
+                f"{resolution_x / resolution_y:.3f} wide per unit of height with the same field of view across "
+                "the width, so it shows "
+                + ("more" if resolution_x / resolution_y < aspect else "less")
+                + " above and below than the camera does. Pass a resolution of that aspect ratio to match it."
+            )
+        result["warnings"] = warnings
+        if "image_base64" in shot:
+            result["image_base64"] = shot["image_base64"]
+            result["encoding"] = "base64"
+            result["inline_width"], result["inline_height"] = resolution_x, resolution_y
+        elif inline and not inline_max_size:
+            result["inline_skipped"] = (
+                f"Capture is {shot['size_bytes']} bytes, above the {MAX_INLINE_CAPTURE_BYTES} byte inline cap. "
+                "Read the file at path, lower the resolution, pass format \"jpeg\", or pass inline_max_size."
+            )
+        if inline and inline_max_size:
+            result.update(await self._scaled_inline(result["path"], result["size_bytes"], format, jpeg_quality,
+                                                    inline_max_size))
+        return result
+
+    async def get_viewport_info(self, measure_size: bool = False) -> Dict[str, Any]:
+        """
+        Get the level viewport camera, and the player's view while Play In Editor runs.
+
+        The camera comes from ``UnrealEditorSubsystem.GetLevelViewportCameraInfo``,
+        which reads the first perspective level viewport pane, the one
+        ``set_camera_view`` moves; ``projection_type`` is therefore
+        "Perspective". Editor Python cannot read that viewport's field of
+        view (UE 5.7 keeps it in config-only per-viewport settings), so
+        ``fov`` stays None and ``notes`` says so; nor its size, which
+        ``measure_size`` measures by taking a HighResShot at the viewport's
+        own size and reading the image's dimensions (the file is deleted).
+        While a Play session with a player runs, ``game_view`` is the player's
+        camera (location, rotation, field of view) and game viewport size, and
+        ``viewport_size`` is that size. A failed camera read is an error,
+        never a default camera.
+
+        Args:
+            measure_size: Outside a Play session, measure the level viewport's
+                size with a HighResShot (about a frame of rendering).
+
+        Returns:
+            ``camera_location``, ``camera_rotation``, ``viewport_size``,
+            ``fov``, ``projection_type``, ``pie_active``, ``game_view``,
+            ``viewports``, ``active_viewport`` and ``notes``; or a
+            ViewportUnavailable envelope.
+        """
+        camera = await self._level_viewport_camera()
+        if camera.get("success") is False:
+            return camera
+        result: Dict[str, Any] = {
+            **camera,
+            "viewport_size": None,
+            "fov": None,
+            "projection_type": "Perspective",
+            "pie_active": False,
+            "game_view": None,
+            "viewports": [],
+            "active_viewport": None,
+            "notes": [VIEWPORT_FOV_NOTE],
+        }
+        try:
+            state = await self._execute_json_script(VIEWPORT_STATE, failure_log_level=logging.DEBUG)
+        except Exception as exc:
+            # The camera came from Remote Control alone; a refused Python
+            # call (Python execution disabled) leaves the rest unknown.
+            state = {"error": str(exc) or type(exc).__name__}
+        if state.get("error"):
+            result["notes"].append("Could not read the Play In Editor state: " + str(state["error"]))
+            return result
+        result.update(
+            pie_active=bool(state.get("pie_active")),
+            game_view=state.get("game_view"),
+            viewports=state.get("viewports") or [],
+            active_viewport=state.get("active_viewport"),
+        )
+        if len(result["viewports"]) > 1:
+            result["notes"].append(VIEWPORT_PANES_NOTE.format(count=len(result["viewports"])))
+        if result["game_view"]:
+            result["viewport_size"] = tuple(result["game_view"]["viewport_size"])
+        elif measure_size:
+            size = await self._measure_viewport_size()
+            if "width" in size:
+                result["viewport_size"] = (size["width"], size["height"])
+            result["notes"].extend(size.get("notes", []))
+        else:
+            result["notes"].append(
+                "viewport_size is not readable from editor Python; pass measure_size=true to measure it "
+                "with a HighResShot at the viewport's own size"
+            )
+        return result
+
+    async def _level_viewport_camera(self) -> Dict[str, Any]:
+        """The first perspective level viewport pane's camera, through Remote Control.
+
+        Returns:
+            ``camera_location`` and ``camera_rotation``; or a
+            ViewportUnavailable envelope when Unreal has no such pane.
         """
         data = await self._call_function(
             "/Script/UnrealEd.Default__UnrealEditorSubsystem",
@@ -2043,10 +2623,40 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         return {
             "camera_location": (loc.get("X", 0.0), loc.get("Y", 0.0), loc.get("Z", 0.0)),
             "camera_rotation": (rot.get("Pitch", 0.0), rot.get("Yaw", 0.0), rot.get("Roll", 0.0)),
-            "viewport_size": None,
-            "fov": None,
-            "projection_type": None,
         }
+
+    async def _measure_viewport_size(self) -> Dict[str, Any]:
+        """The level viewport's size, from a HighResShot at its own size (``HighResShot 1``).
+
+        The PNG's dimensions are read in the editor from its header and the
+        file is deleted.
+
+        Returns:
+            ``width`` and ``height``, with ``notes`` when several panes wrote
+            a screenshot; or ``notes`` saying why nothing was measured.
+        """
+        shot = await self._high_res_shot("HighResShot 1", "editor")
+        if shot.get("error"):
+            return {"notes": ["Could not measure the viewport size: " + str(shot["error"])]}
+        header = await self._execute_json_script(f"""
+import json, os, struct
+path = {shot['path']!r}
+with open(path, 'rb') as stream:
+    head = stream.read(24)
+os.remove(path)
+if head[:8] != b'\\x89PNG\\r\\n\\x1a\\n':
+    raise ValueError('Not a PNG: ' + path)
+width, height = struct.unpack('>II', head[16:24])
+print(json.dumps({{'width': width, 'height': height}}))
+""")
+        if header.get("error"):
+            return {"notes": ["Could not measure the viewport size: " + str(header["error"])]}
+        notes = []
+        if shot.get("others"):
+            notes.append(
+                f"{shot['others'] + 1} viewport panes drew a screenshot; viewport_size is the newest one's"
+            )
+        return {"width": header["width"], "height": header["height"], "notes": notes}
 
     async def set_camera_view(
         self,
@@ -2233,7 +2843,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         )
 
         # Read back viewport camera position
-        info = await self.get_viewport_info()
+        info = await self._level_viewport_camera()
         if info.get("success") is False:
             return info
 
