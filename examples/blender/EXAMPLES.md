@@ -806,8 +806,8 @@ All Blender MCP tools grouped by capability phase.
 | `set_blender_camera_view` | Set camera location and rotation |
 | `get_blender_camera_info` | Focal length, sensor size, clip range, DOF |
 | `focus_blender_on_object` | Point camera at an object with distance factor |
-| `get_blender_viewport_info` | Viewport shading mode, overlays, region sizes |
-| `capture_blender_viewport_sequence` | Multi-frame capture across frame range |
+| `get_blender_viewport_info` | Render settings, plus the 3D View's view matrix, lens, clip range and shading |
+| `capture_blender_viewport_sequence` | Multi-frame capture across a frame range, written to JPEG files |
 
 ### Phase 3 — Scene Manipulation
 
