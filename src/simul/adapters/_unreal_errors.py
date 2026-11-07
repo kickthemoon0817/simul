@@ -28,8 +28,8 @@ alone:
 
 ``AuthenticationError`` (HTTP 401: Remote Control refused this client, for its
 passphrase or its address) and the domain types (``PIEActive`` and the like)
-keep their names. The strings are the cross-backend set; when a shared module
-defines them, these constants should import from it.
+keep their names. The strings are the cross-backend vocabulary of
+``simul.mcp.error_types``; this module re-exports the ones it uses.
 """
 
 from __future__ import annotations
@@ -38,14 +38,30 @@ import json
 import re
 from typing import Any, Dict, Optional
 
-CONNECTION_ERROR = "ConnectionError"
-TIMEOUT_ERROR = "TimeoutError"
-ENGINE_ERROR = "EngineError"
-VALIDATION_ERROR = "ValidationError"
-NOT_FOUND_ERROR = "NotFoundError"
-INSTANCE_BUSY = "InstanceBusy"
-SANDBOX_ERROR = "SandboxError"
-AUTHENTICATION_ERROR = "AuthenticationError"
+from ..mcp.error_types import (  # noqa: F401  (re-exported)
+    AUTHENTICATION_ERROR,
+    CONNECTION_ERROR,
+    ENGINE_ERROR,
+    INSTANCE_BUSY,
+    NOT_FOUND_ERROR,
+    SANDBOX_ERROR,
+    TIMEOUT_ERROR,
+    VALIDATION_ERROR,
+)
+
+#: Suffix of the domain types for a change Unreal took but the read-back shows
+#: it did not make (``TransformNotApplied``, ``RenderSettingNotApplied`` and the
+#: actor tools' types below), so a client can match the family.
+NOT_APPLIED_SUFFIX = "NotApplied"
+
+# The actor tools' read-back failures. Each carries ``details.expected`` (what
+# was asked) and ``details.actual`` (what Unreal reads back).
+ATTACHMENT_NOT_APPLIED = "AttachmentNotApplied"
+COMPONENT_NOT_APPLIED = "ComponentNotApplied"
+RENAME_NOT_APPLIED = "RenameNotApplied"
+DELETE_NOT_APPLIED = "DeleteNotApplied"
+VISIBILITY_NOT_APPLIED = "VisibilityNotApplied"
+CAMERA_NOT_APPLIED = "CameraNotApplied"
 
 
 class UnrealError(Exception):

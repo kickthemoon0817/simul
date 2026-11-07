@@ -422,7 +422,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
                         f"agent_id {_agent_id!r} is not this session's claim "
                         f"({binding.agent_id!r}); only your own claim can be released."
                     ),
-                    error_type=error_types.PERMISSION_ERROR,
+                    error_type=error_types.PERMISSION_DENIED,
                 ).model_dump()
             if binding is not None:
                 _port: Optional[int] = binding.port
@@ -458,7 +458,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
                         "to another live MCP session; only your own claim, or an orphaned "
                         "one, can be released."
                     ),
-                    error_type=error_types.PERMISSION_ERROR,
+                    error_type=error_types.PERMISSION_DENIED,
                 ).model_dump()
             released = server._release_request_binding(instance_name, _agent_id)
             return {

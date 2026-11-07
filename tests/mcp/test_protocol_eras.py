@@ -300,9 +300,12 @@ def test_sessionless_http_clients_get_no_session_to_share(
     (peer,) = set(_agents(server))
     assert re.fullmatch(rf"{server_module._ANONYMOUS_AGENT}@[\w.:]+:\d+", peer), peer
     assert server._session_routes == {}
-    # The refused session tools spend that client's budget too.
+    # The refused session tools spend that client's budget too, all but
+    # release_isaac_instance, which the rate limit never refuses.
     assert set(server._rate_limiters) == {
-        (peer, tool) for tool in ("ping_isaac", "*", *(name for name, _ in SESSION_TOOLS))
+        (peer, tool)
+        for tool in ("ping_isaac", "*", *(name for name, _ in SESSION_TOOLS))
+        if tool != "release_isaac_instance"
     }
     assert server.session_manager.get_all_sessions() == []
 

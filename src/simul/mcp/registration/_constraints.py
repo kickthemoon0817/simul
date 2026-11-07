@@ -137,6 +137,32 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         ),
     },
     "create_isaac_physics_scene": {"gravity_magnitude": Bounds(gt=0)},
+    "add_isaac_collision": {
+        "approximation": Choices(
+            (
+                "none",
+                "convexHull",
+                "convexDecomposition",
+                "meshSimplification",
+                "boundingSphere",
+                "boundingCube",
+            )
+        ),
+    },
+    # The tool upper-cases both before checking, so any case is taken.
+    "configure_isaac_physics_scene": {
+        "solver_type": Choices(("TGS", "PGS"), enforced=False),
+        "broadphase_type": Choices(("GPU", "MBP", "SAP"), enforced=False),
+    },
+    "set_isaac_joint_drive": {
+        "drive_axis": Choices(
+            ("angular", "linear", "transX", "transY", "transZ", "rotX", "rotY", "rotZ")
+        ),
+        "drive_type": Choices(("force", "acceleration")),
+    },
+    "set_isaac_joint_limits": {
+        "limit_axis": Choices(("transX", "transY", "transZ", "rotX", "rotY", "rotZ", "distance")),
+    },
     # -- Headless USD ----------------------------------------------------------
     # The limits the USD request models validate (simul.mcp.schemas.usd); the
     # choices (search_type, format) the tools advertise as Literal types.
@@ -157,9 +183,28 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         "fov": Bounds(ge=UNREAL_MIN_FOV_DEGREES, lt=180.0),
         "aspect_ratio": Bounds(ge=1.0 / UNREAL_MAX_ASPECT_RATIO, le=UNREAL_MAX_ASPECT_RATIO),
     },
-    "get_unreal_actor_by_semantic_label": {"max_results": Bounds(ge=1, le=5000)},
-    "subdivide_unreal_mesh": {"level": Bounds(ge=1, le=4)},
+    "get_unreal_actor_by_semantic_label": {
+        "max_results": Bounds(ge=1, le=5000),
+        "match_mode": Choices(("exact", "contains", "regex")),
+    },
+    # Advertised only: the request model refuses another mode, through the
+    # script tool's own echo (the source by its size) and usage record.
+    "execute_unreal_script": {
+        "mode": Choices(("ExecuteFile", "EvaluateStatement", "ExecuteStatement"), enforced=False),
+    },
+    # Matched in any case by the editor, so advertised without refusing the rest.
+    "generate_unreal_procedural_scene": {
+        "scene_type": Choices(("room", "corridor", "warehouse", "outdoor"), enforced=False),
+    },
+    "apply_unreal_mesh_boolean": {
+        "operation": Choices(("union", "subtract", "intersect"), enforced=False),
+    },
+    "subdivide_unreal_mesh": {
+        "level": Bounds(ge=1, le=4),
+        "scheme": Choices(("catmull_clark", "loop", "uniform"), enforced=False),
+    },
     "simplify_unreal_mesh": {"target_percentage": Bounds(ge=0.0, le=1.0)},
+    "set_unreal_actor_visibility": {"scope": Choices(("all", "editor", "game"))},
     "control_unreal_simulation": {
         "action": Choices(("start", "stop", "pause", "resume", "step")),
     },
@@ -178,6 +223,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     },
     "capture_blender_viewport_sequence": {
         "step": Bounds(ge=1),
+        "max_frames": Bounds(ge=1, le=100),
         "width": Bounds(ge=64, le=4096),
         "height": Bounds(ge=64, le=4096),
         "jpeg_quality": Bounds(ge=1, le=100),
@@ -239,12 +285,26 @@ def apply(annotation: Any, constraint: Constraint) -> Any:
     values when enforced, and add an advertised ``enum`` otherwise. Bounds are
     attached as pydantic constraints, which apply to the value inside an
     ``Optional``.
+
+    A parameter that is already a ``Literal`` keeps its own choices: choices
+    that differ would narrow (or widen) what the tool accepts behind its
+    back, so they are refused.
+
+    Raises:
+        ValueError: Choices for a ``Literal`` parameter that are not its own.
     """
     if isinstance(constraint, Bounds):
         return Annotated[annotation, constraint.field()]
-    _, optional = _optional_of(_base(annotation))
+    inner, optional = _optional_of(_base(annotation))
+    if typing.get_origin(inner) is Literal:
+        if set(typing.get_args(inner)) != set(constraint.values):
+            raise ValueError(
+                f"choices {constraint.values!r} would replace the Literal "
+                f"{typing.get_args(inner)!r} the parameter already declares"
+            )
+        return annotation
     if constraint.enforced:
-        literal: Any = Literal[constraint.values]  # type: ignore[valid-type]
+        literal: Any = Literal[constraint.values]
         return Optional[literal] if optional else literal
     return Annotated[annotation, Field(json_schema_extra={"enum": list(constraint.values)})]
 
@@ -287,7 +347,7 @@ def from_request_model(
     metadata = [m for m in field.metadata if isinstance(m, _COPIED_METADATA)]
     if not metadata:
         return annotation
-    return Annotated[(annotation, *metadata)]  # type: ignore[valid-type]
+    return Annotated[(annotation, *metadata)]
 
 
 def describe_constraints(schema: Mapping[str, Any]) -> Dict[str, Any]:

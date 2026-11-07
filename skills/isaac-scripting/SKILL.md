@@ -39,7 +39,7 @@ Key rules:
 - `stdout` is captured and returned — use `print()` for all output
 - For structured results, always end with `print(json.dumps({...}))` as the final line
 - Top-level `await` is supported — the executor detects coroutines automatically
-- Each execution is **independent**: always `import` everything at the top of each script; do not rely on state from previous executions
+- Executions are **not isolated**: every transport runs scripts in one shared namespace, so globals persist into later calls, other agents' included. Always `import` everything at the top of each script, keep helpers inside functions, and do not rely on state from previous executions
 - Avoid long-running loops or `time.sleep()` calls that block the Kit main thread
 
 ## Script Structure

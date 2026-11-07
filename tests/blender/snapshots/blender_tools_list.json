@@ -21,11 +21,14 @@
       "capture_blender_viewport_sequence",
       "create_blender_object",
       "delete_blender_object",
+      "set_blender_object_mode",
       "set_blender_object_transform",
       "set_blender_object_parent",
       "clear_blender_object_parent",
       "assign_blender_material",
       "add_blender_modifier",
+      "apply_blender_modifier",
+      "remove_blender_modifier",
       "set_blender_light_params",
       "open_blender_file",
       "save_blender_file",
@@ -48,8 +51,11 @@
       "get_blender_object_trajectory",
       "bake_blender_simulation",
       "free_blender_bake",
+      "get_blender_rigid_body_world",
+      "set_blender_rigid_body_world",
       "execute_blender_script",
       "create_blender_mesh_from_data",
+      "clean_blender_mesh",
       "apply_simready_metadata",
       "get_simready_metadata",
       "validate_simready_compliance",
@@ -88,11 +94,14 @@
       "capture_blender_viewport_sequence",
       "create_blender_object",
       "delete_blender_object",
+      "set_blender_object_mode",
       "set_blender_object_transform",
       "set_blender_object_parent",
       "clear_blender_object_parent",
       "assign_blender_material",
       "add_blender_modifier",
+      "apply_blender_modifier",
+      "remove_blender_modifier",
       "set_blender_light_params",
       "open_blender_file",
       "save_blender_file",
@@ -115,8 +124,11 @@
       "get_blender_object_trajectory",
       "bake_blender_simulation",
       "free_blender_bake",
+      "get_blender_rigid_body_world",
+      "set_blender_rigid_body_world",
       "execute_blender_script",
       "create_blender_mesh_from_data",
+      "clean_blender_mesh",
       "apply_simready_metadata",
       "get_simready_metadata",
       "validate_simready_compliance",
@@ -155,11 +167,14 @@
       "capture_blender_viewport_sequence",
       "create_blender_object",
       "delete_blender_object",
+      "set_blender_object_mode",
       "set_blender_object_transform",
       "set_blender_object_parent",
       "clear_blender_object_parent",
       "assign_blender_material",
       "add_blender_modifier",
+      "apply_blender_modifier",
+      "remove_blender_modifier",
       "set_blender_light_params",
       "open_blender_file",
       "save_blender_file",
@@ -182,7 +197,10 @@
       "get_blender_object_trajectory",
       "bake_blender_simulation",
       "free_blender_bake",
+      "get_blender_rigid_body_world",
+      "set_blender_rigid_body_world",
       "create_blender_mesh_from_data",
+      "clean_blender_mesh",
       "apply_simready_metadata",
       "get_simready_metadata",
       "validate_simready_compliance",
@@ -280,7 +298,7 @@
     "list_blender_scene_objects": {
       "name": "list_blender_scene_objects",
       "title": "List Blender Scene Objects",
-      "description": "List objects from the active Blender scene.",
+      "description": "List objects from the active Blender scene, a page at a time: count objects from offset, total matching, and next_offset for the next page (null after the last). A page stops before its entries pass 30000 bytes of JSON, so it can hold fewer than max_items. Each entry names a collection holding the object.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -296,6 +314,12 @@
             "description": "Maximum number of objects to return.",
             "maximum": 5000,
             "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "description": "How many matching objects to skip, as next_offset gives it.",
+            "minimum": 0,
             "type": "integer"
           }
         }
@@ -319,7 +343,7 @@
     "get_blender_mesh_info": {
       "name": "get_blender_mesh_info",
       "title": "Get Blender Mesh Info",
-      "description": "Get mesh geometry counts for a Blender mesh object.",
+      "description": "Get a Blender mesh object's vertex, edge, face and triangle counts: of the stored mesh, and evaluated with the modifiers enabled in the viewport, which is what an export writes. A mesh in Edit Mode is counted with its unsaved edits. warnings name modifiers set differently for render, which USD export evaluates.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -352,7 +376,7 @@
     "search_blender_objects": {
       "name": "search_blender_objects",
       "title": "Search Blender Objects",
-      "description": "Search for objects in the Blender scene by name pattern or type.",
+      "description": "Search for objects in the Blender scene by name pattern or type (in any case), a page at a time as list_blender_scene_objects pages: count, total and next_offset.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -365,13 +389,19 @@
           "object_type": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
-            "description": "Blender object type filter (MESH, LIGHT, etc.)."
+            "description": "Blender object type filter (MESH, LIGHT, etc.), in any case."
           },
           "max_results": {
             "default": 50,
             "description": "Maximum number of results.",
             "maximum": 5000,
             "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "description": "How many matching objects to skip, as next_offset gives it.",
+            "minimum": 0,
             "type": "integer"
           }
         }
@@ -382,7 +412,7 @@
     "summarize_blender_scene": {
       "name": "summarize_blender_scene",
       "title": "Summarize Blender Scene",
-      "description": "Get a high-level summary of the Blender scene.",
+      "description": "Get a high-level summary of the Blender scene: object counts by type, its top-level collections, active camera and frame range.",
       "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
@@ -419,7 +449,7 @@
     "check_blender_object_bounds": {
       "name": "check_blender_object_bounds",
       "title": "Check Blender Object Bounds",
-      "description": "Check if a Blender object is within spatial bounds.",
+      "description": "Check where a Blender object's world-space bounding box lies relative to an axis-aligned box: relation 'inside' (within_bounds), 'intersecting' or 'outside'. The bounding box turns and scales with the object; origin_within_bounds tests the origin alone. bounds_min must not exceed bounds_max.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -448,7 +478,7 @@
     "capture_blender_viewport": {
       "name": "capture_blender_viewport",
       "title": "Capture Blender Viewport",
-      "description": "Capture Blender as a JPEG. In attached mode the default (method='auto') is the 3D View the user sees: view angle, shading, overlays, Edit Mode and unsaved edits, with no camera needed, keeping the view's aspect ratio within width x height (capture_method viewport; an external engine's Rendered view, such as Cycles, is read from the screen as viewport_screen and includes overlapping UI). Embedded (headless bpy) mode has no 3D View, so 'auto' renders. method='render' renders through the scene camera, or through a temporary camera removed afterwards: aligned to the 3D View when attached, framing the visible objects when embedded or when the window shows no 3D View (render_temp_camera_view / render_temp_camera_framing). The image arrives as an MCP image content block, followed by a JSON block with success, width, height, engine, capture_method, format and image_attached=true. In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured image.",
+      "description": "Capture Blender as a JPEG. In attached mode the default (method='auto') is the 3D View the user sees: view angle, shading, overlays, Edit Mode and unsaved edits, with no camera needed, keeping the view's aspect ratio within width x height (capture_method viewport; an external engine's Rendered view, such as Cycles, is read from the screen as viewport_screen and includes overlapping UI). Embedded (headless bpy) mode has no 3D View, so 'auto' renders. method='render' renders through the scene camera, or through a temporary camera removed afterwards: aligned to the 3D View when attached, framing the visible objects when embedded or when the window shows no 3D View (render_temp_camera_view / render_temp_camera_framing). camera_name captures through that camera without changing the scene camera or the view: a render renders through it, a viewport capture draws the 3D View's shading from it (viewport_camera). The image arrives as an MCP image content block, followed by a JSON block with success, width, height, engine, capture_method, camera_name, format and image_attached=true. In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured image.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -489,6 +519,11 @@
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
             "description": "Visible capture feedback label in attached mode; ignored in embedded mode."
+          },
+          "camera_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Capture through this camera instead of the scene camera or the 3D View's angle; the scene camera and the view are left as they were. A render renders through it; a viewport capture draws the 3D View's shading from it (capture_method viewport_camera), keeping the render's aspect ratio inside width x height."
           }
         }
       },
@@ -576,7 +611,7 @@
     "get_blender_viewport_info": {
       "name": "get_blender_viewport_info",
       "title": "Get Blender Viewport Info",
-      "description": "Get active viewport and render settings.",
+      "description": "Get the render settings (engine, resolution, film, active camera) and, in attached mode, view3d: the 3D View captures use, with its view_matrix, eye_location, perspective, lens, clip range and shading. view3d is null without an editor window (embedded bpy, blender -b) or 3D View, and view3d_unavailable_reason says which.",
       "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
@@ -584,13 +619,16 @@
     "capture_blender_viewport_sequence": {
       "name": "capture_blender_viewport_sequence",
       "title": "Capture Blender Viewport Sequence",
-      "description": "Capture a frame range as base64-encoded JPEGs, each made like capture_blender_viewport with the same method (the 3D View when attached, a camera render in embedded mode). In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured images.",
+      "description": "Capture a frame range as JPEG files, each made like capture_blender_viewport with the same method and camera_name (the 3D View when attached, a camera render in embedded mode), and return their paths: frames [{frame, file_path}], output_dir (default a new folder in the sandbox's capture directory), width and height. end_frame must not be before start_frame. One call captures at most max_frames (default 50, at most 100) and starts no frame after 10 s, since Blender is busy meanwhile; then complete is false and next_start_frame says where to continue. In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured images.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "start_frame": {"description": "First frame to capture.", "type": "integer"},
-          "end_frame": {"description": "Last frame to capture (inclusive).", "type": "integer"},
+          "end_frame": {
+            "description": "Last frame to capture (inclusive); not before start_frame.",
+            "type": "integer"
+          },
           "step": {
             "default": 1,
             "description": "Frame step between captures.",
@@ -628,6 +666,23 @@
             "description": "\"viewport\", \"render\" or \"auto\" (default), as for capture_blender_viewport.",
             "enum": ["auto", "viewport", "render"],
             "type": "string"
+          },
+          "camera_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Capture through this camera, as for capture_blender_viewport."
+          },
+          "output_dir": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Folder for the frame files, inside the sandbox; created when missing, and existing frame files of the same numbers are replaced. Default: a new sequence-<time>-<id> folder in the capture directory."
+          },
+          "max_frames": {
+            "default": 50,
+            "description": "Most frames captured by this call, 1 to 100.",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": ["start_frame", "end_frame"]
@@ -638,7 +693,7 @@
     "create_blender_object": {
       "name": "create_blender_object",
       "title": "Create Blender Object",
-      "description": "Create a new object in the Blender scene.",
+      "description": "Create a new object in the Blender scene's active collection, or in the scene's own collection when the active one is excluded, hidden or disabled in viewports (warning says so). It stays in Object Mode whatever Blender's Enter Edit Mode preference.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -682,14 +737,44 @@
     "delete_blender_object": {
       "name": "delete_blender_object",
       "title": "Delete Blender Object",
-      "description": "Delete an object from the Blender scene.",
+      "description": "Delete an object from the current Blender scene with Blender's own Delete, which also resets a rigid body's cache. Another scene linking it keeps it (remaining_scenes); use_global=true deletes it from every scene and the file.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"object_name": {"description": "Name of the object to delete.", "type": "string"}},
+        "properties": {
+          "object_name": {"description": "Name of the object to delete.", "type": "string"},
+          "use_global": {
+            "default": false,
+            "description": "Delete it from every scene and the file, not only from the current scene.",
+            "type": "boolean"
+          }
+        },
         "required": ["object_name"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "set_blender_object_mode": {
+      "name": "set_blender_object_mode",
+      "title": "Set Blender Object Mode",
+      "description": "Switch an object (the active one by default) into a mode, as the 3D View's mode menu does: OBJECT by default, the way back for a window left in Edit or Pose Mode, where create, delete, import and the other mode-sensitive tools refuse to run.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "default": "OBJECT",
+            "description": "OBJECT (default), EDIT, POSE, SCULPT, VERTEX_PAINT, WEIGHT_PAINT, TEXTURE_PAINT or another mode Blender's object.mode_set takes, in any case.",
+            "type": "string"
+          },
+          "object_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "The object to switch; the active object by default."
+          }
+        }
+      },
+      "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_object_transform": {
@@ -823,7 +908,7 @@
     "add_blender_modifier": {
       "name": "add_blender_modifier",
       "title": "Add Blender Modifier",
-      "description": "Add a modifier to a Blender object.",
+      "description": "Add a modifier to a Blender mesh, curve or other object with a modifier stack. params are the modifier's settings by Blender RNA name, checked before use: an unknown name is refused with the closest names, an enum value must be one of its items, a number must lie within the setting's limits (Blender would clamp it silently), and an object or collection setting takes its name, e.g. {'object': 'Cutter'} for BOOLEAN. The reply echoes the stored settings. A refused call leaves no modifier behind. DECIMATE is refused on a mesh with invalid geometry, which can freeze Blender; run clean_blender_mesh first.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -838,13 +923,45 @@
           "params": {
             "additionalProperties": true,
             "default": {},
-            "description": "Modifier-specific parameters to set.",
+            "description": "Modifier settings by RNA name, e.g. {\"ratio\": 0.5} for DECIMATE or {\"object\": \"Cutter\"} for BOOLEAN.",
             "type": "object"
           }
         },
         "required": ["object_name", "modifier_type"]
       },
       "annotations": {"readOnlyHint": false},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "apply_blender_modifier": {
+      "name": "apply_blender_modifier",
+      "title": "Apply Blender Modifier",
+      "description": "Apply one modifier of a Blender mesh object, baking its result into the mesh data (for example a Decimate before export) and removing it from the stack. A modifier below others is applied to the base mesh without them, with a warning; shared mesh data is copied for this object first. A modifier disabled in the viewport is refused, as Blender would drop it unapplied. Requires Object Mode.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "Mesh object holding the modifier.", "type": "string"},
+          "modifier_name": {"description": "Name of the modifier to apply.", "type": "string"}
+        },
+        "required": ["object_name", "modifier_name"]
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "remove_blender_modifier": {
+      "name": "remove_blender_modifier",
+      "title": "Remove Blender Modifier",
+      "description": "Remove one modifier from a Blender object's stack without applying it.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "Object holding the modifier.", "type": "string"},
+          "modifier_name": {"description": "Name of the modifier to remove.", "type": "string"}
+        },
+        "required": ["object_name", "modifier_name"]
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_light_params": {
@@ -936,7 +1053,7 @@
     "import_blender_file": {
       "name": "import_blender_file",
       "title": "Import Blender File",
-      "description": "Import an OBJ, FBX, glTF, USD, STL or PLY file into the Blender scene, optionally scaled about the world origin (scale).",
+      "description": "Import an OBJ, FBX, glTF, USD, STL or PLY file into the Blender scene, optionally scaled about the world origin (scale). The textures, buffers, MTL libraries and USD layers it would read must be inside the sandbox too, or it is refused with SandboxError; within the sandbox the FBX importer does not search folders for textures.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1064,7 +1181,7 @@
     "get_blender_file_info": {
       "name": "get_blender_file_info",
       "title": "Get Blender File Info",
-      "description": "Get information about the current .blend file.",
+      "description": "Get information about the current .blend file: its path, saved and dirty state, the current scene's name and object_count, and file_object_count for the whole file.",
       "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
@@ -1093,7 +1210,7 @@
     "set_blender_frame_range": {
       "name": "set_blender_frame_range",
       "title": "Set Blender Frame Range",
-      "description": "Set the animation frame range.",
+      "description": "Set the animation frame range. An unbaked rigid-body cache follows it; a baked one keeps its range, with a warning.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1183,29 +1300,82 @@
     "setup_blender_rigid_body": {
       "name": "setup_blender_rigid_body",
       "title": "Setup Blender Rigid Body",
-      "description": "Set up rigid body physics on a Blender object.",
+      "description": "Set up rigid body physics on a mesh object, adding the scene's rigid body world when there is none, or replace its settings. Every argument is checked first (mass >= 0.001, friction >= 0, restitution and damping 0-1), and a failure leaves the scene, world and selection unchanged. kinematic=true makes an animated body that pushes simulated ones.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "object_name": {"description": "Name of the target object.", "type": "string"},
+          "object_name": {"description": "Name of the target mesh object.", "type": "string"},
           "body_type": {
             "default": "ACTIVE",
-            "description": "ACTIVE (dynamic) or PASSIVE (static).",
+            "description": "ACTIVE (simulated) or PASSIVE (static or animated collider).",
+            "enum": ["ACTIVE", "PASSIVE"],
             "type": "string"
           },
-          "mass": {"default": 1.0, "description": "Mass in kilograms.", "type": "number"},
-          "friction": {"default": 0.5, "description": "Surface friction coefficient.", "type": "number"},
+          "mass": {
+            "default": 1.0,
+            "description": "Mass in kilograms, at least 0.001.",
+            "minimum": 0.001,
+            "type": "number"
+          },
+          "friction": {
+            "default": 0.5,
+            "description": "Surface friction coefficient, 0 or more.",
+            "minimum": 0.0,
+            "type": "number"
+          },
           "restitution": {
             "default": 0.0,
-            "description": "Bounciness (0-1).",
+            "description": "Bounciness from 0 (none) to 1 (fully elastic).",
             "maximum": 1.0,
             "minimum": 0.0,
             "type": "number"
           },
-          "collision_shape": {"default": "CONVEX_HULL", "description": "Collision shape type.", "type": "string"},
-          "linear_damping": {"default": 0.04, "description": "Linear damping factor.", "type": "number"},
-          "angular_damping": {"default": 0.1, "description": "Angular damping factor.", "type": "number"}
+          "collision_shape": {
+            "default": "CONVEX_HULL",
+            "description": "BOX, SPHERE, CAPSULE, CYLINDER, CONE, CONVEX_HULL, MESH or COMPOUND (a compound of the children's shapes).",
+            "enum": ["BOX", "SPHERE", "CAPSULE", "CYLINDER", "CONE", "CONVEX_HULL", "MESH", "COMPOUND"],
+            "type": "string"
+          },
+          "linear_damping": {
+            "default": 0.04,
+            "description": "Fraction of linear velocity lost per second, 0-1.",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "angular_damping": {
+            "default": 0.1,
+            "description": "Fraction of angular velocity lost per second, 0-1.",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "kinematic": {
+            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+            "default": null,
+            "description": "Animated: the body follows its own animation and pushes simulated bodies instead of being simulated."
+          },
+          "collision_margin": {
+            "anyOf": [{"maximum": 1.0, "minimum": 0.0, "type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Collision margin in meters, 0-1; omitted keeps Blender's automatic margin for a new body."
+          },
+          "collision_collections": {
+            "anyOf": [{"items": {"type": "integer"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "Collision collections (0-19) the body is in; bodies collide only when they share one. A new body is in 0."
+          },
+          "use_deactivation": {
+            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+            "default": null,
+            "description": "Let the body go to sleep when it nearly stops."
+          },
+          "start_deactivated": {
+            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+            "default": null,
+            "description": "Start asleep until something hits it (needs use_deactivation)."
+          }
         },
         "required": ["object_name"]
       },
@@ -1215,12 +1385,30 @@
     "add_blender_force_field": {
       "name": "add_blender_force_field",
       "title": "Add Blender Force Field",
-      "description": "Add a force field to the scene.",
+      "description": "Add a force field to the scene, oriented in world space: its local +Z (where WIND blows, the axis VORTEX turns about) points along direction, world +Z by default, whatever the editor's Align preference. The reply reports rotation_euler and direction.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "field_type": {"description": "Force field type (FORCE, WIND, VORTEX, etc.).", "type": "string"},
+          "field_type": {
+            "description": "FORCE, WIND, VORTEX, MAGNET, HARMONIC, CHARGE, LENNARDJ, TEXTURE, GUIDE, BOID, TURBULENCE, DRAG or FLUID.",
+            "enum": [
+              "FORCE",
+              "WIND",
+              "VORTEX",
+              "MAGNET",
+              "HARMONIC",
+              "CHARGE",
+              "LENNARDJ",
+              "TEXTURE",
+              "GUIDE",
+              "BOID",
+              "TURBULENCE",
+              "DRAG",
+              "FLUID"
+            ],
+            "type": "string"
+          },
           "strength": {"default": 1.0, "description": "Field strength.", "type": "number"},
           "location": {
             "anyOf": [
@@ -1234,6 +1422,47 @@
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
             "description": "Optional name for the field object."
+          },
+          "direction": {
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "World-space direction of the field's local +Z axis."
+          },
+          "shape": {
+            "anyOf": [
+              {"enum": ["POINT", "LINE", "PLANE", "SURFACE", "POINTS"], "type": "string"},
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "POINT, LINE, PLANE, SURFACE or POINTS."
+          },
+          "flow": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Air flow: how strongly the field also drags toward its speed."
+          },
+          "falloff_type": {
+            "anyOf": [{"enum": ["SPHERE", "TUBE", "CONE"], "type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "SPHERE, TUBE or CONE."
+          },
+          "falloff_power": {
+            "anyOf": [{"maximum": 10.0, "minimum": 0.0, "type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "How fast the field weakens with distance, 0-10."
+          },
+          "distance_max": {
+            "anyOf": [{"minimum": 0.0, "type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Distance past which the field has no effect; 0 or omitted for no limit."
+          },
+          "noise": {
+            "anyOf": [{"maximum": 10.0, "minimum": 0.0, "type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Random noise in the field, 0-10."
           }
         },
         "required": ["field_type"]
@@ -1244,7 +1473,7 @@
     "get_blender_force_field_info": {
       "name": "get_blender_force_field_info",
       "title": "Get Blender Force Field Info",
-      "description": "Get force field parameters for an object.",
+      "description": "Get force field parameters, world location and direction (local +Z) for an object; an object without a force field, such as a collider, is an error.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1257,26 +1486,91 @@
     "add_blender_rigid_body_constraint": {
       "name": "add_blender_rigid_body_constraint",
       "title": "Add Blender Rigid Body Constraint",
-      "description": "Add a rigid body constraint between two objects.",
+      "description": "Add a rigid body constraint between two different rigid bodies, as an empty at the pivot (location, default midway between them). axis sets the constraint axis in world space: the hinge axis for HINGE, the slide or motor axis for SLIDER, PISTON and MOTOR; unrotated by default, so a HINGE turns about world Z. limits, springs, motor_* and breaking_threshold configure it. Everything is checked first; a failure leaves no empty behind. The reply reports pivot, axis and local_axes.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "constraint_type": {"description": "Constraint type (FIXED, POINT, HINGE, etc.).", "type": "string"},
-          "object1_name": {"description": "First constrained object.", "type": "string"},
-          "object2_name": {"description": "Second constrained object.", "type": "string"},
+          "constraint_type": {
+            "description": "FIXED, POINT, HINGE, SLIDER, PISTON, GENERIC, GENERIC_SPRING or MOTOR.",
+            "enum": ["FIXED", "POINT", "HINGE", "SLIDER", "PISTON", "GENERIC", "GENERIC_SPRING", "MOTOR"],
+            "type": "string"
+          },
+          "object1_name": {"description": "First constrained rigid body.", "type": "string"},
+          "object2_name": {"description": "Second constrained rigid body.", "type": "string"},
           "location": {
             "anyOf": [
               {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
               {"type": "null"}
             ],
             "default": null,
-            "description": "Optional world-space location for the constraint empty."
+            "description": "World-space pivot; midway between the two objects' origins when omitted."
           },
           "disable_collisions": {
             "default": true,
-            "description": "Disable collisions between constrained objects.",
+            "description": "Disable collisions between the two objects.",
             "type": "boolean"
+          },
+          "axis": {
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "World-space direction of the constraint's axis: the hinge axis (local Z) for HINGE, the slide or motor axis (local X) for SLIDER, PISTON and MOTOR, local Z for the other types. Omitted, the empty is unrotated: a HINGE turns about world Z (a door, not a pendulum) and a SLIDER moves along world X."
+          },
+          "limits": {
+            "anyOf": [
+              {
+                "additionalProperties": {"items": {"type": "number"}, "type": "array"},
+                "propertyNames": {"enum": ["lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z"]},
+                "type": "object"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "Limits by local axis, as [lower, upper] (meters for lin_*, radians for ang_*, within +-2 pi): ang_z for HINGE, lin_x for SLIDER, lin_x and ang_x for PISTON, any of lin_x, lin_y, lin_z, ang_x, ang_y, ang_z for GENERIC and GENERIC_SPRING."
+          },
+          "springs": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "additionalProperties": {"type": "number"},
+                  "propertyNames": {"enum": ["stiffness", "damping"]},
+                  "type": "object"
+                },
+                "propertyNames": {"enum": ["x", "y", "z", "ang_x", "ang_y", "ang_z"]},
+                "type": "object"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "GENERIC_SPRING only: springs by local axis (x, y, z, ang_x, ang_y, ang_z), each {\"stiffness\": ..., \"damping\": ...}."
+          },
+          "motor_angular_velocity": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "MOTOR only: target angular velocity about local X, rad/s. Blender drives object1 relative to object2, so with object1 the anchor a positive velocity turns object2 the negative way about the axis (-1.91 rad in 23 frames at +2 rad/s on Blender 5.0.1); swap the objects or the sign to reverse it."
+          },
+          "motor_angular_max_impulse": {
+            "anyOf": [{"minimum": 0.0, "type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "MOTOR only: most impulse the angular motor applies per step (Blender's default 1)."
+          },
+          "motor_linear_velocity": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "MOTOR only: target velocity along local X, m/s, with the same convention: with object1 the anchor, object2 moves against the sign (-0.91 m in 23 frames at +1 m/s)."
+          },
+          "motor_linear_max_impulse": {
+            "anyOf": [{"minimum": 0.0, "type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "MOTOR only: most impulse the linear motor applies per step (Blender's default 1)."
+          },
+          "breaking_threshold": {
+            "anyOf": [{"minimum": 0.0, "type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Impulse that breaks the constraint; omitted, it never breaks."
           }
         },
         "required": ["constraint_type", "object1_name", "object2_name"]
@@ -1287,7 +1581,7 @@
     "get_blender_constraint_info": {
       "name": "get_blender_constraint_info",
       "title": "Get Blender Constraint Info",
-      "description": "Get rigid body constraint info for an object.",
+      "description": "Get rigid body constraint info for a constraint empty: its bodies, pivot, axis and local axes in world space, limits, springs, motor and breaking threshold.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1300,11 +1594,18 @@
     "get_blender_physics_state": {
       "name": "get_blender_physics_state",
       "title": "Get Blender Physics State",
-      "description": "Get current physics state of an object.",
+      "description": "Get an object's world pose and rigid-body state at the current frame. An unbaked simulation advances one frame at a time, so after a frame jump a body sits where it was last simulated: by default the scene first steps from the cache start to the current frame, as playback would (up to 400 000 body-frames). pose_source and simulated_for_frame say whether the pose is the simulation's for this frame; frames past the cache end hold the bodies at its last frame (past_cache_end). rigid_body_cache reports the cache range and bake state.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"object_name": {"description": "Name of the object.", "type": "string"}},
+        "properties": {
+          "object_name": {"description": "Name of the object.", "type": "string"},
+          "step_simulation": {
+            "default": true,
+            "description": "Step an unbaked rigid-body simulation from its cache start to the current frame before reading the pose, at most frames x bodies = 400 000; false reads the pose as it is.",
+            "type": "boolean"
+          }
+        },
         "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
@@ -1331,13 +1632,34 @@
     "bake_blender_simulation": {
       "name": "bake_blender_simulation",
       "title": "Bake Blender Simulation",
-      "description": "Bake physics simulation for a frame range.",
+      "description": "Bake the physics simulation for frame_start-frame_end (start before end), replacing an earlier bake: the simulation restarts from frame_start with the bodies' current transforms. scope 'rigid_body' (default) bakes only the rigid-body world's cache; 'all' bakes every point cache (rigid bodies, cloth, soft bodies, dynamic paint, particles). Refused for a disabled rigid body world. The reply gives the range the cache holds and warns about scene frames it leaves out, where bodies hold their pose. A bake runs on Blender's main thread and cannot be stopped, so one over 20 000 frames or 400 000 body-frames (frames x bodies, up to about 16 s) is refused unless allow_long_bake=true; past the client timeout Blender keeps baking and the next calls wait behind it.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "frame_start": {"description": "First frame to bake.", "type": "integer"},
-          "frame_end": {"description": "Last frame to bake.", "type": "integer"}
+          "frame_start": {
+            "description": "First frame to bake.",
+            "maximum": 1048574,
+            "minimum": -1048574,
+            "type": "integer"
+          },
+          "frame_end": {
+            "description": "Last frame to bake; after frame_start.",
+            "maximum": 1048574,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "scope": {
+            "default": "rigid_body",
+            "description": "rigid_body bakes the rigid-body world's cache only (stepping each frame, then marking the cache baked), leaving cloth and other caches as they are; all frees and bakes every point cache in the scene, as Blender's Bake All Dynamics does: rigid bodies, cloth, soft bodies and dynamic paint over frame_start-frame_end, particle systems over the range their emission settings give.",
+            "enum": ["rigid_body", "all"],
+            "type": "string"
+          },
+          "allow_long_bake": {
+            "default": false,
+            "description": "Bake even above 20 000 frames or 400 000 body-frames (frames x bodies), which can outlast the client's timeout while Blender keeps baking.",
+            "type": "boolean"
+          }
         },
         "required": ["frame_start", "frame_end"]
       },
@@ -1347,8 +1669,88 @@
     "free_blender_bake": {
       "name": "free_blender_bake",
       "title": "Free Blender Bake",
-      "description": "Free (delete) baked physics simulation data.",
+      "description": "Free baked physics simulation data over the same scope as bake_blender_simulation ('rigid_body' by default, or 'all'). A freed cache gets the scene's frame range back, so the simulation is not cut off at the last bake's end frame. freed lists the caches that were baked.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scope": {
+            "default": "rigid_body",
+            "description": "rigid_body frees the rigid-body world's cache only; all frees every point cache in the scene (rigid bodies, cloth, soft bodies, dynamic paint, particles).",
+            "enum": ["rigid_body", "all"],
+            "type": "string"
+          }
+        }
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "get_blender_rigid_body_world": {
+      "name": "get_blender_rigid_body_world",
+      "title": "Get Blender Rigid Body World",
+      "description": "Get the scene's rigid body world: enabled, scene gravity, substeps, solver iterations, time scale, split impulse, body and constraint counts, and the cache range and bake state (rigid_body_cache). Bodies hold their pose past the cache end; warnings name a disabled world or a cache that leaves out part of the scene range.",
       "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
+      "annotations": {"readOnlyHint": true, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "set_blender_rigid_body_world": {
+      "name": "set_blender_rigid_body_world",
+      "title": "Set Blender Rigid Body World",
+      "description": "Change the scene's rigid body world, adding one when there is none; only the given settings change. gravity is the scene's, shared with cloth, soft bodies and particles. A baked cache keeps playing its bake (changed settings apply after free_blender_bake and a new bake), and its range cannot change until freed. Replies like get_blender_rigid_body_world.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+            "default": null,
+            "description": "Run the simulation; a disabled world leaves bodies at their own transforms."
+          },
+          "gravity": {
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "Scene gravity [x, y, z] in m/s^2, shared with cloth, soft bodies and particles; Blender's default is [0, 0, -9.81]."
+          },
+          "use_gravity": {
+            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+            "default": null,
+            "description": "Apply the scene gravity."
+          },
+          "substeps_per_frame": {
+            "anyOf": [{"maximum": 32767, "minimum": 1, "type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Simulation steps per frame, 1-32767."
+          },
+          "solver_iterations": {
+            "anyOf": [{"maximum": 1000, "minimum": 1, "type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Constraint solver iterations per step, 1-1000."
+          },
+          "time_scale": {
+            "anyOf": [{"maximum": 100.0, "minimum": 0.0, "type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Simulation speed relative to the scene's frame rate, 0-100."
+          },
+          "use_split_impulse": {
+            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+            "default": null,
+            "description": "Reduce extra velocity from penetration recovery."
+          },
+          "cache_frame_start": {
+            "anyOf": [{"maximum": 1048574, "minimum": -1048574, "type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "First simulated frame."
+          },
+          "cache_frame_end": {
+            "anyOf": [{"maximum": 1048574, "minimum": 1, "type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Last simulated frame; after cache_frame_start."
+          }
+        }
+      },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
@@ -1382,47 +1784,73 @@
     "create_blender_mesh_from_data": {
       "name": "create_blender_mesh_from_data",
       "title": "Create Blender Mesh From Data",
-      "description": "Create a mesh object from raw vertex, edge, and face data. Use for procedural geometry.",
+      "description": "Create a mesh object from raw vertex, edge, and face data. Use for procedural geometry. Each vertex is exactly [x, y, z] finite numbers; a face repeating a vertex or another face's vertex set, an edge joining a vertex to itself or repeating another, and a collection outside the current scene are refused before anything is created. The mesh is validated, and a failed call leaves no mesh or object behind.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "name": {"description": "Desired object name.", "minLength": 1, "type": "string"},
           "vertices": {
-            "description": "List of [x, y, z] vertex positions.",
+            "description": "Vertex positions, each exactly [x, y, z] finite numbers.",
             "items": {"items": {"type": "number"}, "type": "array"},
-            "minItems": 1,
             "type": "array"
           },
           "edges": {
             "default": [],
-            "description": "List of [v0, v1] edge index pairs.",
+            "description": "Loose edges as [v0, v1] pairs of two different vertices; face edges are made from the faces.",
             "items": {"items": {"type": "integer"}, "type": "array"},
             "type": "array"
           },
           "faces": {
             "default": [],
-            "description": "List of vertex-index lists per face.",
+            "description": "Faces as lists of three or more vertex indices, each vertex once and each vertex set once.",
             "items": {"items": {"type": "integer"}, "type": "array"},
             "type": "array"
           },
           "location": {
-            "anyOf": [
-              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
-              {"type": "null"}
-            ],
+            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
             "description": "Optional world-space origin [x, y, z]."
           },
           "collection_name": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
-            "description": "Target collection (scene collection if None)."
+            "description": "Target collection in the current scene (the scene collection if None)."
           }
         },
         "required": ["name", "vertices"]
       },
       "annotations": {"readOnlyHint": false},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "clean_blender_mesh": {
+      "name": "clean_blender_mesh",
+      "title": "Clean Blender Mesh",
+      "description": "Repair a Blender mesh object's data. Always validates it, removing faces that repeat a vertex and duplicate faces or edges (geometry that can freeze Decimate); then optionally merges vertices within merge_distance, dissolves edges and faces smaller than dissolve_degenerate_distance, and recalculates normals to point outside. Reports the counts before and after. Shared mesh data changes for every object using it. Requires Object Mode.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "Mesh object whose data to clean.", "type": "string"},
+          "merge_distance": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Merge vertices within this distance; None skips it."
+          },
+          "dissolve_degenerate_distance": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Dissolve edges and faces smaller than this; None skips it."
+          },
+          "recalculate_normals": {
+            "default": false,
+            "description": "Make face normals point consistently outside.",
+            "type": "boolean"
+          }
+        },
+        "required": ["object_name"]
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "apply_simready_metadata": {
@@ -1484,23 +1912,38 @@
     "export_simready_usd": {
       "name": "export_simready_usd",
       "title": "Export Simready Usd",
-      "description": "Export a SimReady-compliant USD file from Blender. Validates objects before export, selects the requested objects, and carries simready_ custom properties into USD attributes.",
+      "description": "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, and UsdSemantics labels. The asset root is the default prim and holds its materials; metersPerUnit follows the scene's Unit Scale. Listed objects export with their descendants, hidden ones too; lights, cameras and the World are left out by default. Refuses when validation finds errors unless force=true. Returns each object's prim path.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "file_path": {"description": "Output .usd / .usda / .usdc path.", "type": "string"},
+          "file_path": {"description": "Output .usd, .usda, .usdc or .usdz path.", "type": "string"},
           "object_names": {
-            "anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [{"items": {"type": "string"}, "minItems": 1, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "Objects to export (None = all)."
+            "description": "Objects to export, each with its descendants unless include_children is false; listed objects are exported even when hidden. Null exports the scene's objects that are visible in renders. An empty list is refused."
           },
           "embed_metadata": {
             "default": true,
-            "description": "Include simready_ custom properties.",
+            "description": "Also keep the simready_ custom properties (and Blender's names) as userProperties attributes, which Blender's USD import reads back as custom properties.",
             "type": "boolean"
           },
-          "validate_before_export": {"default": true, "description": "Run validation first.", "type": "boolean"}
+          "validate_before_export": {"default": true, "description": "Validate the meshes first.", "type": "boolean"},
+          "include_children": {
+            "default": true,
+            "description": "Export the descendants of the listed objects.",
+            "type": "boolean"
+          },
+          "include_lights_and_cameras": {
+            "default": false,
+            "description": "Also export lights, cameras and the World's dome light, which are left out of an asset by default.",
+            "type": "boolean"
+          },
+          "force": {
+            "default": false,
+            "description": "Export although validation found errors.",
+            "type": "boolean"
+          }
         },
         "required": ["file_path"]
       },

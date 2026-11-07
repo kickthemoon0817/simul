@@ -76,6 +76,40 @@ def test_the_table_uses_the_isaac_runtime_constants() -> None:
     assert collision.values == _shared.COLLISION_APPROXIMATIONS
 
 
+def test_the_choice_lists_are_the_tools_own() -> None:
+    """The choices the schema states are the ones the tool checks against."""
+    from simul.mcp.tools.isaac import _shared, joints, physics
+
+    def values(tool: str, param: str) -> Tuple[str, ...]:
+        choice = PARAM_CONSTRAINTS[tool][param]
+        assert isinstance(choice, _constraints.Choices)
+        return choice.values
+
+    assert values("add_isaac_collision", "approximation") == _shared.COLLISION_APPROXIMATIONS
+    assert values("set_isaac_joint_drive", "drive_axis") == joints.DRIVE_AXES
+    assert values("set_isaac_joint_drive", "drive_type") == joints.DRIVE_TYPES
+    assert values("set_isaac_joint_limits", "limit_axis") == joints.LIMIT_AXES
+    assert values("configure_isaac_physics_scene", "solver_type") == physics.PHYSX_SOLVER_TYPES
+    assert values("configure_isaac_physics_scene", "broadphase_type") == physics.PHYSX_BROADPHASE_TYPES
+    pytest.importorskip("aiohttp")
+    from simul.adapters import unreal_runtime
+
+    assert set(values("execute_unreal_script", "mode")) == unreal_runtime.UNREAL_EXEC_MODES
+    assert values("set_unreal_actor_visibility", "scope") == unreal_runtime.VISIBILITY_SCOPES
+
+
+def test_choices_never_replace_a_literal_a_parameter_declares() -> None:
+    """Narrowing a Literal from the table would refuse values the tool accepts."""
+    from typing import Literal, Optional
+
+    declared = Optional[Literal["a", "b", "c"]]
+    assert _constraints.apply(declared, _constraints.Choices(("c", "b", "a"))) is declared
+    with pytest.raises(ValueError, match="would replace the Literal"):
+        _constraints.apply(declared, _constraints.Choices(("a", "b")))
+    with pytest.raises(ValueError, match="would replace the Literal"):
+        _constraints.apply(Literal["a"], _constraints.Choices(("a", "z"), enforced=False))
+
+
 def test_the_table_uses_the_usd_runtime_constants() -> None:
     from simul.mcp.schemas import usd as usd_schemas
     from simul.usd import values
@@ -184,17 +218,32 @@ _RANGE_PROSE = re.compile(
     r"|[Cc]lamped to \[?\d+"  # Clamped to [1, 1000]
     r"|\b0-1\b"  # 0-1
 )
-_CHOICE_PROSE = re.compile(r"\bOne of\b|'[\w-]+' or '[\w-]+'|\"[\w-]+\" or \"[\w-]+\"")
+# A choice list: "One of", two quoted names joined by "or", or three or more
+# names (quoted or not, each maybe with a parenthetical) in a comma list ending
+# in "or": 'a' or 'b'; "TGS" (temporal Gauss-Seidel) or "PGS"; union,
+# subtract, or intersect; transX, ..., rotZ or distance.
+_CHOICE_ITEM = r"[\"'`]?[\w./-]+[\"'`]?(?: \([^)]*\))?"
+_CHOICE_PROSE = re.compile(
+    r"\bOne of\b"
+    r"|(?P<q>['\"`])[\w./-]+(?P=q)(?: \([^)]*\))? or (?P=q)[\w./-]+(?P=q)"
+    rf"|\b{_CHOICE_ITEM}(?:, {_CHOICE_ITEM})+,? or [\"'`]?[\w./-]+"
+)
 
-# Ranges that are documented but deliberately not enforced: list items (colors
-# may be HDR, above 1; a resolution caps width and height differently), a
-# comma-separated list of checks.
+# Ranges or choices that are documented but deliberately not enforced: list
+# items (colors may be HDR, above 1; a resolution caps width and height
+# differently), a comma-separated list of checks; and prose that reads like a
+# choice list but is not one (file extensions, what a query matches).
 _PROSE_ONLY = {
     ("create_isaac_light", "color"),
     ("create_isaac_material", "diffuse_color"),
     ("create_isaac_object", "diffuse_color"),
     ("read_isaac_aovs", "resolution"),
     ("validate_simready_asset", "checks"),
+    ("export_blender_file", "file_path"),
+    ("export_simready_usd", "file_path"),
+    ("search_prims", "query"),
+    ("set_isaac_material_property", "property_name"),
+    ("set_blender_object_mode", "mode"),
 }
 
 

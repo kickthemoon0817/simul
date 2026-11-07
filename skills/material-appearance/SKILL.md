@@ -105,22 +105,24 @@ Change individual shader inputs on an existing material without recreating it.
 ```
 mcp__simul__set_isaac_material_property
   material_path: "/World/Looks/RedMaterial"
-  property_name: "inputs:diffuseColor"
+  property_name: "diffuseColor"
   value: [0.0, 0.5, 1.0]
 ```
 
-**Common property names:**
+**Common property names** (the `inputs:` prefix is optional):
 
-| Property | Value Type | Example |
-|---|---|---|
-| `inputs:diffuseColor` | [R, G, B] floats 0–1 | [1.0, 0.0, 0.0] |
-| `inputs:roughness` | float 0–1 | 0.3 |
-| `inputs:metallic` | float 0–1 | 0.8 |
-| `inputs:opacity` | float 0–1 | 0.5 |
-| `inputs:ior` | float | 1.5 |
-| `inputs:emissiveColor` | [R, G, B] | [1.0, 0.8, 0.0] |
+| UsdPreviewSurface | OmniPBR | Value Type | Example |
+|---|---|---|---|
+| `diffuseColor` | `diffuse_color_constant` | [R, G, B] floats 0–1 | [1.0, 0.0, 0.0] |
+| `roughness` | `reflection_roughness_constant` | float 0–1 | 0.3 |
+| `metallic` | `metallic_constant` | float 0–1 | 0.8 |
+| `opacity` | `opacity_constant` (with `enable_opacity: true`) | float 0–1 | 0.5 |
+| `ior` | | float | 1.5 |
+| `emissiveColor` | `emissive_color` (with `enable_emission: true`) | [R, G, B] | [1.0, 0.8, 0.0] |
+| | `diffuse_texture`, `normalmap_texture`, `ORM_texture` | file path (asset) | "/textures/wood.png" |
+| | `project_uvw`, `world_or_object` | bool | true |
 
-**Note:** Property names use the `inputs:` prefix because they are UsdShade shader inputs. Omitting the prefix will silently fail.
+An input the shader doesn't have yet is created with the type that shader declares: a texture path becomes an asset, a flag a bool, an enum an int. A name that isn't an input of OmniPBR or UsdPreviewSurface is refused with the closest names, because it would create an input the shader never reads. `allow_unknown_input: true` creates it anyway. A value that doesn't fit the input's type is refused.
 
 ## Material Presets
 
@@ -169,7 +171,7 @@ shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.0,
 ## Common Pitfalls
 
 - **Prefer `create_isaac_material` over scripts**: script only when you need a shader input the tool doesn't expose.
-- **Property name prefix**: Always include `inputs:` when calling `set_isaac_material_property` (e.g. `inputs:roughness`, not `roughness`).
+- **Property names differ per shader**: UsdPreviewSurface says `roughness`, OmniPBR says `reflection_roughness_constant`. `set_isaac_material_property` reports `shader_type`; use that shader's names. The `inputs:` prefix is optional.
 - **Material path vs shader path**: The material lives at `/World/Looks/Mat`. The shader is at `/World/Looks/Mat/Shader`. Use the material path for `assign_isaac_material` and `get_isaac_prim_detail` with `aspects=["material"]`. Use the shader path only in scripts.
 - **Opacity requires translucency enabled**: Setting `inputs:opacity` below 1.0 via `set_isaac_material_property` may not render correctly unless the material was created with opacity support. Create the material with the opacity input defined from the start.
 - **Color values are 0–1 floats**: Not 0–255. `[1.0, 0.0, 0.0]` is red.

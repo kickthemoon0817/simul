@@ -118,9 +118,15 @@ def test_stale_addon_endpoint_is_refused_before_connecting(protocol: int) -> Non
     before 5 records agent edits as no undo step, so open_blend_file would
     discard them unasked. The version check names the fix instead.
     """
+    from simul.blender_bridge.protocol import BridgeProtocolError
+    from simul.mcp.error_types import classify_exception
+
     endpoint = {"protocol": protocol, "host": "127.0.0.1", "port": 1, "token": "t"}
-    with pytest.raises(ValueError, match="protocol mismatch.*install-bridge"):
+    with pytest.raises(BridgeProtocolError, match="protocol mismatch.*install-bridge") as caught:
         BridgeWire.request(endpoint, {"request_id": "r"}, 0.1)
+    # A ValueError still, but the bridge's failure, not the caller's input.
+    assert isinstance(caught.value, ValueError)
+    assert classify_exception(caught.value) == "BridgeProtocolError"
 
 
 def test_unencodable_result_still_gets_a_reply(
@@ -614,3 +620,51 @@ def test_every_operation_is_classified_for_undo(bridge_module: Any) -> None:
 
 def test_an_unclassified_operation_is_recorded_rather_than_lost(bridge_module: Any) -> None:
     assert bridge_module.undo_step_name("new_operation", {}) == "simul: new_operation"
+
+
+# ---------------------------------------------------------------------------
+# A declared error type survives the bridge
+# ---------------------------------------------------------------------------
+
+
+def test_a_missing_object_reaches_the_server_as_not_found(
+    bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The add-on relayed the class name, so a missing object read as ValueError."""
+    from simul.adapters.blender_runtime import BlenderNotFoundError
+    from simul.blender_bridge.protocol import BridgeRemoteError
+    from simul.mcp.error_types import exception_fields
+
+    class Session:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def get_frame(self) -> Dict[str, Any]:
+            raise BlenderNotFoundError("Object not found: Cube")
+
+    monkeypatch.setattr(bridge_module, "BlenderRuntimeSession", Session)
+    bridge = _bridge(bridge_module, tmp_path)
+    reply = bridge.dispatch(_operation_request(bridge, tmp_path, "get_frame"))
+
+    assert reply["success"] is False
+    assert reply["error_type"] == "NotFoundError"
+    remote = BridgeRemoteError(reply["error"], reply["error_type"], reply["details"])
+    assert exception_fields(remote) == {"error_type": "NotFoundError", "details": None}
+
+
+def test_a_disabled_script_is_script_execution_disabled_over_the_bridge(
+    bridge_module: Any, tmp_path: Path
+) -> None:
+    bridge = _bridge(bridge_module, tmp_path)
+    reply = bridge.dispatch(
+        _operation_request(
+            bridge,
+            tmp_path,
+            "execute_script",
+            kwargs={"script": "print(1)"},
+            allow_script_execution=False,
+        )
+    )
+
+    assert reply["success"] is False
+    assert reply["error_type"] == "ScriptExecutionDisabled"

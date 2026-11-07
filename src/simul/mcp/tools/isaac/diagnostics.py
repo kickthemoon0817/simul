@@ -3,6 +3,7 @@
 import textwrap
 from typing import Any, Dict, Optional
 
+from ... import error_types
 from ...schemas.common import ErrorResponse
 from ._shared import (
     PROTECTED_EXTENSIONS,
@@ -21,9 +22,10 @@ class DiagnosticsMixin:
         name="get_isaac_runtime_info",
         description=(
             "Get consolidated runtime diagnostics from the running Isaac Sim instance: Kit "
-            "app version, timeline state, physics stats (rigid body/articulation/shape "
-            "counts, CUDA availability), GPU/renderer info, viewport state, stage summary, "
-            "and extension counts. Use this for a quick health check or to understand the "
+            "app version, timeline state, where physics writes (CUDA device, "
+            "updateToUsd, omni.physx.fabric, resetOnStop), the physics scene's rate, GPU "
+            "dynamics and solver, renderer settings, viewport state, stage summary, and "
+            "extension counts. Use this for a quick health check or to understand the "
             "current state of the simulation environment. Pass include_prim_count=true to "
             "also count every prim on the stage."
         ),
@@ -36,8 +38,11 @@ class DiagnosticsMixin:
         """
         Get consolidated runtime diagnostics from the running Isaac Sim instance.
 
-        Collects Kit app info, timeline state, physics stats, GPU/renderer
-        info, and viewport state in a single call.
+        Collects Kit app info, timeline state, the physics write path and
+        scene settings, renderer settings and viewport state in a single
+        call. ``physics`` holds the Carb settings Isaac Sim's
+        SimulationManager reads and sets; ``physics_config`` the physics
+        scene's PhysxSceneAPI rate, GPU dynamics, solver and broadphase.
 
         Args:
             include_prim_count: Also count every prim on the stage for
@@ -100,44 +105,66 @@ class DiagnosticsMixin:
             except Exception as e:
                 info["timeline_error"] = str(e)
 
-            # Physics stats
+            # Where physics writes: the Carb settings and extension Isaac Sim's
+            # SimulationManager reads and sets, plus the app's resetOnStop.
+            # The omni.physx interface has no physics statistics to report.
             try:
-                import omni.physx
-                physx = omni.physx.get_physx_interface()
-                # These live on PhysXUnitTests, not on the PhysX object this
-                # returns, in both Kit 107 (5.1) and Kit 110 (6.0). Probe
-                # rather than call blind, and say when neither is reachable.
-                physics = {{}}
-                available = False
-                if hasattr(physx, "get_physics_stats"):
-                    stats = physx.get_physics_stats()
-                    if isinstance(stats, dict):
-                        physics.update(stats)
-                    available = True
-                if hasattr(physx, "is_cuda_lib_present"):
-                    physics["cuda_available"] = physx.is_cuda_lib_present()
-                    available = True
-                if not available:
-                    physics["stats_unavailable"] = (
-                        "omni.physx interface exposes no get_physics_stats or "
-                        "is_cuda_lib_present on this build"
+                import carb.settings
+                settings = carb.settings.get_settings()
+                physics = {{
+                    "cuda_device": settings.get("/physics/cudaDevice"),
+                    "suppress_readback": settings.get("/physics/suppressReadback"),
+                    "update_to_usd": settings.get("/physics/updateToUsd"),
+                    "update_velocities_to_usd": settings.get("/physics/updateVelocitiesToUsd"),
+                    "reset_on_stop": settings.get("/physics/resetOnStop"),
+                    "physx_fabric_enabled": None,
+                }}
+                try:
+                    import omni.kit.app
+                    manager = omni.kit.app.get_app().get_extension_manager()
+                    physics["physx_fabric_enabled"] = bool(
+                        manager.is_extension_enabled("omni.physx.fabric")
                     )
+                except Exception:
+                    pass
                 info["physics"] = physics
             except Exception as e:
                 info["physics_error"] = str(e)
 
-            # Physics scene settings
+            # The physics scene's own settings, on its PhysxSceneAPI; searched
+            # in the top two levels only (/physicsScene, /World/physicsScene).
             try:
-                import carb.settings
-                settings = carb.settings.get_settings()
-                gpu_dynamics = settings.get("/physics/gpuDynamicsEnabled")
-                physics_dt = settings.get("/persistent/simulation/defaultPhysicsDt")
-                solver_type = settings.get("/persistent/physics/solverType")
-                info["physics_config"] = {{
-                    "gpu_dynamics_enabled": gpu_dynamics,
-                    "physics_dt": physics_dt,
-                    "solver_type": solver_type,
+                import omni.usd
+                from pxr import PhysxSchema, Usd, UsdPhysics
+                config = {{
+                    "scene_path": None,
+                    "time_steps_per_second": None,
+                    "physics_dt": None,
+                    "gpu_dynamics_enabled": None,
+                    "solver_type": None,
+                    "broadphase_type": None,
                 }}
+                stage = omni.usd.get_context().get_stage()
+                if stage is not None:
+                    prims = iter(Usd.PrimRange(stage.GetPseudoRoot()))
+                    for prim in prims:
+                        if prim.GetPath().pathElementCount >= 2:
+                            prims.PruneChildren()
+                        if not prim.IsA(UsdPhysics.Scene):
+                            continue
+                        config["scene_path"] = str(prim.GetPath())
+                        if prim.HasAPI(PhysxSchema.PhysxSceneAPI):
+                            api = PhysxSchema.PhysxSceneAPI(prim)
+                            rate = api.GetTimeStepsPerSecondAttr().Get()
+                            config["time_steps_per_second"] = rate
+                            config["physics_dt"] = 1.0 / rate if rate else None
+                            config["gpu_dynamics_enabled"] = api.GetEnableGPUDynamicsAttr().Get()
+                            solver = api.GetSolverTypeAttr().Get()
+                            config["solver_type"] = str(solver) if solver is not None else None
+                            broadphase = api.GetBroadphaseTypeAttr().Get()
+                            config["broadphase_type"] = str(broadphase) if broadphase is not None else None
+                        break
+                info["physics_config"] = config
             except Exception as e:
                 info["physics_config_error"] = str(e)
 
@@ -252,7 +279,7 @@ class DiagnosticsMixin:
                     "only makes python_server reply early (the 5.x socket has "
                     "none): an overrunning script keeps running inside Kit."
                 ),
-                error_type="BridgeUnavailable",
+                error_type=error_types.BRIDGE_UNAVAILABLE,
             ).model_dump()
         try:
             response = await client.interrupt_bridge_script()
@@ -264,7 +291,7 @@ class DiagnosticsMixin:
                     "also blocks the bridge's event loop, so it cannot take this "
                     "request; its per-request timeout is what stops it."
                 ),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
         return self._bridge_response_envelope(response)
 
@@ -284,11 +311,13 @@ class DiagnosticsMixin:
     @tool_meta(
         name="get_isaac_logs",
         description=(
-            "Read recent log entries from the running Isaac Sim console. Returns entries "
-            "filtered by minimum level (verbose/info/warn/error), optional source module "
-            "filter, and optional text search. Includes per-level counts and log file path. "
-            "Use this to diagnose errors, warnings, or check what happened during a "
-            "simulation."
+            "Read recent log entries from this Isaac Sim instance's Kit log (the file "
+            "Kit names in its /log/file setting). Returns entries filtered by minimum level "
+            "(verbose/info/warn/error), optional source module filter, and optional text "
+            "search, with per-level counts, the log file path and log_file_source; when "
+            "Kit does not name its file, the newest Kit log is read and a warning says it "
+            "may belong to another process. Use this to diagnose errors, warnings, or check "
+            "what happened during a simulation."
         ),
         read_only=True,
         idempotent=True,
@@ -303,8 +332,12 @@ class DiagnosticsMixin:
         """
         Read recent log entries from the running Isaac Sim instance.
 
-        Reads the Kit log file and returns the last N entries, optionally
-        filtered by level and source module.
+        Reads this instance's Kit log, the path Kit keeps in the
+        ``/log/file`` Carb setting, and returns the last N entries,
+        optionally filtered by level and source module. When the setting
+        is unavailable the newest log under ``~/.nvidia-omniverse/logs/Kit``
+        is read instead, with ``log_file_source`` "newest_kit_log" and a
+        ``warning``: with several Kit processes it may be another's.
 
         Args:
             level: Minimum log level to return: "verbose", "info", "warn", "error".
@@ -314,7 +347,8 @@ class DiagnosticsMixin:
             search: Optional text search within log messages.
 
         Returns:
-            Dict with log entries, counts per level, and log file path.
+            Dict with log entries, counts per level, ``log_file`` and
+            ``log_file_source`` ("carb:/log/file" or "newest_kit_log").
         """
         last_n = max(1, min(last_n, 500))
         _level = _pyval(level.lower())
@@ -338,22 +372,44 @@ class DiagnosticsMixin:
             level_priority = {{"verbose": 0, "info": 1, "warn": 2, "warning": 2, "error": 3, "fatal": 4}}
             min_priority = level_priority.get(level_filter, 2)
 
-            # Find the most recent Kit log file
-            log_dir = os.path.expanduser("~/.nvidia-omniverse/logs/Kit")
+            # This instance's log: Kit keeps the path of the file it writes in
+            # the /log/file Carb setting (Isaac Sim's own console_log skill
+            # reads it the same way). Only when that is unavailable fall back
+            # to the newest log under ~/.nvidia-omniverse/logs/Kit, which can
+            # belong to another Kit process, and say so.
             log_path = None
-            newest_mtime = -1.0
-            for root, dirs, files in os.walk(log_dir):
-                for f in files:
-                    if not f.endswith(".log"):
-                        continue
-                    full = os.path.join(root, f)
-                    try:
-                        mtime = os.path.getmtime(full)
-                    except OSError:
-                        continue
-                    if mtime > newest_mtime:
-                        newest_mtime = mtime
-                        log_path = full
+            log_source = None
+            source_warning = None
+            try:
+                import carb.settings
+                configured = carb.settings.get_settings().get("/log/file")
+                if configured and os.path.isfile(str(configured)):
+                    log_path = str(configured)
+                    log_source = "carb:/log/file"
+            except Exception:
+                pass
+            if log_path is None:
+                log_dir = os.path.expanduser("~/.nvidia-omniverse/logs/Kit")
+                newest_mtime = -1.0
+                for root, dirs, files in os.walk(log_dir):
+                    for f in files:
+                        if not f.endswith(".log"):
+                            continue
+                        full = os.path.join(root, f)
+                        try:
+                            mtime = os.path.getmtime(full)
+                        except OSError:
+                            continue
+                        if mtime > newest_mtime:
+                            newest_mtime = mtime
+                            log_path = full
+                if log_path:
+                    log_source = "newest_kit_log"
+                    source_warning = (
+                        "Kit did not expose this instance's log file (/log/file), so this "
+                        "is the newest log under ~/.nvidia-omniverse/logs/Kit, which may "
+                        "belong to another Kit process."
+                    )
 
             if not log_path:
                 print(json.dumps({{"error": "No Kit log file found"}}))
@@ -411,8 +467,9 @@ class DiagnosticsMixin:
                         }})
 
                 tail = list(entries)
-                print(json.dumps({{
+                payload = {{
                     "log_file": log_path,
+                    "log_file_source": log_source,
                     "log_size_bytes": log_size,
                     "scanned_bytes": log_size - scan_start,
                     "truncated_scan": scan_start > 0,
@@ -420,7 +477,10 @@ class DiagnosticsMixin:
                     "returned": len(tail),
                     "counts": counts,
                     "entries": tail,
-                }}))
+                }}
+                if source_warning:
+                    payload["warning"] = source_warning
+                print(json.dumps(payload))
         """)
         return await self._execute_json_script(script)
 
@@ -478,7 +538,9 @@ class DiagnosticsMixin:
     @tool_meta(
         name="disable_isaac_extension",
         description=(
-            "Disable an extension immediately in the running Isaac Sim instance. Refuses the transport "
+            "Disable an extension immediately in the running Isaac Sim instance, and fail when "
+            "it is still enabled afterwards (an enabled extension depending on it keeps it "
+            "loaded). Refuses the transport "
             "extensions simul speaks through (khemoo.simul, "
             "isaacsim.code_editor.python_server, isaacsim.code_editor.vscode)."
         ),
@@ -499,7 +561,9 @@ class DiagnosticsMixin:
             Dict with success status and extension info after disabling, or a
             RefusedOperation error for the extensions the MCP transport runs on.
         """
-        bare_name = extension_id.rsplit("-", 1)[0] if "-" in extension_id else extension_id
+        # Names hold dots, never hyphens; a version may hold hyphens
+        # (1.0.0-rc1), so the name ends at the first one.
+        bare_name = extension_id.strip().split("-", 1)[0]
         if bare_name in PROTECTED_EXTENSIONS:
             return self._refusal(
                 f"Refusing to disable {extension_id!r}: simul reaches Isaac Sim "
@@ -519,19 +583,30 @@ class DiagnosticsMixin:
             # Verify by matching on bare name or fully qualified ID — both are
             # accepted by the Kit extension manager, but get_extensions() always
             # returns the version-suffixed form in 'id' and the bare form in 'name'.
-            bare_query = ext_id.rsplit("-", 1)[0] if "-" in ext_id else ext_id
+            bare_query = ext_id.split("-", 1)[0]
             found = False
             for ext in ext_manager.get_extensions():
                 eid = ext.get("id", "")
                 ename = ext.get("name", "")
                 if ext_id in (eid, ename) or bare_query == ename:
                     found = True
-                    print(json.dumps({{
+                    enabled = bool(ext.get("enabled", False))
+                    payload = {{
                         "extension_id": eid or ename,
                         "name": ename,
-                        "enabled": ext.get("enabled", False),
+                        "enabled": enabled,
                         "version": ext.get("version", ""),
-                    }}))
+                    }}
+                    if enabled:
+                        # The manager keeps an extension that another enabled
+                        # one depends on; without an explicit failure the
+                        # envelope would report success for a no-op.
+                        payload["success"] = False
+                        payload["error"] = (
+                            "Extension is still enabled: " + (eid or ename)
+                            + " (an enabled extension may depend on it; check the Kit log)"
+                        )
+                    print(json.dumps(payload))
                     break
 
             if not found:

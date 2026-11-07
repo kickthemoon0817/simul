@@ -310,7 +310,8 @@ def test_capture_forwards_the_method(arguments: Dict[str, Any], method: str) -> 
     # The deprecated flag is folded into method; only method reaches the add-on.
     (call,) = session.calls
     assert call["method"] == method
-    assert set(call) == {"agent_id", "method"}
+    assert set(call) == {"agent_id", "method", "camera_name"}
+    assert call["camera_name"] is None
 
 
 def test_capture_refuses_contradicting_arguments_without_calling_blender() -> None:

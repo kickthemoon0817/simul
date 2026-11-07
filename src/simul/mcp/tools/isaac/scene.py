@@ -363,7 +363,10 @@ class SceneInspectionMixin:
             """,
         )
         mode = self._raw_script_transport_mode
-        return await self._execute_json_script(script, transport_mode=mode)
+        # The transform comes from USD, which GPU physics stops updating.
+        return await self._execute_json_script(
+            script, transport_mode=mode, annotations=("usd_readback",)
+        )
 
     async def get_isaac_prim_transform(
         self,
@@ -425,7 +428,9 @@ class SceneInspectionMixin:
             """,
         )
         mode = self._raw_script_transport_mode
-        return await self._execute_json_script(script, transport_mode=mode)
+        return await self._execute_json_script(
+            script, transport_mode=mode, annotations=("usd_readback",)
+        )
 
     @tool_meta(
         name="search_isaac_prims",
@@ -468,7 +473,7 @@ class SceneInspectionMixin:
             return ErrorResponse(
                 error="query is required: a prim type name for search_type='type' "
                 "or a name substring for search_type='name'",
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         max_results = max(1, min(max_results, 1000))
         offset = max(0, offset)

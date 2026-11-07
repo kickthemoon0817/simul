@@ -192,6 +192,14 @@ class TestLookupErrors:
 
         assert payload["success"] is False
         assert payload["error_type"] == error_type
+        if error_type == "ValidationError":
+            # The code the edit tools report for the same check, beside the
+            # errors list every ValidationError carries.
+            details = dict(payload["details"])
+            assert [error["message"] for error in details.pop("errors")] == [payload["error"]]
+            assert details == {"code": "InvalidPrimPath", "prim_path": prim_path}
+        else:
+            assert payload["details"] == {"prim_path": prim_path}
 
     def test_unknown_purpose_is_rejected(self, usd_tools, stage_path: Path) -> None:
         stage_id = usd_tools.load(stage_path)

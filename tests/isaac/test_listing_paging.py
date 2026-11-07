@@ -130,7 +130,7 @@ def test_search_prims_pages_and_requires_a_query() -> None:
         IsaacTools(MagicMock(), settings=Settings()).search_isaac_prims(query="  ")
     )
     assert refused["success"] is False
-    assert refused["error_type"] == "ValueError"
+    assert refused["error_type"] == "ValidationError"
 
 
 def test_subtree_pages_in_traversal_order() -> None:

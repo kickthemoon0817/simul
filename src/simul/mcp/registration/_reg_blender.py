@@ -48,22 +48,30 @@ from pydantic import BaseModel
 
 from ...adapters.blender_runtime import BlenderRuntimeSession
 from ...tool_surfaces import THIN_BLENDER_TOOLS
+from .. import error_types
 from ..schemas.blender import (
+    LISTING_JSON_BYTES_MAX,
     SCRIPT_OUTPUT_CHARS_DEFAULT,
     SCRIPT_OUTPUT_CHARS_MAX,
     SCRIPT_OUTPUT_JSON_BYTES_MAX,
+    SEQUENCE_FRAMES_DEFAULT,
+    SEQUENCE_FRAMES_MAX,
+    SEQUENCE_TIME_BUDGET_SECONDS,
     BlenderAddConstraintRequest,
     BlenderAddConstraintResponse,
     BlenderAddForceFieldRequest,
     BlenderAddForceFieldResponse,
     BlenderAddModifierRequest,
     BlenderAddModifierResponse,
+    BlenderApplyModifierResponse,
     BlenderAssignMaterialRequest,
     BlenderAssignMaterialResponse,
     BlenderAttachWindowRequest,
     BlenderAttachWindowResponse,
+    BlenderBakeScope,
     BlenderBakeSimulationRequest,
     BlenderBakeSimulationResponse,
+    BlenderBodyType,
     BlenderBoundingBoxRequest,
     BlenderBoundingBoxResponse,
     BlenderBoundsCheckRequest,
@@ -74,8 +82,13 @@ from ..schemas.blender import (
     BlenderCaptureSequenceResponse,
     BlenderCaptureViewportRequest,
     BlenderCaptureViewportResponse,
+    BlenderCleanMeshRequest,
+    BlenderCleanMeshResponse,
     BlenderClearParentRequest,
     BlenderClearParentResponse,
+    BlenderCollisionShape,
+    BlenderConstraintLimitAxis,
+    BlenderConstraintType,
     BlenderCreateMeshFromDataRequest,
     BlenderCreateMeshFromDataResponse,
     BlenderCreateObjectRequest,
@@ -90,9 +103,13 @@ from ..schemas.blender import (
     BlenderExecuteScriptResponse,
     BlenderExportFileRequest,
     BlenderExportFileResponse,
+    BlenderFalloffType,
+    BlenderFieldShape,
     BlenderFileInfoResponse,
     BlenderFocusOnObjectRequest,
     BlenderFocusOnObjectResponse,
+    BlenderForceFieldType,
+    BlenderFreeBakeRequest,
     BlenderFreeBakeResponse,
     BlenderGetConstraintInfoRequest,
     BlenderGetConstraintInfoResponse,
@@ -114,12 +131,15 @@ from ..schemas.blender import (
     BlenderMaterialInfoResponse,
     BlenderMeshInfoRequest,
     BlenderMeshInfoResponse,
+    BlenderModifierTargetRequest,
     BlenderObjectInfoRequest,
     BlenderObjectInfoResponse,
     BlenderOpenFileRequest,
     BlenderOpenFileResponse,
     BlenderPlayAnimationRequest,
     BlenderPlayAnimationResponse,
+    BlenderRemoveModifierResponse,
+    BlenderRigidBodyWorldResponse,
     BlenderSaveFileRequest,
     BlenderSaveFileResponse,
     BlenderSceneObjectsRequest,
@@ -135,13 +155,25 @@ from ..schemas.blender import (
     BlenderSetFrameResponse,
     BlenderSetLightParamsRequest,
     BlenderSetLightParamsResponse,
+    BlenderSetObjectModeRequest,
+    BlenderSetObjectModeResponse,
     BlenderSetParentRequest,
     BlenderSetParentResponse,
+    BlenderSetRigidBodyWorldRequest,
     BlenderSetTransformRequest,
     BlenderSetTransformResponse,
     BlenderSetupRigidBodyRequest,
     BlenderSetupRigidBodyResponse,
+    BlenderSpringAxis,
+    BlenderSpringSettings,
     BlenderViewportInfoResponse,
+    FieldTenth,
+    NonNegativeFloat,
+    RigidBodyMass,
+    UnitFloat,
+    WorldSolverIterations,
+    WorldSubsteps,
+    WorldTimeScale,
 )
 from ..schemas.blender_ui import AgentControl, BlenderUIRequest, BlenderUIResponse
 from ..schemas.simready import (
@@ -523,7 +555,7 @@ def _attach(server: "SimulMCPServer", request: Any) -> Dict[str, Any]:
         return {
             "success": False,
             "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
-            "error_type": "ValueError",
+            "error_type": "UnsupportedOperation",
         }
     from ...adapters.blender_connection import BlenderAttachments
 
@@ -532,11 +564,12 @@ def _attach(server: "SimulMCPServer", request: Any) -> Dict[str, Any]:
         return attachments.attach(request.instance_id, request.window_id)
     except (ValueError, RuntimeError) as exc:
         # List the candidates so the agent can choose without a shell.
+        fields = error_types.exception_fields(exc)
         return {
             "success": False,
             "error": str(exc),
-            "error_type": type(exc).__name__,
-            "details": {"instances": attachments.instances()},
+            "error_type": fields["error_type"],
+            "details": {**(fields["details"] or {}), "instances": attachments.instances()},
         }
 
 
@@ -558,6 +591,7 @@ def _capture_viewport_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
         method: BlenderCaptureMethod = "auto",
         use_render_fallback: bool = False,
         agent_id: Optional[str] = None,
+        camera_name: Optional[str] = None,
     ) -> ToolResult:
         return await _exec(
             server,
@@ -568,6 +602,7 @@ def _capture_viewport_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
                 request.jpeg_quality,
                 agent_id=request.agent_id,
                 method=request.method,
+                camera_name=request.camera_name,
             ),
             {
                 "width": width,
@@ -576,6 +611,7 @@ def _capture_viewport_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
                 "method": method,
                 "use_render_fallback": use_render_fallback,
                 "agent_id": server._resolve_agent_id(agent_id),
+                "camera_name": camera_name,
             },
         )
 
@@ -599,6 +635,9 @@ def _capture_sequence_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
         jpeg_quality: int = 85,
         agent_id: Optional[str] = None,
         method: BlenderCaptureMethod = "auto",
+        camera_name: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        max_frames: int = SEQUENCE_FRAMES_DEFAULT,
     ) -> ToolResult:
         return await _exec(
             server,
@@ -612,6 +651,9 @@ def _capture_sequence_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
                 request.jpeg_quality,
                 agent_id=request.agent_id,
                 method=request.method,
+                camera_name=request.camera_name,
+                output_dir=request.output_dir,
+                max_frames=request.max_frames,
             ),
             {
                 "start_frame": start_frame,
@@ -622,16 +664,13 @@ def _capture_sequence_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
                 "jpeg_quality": jpeg_quality,
                 "agent_id": server._resolve_agent_id(agent_id),
                 "method": method,
+                "camera_name": camera_name,
+                "output_dir": output_dir,
+                "max_frames": max_frames,
             },
         )
 
     return capture_blender_viewport_sequence
-
-
-def _free_bake(session: Any) -> Dict[str, Any]:
-    """Free the bake; success is the absence of an exception, whatever the session returns."""
-    session.free_bake()
-    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +717,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="list_blender_scene_objects",
-        description="List objects from the active Blender scene.",
+        description=(
+            "List objects from the active Blender scene, a page at a time: count objects from "
+            "offset, total matching, and next_offset for the next page (null after the last). "
+            f"A page stops before its entries pass {LISTING_JSON_BYTES_MAX} bytes of JSON, so it "
+            "can hold fewer than max_items. Each entry names a collection holding the object."
+        ),
         hints=READ_ONLY,
         operation="list_scene_objects",
         request=BlenderSceneObjectsRequest,
@@ -693,6 +737,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "include_hidden": "Include hidden objects when true.",
             "max_items": "Maximum number of objects to return.",
         },
+        added_params=("offset",),
     ),
     # -- Core observation ----------------------------------------------------
     BlenderTool(
@@ -712,7 +757,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_mesh_info",
-        description="Get mesh geometry counts for a Blender mesh object.",
+        description=(
+            "Get a Blender mesh object's vertex, edge, face and triangle counts: of the "
+            "stored mesh, and evaluated with the modifiers enabled in the viewport, which is "
+            "what an export writes. A mesh in Edit Mode is counted with its unsaved edits. "
+            "warnings name modifiers set differently for render, which USD export evaluates."
+        ),
         hints=READ_ONLY,
         operation="get_mesh_info",
         request=BlenderMeshInfoRequest,
@@ -728,15 +778,22 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="search_blender_objects",
-        description="Search for objects in the Blender scene by name pattern or type.",
+        description=(
+            "Search for objects in the Blender scene by name pattern or type (in any case), a "
+            "page at a time as list_blender_scene_objects pages: count, total and next_offset."
+        ),
         hints=READ_ONLY,
         operation="search_objects",
         request=BlenderSearchObjectsRequest,
         response=BlenderSearchObjectsResponse,
+        added_params=("offset",),
     ),
     BlenderTool(
         name="summarize_blender_scene",
-        description="Get a high-level summary of the Blender scene.",
+        description=(
+            "Get a high-level summary of the Blender scene: object counts by type, its "
+            "top-level collections, active camera and frame range."
+        ),
         hints=READ_ONLY,
         operation="summarize_scene",
         response=BlenderSceneSummaryResponse,
@@ -759,7 +816,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="check_blender_object_bounds",
-        description="Check if a Blender object is within spatial bounds.",
+        description=(
+            "Check where a Blender object's world-space bounding box lies relative to an "
+            "axis-aligned box: relation 'inside' (within_bounds), 'intersecting' or 'outside'. "
+            "The bounding box turns and scales with the object; origin_within_bounds tests the "
+            "origin alone. bounds_min must not exceed bounds_max."
+        ),
         hints=READ_ONLY,
         operation="is_object_within_bounds",
         request=BlenderBoundsCheckRequest,
@@ -783,11 +845,13 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "through the scene camera, or through a temporary camera removed afterwards: "
             "aligned to the 3D View when attached, framing the visible objects when embedded "
             "or when the window shows no 3D View "
-            "(render_temp_camera_view / render_temp_camera_framing). The image arrives as an MCP "
-            "image content block, followed by a JSON block with success, width, height, engine, "
-            "capture_method, format and image_attached=true. In attached mode, briefly show an "
-            "agent eye badge and border pulse after success. Agent annotations are excluded "
-            "from the captured image."
+            "(render_temp_camera_view / render_temp_camera_framing). camera_name captures "
+            "through that camera without changing the scene camera or the view: a render "
+            "renders through it, a viewport capture draws the 3D View's shading from it "
+            "(viewport_camera). The image arrives as an MCP image content block, followed by a "
+            "JSON block with success, width, height, engine, capture_method, camera_name, format "
+            "and image_attached=true. In attached mode, briefly show an agent eye badge and "
+            "border pulse after success. Agent annotations are excluded from the captured image."
         ),
         hints=READ_ONLY,
         operation="capture_viewport",
@@ -855,7 +919,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_viewport_info",
-        description="Get active viewport and render settings.",
+        description=(
+            "Get the render settings (engine, resolution, film, active camera) and, in attached "
+            "mode, view3d: the 3D View captures use, with its view_matrix, eye_location, "
+            "perspective, lens, clip range and shading. view3d is null without an editor window "
+            "(embedded bpy, blender -b) or 3D View, and view3d_unavailable_reason says which."
+        ),
         hints=READ_ONLY,
         operation="get_viewport_info",
         response=BlenderViewportInfoResponse,
@@ -863,9 +932,14 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="capture_blender_viewport_sequence",
         description=(
-            "Capture a frame range as base64-encoded JPEGs, each made like "
-            "capture_blender_viewport with the same method (the 3D View when attached, a "
-            "camera render in embedded mode). "
+            "Capture a frame range as JPEG files, each made like capture_blender_viewport "
+            "with the same method and camera_name (the 3D View when attached, a camera render "
+            "in embedded mode), and return their paths: frames [{frame, file_path}], "
+            "output_dir (default a new folder in the sandbox's capture directory), width and "
+            "height. end_frame must not be before start_frame. One call captures at most "
+            f"max_frames (default {SEQUENCE_FRAMES_DEFAULT}, at most {SEQUENCE_FRAMES_MAX}) and "
+            f"starts no frame after {SEQUENCE_TIME_BUDGET_SECONDS:g} s, since Blender is busy "
+            "meanwhile; then complete is false and next_start_frame says where to continue. "
             "In attached mode, briefly show an agent eye badge and border pulse after success. "
             "Agent annotations are excluded from the captured images."
         ),
@@ -878,7 +952,11 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     # -- Scene manipulation --------------------------------------------------
     BlenderTool(
         name="create_blender_object",
-        description="Create a new object in the Blender scene.",
+        description=(
+            "Create a new object in the Blender scene's active collection, or in the scene's own "
+            "collection when the active one is excluded, hidden or disabled in viewports (warning "
+            "says so). It stays in Object Mode whatever Blender's Enter Edit Mode preference."
+        ),
         hints=ADDITIVE,
         operation="create_object",
         request=BlenderCreateObjectRequest,
@@ -891,11 +969,28 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="delete_blender_object",
-        description="Delete an object from the Blender scene.",
-        hints=OVERWRITING,
+        description=(
+            "Delete an object from the current Blender scene with Blender's own Delete, which "
+            "also resets a rigid body's cache. Another scene linking it keeps it "
+            "(remaining_scenes); use_global=true deletes it from every scene and the file."
+        ),
+        hints=DESTRUCTIVE,
         operation="delete_object",
         request=BlenderDeleteObjectRequest,
         response=BlenderDeleteObjectResponse,
+        added_params=("use_global",),
+    ),
+    BlenderTool(
+        name="set_blender_object_mode",
+        description=(
+            "Switch an object (the active one by default) into a mode, as the 3D View's mode menu "
+            "does: OBJECT by default, the way back for a window left in Edit or Pose Mode, where "
+            "create, delete, import and the other mode-sensitive tools refuse to run."
+        ),
+        hints=IDEMPOTENT,
+        operation="set_object_mode",
+        request=BlenderSetObjectModeRequest,
+        response=BlenderSetObjectModeResponse,
     ),
     BlenderTool(
         name="set_blender_object_transform",
@@ -945,12 +1040,43 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="add_blender_modifier",
-        description="Add a modifier to a Blender object.",
+        description=(
+            "Add a modifier to a Blender mesh, curve or other object with a modifier stack. "
+            "params are the modifier's settings by Blender RNA name, checked before use: an "
+            "unknown name is refused with the closest names, an enum value must be one of its "
+            "items, a number must lie within the setting's limits (Blender would clamp it "
+            "silently), and an object or collection setting takes its name, e.g. "
+            "{'object': 'Cutter'} for BOOLEAN. The reply echoes the stored settings. A refused "
+            "call leaves no modifier behind. DECIMATE is refused on a mesh with invalid geometry, "
+            "which can freeze Blender; run clean_blender_mesh first."
+        ),
         hints=ADDITIVE,
         operation="add_modifier",
         request=BlenderAddModifierRequest,
         response=BlenderAddModifierResponse,
         params={"params": Param(Dict[str, Any], {})},
+    ),
+    BlenderTool(
+        name="apply_blender_modifier",
+        description=(
+            "Apply one modifier of a Blender mesh object, baking its result into the mesh data "
+            "(for example a Decimate before export) and removing it from the stack. A modifier "
+            "below others is applied to the base mesh without them, with a warning; shared mesh "
+            "data is copied for this object first. A modifier disabled in the viewport is "
+            "refused, as Blender would drop it unapplied. Requires Object Mode."
+        ),
+        hints=DESTRUCTIVE,
+        operation="apply_modifier",
+        request=BlenderModifierTargetRequest,
+        response=BlenderApplyModifierResponse,
+    ),
+    BlenderTool(
+        name="remove_blender_modifier",
+        description="Remove one modifier from a Blender object's stack without applying it.",
+        hints=DESTRUCTIVE,
+        operation="remove_modifier",
+        request=BlenderModifierTargetRequest,
+        response=BlenderRemoveModifierResponse,
     ),
     BlenderTool(
         name="set_blender_light_params",
@@ -990,7 +1116,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         name="import_blender_file",
         description=(
             "Import an OBJ, FBX, glTF, USD, STL or PLY file into the Blender scene, "
-            "optionally scaled about the world origin (scale)."
+            "optionally scaled about the world origin (scale). The textures, buffers, MTL "
+            "libraries and USD layers it would read must be inside the sandbox too, or it is "
+            "refused with SandboxError; within the sandbox the FBX importer does not search "
+            "folders for textures."
         ),
         hints=ADDITIVE,
         operation="import_file",
@@ -1020,7 +1149,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_file_info",
-        description="Get information about the current .blend file.",
+        description=(
+            "Get information about the current .blend file: its path, saved and dirty state, the "
+            "current scene's name and object_count, and file_object_count for the whole file."
+        ),
         hints=READ_ONLY,
         operation="get_file_info",
         response=BlenderFileInfoResponse,
@@ -1043,7 +1175,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="set_blender_frame_range",
-        description="Set the animation frame range.",
+        description=(
+            "Set the animation frame range. An unbaked rigid-body cache follows it; "
+            "a baked one keeps its range, with a warning."
+        ),
         hints=OVERWRITING,
         operation="set_frame_range",
         request=BlenderSetFrameRangeRequest,
@@ -1084,23 +1219,55 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     # -- Physics and simulation ----------------------------------------------
     BlenderTool(
         name="setup_blender_rigid_body",
-        description="Set up rigid body physics on a Blender object.",
+        description=(
+            "Set up rigid body physics on a mesh object, adding the scene's rigid body "
+            "world when there is none, or replace its settings. Every argument is "
+            "checked first (mass >= 0.001, friction >= 0, restitution and damping 0-1), "
+            "and a failure leaves the scene, world and selection unchanged. "
+            "kinematic=true makes an animated body that pushes simulated ones."
+        ),
         hints=OVERWRITING,
         operation="setup_rigid_body",
         request=BlenderSetupRigidBodyRequest,
         response=BlenderSetupRigidBodyResponse,
+        params={
+            "body_type": Param(BlenderBodyType),
+            "mass": Param(RigidBodyMass),
+            "friction": Param(NonNegativeFloat),
+            "restitution": Param(UnitFloat),
+            "collision_shape": Param(BlenderCollisionShape),
+            "linear_damping": Param(UnitFloat),
+            "angular_damping": Param(UnitFloat),
+            "collision_margin": Param(Optional[UnitFloat]),
+        },
     ),
     BlenderTool(
         name="add_blender_force_field",
-        description="Add a force field to the scene.",
+        description=(
+            "Add a force field to the scene, oriented in world space: its local +Z "
+            "(where WIND blows, the axis VORTEX turns about) points along direction, "
+            "world +Z by default, whatever the editor's Align preference. The reply "
+            "reports rotation_euler and direction."
+        ),
         hints=ADDITIVE,
         operation="add_force_field",
         request=BlenderAddForceFieldRequest,
         response=BlenderAddForceFieldResponse,
+        params={
+            "field_type": Param(BlenderForceFieldType),
+            "shape": Param(Optional[BlenderFieldShape]),
+            "falloff_type": Param(Optional[BlenderFalloffType]),
+            "falloff_power": Param(Optional[FieldTenth]),
+            "distance_max": Param(Optional[NonNegativeFloat]),
+            "noise": Param(Optional[FieldTenth]),
+        },
     ),
     BlenderTool(
         name="get_blender_force_field_info",
-        description="Get force field parameters for an object.",
+        description=(
+            "Get force field parameters, world location and direction (local +Z) for an "
+            "object; an object without a force field, such as a collider, is an error."
+        ),
         hints=READ_ONLY,
         operation="get_force_field_info",
         request=BlenderGetForceFieldInfoRequest,
@@ -1108,15 +1275,35 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="add_blender_rigid_body_constraint",
-        description="Add a rigid body constraint between two objects.",
+        description=(
+            "Add a rigid body constraint between two different rigid bodies, as an "
+            "empty at the pivot (location, default midway between them). axis sets "
+            "the constraint axis in world space: the hinge axis for HINGE, the slide "
+            "or motor axis for SLIDER, PISTON and MOTOR; unrotated by default, so a "
+            "HINGE turns about world Z. limits, springs, motor_* and "
+            "breaking_threshold configure it. Everything is checked first; a failure "
+            "leaves no empty behind. The reply reports pivot, axis and local_axes."
+        ),
         hints=ADDITIVE,
         operation="add_rigid_body_constraint",
         request=BlenderAddConstraintRequest,
         response=BlenderAddConstraintResponse,
+        params={
+            "constraint_type": Param(BlenderConstraintType),
+            "limits": Param(Optional[Dict[BlenderConstraintLimitAxis, List[float]]]),
+            "springs": Param(Optional[Dict[BlenderSpringAxis, BlenderSpringSettings]]),
+            "motor_angular_max_impulse": Param(Optional[NonNegativeFloat]),
+            "motor_linear_max_impulse": Param(Optional[NonNegativeFloat]),
+            "breaking_threshold": Param(Optional[NonNegativeFloat]),
+        },
     ),
     BlenderTool(
         name="get_blender_constraint_info",
-        description="Get rigid body constraint info for an object.",
+        description=(
+            "Get rigid body constraint info for a constraint empty: its bodies, pivot, "
+            "axis and local axes in world space, limits, springs, motor and breaking "
+            "threshold."
+        ),
         hints=READ_ONLY,
         operation="get_constraint_info",
         request=BlenderGetConstraintInfoRequest,
@@ -1124,7 +1311,16 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_physics_state",
-        description="Get current physics state of an object.",
+        description=(
+            "Get an object's world pose and rigid-body state at the current frame. An "
+            "unbaked simulation advances one frame at a time, so after a frame jump a "
+            "body sits where it was last simulated: by default the scene first steps "
+            "from the cache start to the current frame, as playback would (up to "
+            "400 000 body-frames). pose_source and simulated_for_frame say whether the "
+            "pose is the simulation's for this frame; frames past the cache end hold "
+            "the bodies at its last frame (past_cache_end). rigid_body_cache reports "
+            "the cache range and bake state."
+        ),
         hints=READ_ONLY,
         operation="get_physics_state",
         request=BlenderGetPhysicsStateRequest,
@@ -1140,19 +1336,70 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="bake_blender_simulation",
-        description="Bake physics simulation for a frame range.",
+        description=(
+            "Bake the physics simulation for frame_start-frame_end (start before end), "
+            "replacing an earlier bake: the simulation restarts from frame_start with "
+            "the bodies' current transforms. scope 'rigid_body' (default) bakes only "
+            "the rigid-body world's cache; 'all' bakes every point cache (rigid "
+            "bodies, cloth, soft bodies, dynamic paint, particles). Refused for a "
+            "disabled rigid body world. The reply gives the range the cache holds "
+            "and warns about scene frames it leaves out, where bodies hold their "
+            "pose. A bake runs on Blender's main thread and cannot be stopped, so one "
+            "over 20 000 frames or 400 000 body-frames (frames x bodies, up to about 16 s) "
+            "is refused unless allow_long_bake=true; past the client timeout Blender "
+            "keeps baking and the next calls wait behind it."
+        ),
         hints=OVERWRITING,
         operation="bake_simulation",
         request=BlenderBakeSimulationRequest,
         response=BlenderBakeSimulationResponse,
+        params={"scope": Param(BlenderBakeScope)},
     ),
     BlenderTool(
         name="free_blender_bake",
-        description="Free (delete) baked physics simulation data.",
+        description=(
+            "Free baked physics simulation data over the same scope as "
+            "bake_blender_simulation ('rigid_body' by default, or 'all'). A freed "
+            "cache gets the scene's frame range back, so the simulation is not cut "
+            "off at the last bake's end frame. freed lists the caches that were baked."
+        ),
         hints=OVERWRITING,
         operation="free_bake",
+        request=BlenderFreeBakeRequest,
         response=BlenderFreeBakeResponse,
-        call=_free_bake,
+        params={"scope": Param(BlenderBakeScope)},
+    ),
+    BlenderTool(
+        name="get_blender_rigid_body_world",
+        description=(
+            "Get the scene's rigid body world: enabled, scene gravity, substeps, "
+            "solver iterations, time scale, split impulse, body and constraint "
+            "counts, and the cache range and bake state (rigid_body_cache). Bodies "
+            "hold their pose past the cache end; warnings name a disabled world or a "
+            "cache that leaves out part of the scene range."
+        ),
+        hints=READ_ONLY,
+        operation="get_rigid_body_world",
+        response=BlenderRigidBodyWorldResponse,
+    ),
+    BlenderTool(
+        name="set_blender_rigid_body_world",
+        description=(
+            "Change the scene's rigid body world, adding one when there is none; only "
+            "the given settings change. gravity is the scene's, shared with cloth, "
+            "soft bodies and particles. A baked cache keeps playing its bake (changed "
+            "settings apply after free_blender_bake and a new bake), and its range "
+            "cannot change until freed. Replies like get_blender_rigid_body_world."
+        ),
+        hints=OVERWRITING,
+        operation="set_rigid_body_world",
+        request=BlenderSetRigidBodyWorldRequest,
+        response=BlenderRigidBodyWorldResponse,
+        params={
+            "substeps_per_frame": Param(Optional[WorldSubsteps]),
+            "solver_iterations": Param(Optional[WorldSolverIterations]),
+            "time_scale": Param(Optional[WorldTimeScale]),
+        },
     ),
     # -- Scripting and mesh from data ----------------------------------------
     BlenderTool(
@@ -1178,7 +1425,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="create_blender_mesh_from_data",
         description=(
-            "Create a mesh object from raw vertex, edge, and face data. Use for procedural geometry."
+            "Create a mesh object from raw vertex, edge, and face data. Use for procedural "
+            "geometry. Each vertex is exactly [x, y, z] finite numbers; a face repeating a "
+            "vertex or another face's vertex set, an edge joining a vertex to itself or "
+            "repeating another, and a collection outside the current scene are refused before "
+            "anything is created. The mesh is validated, and a failed call leaves no mesh or "
+            "object behind."
         ),
         hints=ADDITIVE,
         operation="create_mesh_from_data",
@@ -1188,6 +1440,21 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "edges": Param(List[List[int]], []),
             "faces": Param(List[List[int]], []),
         },
+    ),
+    BlenderTool(
+        name="clean_blender_mesh",
+        description=(
+            "Repair a Blender mesh object's data. Always validates it, removing faces that "
+            "repeat a vertex and duplicate faces or edges (geometry that can freeze Decimate); "
+            "then optionally merges vertices within merge_distance, dissolves edges and faces "
+            "smaller than dissolve_degenerate_distance, and recalculates normals to point "
+            "outside. Reports the counts before and after. Shared mesh data changes for every "
+            "object using it. Requires Object Mode."
+        ),
+        hints=OVERWRITING,
+        operation="clean_mesh",
+        request=BlenderCleanMeshRequest,
+        response=BlenderCleanMeshResponse,
     ),
     # -- SimReady asset format -----------------------------------------------
     BlenderTool(
@@ -1226,8 +1493,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="export_simready_usd",
         description=(
-            "Export a SimReady-compliant USD file from Blender. Validates objects before export, "
-            "selects the requested objects, and carries simready_ custom properties into USD attributes."
+            "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ "
+            "metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, "
+            "and UsdSemantics labels. The asset root is the default prim and holds its materials; "
+            "metersPerUnit follows the scene's Unit Scale. Listed objects export with their "
+            "descendants, hidden ones too; lights, cameras and the World are left out by default. "
+            "Refuses when validation finds errors unless force=true. Returns each object's prim path."
         ),
         hints=OVERWRITING,
         operation="export_simready_usd",

@@ -1,7 +1,7 @@
 """Transport and policy machinery every Isaac tool mixin builds on."""
 
 import json
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ....adapters import IsaacSocketClient, ScriptResult
 from ....adapters.isaac_socket_client import BridgeRequestDeliveredError
@@ -12,7 +12,9 @@ from ... import error_types
 from ...registration._helpers import apply_success_from_error
 from ...schemas.common import ErrorResponse
 from ._shared import (
+    ANNOTATION_MARKER,
     HEAVY_SCRIPT_TIMEOUT_SECONDS,
+    SCRIPT_ANNOTATIONS,
     logger,
 )
 
@@ -65,6 +67,52 @@ def extract_tool_json(output: str) -> Tuple[Optional[Any], str]:
                 return value, "\n".join(part for part in other if part.strip()).strip()
             start = line.find("{", start + 1)
     return None, text
+
+
+def split_annotations(output: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """Separate annotation lines (see ``SCRIPT_ANNOTATIONS``) from a script's output.
+
+    Returns:
+        The output without annotation lines, and the decoded annotations.
+    """
+    if ANNOTATION_MARKER not in output:
+        return output, []
+    kept: List[str] = []
+    notes: List[Dict[str, Any]] = []
+    for line in output.splitlines():
+        marker_at = line.find(ANNOTATION_MARKER)
+        if marker_at == -1:
+            kept.append(line)
+            continue
+        try:
+            note = json.loads(line[marker_at + len(ANNOTATION_MARKER):])
+        except json.JSONDecodeError:
+            kept.append(line)
+            continue
+        if isinstance(note, dict):
+            notes.append(note)
+        if line[:marker_at].strip():
+            kept.append(line[:marker_at])
+    return "\n".join(kept), notes
+
+
+def merge_annotations(data: Dict[str, Any], notes: Sequence[Dict[str, Any]]) -> None:
+    """Merge annotation fields and warnings into a tool result, never over its own keys."""
+    for note in notes:
+        fields = note.get("fields")
+        if isinstance(fields, dict):
+            for key, value in fields.items():
+                data.setdefault(key, value)
+        extra = [w for w in note.get("warnings") or [] if isinstance(w, str)]
+        if not extra:
+            continue
+        warnings = data.get("warnings")
+        if warnings is None:
+            data["warnings"] = list(extra)
+        elif isinstance(warnings, list):
+            warnings.extend(extra)
+        else:
+            data.setdefault("annotation_warnings", list(extra))
 
 
 def _note_foreign_output(data: Dict[str, Any], other: str) -> None:
@@ -156,7 +204,7 @@ class IsaacScriptBase(LoggerMixin):
         """
         return ErrorResponse(
             error=message,
-            error_type="RefusedOperation",
+            error_type=error_types.REFUSED_OPERATION,
             details=details or None,
         ).model_dump()
 
@@ -197,7 +245,7 @@ class IsaacScriptBase(LoggerMixin):
             if not isinstance(result_payload, dict):
                 return ErrorResponse(
                     error="Bridge response payload must be an object.",
-                    error_type="BridgeProtocolError",
+                    error_type=error_types.BRIDGE_PROTOCOL_ERROR,
                 ).model_dump()
             return apply_success_from_error(result_payload)
 
@@ -227,6 +275,7 @@ class IsaacScriptBase(LoggerMixin):
         transport_mode: str = "default",
         *,
         timeout_seconds: Optional[float] = None,
+        annotations: Sequence[str] = (),
     ) -> Dict[str, Any]:
         """
         Execute a Python script in Isaac Sim and parse JSON from stdout.
@@ -244,10 +293,18 @@ class IsaacScriptBase(LoggerMixin):
                 the VS Code socket.
             timeout_seconds: Script budget for this call; the client's default
                 when None.
+            annotations: Names from ``SCRIPT_ANNOTATIONS`` whose checks run
+                after the script and add fields and warnings to a successful
+                result ("usd_readback" for readers of poses and velocities,
+                "paused_edit" for edits).
 
         Returns:
             Parsed dict from stdout JSON, or an ErrorResponse dict.
         """
+        if annotations:
+            script = "\n\n".join(
+                [script.rstrip("\n")] + [SCRIPT_ANNOTATIONS[name] for name in annotations]
+            )
         # Passed only when set, so a client double with the plain
         # execute(code) signature keeps working for every other tool.
         kwargs: Dict[str, Any] = (
@@ -266,33 +323,31 @@ class IsaacScriptBase(LoggerMixin):
                 error=str(exc)
                 or f"Isaac Sim at {self._client.address} did not answer in time; the "
                 "script may still be running.",
-                error_type=error_types.TIMEOUT_ERROR,
-                details={"cause": type(exc).__name__},
+                **error_types.exception_fields(exc),
             ).model_dump()
         except (ConnectionError, OSError) as exc:
             # Refused, reset by the peer, or broken mid-reply: the shared class,
-            # with the transport's own name as the cause.
+            # with the transport's own name as details.exception_type.
             return ErrorResponse(
                 error=str(exc) or f"The connection to Isaac Sim at {self._client.address} failed.",
-                error_type=error_types.CONNECTION_ERROR,
-                details={"cause": type(exc).__name__},
+                **error_types.exception_fields(exc),
             ).model_dump()
         except Exception as exc:
             logger.error("Script execution failed: %s", exc, exc_info=True)
             return ErrorResponse(
                 error=str(exc) or type(exc).__name__,
-                error_type=error_types.ENGINE_ERROR,
-                details={"cause": type(exc).__name__},
+                **error_types.exception_fields(exc),
             ).model_dump()
 
         if not result.success:
             return self._script_failure(result)
 
-        output = result.output.strip()
+        output, notes = split_annotations(result.output)
+        output = output.strip()
         if not output:
             return ErrorResponse(
                 error="Script produced no output",
-                error_type="EmptyOutput",
+                error_type=error_types.EMPTY_OUTPUT,
             ).model_dump()
 
         data, other_output = extract_tool_json(output)
@@ -303,23 +358,36 @@ class IsaacScriptBase(LoggerMixin):
                 reason = str(exc)
             else:
                 reason = f"expected a JSON object, got {type(data).__name__}"
+            # The engine's output, not the caller's input, failed to parse.
             return ErrorResponse(
                 error=f"Failed to parse script output as JSON: {reason}",
-                error_type="JSONDecodeError",
-                details={"raw_output": output[:2000]},
+                error_type=error_types.ENGINE_ERROR,
+                details={"raw_output": output[:2000], "exception_type": "JSONDecodeError"},
             ).model_dump()
         if other_output:
             _note_foreign_output(data, other_output)
+        if notes and data.get("error") is None:
+            merge_annotations(data, notes)
         # A script that sets `success` itself is trusted; otherwise `error`
         # or any `*_error` key marks the call failed, so a partial result
         # (`syntheticdata_error` beside a valid listing) is not reported green.
         return apply_success_from_error(data)
 
     async def _execute_bridge_action(
-        self, action: str, payload: Optional[Dict[str, Any]] = None
+        self,
+        action: str,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        read_timeout: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Execute a typed bridge action without falling back to VS Code.
+
+        Args:
+            action: Bridge action name.
+            payload: Action payload.
+            read_timeout: How long to wait for the reply, for actions whose
+                duration scales with their input; the bridge timeout when None.
 
         Returns:
             Parsed payload dict on success, an error dict on bridge-only
@@ -329,15 +397,17 @@ class IsaacScriptBase(LoggerMixin):
         if not self._client.bridge_enabled:
             return None
 
+        # Passed only when set, so client doubles with the plain signature work.
+        kwargs: Dict[str, Any] = {} if read_timeout is None else {"read_timeout": read_timeout}
         try:
-            response = await self._client.bridge_request(action, payload or {})
+            response = await self._client.bridge_request(action, payload or {}, **kwargs)
         except BridgeRequestDeliveredError as exc:
             # The bridge already holds the request and may have acted on it
             # (a typed create/delete/simulation_control is not idempotent).
             # Running the script fallback now would apply it a second time.
             return ErrorResponse(
                 error=str(exc),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
         except (ConnectionRefusedError, TimeoutError, OSError) as exc:
             # The bridge is unreachable, not the action unsupported. When a
@@ -354,14 +424,14 @@ class IsaacScriptBase(LoggerMixin):
                 return None
             return ErrorResponse(
                 error=str(exc),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
         except ValueError as exc:
             # Protocol-level failure (oversized request, malformed frame). The
             # script path would not do better, so surface it.
             return ErrorResponse(
                 error=str(exc),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
 
         if (

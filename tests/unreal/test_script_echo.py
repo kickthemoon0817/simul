@@ -158,7 +158,8 @@ def test_the_envelope_echoes_through_the_hook(tmp_path: Any) -> None:
         )
         return json.loads(result.content[-1].text)
 
-    assert run(None)["details"]["input"] == {"name": "n" * 500, "count": "many"}
+    # Without a hook the arguments are echoed bounded: a long string by its size.
+    assert run(None)["details"]["input"] == {"name": "<500 characters>", "count": "many"}
     hooked = run(lambda arguments: {"name_chars": len(arguments["name"])})["details"]
     assert hooked["input"] == {"name_chars": 500}
     assert [error["field"] for error in hooked["errors"]] == ["count"]

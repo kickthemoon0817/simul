@@ -14,6 +14,7 @@ derived from the same source rather than written out.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -188,7 +189,7 @@ def test_isaac_not_running(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
         "success": False,
         "error": NOT_REACHABLE,
         "error_type": "ConnectionError",
-        "details": None,
+        "details": {"exception_type": "ConnectionRefusedError"},
     }
     assert _records(instance, "execute_isaac_script") == [
         {
@@ -212,11 +213,12 @@ def test_isaac_script_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
     payload = _call(instance, "execute_isaac_script", code=CODE)
 
+    # The agent's script raised: ScriptError, naming what it raised.
     assert payload == {
         "success": False,
         "error": "name 'stage' is not defined",
-        "error_type": "NameError",
-        "details": {"traceback": TRACEBACK},
+        "error_type": "ScriptError",
+        "details": {"traceback": TRACEBACK, "exception_type": "NameError"},
     }
     assert _records(instance, "execute_isaac_script") == [
         {
@@ -244,7 +246,7 @@ def test_isaac_tool_that_raises(
         "success": False,
         "error": "[Errno 54] Connection reset by peer",
         "error_type": "ConnectionError",
-        "details": {"cause": "ConnectionResetError"},
+        "details": {"exception_type": "ConnectionResetError"},
     }
     assert _records(instance, "get_isaac_stage_info") == [
         {"success": False, "error": "[Errno 54] Connection reset by peer"}
@@ -410,18 +412,47 @@ def _raising(exc: BaseException) -> Any:
     return operator
 
 
+class _Objects(dict):
+    """bpy.data.objects: looked up by name, iterated over its objects."""
+
+    def __iter__(self) -> Any:
+        return iter(list(self.values()))
+
+
+def _view_layer() -> SimpleNamespace:
+    """A view layer whose only collection is the scene's own, active and visible."""
+    root = SimpleNamespace(
+        collection=SimpleNamespace(
+            name="Scene Collection", library=None, is_editable=True, hide_viewport=False
+        ),
+        children=[],
+        exclude=False,
+        hide_viewport=False,
+    )
+    return SimpleNamespace(
+        objects=SimpleNamespace(active=None),
+        layer_collection=root,
+        active_layer_collection=root,
+    )
+
+
 def _stand_in_bpy() -> SimpleNamespace:
     """Just enough of bpy for the physics tools, with operators that fail like Blender 5.0's."""
     cube = SimpleNamespace(
-        name="Cube", type="MESH", rigid_body=None, select_set=lambda value: None
+        name="Cube",
+        type="MESH",
+        rigid_body=None,
+        select_set=lambda value: None,
+        as_pointer=lambda: 1,
     )
     scene = SimpleNamespace(rigidbody_world=SimpleNamespace(), objects={"Cube": cube})
     return SimpleNamespace(
         app=SimpleNamespace(version=(5, 0, 1), version_string="5.0.1", background=True),
-        data=SimpleNamespace(objects={"Cube": cube}),
+        data=SimpleNamespace(objects=_Objects(Cube=cube)),
         context=SimpleNamespace(
             scene=scene,
-            view_layer=SimpleNamespace(objects=SimpleNamespace(active=None)),
+            view_layer=_view_layer(),
+            temp_override=lambda **members: contextlib.nullcontext(),
         ),
         ops=SimpleNamespace(
             rigidbody=SimpleNamespace(object_add=_raising(RuntimeError(POLL_FAILED))),
@@ -443,7 +474,7 @@ def _embedded_blender(
 def test_blender_bpy_failure_with_object_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """bpy's RuntimeError keeps its class; the object it concerned rides as a note."""
+    """bpy's RuntimeError is an EngineError naming it; the object it concerned rides as a note."""
     instance = _embedded_blender(monkeypatch, tmp_path)
 
     payload = _call(instance, "setup_blender_rigid_body", object_name="Cube")
@@ -452,40 +483,74 @@ def test_blender_bpy_failure_with_object_context(
     assert payload == {
         "success": False,
         "error": message,
-        "error_type": "RuntimeError",
-        "details": None,
+        "error_type": "EngineError",
+        "details": {"exception_type": "RuntimeError"},
     }
     assert _records(instance, "setup_blender_rigid_body") == [
         {"success": False, "error": message}
     ]
 
 
+def test_blender_missing_object_is_not_found(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Blender's lookups raised a bare ValueError, which read as a ValidationError."""
+    instance = _embedded_blender(monkeypatch, tmp_path)
+
+    payload = _call(instance, "setup_blender_rigid_body", object_name="Ghost")
+
+    assert payload == {
+        "success": False,
+        "error": "Object not found: Ghost",
+        "error_type": "NotFoundError",
+        "details": None,
+    }
+
+
 def test_blender_bpy_failure_without_added_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A bad enum is a TypeError from bpy, whose message already lists the valid values.
+    """An operator's TypeError keeps bpy's message, which says enough.
 
     The wrapper that restated the field type, and re-raised the TypeError as a
-    RuntimeError, is gone.
+    RuntimeError, is gone. A type Blender does not know never reaches bpy now:
+    the request model lists the valid ones. One an operator still refuses is
+    the ValidationError it is, with the choices the message lists.
     """
     instance = _embedded_blender(monkeypatch, tmp_path)
 
+    refused = _call(instance, "add_blender_force_field", field_type="BOGUS")
     payload = _call(
         instance,
         "add_blender_force_field",
-        field_type="BOGUS",
+        field_type="WIND",
         location=[0.0, 0.0, 0.0],
     )
+
+    assert refused["error_type"] == "ValidationError"
+    assert "'FORCE', 'WIND'" in refused["error"]
 
     message = ENUM_MISSING
     assert payload == {
         "success": False,
         "error": message,
-        "error_type": "TypeError",
-        "details": None,
+        "error_type": "ValidationError",
+        "details": {
+            "exception_type": "TypeError",
+            "errors": [
+                {
+                    "field": None,
+                    "message": message,
+                    "type": "enum",
+                    "constraint": {"expected": ["FORCE", "WIND", "VORTEX"]},
+                    "input": "BOGUS",
+                }
+            ],
+        },
     }
     assert _records(instance, "add_blender_force_field") == [
-        {"success": False, "error": message}
+        {"success": False, "error": refused["error"]},
+        {"success": False, "error": message},
     ]
 
 
@@ -494,7 +559,8 @@ def test_blender_attached_bpy_failure(
 ) -> None:
     """The add-on replies with the failure; the client raises it as a BridgeRemoteError.
 
-    The envelope reports the class the add-on raised, which the reply names.
+    The envelope reports the class the add-on raised, which the reply names,
+    as the EngineError it is.
     """
     settings = Settings(
         blender={
@@ -544,8 +610,8 @@ def test_blender_attached_bpy_failure(
     assert payload == {
         "success": False,
         "error": remote,
-        "error_type": "RuntimeError",
-        "details": None,
+        "error_type": "EngineError",
+        "details": {"exception_type": "RuntimeError"},
     }
     assert _records(instance, "setup_blender_rigid_body") == [
         {"success": False, "error": remote}
@@ -560,7 +626,12 @@ def test_blender_validation_error(
 
     payload = _call(instance, "list_blender_scene_objects", max_items=0)
 
-    arguments = {"collection_name": None, "include_hidden": False, "max_items": 0}
+    arguments = {
+        "collection_name": None,
+        "include_hidden": False,
+        "max_items": 0,
+        "offset": 0,
+    }
     # The same shape the MCP schema layer reports: one line per field, the
     # fields listed, the input echoed; no pydantic banner or help URL.
     message = "max_items: Input should be greater than or equal to 1"

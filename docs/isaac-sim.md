@@ -128,7 +128,31 @@ From an agent, `ping_isaac` does the same check.
   deprecated in favour of `isaacsim.core.experimental.*`, and the
   `omni.isaac.*` shims are gone. Read
   [`skills/isaac-scripting/references/namespace-migration.md`](../skills/isaac-scripting/references/namespace-migration.md)
-  before writing `execute_isaac_script` code.
+  before writing `execute_isaac_script` code. The `simul://isaac-sim/api/core`
+  resource documents the 5.1 API and lists the 6.0 equivalents.
+
+## Reading simulated state
+
+simul's granular readers (transforms, bounding boxes, rigid-body velocities,
+camera poses) read USD. That is the simulated state only while PhysX writes
+its results back to USD. For GPU physics, Isaac Sim's `SimulationManager`
+(`set_physics_sim_device` on 5.1, `set_device` on 6.0) calls `enable_fabric`.
+That enables `omni.physx.fabric` and sets `/physics/updateToUsd` and
+`/physics/updateVelocitiesToUsd` to false. From then on USD keeps the
+pre-play values while the robot moves.
+
+The readers detect this. While the timeline is not stopped and either setting
+is false, the result carries `stale_under_fabric: true`, a `usd_readback`
+object (the two settings and whether `omni.physx.fabric` is enabled) and a
+warning. `get_isaac_runtime_info` reports the same settings under `physics`.
+simul does not read Fabric itself. To get simulated poses and velocities,
+use `execute_isaac_script` with a physics view:
+- on 5.1, the `isaacsim.core.prims` views in `simul://isaac-sim/api/core`;
+- on 6.0, `isaacsim.core.experimental.prims.RigidPrim(...).get_world_poses()`
+  and `get_velocities()`.
+
+A stopped timeline is not flagged: USD then holds the authored state, which
+`/physics/resetOnStop` (on in Isaac Sim's apps) restores on every stop.
 
 ## Transports
 

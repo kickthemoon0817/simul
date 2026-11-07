@@ -3,6 +3,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
+from ... import error_types
 from ...registration._helpers import apply_success_from_error, utf8_byte_length
 from ...schemas.common import ErrorResponse
 from ._shared import (
@@ -51,7 +52,7 @@ class CoreToolsMixin:
                     f"Unknown aspect(s): {', '.join(unknown)}. "
                     f"Valid aspects: {', '.join(sorted(PRIM_DETAIL_ASPECTS))}."
                 ),
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
 
         # One bridge round trip reads every aspect; the per-aspect loop below
@@ -81,10 +82,14 @@ class CoreToolsMixin:
             "Execute arbitrary Python code inside a running Isaac Sim application. The code "
             "runs in Kit's Python scope with full access to omni.*, pxr.*, and isaacsim.* "
             "APIs. stdout is captured and returned. For structured results, print JSON via "
-            "json.dumps(). Each execution is independent — always import modules at the top "
-            "of every script. Call ping_isaac first to verify connectivity before sending "
-            "scripts. Read the 'simul://isaac-sim/skills' resource for scripting patterns, "
-            "API quick reference, and Isaac Sim 5.1 / 6.0 namespace migration notes."
+            "json.dumps(). Executions are not isolated: every transport runs scripts in one "
+            "shared namespace, so globals a script defines persist into later calls, "
+            "including other agents' calls on the same instance. Import what you use in "
+            "every script, keep helpers in functions, and don't depend on leftover globals. "
+            "On Isaac Sim 5.1 with the bridge down, scripts over 32 KiB are refused. Call "
+            "ping_isaac first to verify connectivity before sending scripts. Read the "
+            "'simul://isaac-sim/skills' resource for scripting patterns, API quick "
+            "reference, and Isaac Sim 5.1 / 6.0 namespace migration notes."
         ),
         read_only=False,
         destructive=True,
@@ -119,7 +124,7 @@ class CoreToolsMixin:
                     "security.allow_script_execution. Use the granular tools, or "
                     "set SECURITY__ALLOW_SCRIPT_EXECUTION=true to re-enable it."
                 ),
-                error_type="ScriptExecutionDisabled",
+                error_type=error_types.SCRIPT_EXECUTION_DISABLED,
             ).model_dump()
         code_bytes = utf8_byte_length(code)
         if code_bytes > MAX_SCRIPT_BYTES:
@@ -128,7 +133,7 @@ class CoreToolsMixin:
                     f"Code payload too large ({code_bytes} bytes in UTF-8, "
                     f"max {MAX_SCRIPT_BYTES})."
                 ),
-                error_type="PayloadTooLarge",
+                error_type=error_types.PAYLOAD_TOO_LARGE,
             ).model_dump()
 
         client = self._client
@@ -137,7 +142,7 @@ class CoreToolsMixin:
                 result = await client.execute_vscode_only(code)
             else:
                 result = await client.execute(code)
-        except ConnectionRefusedError:
+        except ConnectionRefusedError as exc:
             return ErrorResponse(
                 error=(
                     f"Isaac Sim is not reachable at {client.address}. "
@@ -145,9 +150,9 @@ class CoreToolsMixin:
                     "isaacsim.code_editor.vscode extension enabled. "
                     "Use ping_isaac to verify connectivity."
                 ),
-                error_type="ConnectionError",
+                **error_types.exception_fields(exc),
             ).model_dump()
-        except TimeoutError:
+        except TimeoutError as exc:
             return ErrorResponse(
                 error=(
                     f"Script execution timed out after "
@@ -156,16 +161,31 @@ class CoreToolsMixin:
                     "unresponsive. Use ping_isaac to check if Isaac Sim is "
                     "still reachable."
                 ),
-                error_type="TimeoutError",
+                **error_types.exception_fields(exc),
             ).model_dump()
         except Exception as exc:
+            # A reset mid-reply is a ConnectionError, a garbled reply an
+            # EngineError: the shared classes, never the bare "Exception".
             logger.error("Script execution failed: %s", exc, exc_info=True)
             return ErrorResponse(
-                error=str(exc), error_type="Exception"
+                error=str(exc) or type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
 
         if not result.success:
-            return self._script_failure(result)
+            failure = self._script_failure(result)
+            raised = failure["error_type"]
+            if error_types.family_of(raised) in (
+                error_types.ENGINE_ERROR,
+                error_types.VALIDATION_ERROR,
+                error_types.NOT_FOUND_ERROR,
+            ):
+                # The agent's own code raised (a NameError, a ValueError): a
+                # ScriptError, as on Unreal, naming what it raised. A transport
+                # failure keeps its class.
+                failure["error_type"] = error_types.SCRIPT_ERROR
+                failure["details"] = {**(failure.get("details") or {}), "exception_type": raised}
+            return failure
 
         output = result.output.strip()
         if output:

@@ -774,20 +774,26 @@ class IsaacSocketClient:
         transport until it returns.
 
         Returns:
-            True if Isaac Sim responded successfully, False otherwise.
+            True if Isaac Sim responded successfully, False otherwise,
+            including when what answered sent a reply that is not the
+            protocol's (undecodable bytes, a malformed frame).
         """
         if self._prefer_bridge:
             try:
                 response = await self._bridge_request("ping", {})
                 if response.get("status") == "ok":
-                    return bool(response.get("payload", {}).get("reachable", True))
+                    payload = response.get("payload", {})
+                    if not isinstance(payload, dict):
+                        return False
+                    return bool(payload.get("reachable", True))
             except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
                 if not self._fallback_to_vscode:
                     return False
         try:
             result = await self._execute_vscode_unlocked("print('pong')")
             return result.success and "pong" in result.output
-        except (ConnectionRefusedError, TimeoutError, OSError):
+        except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
+            # ValueError covers UnicodeDecodeError and an oversized reply.
             return False
 
     @property

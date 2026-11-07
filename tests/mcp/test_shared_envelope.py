@@ -110,13 +110,19 @@ def _noted(exc: Exception, *notes: str) -> Exception:
             {
                 "error": "[Errno 54] Connection reset by peer",
                 "error_type": "ConnectionError",
-                "details": {"cause": "ConnectionResetError"},
+                "details": {"exception_type": "ConnectionResetError"},
             },
             id="transport-class",
         ),
         pytest.param(
+            # Python's name is no contract either: a KeyError is a lookup that
+            # found nothing, kept as the exception_type.
             KeyError("stage"),
-            {"error": "'stage'", "error_type": "KeyError"},
+            {
+                "error": "'stage'",
+                "error_type": "NotFoundError",
+                "details": {"exception_type": "KeyError"},
+            },
             id="class-name",
         ),
         pytest.param(
@@ -132,13 +138,13 @@ def _noted(exc: Exception, *notes: str) -> Exception:
             BridgeRemoteError(
                 "ValueError: Attached window is not in Object Mode", "ValueError", {}
             ),
-            # The class Blender raised is the cause; a ValueError is a
-            # ValidationError in the shared taxonomy, on every backend.
+            # The class Blender raised is the exception_type; a ValueError is
+            # a ValidationError in the shared taxonomy, on every backend.
             {
                 "error": "ValueError: Attached window is not in Object Mode",
                 "error_type": "ValidationError",
                 "details": {
-                    "cause": "ValueError",
+                    "exception_type": "ValueError",
                     "errors": [
                         {
                             "field": None,
@@ -154,7 +160,8 @@ def _noted(exc: Exception, *notes: str) -> Exception:
             _noted(RuntimeError("poll() failed"), "Failed to add rigid body to 'Cube'"),
             {
                 "error": "Failed to add rigid body to 'Cube': poll() failed",
-                "error_type": "RuntimeError",
+                "error_type": "EngineError",
+                "details": {"exception_type": "RuntimeError"},
             },
             id="note-as-context",
         ),
@@ -277,7 +284,7 @@ def test_a_payload_that_is_not_an_object_is_reported_not_raised(
     assert isaac == {
         "success": False,
         "error": "isaac_tool returned list, not a JSON object",
-        "error_type": "TypeError",
+        "error_type": "EngineError",
         "details": None,
     }
     assert backend["error"] == "backend_tool returned NoneType, not a JSON object"
@@ -672,8 +679,8 @@ def test_lock_bypassing_isaac_tools_are_enveloped_too(
     assert interrupt == {
         "success": False,
         "error": "bridge reply carried no status",
-        "error_type": "RuntimeError",
-        "details": None,
+        "error_type": "EngineError",
+        "details": {"exception_type": "RuntimeError"},
     }
     assert _records(instance, "ping_isaac") == [{"success": True, "error": None}]
     assert _records(instance, "interrupt_isaac_script") == [

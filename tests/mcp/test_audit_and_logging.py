@@ -104,8 +104,10 @@ def test_audit_rows_record_the_real_outcome(
         json.loads(line)
         for line in (tmp_path / "usage" / "tool_usage.jsonl").read_text().splitlines()
     ]
-    # One id per call ties its usage row to its audit row.
-    assert [row["request_id"] for row in usage] == [row["request_id"] for row in tool_rows]
+    # One id per call ties its usage row to its audit row; the unknown tool's
+    # call is recorded too, under one name for every unknown tool.
+    assert [row["request_id"] for row in usage] == [row["request_id"] for row in audit_rows]
+    assert usage[-1]["tool"] == "<unknown tool>"
 
 
 def test_a_cancelled_call_is_audited_as_cancelled(audit_rows: List[Dict[str, Any]]) -> None:

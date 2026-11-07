@@ -106,7 +106,7 @@ class CompoundMixin:
                     f"Invalid collision {collision!r}. Must be one of: "
                     f"{', '.join(COLLISION_APPROXIMATIONS)}"
                 ),
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         if material_path is None and diffuse_color is not None:
             parent, _, name = prim_path.rpartition("/")
@@ -178,4 +178,4 @@ class CompoundMixin:
                 print(json.dumps(result))
             """,
         )
-        return await self._execute_json_script(script)
+        return await self._execute_json_script(script, annotations=("paused_edit",))

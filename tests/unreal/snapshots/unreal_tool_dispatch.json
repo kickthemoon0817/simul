@@ -1606,7 +1606,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "visible": true,
-      "propagate": true
+      "propagate": true,
+      "scope": "all",
+      "persistent": false
      }
     }
    ],
@@ -1629,7 +1631,9 @@
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "visible": false,
-    "propagate": false
+    "propagate": false,
+    "scope": "editor",
+    "persistent": true
    },
    "envelope": [
     {
@@ -1645,7 +1649,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "visible": false,
-      "propagate": false
+      "propagate": false,
+      "scope": "editor",
+      "persistent": true
      }
     }
    ],
@@ -1718,7 +1724,8 @@
       "material_path": "/Game/Materials/M_Wood",
       "scalar_params": null,
       "vector_params": null,
-      "texture_params": null
+      "texture_params": null,
+      "allow_engine_content": false
      }
     }
    ],
@@ -1742,7 +1749,8 @@
     "material_path": "/Game/Materials/M_Wood",
     "scalar_params_json": "{\"Roughness\": 0.4}",
     "vector_params_json": "{\"Tint\": [1, 0.5, 0, 1]}",
-    "texture_params_json": "{\"Albedo\": \"/Game/Textures/T_Wood\"}"
+    "texture_params_json": "{\"Albedo\": \"/Game/Textures/T_Wood\"}",
+    "allow_engine_content": true
    },
    "envelope": [
     {
@@ -1770,7 +1778,8 @@
       },
       "texture_params": {
        "Albedo": "/Game/Textures/T_Wood"
-      }
+      },
+      "allow_engine_content": true
      }
     }
    ],
@@ -1808,7 +1817,8 @@
      "arguments": {
       "parent_path": "/Game/Materials/M_Wood",
       "instance_name": "MI_Chair",
-      "save_path": ""
+      "save_path": "",
+      "allow_engine_content": false
      }
     }
    ],
@@ -1831,7 +1841,8 @@
    "arguments": {
     "parent_path": "/Game/Materials/M_Wood",
     "instance_name": "MI_Chair",
-    "save_path": "/Game/Materials"
+    "save_path": "/Game/Materials",
+    "allow_engine_content": true
    },
    "envelope": [
     {
@@ -1847,7 +1858,8 @@
      "arguments": {
       "parent_path": "/Game/Materials/M_Wood",
       "instance_name": "MI_Chair",
-      "save_path": "/Game/Materials"
+      "save_path": "/Game/Materials",
+      "allow_engine_content": true
      }
     }
    ],
@@ -2491,7 +2503,8 @@
      "arguments": {
       "usd_path": "/tmp/in.usd",
       "destination_path": "/Game/Imports",
-      "import_options": null
+      "import_options": null,
+      "replace_existing": false
      }
     }
    ],
@@ -2516,7 +2529,8 @@
     "destination_path": "/Game/USD",
     "import_options": {
      "import_lights": false
-    }
+    },
+    "replace_existing": true
    },
    "envelope": [
     {
@@ -2534,7 +2548,8 @@
       "destination_path": "/Game/USD",
       "import_options": {
        "import_lights": false
-      }
+      },
+      "replace_existing": true
      }
     }
    ],
@@ -4438,6 +4453,95 @@
    ]
   },
   {
+   "tool": "set_unreal_actor_visibility",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "scope": "viewport"
+   },
+   "envelope": [],
+   "session": [],
+   "result": {
+    "is_error": true,
+    "payload": {
+     "success": false,
+     "error": "scope: Input should be 'all', 'editor' or 'game'",
+     "error_type": "ValidationError",
+     "details": {
+      "errors": [
+       {
+        "field": "scope",
+        "message": "Input should be 'all', 'editor' or 'game'",
+        "type": "literal_error",
+        "constraint": {
+         "expected": "'all', 'editor' or 'game'"
+        },
+        "input": "viewport"
+       }
+      ],
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "scope": "viewport"
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "scope: Input should be 'all', 'editor' or 'game'"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_visibility",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "scope": "game",
+    "persistent": true
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_visibility",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorVisibilityResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": true,
+    "payload": {
+     "success": false,
+     "error": "persistent applies to the editor's hiding (scope 'editor' or 'all'); hidden in game is always saved with the level",
+     "error_type": "ValidationError",
+     "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "persistent applies to the editor's hiding (scope 'editor' or 'all'); hidden in game is always saved with the level",
+        "type": "value_error"
+       }
+      ],
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "visible": true,
+       "propagate": true,
+       "scope": "game",
+       "persistent": true
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "persistent applies to the editor's hiding (scope 'editor' or 'all'); hidden in game is always saved with the level"
+    }
+   ]
+  },
+  {
    "tool": "control_unreal_ui",
    "case": "invalid",
    "arguments": {
@@ -4547,15 +4651,23 @@
     "is_error": true,
     "payload": {
      "success": false,
-     "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-     "error_type": "JSONDecodeError",
-     "details": null
+     "error": "scalar_params_json: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+     "error_type": "ValidationError",
+     "details": {
+      "errors": [
+       {
+        "field": "scalar_params_json",
+        "message": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "type": "json_invalid"
+       }
+      ]
+     }
     }
    },
    "usage": [
     {
      "success": false,
-     "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+     "error": "scalar_params_json: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
     }
    ]
   },
@@ -4614,13 +4726,12 @@
     "is_error": true,
     "payload": {
      "success": false,
-     "error": "could not convert string to float: 'x'",
+     "error": "location: could not convert string to float: 'x'",
      "error_type": "ValidationError",
      "details": {
-      "cause": "ValueError",
       "errors": [
        {
-        "field": null,
+        "field": "location",
         "message": "could not convert string to float: 'x'",
         "type": "value_error"
        }
@@ -4631,7 +4742,7 @@
    "usage": [
     {
      "success": false,
-     "error": "could not convert string to float: 'x'"
+     "error": "location: could not convert string to float: 'x'"
     }
    ]
   },
@@ -4656,13 +4767,12 @@
     "is_error": true,
     "payload": {
      "success": false,
-     "error": "could not convert string to float: 'up'",
+     "error": "plane_normal: could not convert string to float: 'up'",
      "error_type": "ValidationError",
      "details": {
-      "cause": "ValueError",
       "errors": [
        {
-        "field": null,
+        "field": "plane_normal",
         "message": "could not convert string to float: 'up'",
         "type": "value_error"
        }
@@ -4673,7 +4783,7 @@
    "usage": [
     {
      "success": false,
-     "error": "could not convert string to float: 'up'"
+     "error": "plane_normal: could not convert string to float: 'up'"
     }
    ]
   }
