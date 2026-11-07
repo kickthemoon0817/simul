@@ -21,12 +21,18 @@ SCRIPT_OUTPUT_CHARS_DEFAULT = 32_000
 SCRIPT_OUTPUT_CHARS_MAX = 100_000
 # Mirrors MAX_SCRIPT_OUTPUT_JSON_BYTES: output that JSON escapes heavily is cut here.
 SCRIPT_OUTPUT_JSON_BYTES_MAX = 300_000
+# capture_blender_viewport_sequence: mirrors DEFAULT_SEQUENCE_FRAMES,
+# MAX_SEQUENCE_FRAMES and SEQUENCE_TIME_BUDGET_SECONDS in blender_runtime.
+SEQUENCE_FRAMES_DEFAULT = 50
+SEQUENCE_FRAMES_MAX = 100
+SEQUENCE_TIME_BUDGET_SECONDS = 10.0
 
 # How capture_blender_viewport produces its image; see BlenderRuntimeSession.capture_viewport.
 BlenderCaptureMethod = Literal["auto", "viewport", "render"]
 
 _CAPTURE_METHOD_RESULT = (
     "How the image was made: viewport (the 3D View redrawn offscreen as the user sees it), "
+    "viewport_camera (the 3D View's shading drawn offscreen from camera_name), "
     "viewport_screen (the 3D View's on-screen pixels, used for Rendered shading of an "
     "external engine such as Cycles), render (bpy.ops.render.render through the scene "
     "camera), render_temp_camera_view or render_temp_camera_framing (a render through a "
@@ -641,6 +647,9 @@ class BlenderCaptureViewportRequest(BaseModel):
     use_render_fallback: bool = Field(
         False, description="Deprecated; same as method='render'"
     )
+    camera_name: Optional[str] = Field(
+        None, min_length=1, description="Capture through this camera"
+    )
 
     @model_validator(mode="after")
     def _apply_render_alias(self) -> "BlenderCaptureViewportRequest":
@@ -685,6 +694,13 @@ class BlenderCaptureViewportResponse(BaseModel):
     )
     capture_method: str = Field(..., description=_CAPTURE_METHOD_RESULT)
     format: str = Field("jpeg", description="Encoded format of the attached image")
+    camera_name: Optional[str] = Field(
+        None,
+        description=(
+            "Camera captured through: camera_name, or the scene camera of a render; null "
+            "for the 3D View's angle or a temporary camera"
+        ),
+    )
 
 
 class BlenderSetCameraViewRequest(BaseModel):
@@ -952,6 +968,29 @@ class BlenderFocusOnObjectResponse(BaseModel):
     warning: Optional[str] = Field(None, description=_PLACEMENT_WARNING)
 
 
+class BlenderView3DState(BaseModel):
+    """The view state of the 3D View captures use; see BlenderRuntimeSession.get_viewport_info."""
+
+    view_perspective: str = Field(..., description="PERSP, ORTHO or CAMERA")
+    is_perspective: bool = Field(..., description="Whether the view projects in perspective")
+    view_matrix: List[List[float]] = Field(
+        ..., description="World-to-view matrix, 4 rows of 4"
+    )
+    eye_location: List[float] = Field(..., description="World-space point the view looks from")
+    view_location: List[float] = Field(..., description="World-space point the view orbits")
+    view_rotation: List[float] = Field(..., description="View rotation as a quaternion [w, x, y, z]")
+    view_distance: float = Field(..., description="Distance from eye to view_location")
+    lens: float = Field(..., description="The 3D View's focal length in mm")
+    clip_start: float = Field(..., description="The 3D View's near clip distance")
+    clip_end: float = Field(..., description="The 3D View's far clip distance")
+    shading_type: str = Field(..., description="WIREFRAME, SOLID, MATERIAL or RENDERED")
+    view_camera: Optional[str] = Field(
+        None, description="The camera a CAMERA view looks through; null otherwise"
+    )
+    region_width: int = Field(..., description="Width of the view's region in pixels")
+    region_height: int = Field(..., description="Height of the view's region in pixels")
+
+
 class BlenderViewportInfoResponse(BaseModel):
     """Active viewport / render settings summary."""
 
@@ -967,6 +1006,16 @@ class BlenderViewportInfoResponse(BaseModel):
         ..., description="Whether film transparency is enabled"
     )
     active_camera: Optional[str] = Field(None, description="Active camera name or None")
+    view3d: Optional[BlenderView3DState] = Field(
+        None,
+        description=(
+            "The largest 3D View of the attached window, which captures use; null without "
+            "an editor window (embedded bpy, blender -b) or 3D View"
+        ),
+    )
+    view3d_unavailable_reason: Optional[str] = Field(
+        None, description="Why view3d is null; null when it is reported"
+    )
 
 
 class BlenderCaptureSequenceRequest(BaseModel):
@@ -983,20 +1032,67 @@ class BlenderCaptureSequenceRequest(BaseModel):
     method: BlenderCaptureMethod = Field(
         "auto", description="viewport, render or auto, as for capture_blender_viewport"
     )
+    camera_name: Optional[str] = Field(
+        None, min_length=1, description="Capture through this camera"
+    )
+    output_dir: Optional[str] = Field(
+        None, min_length=1, description="Folder for the frame files, inside the sandbox"
+    )
+    max_frames: int = Field(
+        SEQUENCE_FRAMES_DEFAULT,
+        ge=1,
+        le=SEQUENCE_FRAMES_MAX,
+        description="Most frames captured by this call",
+    )
+
+    @model_validator(mode="after")
+    def _check_range(self) -> "BlenderCaptureSequenceRequest":
+        """An end before the start used to succeed with no frames."""
+        if self.end_frame < self.start_frame:
+            raise ValueError(
+                f"end_frame ({self.end_frame}) is before start_frame ({self.start_frame})"
+            )
+        return self
 
 
 class BlenderCaptureSequenceResponse(BaseModel):
-    """Multi-frame capture result with per-frame base64 images."""
+    """Multi-frame capture result: JPEG files on disk and their paths."""
 
     success: bool = Field(..., description="Whether capture succeeded")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     frames: List[Dict[str, Any]] = Field(
-        ..., description="Per-frame data: [{frame: int, image_base64: str}, ...]"
+        ...,
+        description="The frames captured by this call: [{frame: int, file_path: str}, ...]",
     )
-    frame_count: int = Field(..., description="Number of frames captured")
+    frame_count: int = Field(..., description="Number of frames captured by this call")
     capture_method: str = Field(..., description=_CAPTURE_METHOD_RESULT)
+    # Optional: an add-on built before these were reported still answers.
+    requested_frame_count: Optional[int] = Field(
+        None, description="Frames in start_frame..end_frame at step"
+    )
+    complete: Optional[bool] = Field(
+        None, description="Whether every requested frame has been captured"
+    )
+    next_start_frame: Optional[int] = Field(
+        None,
+        description="First frame not captured yet: call again with it as start_frame; null when complete",
+    )
+    stopped_by: Optional[str] = Field(
+        None,
+        description=(
+            "Why the call stopped early: max_frames, or time_budget (no frame is started after "
+            f"{SEQUENCE_TIME_BUDGET_SECONDS:g} s); null when complete"
+        ),
+    )
+    output_dir: Optional[str] = Field(None, description="Folder holding the frame files")
+    width: Optional[int] = Field(None, description="Image width of the frames")
+    height: Optional[int] = Field(None, description="Image height of the frames")
+    format: Optional[str] = Field(None, description="Encoded format of the frame files")
+    camera_name: Optional[str] = Field(
+        None, description="Camera captured through; null for the 3D View's angle"
+    )
 
 
 # ---------------------------------------------------------------------------

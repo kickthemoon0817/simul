@@ -26,10 +26,11 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # would reject the arguments, or, left without them, report a re-bake it did not do.
 # Version 8: export_simready_usd takes include_children, include_lights_and_cameras and force, and
 # authors UsdPhysics and UsdSemantics schemas through the add-on's bundled simready_usd module.
-# Version 9: setup_rigid_body, add_force_field and add_rigid_body_constraint take new settings
+# Version 9: capture tools take camera_name; capture_viewport_sequence writes files (output_dir, max_frames).
+# Version 10: setup_rigid_body, add_force_field and add_rigid_body_constraint take new settings
 # (kinematic, direction, axis, limits, springs, motors, ...) and check them up front;
 # bake_simulation takes allow_long_bake and refuses a bake over its work budget without it.
-PROTOCOL_VERSION = 9
+PROTOCOL_VERSION = 10
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 

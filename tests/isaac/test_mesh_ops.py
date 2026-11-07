@@ -7,7 +7,7 @@ and validation operations.
 
 import pytest
 import numpy as np
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 # Test imports
 
@@ -15,7 +15,6 @@ from unittest.mock import Mock, patch, MagicMock
 pytest.importorskip("pxr", reason="pxr library not available")
 
 from simul.usd.mesh_ops import MeshOperations, MeshInfo  # noqa: E402
-from simul.utils.math import BBox  # noqa: E402
 
 
 class TestMeshOperations:
@@ -143,58 +142,38 @@ class TestMeshOperations:
         with pytest.raises(ValueError, match="is not a mesh"):
             mesh_ops.extract_mesh_data(mock_prim)
 
-    @patch("simul.usd.mesh_ops.UsdGeom")
-    def test_get_mesh_statistics(self, mock_usd_geom, mesh_ops, mock_mesh_prim):
-        """Test mesh statistics computation."""
-        mock_prim, mock_mesh = mock_mesh_prim
-        mock_usd_geom.Mesh.return_value = mock_mesh
+    def test_get_mesh_statistics(self, mesh_ops):
+        """Statistics of a real cube mesh (the Mock version could not reach pxr)."""
+        from pxr import Usd, UsdGeom
 
-        # Mock the extract_mesh_data method to return test data
-        with patch.object(mesh_ops, "extract_mesh_data") as mock_extract:
-            mock_extract.return_value = {
-                "prim_path": "/World/Cube",
-                "points": [
-                    [-1, -1, -1],
-                    [1, -1, -1],
-                    [-1, 1, -1],
-                    [1, 1, -1],
-                    [-1, -1, 1],
-                    [1, -1, 1],
-                    [-1, 1, 1],
-                    [1, 1, 1],
-                ],
-                "face_vertex_counts": [4, 4, 4, 4, 4, 4],
-                "face_vertex_indices": [
-                    0, 1, 3, 2,
-                    4, 6, 7, 5,
-                    0, 2, 6, 4,
-                    1, 5, 7, 3,
-                    0, 4, 5, 1,
-                    2, 3, 7, 6,
-                ],
-                "normals": None,
-                "uvs": None,
-                "colors": None,
-                "subdivision_scheme": "none",
-                "face_varying_linear_interpolation": None,
-                "interpolate_boundary": None,
-                "vertex_count": 8,
-                "face_count": 6,
-            }
+        stage = Usd.Stage.CreateInMemory()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Cube")
+        mesh.GetPointsAttr().Set([
+            (-1, -1, -1), (1, -1, -1), (-1, 1, -1), (1, 1, -1),
+            (-1, -1, 1), (1, -1, 1), (-1, 1, 1), (1, 1, 1),
+        ])
+        mesh.GetFaceVertexCountsAttr().Set([4] * 6)
+        mesh.GetFaceVertexIndicesAttr().Set([
+            0, 2, 3, 1, 4, 5, 7, 6, 0, 1, 5, 4,
+            2, 6, 7, 3, 0, 4, 6, 2, 1, 3, 7, 5,
+        ])
+        mesh.GetSubdivisionSchemeAttr().Set("none")
 
-            mesh_info = mesh_ops.get_mesh_statistics(mock_prim)
+        mesh_info = mesh_ops.get_mesh_statistics(mesh.GetPrim())
 
-            assert isinstance(mesh_info, MeshInfo)
-            assert mesh_info.prim_path == "/World/Cube"
-            assert mesh_info.vertex_count == 8
-            assert mesh_info.face_count == 6
-            assert mesh_info.has_normals is False
-            assert mesh_info.has_uvs is False
-            assert mesh_info.has_colors is False
-            assert mesh_info.subdivision_scheme == "none"
-            assert mesh_info.topology_valid is True
-            assert mesh_info.surface_area > 0
-            assert isinstance(mesh_info.bbox, tuple)
+        assert isinstance(mesh_info, MeshInfo)
+        assert mesh_info.prim_path == "/World/Cube"
+        assert mesh_info.vertex_count == 8
+        assert mesh_info.face_count == 6
+        assert mesh_info.has_normals is False
+        assert mesh_info.has_uvs is False
+        assert mesh_info.has_colors is False
+        assert mesh_info.subdivision_scheme == "none"
+        assert mesh_info.topology_valid is True
+        assert mesh_info.is_closed is True
+        assert mesh_info.surface_area == pytest.approx(24.0)
+        assert mesh_info.volume == pytest.approx(8.0)
+        assert mesh_info.bbox == ([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
 
     def test_validate_mesh_topology_valid(self, mesh_ops):
         """Test mesh topology validation with valid topology."""
@@ -298,17 +277,22 @@ class TestMeshOperations:
 
         assert volume == 0.0
 
-    @patch("simul.usd.mesh_ops.UsdGeom")
-    def test_get_mesh_materials_empty(self, mock_usd_geom, mesh_ops):
-        """Test getting mesh materials when none are bound."""
-        mock_prim = Mock()
+    def test_get_mesh_materials(self, mesh_ops):
+        """Materials resolve through UsdShade.MaterialBindingAPI.
 
-        # Mock MaterialBindingAPI not available or no bindings
-        mock_usd_geom.MaterialBindingAPI.return_value = None
+        The Mock version patched in UsdGeom.MaterialBindingAPI, which pxr does
+        not have, and so asserted the [] the dead code always returned.
+        """
+        from pxr import Usd, UsdGeom, UsdShade
 
-        materials = mesh_ops._get_mesh_materials(mock_prim)
+        stage = Usd.Stage.CreateInMemory()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Mesh")
+        assert mesh_ops._get_mesh_materials(mesh.GetPrim()) == []
 
-        assert materials == []
+        material = UsdShade.Material.Define(stage, "/World/Looks/Steel")
+        UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(material)
+
+        assert mesh_ops._get_mesh_materials(mesh.GetPrim()) == ["/World/Looks/Steel"]
 
     @patch("simul.usd.mesh_ops.UsdGeom")
     def test_get_geometry_subsets_empty(self, mock_usd_geom, mesh_ops):
