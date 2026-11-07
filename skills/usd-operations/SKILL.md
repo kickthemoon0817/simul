@@ -197,6 +197,12 @@ error names the prim, each rejected attribute and the reason.
 - `create_prim` takes a concrete registered type (`Xform`, `Cube`, ...) and
   refuses an existing path unless `redefine_existing: true`.
 - `active`, `instanceable` and `kind` in `attributes` set prim metadata.
+- Values take the attribute's type: quaternions are `[w, x, y, z]`,
+  matrices are lists of rows, and a new `xformOp:translate` is a `double3`
+  op added to `xformOpOrder`. Name a new custom attribute's type with
+  `attribute_types: {"custom:offset": "double3"}`.
+- An animated attribute needs `time_code: <frame>`; without it the call is
+  refused, because a default value would be hidden by the time samples.
 - `delete_prim` refuses `/`, and the default prim unless
   `allow_root_delete: true`. A prim that also comes from a sublayer or a
   reference cannot be deleted from the root layer; deactivate it with
