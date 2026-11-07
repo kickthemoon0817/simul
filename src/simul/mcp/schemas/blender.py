@@ -1246,7 +1246,8 @@ class BlenderSaveFileRequest(BaseModel):
     """Request to save the current .blend file."""
 
     file_path: Optional[str] = Field(
-        None, description="Path to save to. None saves in place."
+        None,
+        description="Path of the .blend file to save to. None saves in place.",
     )
 
 
@@ -1267,6 +1268,15 @@ class BlenderImportFileRequest(BaseModel):
     file_format: str = Field(
         ..., description="File format: OBJ, FBX, GLTF, USD, STL, PLY"
     )
+    scale: float = Field(
+        1.0,
+        gt=0.0,
+        le=1_000_000.0,
+        description=(
+            "Uniform scale applied to the imported objects about the world origin; "
+            "1.0 keeps the file's size"
+        ),
+    )
 
 
 class BlenderImportFileResponse(BaseModel):
@@ -1281,16 +1291,90 @@ class BlenderImportFileResponse(BaseModel):
     imported_objects: List[str] = Field(
         default_factory=list, description="Names of newly imported objects"
     )
+    # Optional: an add-on built before these were reported still answers.
+    scale: Optional[float] = Field(None, description="Scale applied to the imported objects")
+    warning: Optional[str] = Field(
+        None, description="Something about the import that needs attention; null otherwise"
+    )
+
+
+ExportAxisName = Literal["X", "Y", "Z", "-X", "-Y", "-Z"]
 
 
 class BlenderExportFileRequest(BaseModel):
     """Request to export scene objects to a file."""
 
-    file_path: str = Field(..., description="Absolute path to export to")
+    file_path: str = Field(
+        ...,
+        description=(
+            "Absolute path to export to, ending in the format's extension: .obj, .fbx, "
+            ".glb or .gltf, .usd/.usda/.usdc/.usdz, .stl, .ply"
+        ),
+    )
     file_format: str = Field(
         ..., description="File format: OBJ, FBX, GLTF, USD, STL, PLY"
     )
     selected_only: bool = Field(False, description="Export only selected objects")
+    object_names: Optional[List[str]] = Field(
+        None, min_length=1, description="Export exactly these objects"
+    )
+    collection_name: Optional[str] = Field(
+        None, min_length=1, description="Export the objects of this collection"
+    )
+    apply_modifiers: bool = Field(True, description="Apply modifiers to exported meshes")
+    export_animation: bool = Field(True, description="Include animation (glTF, FBX, USD)")
+    frame_start: Optional[int] = Field(None, description="First frame of exported animation")
+    frame_end: Optional[int] = Field(None, description="Last frame of exported animation")
+    gltf_format: Optional[Literal["GLB", "GLTF_SEPARATE", "GLTF_EMBEDDED"]] = Field(
+        None, description="glTF layout; default from the extension"
+    )
+    axis_forward: Optional[ExportAxisName] = Field(None, description="Forward axis written")
+    axis_up: Optional[ExportAxisName] = Field(None, description="Up axis written")
+    global_scale: Optional[float] = Field(
+        None, gt=0.0, le=1_000_000.0, description="Scale applied to exported data"
+    )
+    usd_up_axis: Optional[Literal["Y", "Z"]] = Field(None, description="USD stage up axis")
+    meters_per_unit: Optional[float] = Field(
+        None, ge=0.0001, le=1000.0, description="USD stage metersPerUnit"
+    )
+    root_prim_path: Optional[str] = Field(
+        None,
+        pattern=r"^(/[A-Za-z_][A-Za-z0-9_]*)*$",
+        description="USD prim everything is exported under; empty for none",
+    )
+    overwrite_companion_files: bool = Field(
+        False, description="Replace an unrelated .bin/.mtl beside file_path"
+    )
+
+    @model_validator(mode="after")
+    def _check_choices(self) -> "BlenderExportFileRequest":
+        """Refuse combinations export_file would refuse, before reaching Blender."""
+        chosen = [
+            name
+            for name, value in (
+                ("selected_only", self.selected_only),
+                ("object_names", self.object_names is not None),
+                ("collection_name", self.collection_name is not None),
+            )
+            if value
+        ]
+        if len(chosen) > 1:
+            raise ValueError(f"Pass only one of {', '.join(chosen)}")
+        if (self.frame_start is None) != (self.frame_end is None):
+            raise ValueError("Pass frame_start and frame_end together")
+        if (
+            self.frame_start is not None
+            and self.frame_end is not None
+            and self.frame_start > self.frame_end
+        ):
+            raise ValueError("frame_start must not be after frame_end")
+        if self.frame_start is not None and not self.export_animation:
+            raise ValueError("frame_start and frame_end need export_animation")
+        if (self.axis_forward is None) != (self.axis_up is None):
+            raise ValueError("Pass axis_forward and axis_up together")
+        if self.axis_forward and self.axis_up and self.axis_forward[-1] == self.axis_up[-1]:
+            raise ValueError("axis_forward and axis_up must be different axes")
+        return self
 
 
 class BlenderExportFileResponse(BaseModel):
@@ -1302,6 +1386,28 @@ class BlenderExportFileResponse(BaseModel):
     )
     file_path: str = Field(..., description="Path the file was exported to")
     file_format: str = Field(..., description="Format that was exported")
+    # Optional: an add-on built before these were reported still answers.
+    gltf_format: Optional[str] = Field(
+        None, description="GLTF only: the layout written, GLB, GLTF_SEPARATE or GLTF_EMBEDDED"
+    )
+    files_written: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Every file the export created or changed, file_path first: a glTF's .bin and "
+            "textures, an OBJ's .mtl, USD textures"
+        ),
+    )
+    object_count: Optional[int] = Field(
+        None,
+        description="Objects chosen for export (selection, list or collection); null for the scene",
+    )
+    exporter_options: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The Blender exporter's operator properties that were set, besides filepath",
+    )
+    warning: Optional[str] = Field(
+        None, description="Something about the export that needs attention; null otherwise"
+    )
 
 
 class BlenderFileInfoResponse(BaseModel):
