@@ -963,7 +963,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     # -- File I/O ------------------------------------------------------------
     BlenderTool(
         name="open_blender_file",
-        description="Open a .blend file, replacing the current scene.",
+        description=(
+            "Open a .blend file, replacing the current scene. Refuses with "
+            "UnsavedChangesError while the open file has unsaved changes (in attached mode "
+            "every agent edit counts, as each is an undo step); save them first with "
+            "save_blender_file, or pass discard_unsaved=true to discard them."
+        ),
         hints=DESTRUCTIVE,
         operation="open_blend_file",
         request=BlenderOpenFileRequest,
@@ -1140,7 +1145,9 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             f"or earlier when they exceed {SCRIPT_OUTPUT_JSON_BYTES_MAX} bytes of JSON "
             "(heavily non-ASCII output); "
             "a cut sets output_truncated=true and output_total_chars to the full length. "
-            "Write larger results to a file and return its path instead."
+            "Write larger results to a file and return its path instead. Anything the script "
+            "raises, including SystemExit from sys.exit(), is reported in error and never "
+            "ends Blender. In attached mode each call is one undo step."
         ),
         hints=DESTRUCTIVE,
         operation="execute_script",

@@ -167,7 +167,10 @@ them with `list_isaac_instances` and switch with `set_active_isaac_instance`.
 claims are advisory unless `ISAAC_SIM__ENFORCE_CLAIMS=true`. The switch and
 the claim belong to the caller's MCP session, which an HTTP client on the
 sessionless 2026-07-28 protocol does not have
-([configuration.md](configuration.md#multi-agent-claims)).
+([configuration.md](configuration.md#multi-agent-claims)). After a reconnect
+or a server restart, claiming again with the same `agent_id` takes the
+orphaned claim over; `simul isaac claims` lists the claims on this machine and
+`--clear` removes them.
 
 ## Remote hosts
 
