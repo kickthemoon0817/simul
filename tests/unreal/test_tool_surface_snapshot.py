@@ -170,7 +170,13 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
     "set_unreal_render_settings": {"setting_name": "r.ScreenPercentage", "setting_value": "50"},
     "control_unreal_simulation": {"action": "start"},
     "get_unreal_simulation_status": {},
-    "enable_unreal_physics": {"actor_path": ACTOR, "enable": False, "simulate_physics": False},
+    "enable_unreal_physics": {
+        "actor_path": ACTOR,
+        "enable": False,
+        "kinematic": True,
+        "make_movable": False,
+        "allow_detach": True,
+    },
     "set_unreal_collision": {"actor_path": ACTOR, "collision_preset": "OverlapAll", "collision_enabled": False},
     "apply_unreal_force": {
         "actor_path": ACTOR,

@@ -42,7 +42,7 @@ import pytest
 from fastmcp import Client
 
 from simul.adapters import unreal_runtime
-from simul.adapters._unreal_scripts import ACTOR_NOT_FOUND
+from simul.adapters._unreal_scripts import ACTOR_HELPERS, ACTOR_NOT_FOUND
 from simul.config import Settings
 from simul.mcp import server as server_module
 from simul.mcp.usage_tracker import ToolUsageTracker
@@ -200,6 +200,8 @@ class Editor:
     def __init__(self) -> None:
         self.world = World(MAP_B)
         self.map_a = World(MAP_A)
+        # The running game's copy of MapB while Play In Editor runs.
+        self.play_world = World("/Game/Maps/UEDPIE_0_MapB.MapB")
         # Loaded objects by path: what find_object finds, destroyed actors
         # included until garbage collection, as on UE 5.7.4.
         self.memory: Dict[str, Actor] = {}
@@ -310,7 +312,7 @@ class Editor:
         )
         subsystems = {
             "LevelEditorSubsystem": SimpleNamespace(is_in_play_in_editor=lambda: editor.pie),
-            **editor_subsystems(self.world, pie=lambda: editor.pie),
+            **editor_subsystems(self.world, pie=lambda: editor.pie, pie_world=self.play_world),
         }
         return SimpleNamespace(
             Actor=Actor,
@@ -455,6 +457,25 @@ def test_an_actor_of_a_map_loaded_but_not_open_is_refused(editor: Editor, monkey
     assert _not_found(result, stale.path), result
     assert "it belongs to " + MAP_A + ", not to the level open in the editor, " + MAP_B in result["error"]
     assert editor.events == []
+
+
+def test_the_running_games_copy_is_found_only_when_a_script_asks_for_it(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The physics and collision edits change the running copy on purpose
+    (actor_at(path, play_world=True)); every other lookup refuses it."""
+    editor.pie = True
+    copy = editor.spawn("Crate", editor.play_world)
+    session = _session(editor, monkeypatch)
+    lookup = ACTOR_HELPERS + (
+        f"\nprint(json.dumps({{'path': actor_at({copy.path!r}, play_world=True).get_path_name()}}))"
+    )
+
+    found = asyncio.run(session._execute_json_script(lookup))
+    refused = asyncio.run(session.set_actor_transform(copy.path, location=[1.0, 2.0, 3.0]))
+
+    assert found == {"path": copy.path}
+    assert _not_found(refused, copy.path)
 
 
 def test_the_editor_world_is_found_during_pie(editor: Editor, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1511,7 +1511,7 @@
   {
    "name": "enable_unreal_physics",
    "title": "Enable Unreal Physics",
-   "description": "Enable or disable physics simulation on an actor.",
+   "description": "Make an actor's body simulate physics (falls, takes forces), make it kinematic (physics collision, moved only by its transform), or turn physics off, in one undoable editor transaction that marks the map dirty. A Static body is made Movable unless make_movable is false; a body without physics collision or simple collision geometry is refused (IncompatibleBody, with the reasons). Unreal detaches a simulated body from its parent, so an attached one needs allow_detach. Returns the body read back: physics_mode, mobility, collision and mass.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1522,12 +1522,22 @@
      },
      "enable": {
       "default": true,
-      "description": "Whether physics should be enabled.",
+      "description": "True makes the body physical: simulated, or kinematic with kinematic true. False stops it simulating, keeping its collision and mobility.",
       "type": "boolean"
      },
-     "simulate_physics": {
+     "kinematic": {
+      "default": false,
+      "description": "With enable true, make the body kinematic instead of simulated: it keeps physics collision, so simulated bodies hit it, but is not simulated and moves only when its transform is set.",
+      "type": "boolean"
+     },
+     "make_movable": {
       "default": true,
-      "description": "Whether the body actively simulates.",
+      "description": "Make a Static or Stationary body Movable, which simulation and kinematic movement need (reported as mobility_changed_from); false refuses such a body instead.",
+      "type": "boolean"
+     },
+     "allow_detach": {
+      "default": false,
+      "description": "Let a body attached to a parent be detached from it as it starts simulating, keeping its world transform, as Unreal does (reported as detached_from; Undo reattaches it, turning physics off does not). False refuses an attached body.",
       "type": "boolean"
      }
     },
@@ -1554,7 +1564,7 @@
   {
    "name": "set_unreal_collision",
    "title": "Set Unreal Collision",
-   "description": "Set an actor's collision preset and/or enable or disable its collision; what is left out is kept. Returns the state read back.",
+   "description": "Set an actor's collision preset and/or enable or disable its collision, in one undoable editor transaction that marks the map dirty; what is left out is kept and an unknown preset changes nothing. Returns the state read back.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1565,7 +1575,7 @@
      },
      "collision_preset": {
       "default": "",
-      "description": "Named collision preset (e.g. BlockAll, OverlapAll, NoCollision); empty keeps the current preset.",
+      "description": "Named collision preset (e.g. BlockAll, PhysicsActor, OverlapAll, NoCollision); empty keeps the current preset. An unknown preset changes nothing.",
       "type": "string"
      },
      "collision_enabled": {
@@ -1693,7 +1703,7 @@
   {
    "name": "set_unreal_physics_params",
    "title": "Set Unreal Physics Params",
-   "description": "Set physics body parameters (mass, damping, gravity) on an actor.",
+   "description": "Set physics body parameters (mass in kg, linear and angular damping, gravity) on an actor in one undoable editor transaction that marks the map dirty, and read them back; a parameter left out is kept. A Static body keeps the values but has no mass until it is Movable (see warning).",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1712,7 +1722,7 @@
        }
       ],
       "default": null,
-      "description": "Mass in kg."
+      "description": "Mass override in kg, from 0.001 (Unreal's least) to 1e9."
      },
      "linear_damping": {
       "anyOf": [
@@ -1724,7 +1734,7 @@
        }
       ],
       "default": null,
-      "description": "Linear damping coefficient."
+      "description": "Linear damping, 0 to 1e6."
      },
      "angular_damping": {
       "anyOf": [
@@ -1736,7 +1746,7 @@
        }
       ],
       "default": null,
-      "description": "Angular damping coefficient."
+      "description": "Angular damping, 0 to 1e6."
      },
      "enable_gravity": {
       "anyOf": [
