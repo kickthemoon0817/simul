@@ -24,7 +24,10 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # Version 7: bake_simulation and free_bake take scope, and a bake replaces an earlier one;
 # get_physics_state takes step_simulation; get/set_rigid_body_world are new. An older add-on
 # would reject the arguments, or, left without them, report a re-bake it did not do.
-PROTOCOL_VERSION = 7
+# Version 8: setup_rigid_body, add_force_field and add_rigid_body_constraint take new settings
+# (kinematic, direction, axis, limits, springs, motors, ...) and check them up front;
+# bake_simulation takes allow_long_bake and refuses a bake over its work budget without it.
+PROTOCOL_VERSION = 8
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
