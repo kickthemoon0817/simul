@@ -266,6 +266,41 @@ directory you share with it on purpose instead.
 Every allowed root admits reads and writes alike, so in a source checkout
 `examples/` and `tests/data/` are writable by the tools too.
 
+For the headless USD tools the sandbox also covers everything a file draws
+on, not just the file named in the call. Before `load_usd_file` or
+`validate_usd_file` composes a stage, it walks the layers the file reaches and
+checks every asset path they author against the same roots and URL schemes:
+sublayers, references, payloads, value clips and clip manifests, and
+asset-valued attributes and metadata such as textures. Paths in unselected
+variants count too, and expression variables are evaluated. Each path is
+anchored to the layer that names it and resolved the way composition
+resolves it. A symlink is followed, and a search-path reference that pxr
+would find in the server's working directory is checked there. A path
+outside the sandbox fails the call with `SandboxError`;
+`details.outside_sandbox` lists each offender's `kind`, its authored
+`asset_path`, the `location` it names, and the `layer` that names it, and
+`outside_count` gives the total. The kinds are `sublayer`, `reference`,
+`payload`, `clip` (a value clip or clip manifest), `asset` (a texture or
+other non-layer file), and `layer` when the post-composition check caught
+it. Only layers that pass are opened, so a refused file is never read.
+After composition, the layers the stage uses by then are checked again as a
+backstop, judged afresh so a file swapped on disk between the two passes is
+caught. That check cannot see value clips: when a clip set authors a
+`manifestAssetPath`, pxr opens its clip layers only on the first read of a
+time-varying value, after the load. Clips therefore rely on the first pass,
+which checks every clip and manifest path before anything opens. Each load
+resolves a path named from many layers once and checks a shared root's
+trust once, so the walk adds a fraction of the stack's own load time.
+
+An asset path outside the sandbox is refused even when nothing exists there,
+so the error never reveals whether an outside file exists. Textures are held
+to the same rule although the headless tools never open them, because pxr
+checks that each one exists when it resolves it. A search-path asset that
+anchors nowhere, such as `OmniPBR.mdl`, names no location and passes. A
+URL passes when its scheme is in `allowed_url_schemes`. To use a file whose
+references or textures live elsewhere, add that directory to
+`security.allowed_paths`.
+
 ### Refusals
 
 Some operations refuse by default to protect the running application and

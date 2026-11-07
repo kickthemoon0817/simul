@@ -42,6 +42,7 @@ from ..schemas.usd import (
     USDValidateRequest,
 )
 from ...logging import get_logger
+from ...usd.sandbox import CompositionSandbox
 from ...usd.validation import WARNING, composition_issues
 from ...usd.validation import validate_usd_file as run_validation
 from ._helpers import with_param_descriptions
@@ -98,7 +99,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "with line and column, CorruptFile, EmptyFile, FileTooLarge, "
             "PermissionDenied, UnsupportedExtension, FileNotFound, NotAFile). Missing "
             "sublayers, references or payloads do not fail the load; they are listed "
-            "in warnings. Paths: sandbox (security.allowed_paths)."
+            "in warnings. Paths: sandbox (security.allowed_paths), which also holds "
+            "every sublayer, reference, payload, clip and asset path the file draws "
+            "on: one outside it fails the load with SandboxError listing them."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -126,7 +129,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             # A USDLoadError carries pxr's reason; the envelope reports it as
             # LoadError with details.reason.
             stage_id = session.load_stage_or_raise(
-                server._path_policy.authorize(input_data.file_path)
+                server._path_policy.authorize(input_data.file_path),
+                sandbox=CompositionSandbox(server._path_policy),
             )
             stage = session.get_stage(stage_id)
             stage_info = session.get_stage_info(stage_id)
@@ -173,7 +177,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "and pxr's UsdValidation validators, with the usdz package rules for a "
             ".usdz. Returns is_valid (no error-severity issue), can_read (pxr opened "
             "it, so load_usd_file can) and issues with severity, code and location. "
-            "Paths: sandbox (security.allowed_paths)."
+            "Paths: sandbox (security.allowed_paths), applied to everything the file "
+            "draws on as load_usd_file applies it."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -198,7 +203,11 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 return input_data
 
             path = Path(server._path_policy.authorize(input_data.file_path))
-            report = run_validation(str(path.resolve()), server.settings.usd)
+            report = run_validation(
+                str(path.resolve()),
+                server.settings.usd,
+                sandbox=CompositionSandbox(server._path_policy),
+            )
             return USDFileInfo(**report.to_dict()).model_dump()
 
         return await server._exec_backend(
