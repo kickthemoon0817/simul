@@ -49,6 +49,13 @@ LIGHT_INPUT_NAMES: tuple[str, ...] = (
     "inputs:shaping:focus",
 )
 
+# What the mass and rigid_body aspects say beside a null centre of mass; the
+# MCP side's _shared.UNSET_CENTER_OF_MASS_NOTE carries the same text.
+UNSET_CENTER_OF_MASS_NOTE = (
+    "Not authored: the schema fallback (-inf) means PhysX derives the centre of mass "
+    "from the collision shapes."
+)
+
 # Primvar names that count as UV sets for the mesh aspect.
 UV_PRIMVAR_NAMES: frozenset[str] = frozenset({"st", "UVMap", "st0", "st1"})
 
@@ -148,14 +155,8 @@ class PrimDetailReader:
 
         transform = None
         if prim.IsA(UsdGeom.Xformable):
-            xformable = UsdGeom.Xformable(prim)
-            matrix = xformable.ComputeLocalToWorldTransform(self._time_code())
-            quat = matrix.ExtractRotation().GetQuat()
-            transform = {
-                "translation": list(matrix.ExtractTranslation()),
-                "rotation_quat": [quat.GetReal()] + list(quat.GetImaginary()),
-                "scale": self._scale_from_ops(xformable),
-            }
+            # World pose, with the local one beside it.
+            transform = self._transform_report(UsdGeom.Xformable(prim), True)
 
         material_bindings = []
         try:
@@ -190,25 +191,20 @@ class PrimDetailReader:
         }
 
     def transform(self, prim: Any, world_space: bool = True) -> dict[str, Any]:
-        """Return translation, rotation quaternion and scale of an Xformable."""
+        """Return the pose of an Xformable in the requested space, plus both spaces.
+
+        The top-level translation, rotation and scale are in ``space``;
+        ``local`` and ``world`` carry both. Same shape as the MCP side's
+        ``XFORM_READ_CORE``.
+        """
         from pxr import UsdGeom
 
         prim_path = str(prim.GetPath())
         if not prim.IsA(UsdGeom.Xformable):
             return {"error": "Prim is not Xformable: " + prim_path}
-        xformable = UsdGeom.Xformable(prim)
-        if world_space:
-            matrix = xformable.ComputeLocalToWorldTransform(self._time_code())
-        else:
-            matrix = xformable.GetLocalTransformation(self._time_code())
-        quat = matrix.ExtractRotation().GetQuat()
-        return {
-            "prim_path": prim_path,
-            "space": "world" if world_space else "local",
-            "translation": list(matrix.ExtractTranslation()),
-            "rotation_quat": [quat.GetReal()] + list(quat.GetImaginary()),
-            "scale": self._scale_from_ops(xformable),
-        }
+        payload: dict[str, Any] = {"prim_path": prim_path}
+        payload.update(self._transform_report(UsdGeom.Xformable(prim), world_space))
+        return payload
 
     def ancestors(self, prim: Any) -> dict[str, Any]:
         """Return the chain from the first prim below the root down to ``prim``."""
@@ -415,13 +411,15 @@ class PrimDetailReader:
 
         mass = None
         center_of_mass = None
+        center_of_mass_note = None
         inertia = None
         has_mass_api = prim.HasAPI(UsdPhysics.MassAPI)
         if has_mass_api:
             mass_api = UsdPhysics.MassAPI(prim)
             mass = mass_api.GetMassAttr().Get()
-            com = mass_api.GetCenterOfMassAttr().Get()
-            center_of_mass = list(com) if com else None
+            center_of_mass = self._authored_center_of_mass(mass_api)
+            if center_of_mass is None:
+                center_of_mass_note = UNSET_CENTER_OF_MASS_NOTE
             diagonal = mass_api.GetDiagonalInertiaAttr().Get()
             inertia = list(diagonal) if diagonal else None
 
@@ -434,6 +432,7 @@ class PrimDetailReader:
             "has_mass_api": has_mass_api,
             "mass": mass,
             "center_of_mass": center_of_mass,
+            "center_of_mass_note": center_of_mass_note,
             "diagonal_inertia": inertia,
         }
 
@@ -506,14 +505,15 @@ class PrimDetailReader:
         if not prim.HasAPI(UsdPhysics.MassAPI):
             return {"error": "Prim does not have MassAPI: " + prim_path}
         mass_api = UsdPhysics.MassAPI(prim)
-        com = mass_api.GetCenterOfMassAttr().Get()
+        center_of_mass = self._authored_center_of_mass(mass_api)
         inertia = mass_api.GetDiagonalInertiaAttr().Get()
         axes = mass_api.GetPrincipalAxesAttr().Get()
         return {
             "prim_path": prim_path,
             "mass": mass_api.GetMassAttr().Get(),
             "density": mass_api.GetDensityAttr().Get(),
-            "center_of_mass": list(com) if com else None,
+            "center_of_mass": center_of_mass,
+            "center_of_mass_note": None if center_of_mass is not None else UNSET_CENTER_OF_MASS_NOTE,
             "diagonal_inertia": list(inertia) if inertia else None,
             "principal_axes": (
                 [axes.GetReal()] + list(axes.GetImaginary()) if axes else None
@@ -562,17 +562,89 @@ class PrimDetailReader:
         return Usd.TimeCode.Default()
 
     @staticmethod
-    def _scale_from_ops(xformable: Any) -> list[float]:
-        """Return the first scale xform op's value, or unit scale."""
-        from pxr import Gf, UsdGeom
+    def _authored_center_of_mass(mass_api: Any) -> list[float] | None:
+        """Return the centre of mass, or None for the (-inf, -inf, -inf) fallback.
 
-        for op in xformable.GetOrderedXformOps():
-            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
-                value = op.Get()
-                if value is not None:
-                    return list(Gf.Vec3d(value))
+        The fallback means "derive it from the colliders"; json.dumps would
+        spell it -Infinity, which is not JSON.
+        """
+        com = mass_api.GetCenterOfMassAttr().Get()
+        if com is None or not all(abs(c) != float("inf") and c == c for c in com):
+            return None
+        return list(com)
+
+    @staticmethod
+    def _rounded(values: Any) -> list[float]:
+        """Round pose components to nine decimals; ``+ 0.0`` turns -0.0 into 0.0."""
+        return [round(float(value), 9) + 0.0 for value in values]
+
+    @classmethod
+    def decompose_matrix(cls, matrix: Any) -> dict[str, Any]:
+        """Split a transform matrix into translation, rotation and scale.
+
+        ``Matrix4d.ExtractRotation()`` orthonormalises a matrix that still
+        carries scale, so a rotation under a scaled parent reads wrong (90
+        degrees about Z under a parent scaled by 2 comes back as 60), and the
+        first scale op misses parents and matrix ops. ``Gf.Transform``
+        factors the scale out first.
+
+        Args:
+            matrix: A ``Gf.Matrix4d``.
+
+        Returns:
+            ``translation``, ``rotation_quat`` ([w, x, y, z]),
+            ``rotation_euler_xyz`` (degrees, rotateXYZ order) and ``scale``,
+            plus ``sheared: True`` when the axes are not perpendicular.
+        """
+        from pxr import Gf
+
+        xform = Gf.Transform(matrix)
+        rotation = xform.GetRotation()
+        quat = rotation.GetQuat()
+        # rotateXYZ composes X, then Y, then Z; Decompose takes the axes in
+        # the reverse of that order, so read Z, Y, X and flip.
+        z_y_x = rotation.Decompose(Gf.Vec3d(0, 0, 1), Gf.Vec3d(0, 1, 0), Gf.Vec3d(1, 0, 0))
+        result: dict[str, Any] = {
+            "translation": cls._rounded(matrix.ExtractTranslation()),
+            "rotation_quat": cls._rounded([quat.GetReal()] + list(quat.GetImaginary())),
+            "rotation_euler_xyz": cls._rounded(reversed(z_y_x)),
+            "scale": cls._rounded(xform.GetScale()),
+        }
+        # A rotated prim under a non-uniformly scaled parent has axes that
+        # are no longer perpendicular: no rotation and per-axis scale
+        # reproduce it, so say so rather than present the fit as exact.
+        rows = [Gf.Vec3d(matrix[i][0], matrix[i][1], matrix[i][2]) for i in range(3)]
+        for a, b in ((0, 1), (0, 2), (1, 2)):
+            la = rows[a].GetLength()
+            lb = rows[b].GetLength()
+            if la > 1e-12 and lb > 1e-12 and abs(Gf.Dot(rows[a], rows[b])) > 1e-6 * la * lb:
+                result["sheared"] = True
                 break
-        return [1.0, 1.0, 1.0]
+        return result
+
+    def _transform_report(self, xformable: Any, world_space: bool) -> dict[str, Any]:
+        """Return the pose in the requested space with ``local`` and ``world`` beside it."""
+        time_code = self._time_code()
+        local = self.decompose_matrix(xformable.GetLocalTransformation(time_code))
+        world = self.decompose_matrix(xformable.ComputeLocalToWorldTransform(time_code))
+        ops = xformable.GetOrderedXformOps()
+        report: dict[str, Any] = {"space": "world" if world_space else "local"}
+        report.update(world if world_space else local)
+        report["local"] = local
+        report["world"] = world
+        report["xform_op_order"] = [op.GetOpName() for op in ops]
+        animated = [op.GetOpName() for op in ops if op.GetNumTimeSamples() > 0]
+        if animated:
+            report["time_sampled_ops"] = animated
+        if xformable.GetResetXformStack():
+            report["resets_xform_stack"] = True
+        if local.get("sheared") or world.get("sheared"):
+            report["note"] = (
+                "The transform is sheared (a rotated prim under a non-uniform scale): "
+                "rotation is the closest pure rotation and scale is measured along "
+                "the stretch axes, not the prim's own."
+            )
+        return report
 
     @staticmethod
     def _surface_shader(material: Any) -> tuple[Any, str]:
