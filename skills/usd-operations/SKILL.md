@@ -129,7 +129,11 @@ mcp__simul__get_mesh_info
   prim_path: "/World/Robot/base_link/visuals/mesh"
 ```
 
-Returns: `{ "vertex_count": 2048, "face_count": 1024, "has_normals": true, "uv_sets": ["st"], "extent": [...] }`
+Returns: `{ "vertex_count": 2048, "face_count": 1024, "has_normals": true, "normals_source": "primvars:normals", "uv_sets": ["st"], "is_closed": true, "surface_area": ..., "volume": ..., "bbox": {...}, "materials": [...], "physics_material": ..., "subsets": [...] }`
+
+- `materials` lists the material bound to the mesh, then those bound to its `materialBind` geometry subsets; each such subset also carries its `material`.
+- `volume` is null unless the mesh is closed. Area, volume and bounds are in the mesh's own space, before transforms.
+- Pass `time_code` for a deforming mesh: `points_time_samples > 0` means its points are animated, and at the default time it may have none.
 
 Use this to assess mesh complexity before simulation (high-poly meshes should use convex decomposition for collision).
 
@@ -161,7 +165,11 @@ mcp__simul__summarize_scene
 
 Use `format: "json"` for structured output when parsing programmatically. Use `format: "text"` for human-readable summaries.
 
-`include_meshes: true` adds per-mesh vertex/face counts to the summary. Set to `false` for faster results on large scenes.
+`include_meshes: true` adds mesh totals (vertices, faces, normals, UVs, closed meshes, area, volume) to the summary; it is fast even on large scenes.
+
+- `scene_size_meters` converts the bounds with the stage's `metersPerUnit`.
+- `animation_info.duration_seconds` is the animated span in seconds. Animation is detected from time samples too, when no time range is authored.
+- `warnings` flags referenced or sublayered files whose `upAxis` or `metersPerUnit` differs from the stage's: such an asset shows up scaled or rotated, because USD does not convert it.
 
 ### 8. Modify the USD File
 
@@ -189,6 +197,24 @@ mcp__simul__delete_prim
   stage_id: "abc123"
   prim_path: "/World/UnwantedPrim"
 ```
+
+Every edit is all or nothing: a call that fails changes nothing, and its
+error names the prim, each rejected attribute and the reason.
+
+- Paths are absolute (`/World/Box`, never `World/Box`).
+- `create_prim` takes a concrete registered type (`Xform`, `Cube`, ...) and
+  refuses an existing path unless `redefine_existing: true`.
+- `active`, `instanceable` and `kind` in `attributes` set prim metadata.
+- Values take the attribute's type: quaternions are `[w, x, y, z]`,
+  matrices are lists of rows, and a new `xformOp:translate` is a `double3`
+  op added to `xformOpOrder`. Name a new custom attribute's type with
+  `attribute_types: {"custom:offset": "double3"}`.
+- An animated attribute needs `time_code: <frame>`; without it the call is
+  refused, because a default value would be hidden by the time samples.
+- `delete_prim` refuses `/`, and the default prim unless
+  `allow_root_delete: true`. A prim that also comes from a sublayer or a
+  reference cannot be deleted from the root layer; deactivate it with
+  `attributes: {"active": false}` instead.
 
 **Note:** Modifications via these tools write back to the loaded stage. To persist changes to disk, the stage must be saved — use `execute_isaac_script` with `stage.Export(path)` if Isaac Sim is running, or be aware that headless modifications may require a separate save step depending on server configuration.
 

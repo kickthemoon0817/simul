@@ -1694,7 +1694,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "visible": true,
-      "propagate": true
+      "propagate": true,
+      "scope": "all",
+      "persistent": false
      }
     }
    ],
@@ -1717,7 +1719,9 @@
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "visible": false,
-    "propagate": false
+    "propagate": false,
+    "scope": "editor",
+    "persistent": true
    },
    "envelope": [
     {
@@ -1733,7 +1737,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "visible": false,
-      "propagate": false
+      "propagate": false,
+      "scope": "editor",
+      "persistent": true
      }
     }
    ],
@@ -1806,7 +1812,8 @@
       "material_path": "/Game/Materials/M_Wood",
       "scalar_params": null,
       "vector_params": null,
-      "texture_params": null
+      "texture_params": null,
+      "allow_engine_content": false
      }
     }
    ],
@@ -1830,7 +1837,8 @@
     "material_path": "/Game/Materials/M_Wood",
     "scalar_params_json": "{\"Roughness\": 0.4}",
     "vector_params_json": "{\"Tint\": [1, 0.5, 0, 1]}",
-    "texture_params_json": "{\"Albedo\": \"/Game/Textures/T_Wood\"}"
+    "texture_params_json": "{\"Albedo\": \"/Game/Textures/T_Wood\"}",
+    "allow_engine_content": true
    },
    "envelope": [
     {
@@ -1858,7 +1866,8 @@
       },
       "texture_params": {
        "Albedo": "/Game/Textures/T_Wood"
-      }
+      },
+      "allow_engine_content": true
      }
     }
    ],
@@ -1896,7 +1905,8 @@
      "arguments": {
       "parent_path": "/Game/Materials/M_Wood",
       "instance_name": "MI_Chair",
-      "save_path": ""
+      "save_path": "",
+      "allow_engine_content": false
      }
     }
    ],
@@ -1919,7 +1929,8 @@
    "arguments": {
     "parent_path": "/Game/Materials/M_Wood",
     "instance_name": "MI_Chair",
-    "save_path": "/Game/Materials"
+    "save_path": "/Game/Materials",
+    "allow_engine_content": true
    },
    "envelope": [
     {
@@ -1935,7 +1946,8 @@
      "arguments": {
       "parent_path": "/Game/Materials/M_Wood",
       "instance_name": "MI_Chair",
-      "save_path": "/Game/Materials"
+      "save_path": "/Game/Materials",
+      "allow_engine_content": true
      }
     }
    ],
@@ -2579,7 +2591,8 @@
      "arguments": {
       "usd_path": "/tmp/in.usd",
       "destination_path": "/Game/Imports",
-      "import_options": null
+      "import_options": null,
+      "replace_existing": false
      }
     }
    ],
@@ -2604,7 +2617,8 @@
     "destination_path": "/Game/USD",
     "import_options": {
      "import_lights": false
-    }
+    },
+    "replace_existing": true
    },
    "envelope": [
     {
@@ -2622,7 +2636,8 @@
       "destination_path": "/Game/USD",
       "import_options": {
        "import_lights": false
-      }
+      },
+      "replace_existing": true
      }
     }
    ],
@@ -4490,6 +4505,87 @@
     {
      "success": false,
      "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent, not both"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_visibility",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "scope": "viewport"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_visibility",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorVisibilityResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "scope must be one of ['all', 'editor', 'game'], not 'viewport'",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "visible": true,
+       "propagate": true,
+       "scope": "viewport",
+       "persistent": false
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "scope must be one of ['all', 'editor', 'game'], not 'viewport'"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_visibility",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "scope": "game",
+    "persistent": true
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_visibility",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorVisibilityResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "persistent applies to the editor's hiding (scope 'editor' or 'all'); hidden in game is always saved with the level",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "visible": true,
+       "propagate": true,
+       "scope": "game",
+       "persistent": true
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "persistent applies to the editor's hiding (scope 'editor' or 'all'); hidden in game is always saved with the level"
     }
    ]
   },

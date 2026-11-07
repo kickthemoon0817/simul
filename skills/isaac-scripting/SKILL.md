@@ -19,6 +19,9 @@ version: 0.1.0
 | Add rigid body | `add_isaac_rigid_body` |
 | Add collision | `add_isaac_collision` |
 | Physics material | `set_isaac_physics_material` |
+| Physics rate, solver settings | `configure_isaac_physics_scene` |
+| Joint drives and limits | `set_isaac_joint_drive`, `set_isaac_joint_limits` |
+| Robot joints in order | `list_isaac_articulations` |
 | Start/stop sim | `start_isaac_simulation`, `stop_isaac_simulation` |
 | Query scene | `get_isaac_scene_summary`, `get_isaac_prim_detail` with `aspects=["info"]` |
 
@@ -36,7 +39,7 @@ Key rules:
 - `stdout` is captured and returned — use `print()` for all output
 - For structured results, always end with `print(json.dumps({...}))` as the final line
 - Top-level `await` is supported — the executor detects coroutines automatically
-- Each execution is **independent**: always `import` everything at the top of each script; do not rely on state from previous executions
+- Executions are **not isolated**: every transport runs scripts in one shared namespace, so globals persist into later calls, other agents' included. Always `import` everything at the top of each script, keep helpers inside functions, and do not rely on state from previous executions
 - Avoid long-running loops or `time.sleep()` calls that block the Kit main thread
 
 ## Script Structure
