@@ -16,8 +16,11 @@ import math
 import numbers
 import os
 import re
+import secrets
 import shutil
+import struct
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -97,6 +100,19 @@ LISTING_JSON_BYTES_MAX = 30_000
 # capture_viewport methods (issue #228). "auto" means "viewport" in attached
 # mode and "render" in embedded mode, which has no editor window.
 CAPTURE_METHODS = ("auto", "viewport", "render")
+
+# capture_viewport_sequence writes its frames to files (B1-05): five 512 px
+# frames inline exceeded the server's 40 KB result budget and came back as one,
+# and 1500 frames ran 7 s on Blender's main thread before failing to encode.
+# One call captures at most MAX_SEQUENCE_FRAMES frames (DEFAULT_SEQUENCE_FRAMES
+# unless asked), so that its list of paths stays well inside the budget, and
+# starts no frame after SEQUENCE_TIME_BUDGET_SECONDS, well inside the default
+# 30 s client timeout; the reply names the frame to continue from.
+# BlenderCaptureSequenceRequest repeats the frame numbers: this module ships
+# inside the Blender add-on and cannot import the MCP schemas.
+DEFAULT_SEQUENCE_FRAMES = 50
+MAX_SEQUENCE_FRAMES = 100
+SEQUENCE_TIME_BUDGET_SECONDS = 10.0
 
 # Engines the draw manager draws itself, so an offscreen redraw of a 3D View
 # shows them. An external engine (Cycles, third-party) draws its Rendered view
@@ -877,6 +893,371 @@ def action_fcurves(
 def _channel_name(data_path: str, index: int) -> str:
     """Name a keyframed property, or one element of it, as ``location[2]``."""
     return data_path if index < 0 else f"{data_path}[{index}]"
+
+
+# -- Files an import reads besides the one named (B1-20) ---------------------
+#
+# The sandbox checked only the path handed to import_file, so a glTF inside the
+# allowed folders whose image URI pointed outside them imported that image, and
+# a later GLB export embedded it. Each function below lists, for one reference
+# the file makes, the paths Blender's importer tries in the order it tries
+# them; the first that exists is what it reads.
+
+# MTL texture options and how many arguments each takes at most (the OBJ
+# importer's parse_texture_option); numeric ones stop at the first non-number.
+_MTL_OPTION_ARGUMENTS = {
+    "-o": 3,
+    "-s": 3,
+    "-t": 3,
+    "-mm": 2,
+    "-bm": 1,
+    "-boost": 1,
+    "-texres": 1,
+    "-blendu": 1,
+    "-blendv": 1,
+    "-clamp": 1,
+    "-cc": 1,
+    "-imfchan": 1,
+    "-type": 1,
+}
+_MTL_NUMERIC_OPTIONS = frozenset({"-o", "-s", "-t", "-mm", "-bm", "-boost", "-texres"})
+_MTL_MAP_KEYWORDS = frozenset({"bump", "refl", "norm", "disp", "decal"})
+
+# USD layers an import composes, and so reads, besides textures.
+_USD_LAYER_EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
+
+
+def _unquote_path(text: str) -> str:
+    """Strip whitespace and the surrounding double quotes the OBJ importer strips."""
+    text = text.strip()
+    if len(text) > 2 and text.startswith('"') and text.endswith('"'):
+        text = text[1:-1]
+    return text
+
+
+def _joined(directory: str, path: str) -> str:
+    """Join as Blender's BLI_path_join does: a later absolute part stays inside."""
+    return os.path.normpath(os.path.join(directory, path.lstrip("/\\")))
+
+
+def _gltf_document(path: Path) -> Dict[str, Any]:
+    """Read the JSON of a .gltf, or the JSON chunk of a .glb."""
+    with path.open("rb") as handle:
+        header = handle.read(20)
+        if header[:4] == b"glTF":
+            length, kind = struct.unpack_from("<II", header, 12)
+            if kind != 0x4E4F534A:  # "JSON"
+                raise ValueError(f"{path.name} has no JSON chunk")
+            return dict(json.loads(handle.read(length)))
+        return dict(json.loads(header + handle.read()))
+
+
+def _gltf_reads(path: Path) -> List[List[str]]:
+    """List the buffer and image files a glTF or GLB names, as its importer opens them."""
+    from urllib.parse import unquote
+
+    document = _gltf_document(path)
+    base = str(path.parent)
+    reads = []
+    for key in ("buffers", "images"):
+        for entry in document.get(key) or []:
+            uri = entry.get("uri") if isinstance(entry, dict) else None
+            if not isinstance(uri, str) or not uri or uri.startswith("data:"):
+                continue
+            # io_scene_gltf2: join(dirname(gltf), normpath(unquote(uri))).
+            local = os.path.normpath(unquote(uri.replace("\\", "/")))
+            reads.append([os.path.join(base, local)])
+    return reads
+
+
+def _mtl_texture_path(rest: str) -> str:
+    """Return the image path of an MTL map line, after its options."""
+    text = rest.strip()
+    while text.startswith("-"):
+        option, _, text = text.partition(" ")
+        text = text.lstrip()
+        for _ in range(_MTL_OPTION_ARGUMENTS.get(option, 1)):
+            argument, _, remainder = text.partition(" ")
+            if not argument:
+                break
+            if option in _MTL_NUMERIC_OPTIONS:
+                try:
+                    float(argument)
+                except ValueError:
+                    break
+            text = remainder.lstrip()
+    return _unquote_path(text)
+
+
+def _obj_reads(path: Path) -> List[List[str]]:
+    """List the MTL libraries an OBJ names and the textures they name.
+
+    The OBJ importer joins each mtllib to the OBJ's folder, and tries a
+    texture joined to the MTL's folder, as given (absolute, or relative to the
+    working directory), with underscores turned to spaces, and its base name
+    in the MTL's folder.
+    """
+    reads: List[List[str]] = []
+    folder = str(path.parent)
+    libraries: List[str] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith("mtllib"):
+                name = _unquote_path(line[6:])
+                if name:
+                    libraries.append(_joined(folder, name))
+    for library in dict.fromkeys(libraries):
+        reads.append([library])
+        if not os.path.isfile(library):
+            continue
+        library_folder = os.path.dirname(library)
+        with open(library, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                keyword, _, rest = line.strip().partition(" ")
+                keyword = keyword.lower()
+                if not (keyword.startswith("map_") or keyword in _MTL_MAP_KEYWORDS):
+                    continue
+                image = _mtl_texture_path(rest)
+                if image:
+                    reads.append(
+                        [
+                            _joined(library_folder, image),
+                            os.path.abspath(image),
+                            os.path.abspath(image.replace("_", " ")),
+                            os.path.join(library_folder, os.path.basename(image)),
+                        ]
+                    )
+    return reads
+
+
+def _resolve_ncase(path: str) -> str:
+    """Find a path's real spelling on a case-sensitive file system.
+
+    Mirrors ``bpy.path.resolve_ncase`` (Blender 4.2 through 5.0.1), which
+    ``bpy_extras.image_utils.load_image`` tries after each path: a component
+    that does not exist is matched case-insensitively among its folder's
+    entries. Returns the path unchanged when nothing matches.
+    """
+
+    def found(candidate: str) -> Tuple[str, bool]:
+        if not candidate or os.path.exists(candidate):
+            return candidate, True
+        filename, folder = os.path.basename(candidate), os.path.dirname(candidate)
+        suffix = ""
+        if not filename:
+            if len(folder) < len(candidate):
+                suffix = candidate[len(folder) :]
+            filename, folder = os.path.basename(folder), os.path.dirname(folder)
+        if not os.path.exists(folder):
+            if folder == candidate:
+                return candidate, False
+            folder, ok = found(folder)
+            if not ok:
+                return candidate, False
+        if not os.path.isdir(folder):
+            return candidate, False
+        try:
+            entries = os.listdir(folder)
+        except OSError:
+            return candidate, False
+        lower = filename.lower()
+        match = next((entry for entry in entries if entry.lower() == lower), None)
+        if match is None:
+            return candidate, False
+        return os.path.join(folder, match) + suffix, True
+
+    return found(path)[0]
+
+
+def _fbx_element_name(element: Any) -> str:
+    """An FBX object's name: the part of its name property before the class."""
+    props = getattr(element, "props", None) or []
+    if len(props) < 2 or not isinstance(props[-2], bytes):
+        return ""
+    return props[-2].split(b"\x00\x01")[0].decode("utf-8", "replace")
+
+
+def _fbx_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
+    """List the texture files an FBX names, as Blender's FBX importer looks for them.
+
+    blen_read_texture_image takes a texture's RelativeFilename joined to the
+    FBX's folder (stripped of a leading separator), else its FileName or
+    Filename, else the texture's name. bpy_extras.image_utils.load_image then
+    tries that path, the path joined to the folder and its base name there,
+    each also with its case resolved (resolve_ncase). Its recursive search of
+    folders, the importer's use_image_search, is switched off for an import
+    the sandbox checks (import_file), so it reads nothing found that way.
+    Blender's own FBX parser reads the file; a file it cannot parse fails the
+    import itself.
+    """
+    try:
+        from io_scene_fbx import parse_fbx  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise UncheckableReferences("Blender's FBX add-on is not available") from exc
+
+    try:
+        root, _version = parse_fbx.parse(str(path))
+    except Exception:
+        return []
+    base = str(path.parent)
+    reads: List[List[str]] = []
+    for section in root.elems:
+        if section.id != b"Objects":
+            continue
+        for element in section.elems:
+            if element.id not in (b"Texture", b"Video"):
+                continue
+            names: Dict[bytes, str] = {}
+            for prop in element.elems:
+                if prop.id in (b"RelativeFilename", b"FileName", b"Filename") and prop.props:
+                    value = prop.props[0]
+                    if isinstance(value, bytes):
+                        value = value.decode("utf-8", "replace")
+                    names.setdefault(prop.id, str(value))
+            relative = names.get(b"RelativeFilename")
+            if relative:
+                # str.lstrip(None) strips whitespace, as the importer's
+                # lstrip(os.path.altsep) does where altsep is None.
+                image = os.path.join(base, relative.lstrip(os.path.sep).lstrip(os.path.altsep))
+            else:
+                image = names.get(b"FileName") or names.get(b"Filename") or ""
+            if not image:
+                image = _fbx_element_name(element)
+            if not image:
+                continue
+            # bpy.path.native_pathsep, as load_image applies it.
+            image = image.replace("\\", "/") if os.sep == "/" else image.replace("/", "\\")
+            short = image[2:] if image[:2] == "//" else image
+            candidates = [image]
+            for variant in (image, os.path.join(base, image), os.path.join(base, os.path.basename(short))):
+                candidates.extend((variant, _resolve_ncase(variant)))
+            reads.append(list(dict.fromkeys(candidates)))
+    return reads
+
+
+def _usd_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
+    """List the layers and assets a USD file composes, following its layers.
+
+    Sublayers, references, payloads and asset-valued attributes (textures)
+    of each layer, resolved against that layer, through pxr (Blender bundles
+    it). Layers outside the sandbox are not opened: they are refused anyway.
+    """
+    try:
+        from pxr import Ar, Sdf, UsdUtils
+    except ImportError:
+        return _usda_text_reads(path)
+
+    reads: List[List[str]] = []
+    pending: List[str] = [str(path)]
+    seen: set = set()
+    while pending:
+        identifier = pending.pop()
+        if identifier in seen or len(seen) >= 1000:
+            continue
+        seen.add(identifier)
+        try:
+            layer = Sdf.Layer.FindOrOpen(identifier)
+        except Exception:
+            # The importer cannot open it either, so it reads nothing through it.
+            layer = None
+        if layer is None:
+            continue
+        anchor = os.path.dirname(Ar.SplitPackageRelativePathOuter(identifier)[0])
+        try:
+            sublayers, references, payloads = UsdUtils.ExtractExternalReferences(identifier)
+        except Exception as exc:
+            raise UncheckableReferences(f"pxr could not list the references of {identifier}: {exc}") from exc
+        for asset in (*sublayers, *references, *payloads):
+            if not asset:
+                continue
+            resolved = layer.ComputeAbsolutePath(asset)
+            outer, inner = Ar.SplitPackageRelativePathOuter(resolved)
+            if not os.path.isabs(outer):
+                outer = os.path.join(anchor, outer)
+            outer = os.path.normpath(outer)
+            if "<UDIM>" in outer:
+                import glob
+
+                tiles = glob.glob(outer.replace("<UDIM>", "[0-9][0-9][0-9][0-9]"))
+                reads.extend([tile] for tile in tiles)
+                continue
+            # A path such as "textures/a.png" that does not exist beside the
+            # layer is looked up in the resolver's search paths
+            # (PXR_AR_DEFAULT_SEARCH_PATH), as the import's stage does.
+            found = _usd_search_path_hit(Ar, asset, identifier, outer)
+            reads.append([outer] if found is None else [outer, found])
+            target = found if found is not None and not os.path.exists(outer) else outer
+            if not (target.lower().endswith(_USD_LAYER_EXTENSIONS) and allowed(target)):
+                continue
+            if inner and target == outer:
+                pending.append(resolved)
+            elif os.path.isfile(target):
+                pending.append(target)
+    return reads
+
+
+def _usd_search_path_hit(ar: Any, asset: str, layer_path: str, anchored: str) -> Optional[str]:
+    """Where the USD resolver finds ``asset`` for a layer, when that is not beside it.
+
+    Returns:
+        The file the resolver resolves the asset to, outside its package if
+        it is in one, or None when that is the anchored path or nothing.
+    """
+    if os.path.exists(anchored):
+        return None
+    try:
+        resolver = ar.GetResolver()
+        identifier = resolver.CreateIdentifier(asset, ar.ResolvedPath(layer_path))
+        hit = str(resolver.Resolve(identifier))
+    except Exception:
+        return None
+    if not hit:
+        return None
+    outer = os.path.normpath(ar.SplitPackageRelativePathOuter(hit)[0])
+    return None if outer == anchored else outer
+
+
+def _usda_text_reads(path: Path) -> List[List[str]]:
+    """Without pxr: the asset paths of a text .usda that names no other layer.
+
+    Raises:
+        UncheckableReferences: For a binary layer, or a text layer naming
+            other layers, which this cannot follow.
+    """
+    with path.open("rb") as handle:
+        head = handle.read(8)
+    if not head.startswith(b"#usda"):
+        raise UncheckableReferences(f"{path.name} is a binary USD file and pxr is not available")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    reads = []
+    for match in re.finditer(r"@@@(.*?)@@@|@([^@\n]+)@", text):
+        asset = match.group(1) or match.group(2) or ""
+        local = asset.split("[", 1)[0]
+        if local.lower().endswith(_USD_LAYER_EXTENSIONS):
+            raise UncheckableReferences(
+                f"{path.name} composes {asset} and pxr is not available to follow it"
+            )
+        reads.append([os.path.normpath(os.path.join(str(path.parent), local))])
+    return reads
+
+
+class UncheckableReferences(Exception):
+    """The files an import would read cannot be listed, so the sandbox cannot vouch for them."""
+
+
+# Importer options that search folders for a file a reference names, set off
+# while the sandbox is on: the FBX importer's use_image_search walks the
+# texture's folder and the FBX's, subfolders included, for any file of the
+# same name (bpy_extras.image_utils.load_image), which found and loaded an
+# image outside the sandbox. No other importer searches.
+_IMPORT_SEARCH_OPTIONS: Dict[str, Tuple[str, ...]] = {"FBX": ("use_image_search",)}
+
+_IMPORT_READS: Dict[str, Callable[[Path, Callable[[str], bool]], List[List[str]]]] = {
+    "GLTF": lambda path, _allowed: _gltf_reads(path),
+    "OBJ": lambda path, _allowed: _obj_reads(path),
+    "FBX": _fbx_reads,
+    "USD": _usd_reads,
+}
 
 
 def _did_you_mean(name: str, choices: Sequence[str]) -> str:
@@ -1850,6 +2231,7 @@ class BlenderRuntimeSession:
         use_render_fallback: bool = False,
         agent_id: str = "agent",
         method: str = "auto",
+        camera_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Capture the 3D View or a camera render as a base64-encoded JPEG image.
@@ -1876,18 +2258,28 @@ class BlenderRuntimeSession:
                 camera when the scene has none (aligned to the 3D View when attached,
                 framing the visible objects otherwise), removed afterwards.
                 "auto" (default): "viewport" when attached, "render" in embedded mode.
+            camera_name: Capture through this camera instead of the scene camera or
+                the 3D View's angle; the scene camera and the view are left as they
+                were. A render renders through it; a viewport capture draws the 3D
+                View's shading from it (capture_method viewport_camera), keeping the
+                render's aspect ratio inside width x height.
 
         Returns:
-            Dictionary with image_base64, width, height, engine, format and
-            capture_method: viewport, viewport_screen, render,
-            render_temp_camera_view or render_temp_camera_framing.
+            Dictionary with image_base64, width, height, engine, format,
+            camera_name (the camera captured through; None for the 3D View's
+            angle or a temporary camera) and capture_method: viewport,
+            viewport_camera, viewport_screen, render, render_temp_camera_view
+            or render_temp_camera_framing.
         """
         method = self._resolve_capture_method(method, use_render_fallback)
+        camera = None if camera_name is None else self._resolve_camera(camera_name)
         blender_module: Any = bpy
         engine = blender_module.context.scene.render.engine
         if method == "viewport":
-            return self._capture_view3d(width, height, jpeg_quality, engine)
-        return self._capture_render(width, height, jpeg_quality, engine)
+            result = self._capture_view3d(width, height, jpeg_quality, engine, camera)
+        else:
+            result = self._capture_render(width, height, jpeg_quality, engine, camera)
+        return result
 
     def set_camera_view(
         self,
@@ -2123,15 +2515,25 @@ class BlenderRuntimeSession:
 
     def get_viewport_info(self) -> Dict[str, Any]:
         """
-        Get active viewport / render settings summary.
+        Get the render settings and, in attached mode, the 3D View's view state.
 
         Returns:
-            Dictionary with render engine, resolution, film, active camera.
+            Dictionary with render engine, resolution, film and active camera,
+            plus view3d: the largest 3D View's view_perspective (PERSP, ORTHO
+            or CAMERA), is_perspective, view_matrix (world to view, rows),
+            eye_location (where the view looks from), view_location (the
+            point it orbits), view_rotation (quaternion w, x, y, z),
+            view_distance, lens, clip_start, clip_end, shading_type,
+            view_camera (the camera a CAMERA view looks through) and its
+            region size. view3d is None without an editor window (embedded
+            bpy, blender -b) or a 3D View, and view3d_unavailable_reason says
+            which.
         """
         blender_module: Any = bpy
         scene = blender_module.context.scene
         render = scene.render
         active_cam = scene.camera
+        view3d, reason = self._view3d_state()
         return {
             "render_engine": render.engine,
             "resolution_x": render.resolution_x,
@@ -2139,7 +2541,46 @@ class BlenderRuntimeSession:
             "resolution_percentage": render.resolution_percentage,
             "film_transparent": render.film_transparent,
             "active_camera": active_cam.name if active_cam else None,
+            "view3d": view3d,
+            "view3d_unavailable_reason": reason,
         }
+
+    def _view3d_state(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Describe the 3D View the captures use, or say why there is none."""
+        blender_module: Any = bpy
+        try:
+            _area, region, space = self._view3d_target()
+        except RuntimeError:
+            if getattr(blender_module.app, "background", False) or getattr(
+                blender_module.context, "window", None
+            ) is None:
+                return None, (
+                    "Blender runs without an editor window (embedded bpy or blender -b), "
+                    "so there is no 3D View; the render settings still apply"
+                )
+            return None, "The attached window shows no 3D View with a drawable region"
+        view = region.data
+        view.update()
+        perspective = view.view_perspective
+        camera = None
+        if perspective == "CAMERA":
+            camera = space.camera if space.use_local_camera else blender_module.context.scene.camera
+        return {
+            "view_perspective": perspective,
+            "is_perspective": bool(view.is_perspective),
+            "view_matrix": [list(row) for row in view.view_matrix],
+            "eye_location": list(view.view_matrix.inverted().translation),
+            "view_location": list(view.view_location),
+            "view_rotation": list(view.view_rotation),
+            "view_distance": view.view_distance,
+            "lens": space.lens,
+            "clip_start": space.clip_start,
+            "clip_end": space.clip_end,
+            "shading_type": space.shading.type,
+            "view_camera": camera.name if camera is not None else None,
+            "region_width": region.width,
+            "region_height": region.height,
+        }, None
 
     def capture_viewport_sequence(
         self,
@@ -2151,55 +2592,133 @@ class BlenderRuntimeSession:
         jpeg_quality: int = 85,
         agent_id: str = "agent",
         method: str = "auto",
+        camera_name: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        max_frames: int = DEFAULT_SEQUENCE_FRAMES,
     ) -> Dict[str, Any]:
         """
-        Capture viewport at multiple frames as base64-encoded JPEGs.
+        Capture a frame range as JPEG files and return their paths.
+
+        Each frame is captured like capture_viewport and written to output_dir
+        as frame_<number>.jpg, so the reply carries paths and sizes rather than
+        images: inline images of more than a few frames exceeded the server's
+        result budget. Blender's main thread is busy while frames are captured,
+        so one call captures at most max_frames frames and stops starting new
+        ones after SEQUENCE_TIME_BUDGET_SECONDS; next_start_frame then says
+        where to continue. The current frame is restored afterwards.
 
         Args:
             start_frame: First frame to capture.
-            end_frame: Last frame to capture (inclusive).
+            end_frame: Last frame to capture (inclusive); not before start_frame.
             step: Frame step between captures.
             width: Maximum image width, as for capture_blender_viewport.
             height: Maximum image height, as for capture_blender_viewport.
             jpeg_quality: JPEG compression quality.
             agent_id: Visible capture feedback label in attached mode; ignored in embedded mode.
             method: "viewport", "render" or "auto" (default), as for capture_blender_viewport.
+            camera_name: Capture through this camera, as for capture_blender_viewport.
+            output_dir: Folder for the frame files, inside the sandbox; created when
+                missing, and existing frame files of the same numbers are replaced.
+                Default: a new sequence-<time>-<id> folder in the capture directory.
+            max_frames: Most frames captured by this call, 1 to 100.
 
         Returns:
-            Dictionary with frames list, frame_count, capture_method.
+            Dictionary with frames ([{frame, file_path}]), frame_count (captured
+            now), requested_frame_count (in the range), complete, next_start_frame
+            (the first frame left, None when complete), stopped_by (None,
+            "max_frames" or "time_budget"), output_dir, width, height, format,
+            camera_name and capture_method.
+
+        Raises:
+            ValueError: When end_frame is before start_frame, step is below 1,
+                or max_frames is out of range.
         """
+        if end_frame < start_frame:
+            raise ValueError(
+                f"end_frame ({end_frame}) is before start_frame ({start_frame})"
+            )
+        if step < 1:
+            raise ValueError(f"step must be at least 1, not {step}")
+        if not 1 <= max_frames <= MAX_SEQUENCE_FRAMES:
+            raise ValueError(
+                f"max_frames must be between 1 and {MAX_SEQUENCE_FRAMES}, not {max_frames}"
+            )
         method = self._resolve_capture_method(method)
+        if camera_name is not None:
+            self._resolve_camera(camera_name)
+        folder = self._sequence_folder(output_dir)
         blender_module: Any = bpy
         scene = blender_module.context.scene
+        # frame_set(7) alone would turn frame 7.25 into 7.0.
         original_frame = scene.frame_current
+        original_subframe = float(getattr(scene, "frame_subframe", 0.0))
+        requested = range(start_frame, end_frame + 1, step)
 
         frames: List[Dict[str, Any]] = []
         capture_method = method
-
+        size: Tuple[Optional[int], Optional[int]] = (None, None)
+        stopped_by: Optional[str] = None
+        started = time.monotonic()
         try:
-            for frame_num in range(start_frame, end_frame + 1, step):
+            for frame_num in requested:
+                if len(frames) >= max_frames:
+                    stopped_by = "max_frames"
+                    break
+                if frames and time.monotonic() - started > SEQUENCE_TIME_BUDGET_SECONDS:
+                    stopped_by = "time_budget"
+                    break
                 scene.frame_set(frame_num)
                 result = self.capture_viewport(
                     width=width,
                     height=height,
                     jpeg_quality=jpeg_quality,
                     method=method,
+                    camera_name=camera_name,
                 )
-                frames.append(
-                    {
-                        "frame": frame_num,
-                        "image_base64": result["image_base64"],
-                    }
-                )
+                path = folder / f"frame_{frame_num:06d}.jpg"
+                path.write_bytes(base64.b64decode(result["image_base64"]))
+                frames.append({"frame": frame_num, "file_path": str(path)})
                 capture_method = result.get("capture_method", capture_method)
+                size = (result.get("width"), result.get("height"))
         finally:
-            scene.frame_set(original_frame)
+            scene.frame_set(original_frame, subframe=original_subframe)
 
+        next_start = requested[len(frames)] if len(frames) < len(requested) else None
         return {
             "frames": frames,
             "frame_count": len(frames),
+            "requested_frame_count": len(requested),
+            "complete": next_start is None,
+            "next_start_frame": next_start,
+            "stopped_by": stopped_by,
+            "output_dir": str(folder),
+            "width": size[0],
+            "height": size[1],
+            "format": "jpeg",
+            "camera_name": camera_name,
             "capture_method": capture_method,
         }
+
+    def _sequence_folder(self, output_dir: Optional[str]) -> Path:
+        """Create the folder a sequence's frames go to, inside the sandbox.
+
+        Raises:
+            PermissionError: When the sandbox refuses output_dir, or allows no
+                writable capture directory for the default one.
+        """
+        if output_dir is not None:
+            folder = Path(self._export_target(self._deny_outside_sandbox(output_dir, write=True)))
+        else:
+            capture_dir = self._path_policy.default_capture_dir()
+            if capture_dir is None:
+                raise PermissionError(
+                    "No writable capture directory is allowed by the sandbox"
+                )
+            base = Path(self._deny_outside_sandbox(capture_dir, write=True))
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            folder = base / f"sequence-{stamp}-{secrets.token_hex(3)}"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
 
     # -- Phase 3: Scene manipulation methods ---------------------------------
 
@@ -4152,8 +4671,15 @@ class BlenderRuntimeSession:
             Dict with file_path, file_format, imported_objects, scale and
             warning (None unless something needs attention).
 
+        Files the import would read besides file_path (textures, buffers, MTL
+        libraries, USD layers) must be inside the sandbox too
+        (_refuse_reads_outside_sandbox). While the sandbox is on, the FBX
+        importer's recursive image search (use_image_search) is off: a texture
+        must be at the path the FBX stores, or beside the FBX.
+
         Raises:
-            PermissionError: If the path is outside the sandbox policy.
+            PermissionError: If the path, or a file the import would read, is
+                outside the sandbox policy.
             FileNotFoundError: If the file does not exist.
             ValueError: If the format is unsupported or scale is not positive.
         """
@@ -4163,6 +4689,7 @@ class BlenderRuntimeSession:
             raise FileNotFoundError(f"File not found: {file_path}")
         if not (math.isfinite(scale) and scale > 0.0):
             raise ValueError(f"scale must be a positive number, not {scale!r}")
+        self._refuse_reads_outside_sandbox(file_path, fmt)
 
         blender_module: Any = bpy
         existing_names = set(blender_module.data.objects.keys())
@@ -4179,6 +4706,11 @@ class BlenderRuntimeSession:
                 scale_roots = scale
             else:
                 kwargs[prop] = scale
+        if self._path_policy.enabled:
+            # Search options that find files the reference check cannot vouch for.
+            for option in _IMPORT_SEARCH_OPTIONS.get(fmt, ()):
+                if self._operator_property(op_func, (option,)):
+                    kwargs[option] = False
         _bpy_op(f"Failed to import {fmt} file '{file_path}'", op_func, **kwargs)
 
         new_names = [
@@ -4938,6 +5470,64 @@ class BlenderRuntimeSession:
             yield
         finally:
             preferences.allow_embedded_format = False
+
+    def _refuse_reads_outside_sandbox(self, file_path: str, fmt: str) -> None:
+        """Refuse an import that would read files outside the sandbox (B1-20).
+
+        The files a glTF's buffers and images, an OBJ's MTL libraries and their
+        textures, an FBX's textures, and a USD file's layers and assets name
+        are found where Blender's importer looks for them; the first of its
+        candidates that exists must be allowed. A reference to a file that does
+        not exist reads nothing and passes. STL and PLY name no other files.
+
+        Raises:
+            SandboxDenied: When a referenced file outside the sandbox exists,
+                or when the references cannot be listed (a binary USD file
+                without pxr, an FBX without Blender's FBX add-on).
+        """
+        reader = _IMPORT_READS.get(fmt)
+        if reader is None or not self._path_policy.enabled:
+            return
+        from ..utils.paths import SandboxDenied
+
+        name = os.path.basename(file_path)
+        try:
+            reads = reader(Path(file_path), self._path_policy.is_allowed)
+        except Exception as exc:
+            if fmt != "USD" and not isinstance(exc, UncheckableReferences):
+                # Blender's importer reads the same file and says why it cannot.
+                logger.warning("Could not list the files %s refers to: %s", name, exc)
+                return
+            details = self._path_policy.denial_details(file_path)
+            details.update(
+                referenced_by=file_path,
+                hint=(
+                    f"Could not check the files {name} refers to against the sandbox "
+                    f"({exc}), so it is not imported"
+                ),
+            )
+            raise SandboxDenied(file_path, details) from exc
+        outside: List[str] = []
+        for candidates in reads:
+            found = next((c for c in candidates if os.path.exists(c)), None)
+            if found is not None and not self._path_policy.is_allowed(found):
+                # Reported as the file it is, without ../ steps or symlinks.
+                real = str(self._path_policy.resolve(found))
+                if real not in outside:
+                    outside.append(real)
+        if not outside:
+            return
+        details = self._path_policy.denial_details(outside[0])
+        details.update(
+            referenced_by=file_path,
+            references_outside=outside[:20],
+            hint=(
+                f"{name} refers to files outside the sandbox, which the import would read: "
+                f"{', '.join(outside[:5])}. Copy them under an allowed root and point "
+                f"{name} at the copies, or widen security.allowed_paths"
+            ),
+        )
+        raise SandboxDenied(outside[0], details)
 
     def _scale_imported_roots(self, names: List[str], factor: float) -> Optional[str]:
         """Scale imported objects about the world origin through their root objects.
@@ -7921,27 +8511,52 @@ class BlenderRuntimeSession:
         height: int,
         jpeg_quality: int,
         engine: str,
+        camera: Any = None,
     ) -> Dict[str, Any]:
         """
-        Capture the 3D View as the user sees it; see capture_viewport.
+        Capture the 3D View as the user sees it, or through a camera; see capture_viewport.
 
         Args:
             width: Largest image width.
             height: Largest image height.
             jpeg_quality: JPEG compression quality.
             engine: Render engine identifier.
+            camera: Camera to draw the 3D View's shading from instead of its
+                own angle, or None.
 
         Returns:
             Dictionary with image_base64, dimensions, engine, capture_method.
+
+        Raises:
+            RuntimeError: When there is no 3D View, or a camera is asked for
+                while an external engine draws the view, which only the
+                screen shows.
         """
         blender_module: Any = bpy
         context = blender_module.context
         area, region, space = self._view3d_target()
-        out_width, out_height = self._fit_inside(
-            region.width, region.height, width, height
-        )
-        with self._capture_workdir() as workdir:
+        matrices = None
+        if camera is not None:
             if self._drawn_by_external_engine(space, engine):
+                raise RuntimeError(
+                    f"The 3D View shows {engine}'s Rendered shading, which Blender draws "
+                    f"only on screen, so it cannot be drawn through camera {camera.name!r}; "
+                    "pass method='render' to render through it"
+                )
+            render = context.scene.render
+            out_width, out_height = self._fit_inside(
+                render.resolution_x * render.pixel_aspect_x,
+                render.resolution_y * render.pixel_aspect_y,
+                width,
+                height,
+            )
+            matrices = self._camera_matrices(camera, out_width, out_height)
+        else:
+            out_width, out_height = self._fit_inside(
+                region.width, region.height, width, height
+            )
+        with self._capture_workdir() as workdir:
+            if camera is None and self._drawn_by_external_engine(space, engine):
                 image = self._read_view3d_screen(context.window, area, region, workdir)
                 capture_method = "viewport_screen"
             else:
@@ -7952,8 +8567,9 @@ class BlenderRuntimeSession:
                     region,
                     out_width,
                     out_height,
+                    matrices,
                 )
-                capture_method = "viewport"
+                capture_method = "viewport" if camera is None else "viewport_camera"
             try:
                 if tuple(image.size) != (out_width, out_height):
                     image.scale(out_width, out_height)
@@ -7967,7 +8583,21 @@ class BlenderRuntimeSession:
             "engine": engine,
             "capture_method": capture_method,
             "format": "jpeg",
+            "camera_name": None if camera is None else camera.name,
         }
+
+    @staticmethod
+    def _camera_matrices(camera: Any, width: int, height: int) -> Tuple[Any, Any]:
+        """Return a camera's view and projection matrices for a width x height image.
+
+        The pose is the evaluated one, constraints included, as a render uses.
+        """
+        blender_module: Any = bpy
+        depsgraph = blender_module.context.evaluated_depsgraph_get()
+        evaluated = camera.evaluated_get(depsgraph)
+        view_matrix = evaluated.matrix_world.inverted()
+        projection = evaluated.calc_matrix_camera(depsgraph, x=width, y=height)
+        return view_matrix, projection
 
     def _draw_view3d_offscreen(
         self,
@@ -7977,6 +8607,7 @@ class BlenderRuntimeSession:
         region: Any,
         width: int,
         height: int,
+        matrices: Optional[Tuple[Any, Any]] = None,
     ) -> Any:
         """
         Redraw the 3D View offscreen with its own matrices, shading and overlays.
@@ -7990,16 +8621,20 @@ class BlenderRuntimeSession:
             region: Its WINDOW region.
             width: Image width; the region's aspect ratio.
             height: Image height.
+            matrices: View and projection matrices to draw with instead of the
+                region's, such as a camera's.
 
         Returns:
             A temporary image with the pixels; the caller removes it.
         """
         import gpu  # type: ignore[import-not-found]
 
-        view = region.data
-        # Blender refreshes view matrices on redraw; a view changed since the
-        # last one, or a window that is not redrawing, would be stale.
-        view.update()
+        if matrices is None:
+            view = region.data
+            # Blender refreshes view matrices on redraw; a view changed since the
+            # last one, or a window that is not redrawing, would be stale.
+            view.update()
+            matrices = (view.view_matrix, view.window_matrix)
         offscreen = gpu.types.GPUOffScreen(width, height)
         try:
             offscreen.draw_view3d(
@@ -8007,8 +8642,8 @@ class BlenderRuntimeSession:
                 view_layer,
                 space,
                 region,
-                view.view_matrix,
-                view.window_matrix,
+                matrices[0],
+                matrices[1],
                 do_color_management=True,
             )
             with offscreen.bind():
@@ -8093,6 +8728,7 @@ class BlenderRuntimeSession:
         height: int,
         jpeg_quality: int,
         engine: str,
+        chosen: Any = None,
     ) -> Dict[str, Any]:
         """
         Capture via bpy.ops.render.render (all engines), through a camera.
@@ -8107,9 +8743,12 @@ class BlenderRuntimeSession:
             height: Image height.
             jpeg_quality: JPEG compression quality.
             engine: Render engine identifier.
+            chosen: Camera to render through instead of the scene camera, which
+                is restored afterwards; None renders through the scene camera.
 
         Returns:
-            Dictionary with image_base64, dimensions, engine, capture_method.
+            Dictionary with image_base64, dimensions, engine, capture_method
+            and camera_name.
         """
         blender_module: Any = bpy
         scene = blender_module.context.scene
@@ -8121,9 +8760,12 @@ class BlenderRuntimeSession:
                 render.resolution_y,
                 render.resolution_percentage,
             )
+            scene_camera = scene.camera
             camera = None
             try:
-                if scene.camera is None:
+                if chosen is not None:
+                    scene.camera = chosen
+                elif scene.camera is None:
                     camera, capture_method, (width, height) = (
                         self._add_temporary_camera(scene, width, height)
                     )
@@ -8148,6 +8790,9 @@ class BlenderRuntimeSession:
                 ) = saved
                 if camera is not None:
                     self._remove_temporary_camera(scene, camera)
+                if chosen is not None:
+                    scene.camera = scene_camera
+        used = chosen if chosen is not None else scene_camera
         return {
             "image_base64": b64,
             "width": width,
@@ -8155,6 +8800,7 @@ class BlenderRuntimeSession:
             "engine": engine,
             "capture_method": capture_method,
             "format": "jpeg",
+            "camera_name": None if camera is not None or used is None else used.name,
         }
 
     def _add_temporary_camera(

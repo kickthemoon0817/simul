@@ -970,7 +970,7 @@ Behaviour worth knowing:
   `ValidationError` (or `NotFoundError` for a missing material or texture
   file) and a stable `details.code`, such as `shared_data`, `out_of_range`,
   `setting_not_for_light_type`, `wrong_mode` or `linked_from_library`.
-- These calls need a Blender add-on built for bridge protocol 9 or later:
+- These calls need a Blender add-on built for bridge protocol 10 or later:
   assignment now replaces where it appended, so an older add-on is refused
   with the rebuild instructions rather than silently appending a slot no face
   uses.
@@ -996,7 +996,34 @@ Behaviour worth knowing:
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
   View, so its captures are renders. The per-mode table is in
-  [blender-attachment.md](blender-attachment.md#capture-feedback).
+  [blender-attachment.md](blender-attachment.md#capture-feedback). `camera_name`
+  captures through another camera without changing the scene camera or the
+  view. `capture_blender_viewport_sequence` writes JPEG files and returns their
+  paths, at most `max_frames` (50, at most 100) per call and no new frame after
+  10 s, with `next_start_frame` to continue.
+- `get_blender_viewport_info` reports, besides the render settings, `view3d`:
+  the attached window's largest 3D View (the one captures use) with its
+  `view_matrix` (world to view), `eye_location`, `view_perspective`, `lens`,
+  `clip_start`/`clip_end`, `shading_type` and, for a camera view,
+  `view_camera`. Without an editor window (embedded `bpy`, `blender -b`) or a 3D
+  View it is `null`, and `view3d_unavailable_reason` says which.
+- `import_blender_file` checks the files an import would read besides the one
+  named against `security.allowed_paths`, where Blender's importer looks for
+  them: a glTF's buffers and images (also in a GLB's JSON), an OBJ's MTL
+  libraries and their texture maps, an FBX's textures, and a USD file's
+  sublayers, references, payloads and asset paths such as textures, following
+  the layers inside the sandbox. An existing file outside the sandbox is refused
+  with `SandboxError` before anything is imported; `details.references_outside`
+  lists those files and `details.referenced_by` the imported file. A reference to
+  a missing file reads nothing and passes. The check follows the importers'
+  fallbacks: an FBX texture's case-insensitive match (Blender's
+  `resolve_ncase`) and its name when it stores no path, an MTL texture's base
+  name beside the MTL, and USD's resolver search paths. The FBX importer's
+  recursive image search (`use_image_search`), which walked the texture's
+  folder and found a same-named image outside the sandbox, is switched off
+  while the sandbox is on, so an FBX texture must be at the path it stores or
+  beside the FBX. USD files are read through pxr, which Blender bundles; without
+  pxr a binary USD file, or a text one that composes other layers, is refused.
 - `set_blender_camera_view` and `get_blender_camera_info` work in world space:
   `location` and an XYZ Euler `rotation_euler` in radians, whatever the
   camera's parent and rotation mode (glTF imports store quaternions).
