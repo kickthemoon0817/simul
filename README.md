@@ -130,7 +130,7 @@ specific open editor and viewport.
 **Blender (attach to an open window)**
 
 ```bash
-simul blender install-bridge            # builds ~/.simul/blender/simul_blender_bridge.zip
+simul blender install-bridge            # builds $SIMUL_HOME/blender/simul_blender_bridge.zip (default ~/.simul)
 # In Blender: Preferences > Add-ons > Install from Disk, enable "Simul Blender Bridge"
 simul blender attach
 simul blender status

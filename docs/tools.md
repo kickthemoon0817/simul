@@ -77,6 +77,39 @@ No running application needed. File arguments must be inside the sandbox
   is a `NotFoundError`; a relative, malformed or property path is a
   `ValidationError`.
 
+`validate_usd_file` opens the file with pxr, as `load_usd_file` does, and
+keeps no stage. `can_read` says whether pxr opened it (so whether
+`load_usd_file` can); `is_valid` additionally needs no issue of severity
+`error`. Each issue carries `severity`, a stable `code`, pxr's `message`, its
+`source` (`simul` or the pxr validator) and a `location` (`layer`,
+`prim_path`, `property_path`, `asset_path`, or `line` and `column` for a
+parse error). The checks, in order:
+
+- Access, shared with the loader: the file exists, is a regular file, has an
+  extension from `usd.allowed_extensions`, is readable by the server process,
+  is not empty and fits `usd.max_file_size_mb` (`FileNotFound`, `NotAFile`,
+  `UnsupportedExtension`, `PermissionDenied`, `EmptyFile`, `FileTooLarge`).
+- Parsing: pxr's own reason (`ParseError` with line and column,
+  `CorruptFile` for crate or usdz damage, `UnknownFormat`), with a hint when
+  the bytes do not match the extension (text in a `.usdc`).
+- Composition: `MissingSublayer`, `MissingReference`, `MissingPayload`,
+  `UnresolvedPrimPath`, and pxr's `UnresolvableDependency` for other asset
+  paths such as textures.
+- Stage metadata: a dangling defaultPrim is an error; an unset defaultPrim,
+  upAxis or metersPerUnit is a warning, since consumers fall back to Y up and
+  centimeters.
+- Physics: `NestedRigidBody` (without `resetXformStack`) and
+  `InvertedJointLimits`, plus pxr's UsdPhysics validators (dangling joint
+  bodies, nested articulation roots, invalid mass and inertia).
+- pxr's UsdValidation validators, listed in `validators`; the usdz package
+  rules (alignment, compression, file types) run only for a `.usdz`.
+
+`load_usd_file` fails with `error_type: LoadError` and `details.reason` set
+to the same access or parsing code, with pxr's message in `error`. A stage
+that opens with missing sublayers, references or payloads loads, and lists
+them in `warnings`. `simul usd validate` runs the same checks and exits 1
+when the file is invalid.
+
 ## Isaac Sim
 
 Requires a running Isaac Sim 5.1.0, 6.0.0 or 6.0.1 reachable over the bridge
@@ -237,6 +270,39 @@ Behaviour worth knowing:
   `r.RayTracing`, which only startup configuration sets, and one Unreal limits
   or rounds. Post-process settings live on PostProcessVolume actors, not in
   console variables, and this tool does not change them.
+- The actor tools take an actor's full object path, as `list_unreal_actors`
+  reports it, in the level open in the editor. A path that names no live actor
+  there fails with `NotFoundError`, `Actor not found: <path>` and why: nothing
+  is at that path, the actor was deleted (Unreal keeps a deleted actor in memory, empty,
+  until garbage collection), or it belongs to another map, loaded or not, or to
+  the running game during PIE. The actor is looked up among the objects already
+  loaded, so simul never loads a map that is not open: a lookup that loaded one
+  used to edit that map unseen and leave it dirty for the next Save All.
+- `set_unreal_actor_parent` attaches the actor to `parent_path`, or detaches it
+  with `detach: true` and an empty `parent_path`; one of the two is required.
+  The actor keeps its world location, rotation and scale, the change is one
+  undoable transaction, and the parent is read back: `parent_path` is the
+  parent afterwards (null once detached), with `previous_parent_path` and
+  `changed`. Unreal refuses, without a reason, to attach an actor to itself or
+  under one of its own children, or a Static actor under a parent that is not
+  Static; those come back as `ValidationError` (itself, a cycle) or
+  `InvalidState` (mobility, an actor without a root component) with the reason,
+  before anything changes. An attachment Unreal still refuses is an
+  `EngineError`, and its transaction is cancelled.
+- `add_unreal_component` adds an instance component the way the editor's Add
+  Component button does (`SubobjectDataSubsystem`): Remote Control refuses
+  `AddComponentByClass` on UE 5.7. `component_class` is a native class name
+  (`PointLightComponent`) or a class path (`/Script/Engine.PointLightComponent`,
+  a Blueprint component's `/Game/BP_Lamp.BP_Lamp_C`); a path into a map's
+  package is refused before anything loads. A scene component attaches under
+  `parent_component` (by name) or the root component, and becomes the root of
+  an actor without one; other components take no parent. The add and the name
+  are one undoable transaction, and the reply is read back from the actor:
+  `component_path`, `component_name`, `component_class`, `parent_component` and
+  `is_root`. An abstract class (Unreal adds one and fires an engine ensure), a
+  class that is not a component and a name already used inside the actor are
+  refused first. Unreal adds its usual helpers too, such as a light's editor
+  icon (a BillboardComponent).
 - Actor inspection, physics, materials and PIE start/stop/pause/resume use
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
@@ -420,12 +486,13 @@ Behaviour worth knowing:
     of actors missing simple collision, as `null`, since Unreal does not
     report mesh collision during PIE.
   - Editing actors already in the level by path (transform, lights, collision,
-    physics settings, visibility, materials) keeps working and changes the
-    editor world, which the running simulation does not see: it takes effect
-    the next time the simulation starts, and a physics or collision edit says
-    so in its `warning`. A physics or collision edit given the actor's path
-    in the simulation's world (`UEDPIE_<n>_<map>`) changes the running copy
-    instead, which is neither undoable nor saved.
+    physics settings, visibility, materials, parenting, components) keeps
+    working and changes the editor world, which the running simulation does
+    not see: it takes effect the next time the simulation starts, and a
+    physics or collision edit says so in its `warning`. A physics or collision
+    edit given the actor's path in the simulation's world (`UEDPIE_<n>_<map>`)
+    changes the running copy instead, which is neither undoable nor saved;
+    every other actor tool finds no actor at such a path.
   - `set_unreal_material_params` edits the material instance asset, which the
     running game uses too: an edit made during PIE shows in the game and stays
     after PIE stops.
@@ -492,6 +559,39 @@ Behaviour worth knowing:
   unsaved changes; save them with `save_blender_file`, or pass
   `discard_unsaved: true`. Headless (embedded) Blender does not track unsaved
   changes, so there it opens without the check.
+- `get_blender_object_info` reports an object's own transform (`location`,
+  `rotation_euler`, `scale`: relative to its parent and before constraints, as
+  Blender's Location, Rotation and Scale fields show them) and where it is in
+  the scene (`world_location`, `world_rotation_euler`,
+  `world_rotation_quaternion`, `world_scale`, and the exact `matrix_world`).
+  A turned child of a parent with non-uniform scale has a sheared world
+  matrix that no rotation and scale rebuild; the world rotation is then the
+  rotation nearest it (its polar decomposition), the parent's rotation times
+  the child's, where Blender's `decompose()` and `to_euler()` were 0.19 and
+  0.15 rad off for a glTF link under a parent scaled 0.5 on Z. It also
+  reports `rotation_mode`, the rotation as Blender stores it in that mode
+  (`rotation_in_mode`) and as a quaternion (`rotation_quaternion`). Euler
+  angles are in XYZ order throughout, whatever the object's rotation mode.
+- `set_blender_object_transform` writes the object's own transform:
+  `location` relative to its parent, and `rotation_euler` (XYZ) or
+  `rotation_quaternion` (`[w, x, y, z]`, normalized), converted to the
+  object's rotation mode, which is kept. Blender reads only the property of
+  that mode, so a plain `rotation_euler` write left a glTF import's
+  quaternion nodes unturned. `control_blender_ui`'s `set_property` of
+  `rotation_euler` converts the same way.
+- `set_blender_object_parent` keeps the child's world transform, as Blender's
+  Parent > Object (Keep Transform) does: the parent inverse cancels the
+  parent's transform, and a child without a previous parent keeps its own
+  values. `keep_transform: false` clears the parent inverse instead, so the
+  child's values become relative to the parent and it moves. A parent that is
+  the child itself or one of its descendants is refused (Blender ignores such
+  a parent without an error).
+- Reads of world-space transforms (object info, distance, bounds, bounding
+  box, parenting) evaluate the depsgraph first: in embedded (bpy module) mode
+  Blender leaves a transform written by an earlier call out of `matrix_world`
+  until then. An add-on built before `rotation_quaternion` and
+  `keep_transform` still answers calls that leave them at their defaults, with
+  its own behaviour; the newer reply fields then come back `null`.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
@@ -633,6 +733,44 @@ Behaviour worth knowing:
   collection, are not followed, so a camera that only they need is composed
   as well. An add-on built before this report answers without
   `pose_source` and `warning`, and the server returns them as `null`.
+- `export_blender_file` writes `file_path` exactly. The path must end in the
+  format's extension (`.obj`, `.fbx`, `.glb`/`.gltf`, `.usd`/`.usda`/`.usdc`/`.usdz`,
+  `.stl`, `.ply`); anything else is refused before Blender runs, as Blender's glTF
+  exporter would otherwise swap the extension (a `model.gltf` exported as GLB
+  used to overwrite `model.glb`). For GLTF the extension picks the layout: `.glb`
+  is GLB, `.gltf` is `GLTF_SEPARATE` (a `.bin` and textures beside it);
+  `gltf_format: "GLTF_EMBEDDED"` writes one `.gltf` with its data inline. The
+  reply's `files_written` lists every file the export created or changed in
+  that folder (and its `textures/` or newly created subfolders), `file_path`
+  first. An existing `.bin` or `.mtl` beside the file that the file being
+  replaced does not refer to is not overwritten unless
+  `overwrite_companion_files: true`; texture files a `GLTF_SEPARATE` export
+  writes replace files of the same name. Missing folders are created for every
+  format.
+- What to export: the whole scene by default, `selected_only` (an error when
+  nothing is selected, instead of an empty file), `object_names` or
+  `collection_name` (selected for the export, the previous selection restored
+  afterwards; a hidden object or one outside the view layer is refused, since
+  the exporter would leave it out). Children are not added to `object_names`.
+- Defaults that changed: `apply_modifiers` is on for every format (glTF used to
+  export the cage without its modifiers; USD always applies them, so `false` is
+  an error there), and `export_animation` is on for glTF, FBX and USD, also for
+  USD, whose exporter leaves animation out by default. `frame_start`/`frame_end`
+  set the scene's frame range for the export and restore it. FBX, OBJ, STL and
+  PLY take `axis_forward`/`axis_up` (together, on different axes) and
+  `global_scale`; USD takes `usd_up_axis` (`Y` rotates the scene to Y-up),
+  `meters_per_unit` (Blender 4.4+; the root is scaled so objects keep their
+  size) and `root_prim_path` (`""` for none). An option that does not apply to
+  the format, or that this Blender's exporter lacks, is an error rather than
+  ignored. `exporter_options` reports the operator properties that were set.
+  Edit, Pose and paint modes are left for the export, so unsaved mesh edits are
+  included, and entered again afterwards.
+- `import_blender_file` takes `scale`, about the world origin: OBJ, FBX, STL
+  and PLY pass it to Blender's importer; glTF (no importer option) and USD
+  (Blender 5.0.1's importer ignored it for USD files Blender wrote) scale the
+  imported root objects, and `warning` names roots whose transform is animated.
+  `save_blender_file` accepts only `.blend` paths, since the saved file becomes
+  the open document.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
   backtracks, and on a long object name such a pattern runs for hours on

@@ -20,7 +20,8 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # Version 5: open_blend_file takes discard_unsaved and refuses to discard unsaved changes, which
 # agent edits now count as. An older add-on would reject the argument, or, if it were left out,
 # open over the unsaved work without the check.
-PROTOCOL_VERSION = 5
+# Version 6: export_file takes object, modifier, animation and format options; import_file takes scale.
+PROTOCOL_VERSION = 6
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
