@@ -34,9 +34,11 @@ class _FakeIsaacClient:
 
     def __init__(self) -> None:
         self.executed_scripts: list[str] = []
+        self.timeouts: list[object] = []
 
-    async def execute(self, script: str):
+    async def execute(self, script: str, timeout_seconds=None):
         self.executed_scripts.append(script)
+        self.timeouts.append(timeout_seconds)
         # Return a fake successful result. _execute_json_script reads
         # ``result.output`` (not stdout) and json.loads it. We don't
         # actually run the script — we just need read_aovs to complete
@@ -50,11 +52,11 @@ class _FakeIsaacClient:
             traceback=None,
         )
 
-    async def execute_bridge_script_only(self, script: str):  # pragma: no cover
-        return await self.execute(script)
+    async def execute_bridge_script_only(self, script: str, timeout_seconds=None):  # pragma: no cover
+        return await self.execute(script, timeout_seconds)
 
-    async def execute_vscode_only(self, script: str):  # pragma: no cover
-        return await self.execute(script)
+    async def execute_vscode_only(self, script: str, timeout_seconds=None):  # pragma: no cover
+        return await self.execute(script, timeout_seconds)
 
 
 def _capture_script(*, aov_names=None, num_frames=5) -> str:
