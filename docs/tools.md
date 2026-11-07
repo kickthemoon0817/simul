@@ -23,6 +23,21 @@ No running application needed. File arguments must be inside the sandbox
 | Query | `get_prim_info`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
 | Edit | `create_prim`, `delete_prim`, `update_prim_attributes` |
 
+- **Bounds.** `get_bounding_box`, and the bounds in `get_prim_info` and
+  `summarize_scene`, are USD's own `UsdGeom.BBoxCache` bounds: every
+  transform applies and instances are followed. Only geometry whose purpose
+  is in `include_purposes` counts; the default, `default` and `render`, is
+  what renderers and simulators see, so `proxy` and `guide` geometry (often
+  collision shapes) needs `include_purposes` to be bounded. A prim with
+  nothing boundable is a successful result with `has_geometry: false` and
+  `bbox: null`, never a guessed box; `excluded_purposes_with_geometry` then
+  names the purposes left out that do hold geometry. `world_space: false`
+  bounds the prim in its own space (its descendants' transforms apply, its
+  own does not), and `time_code` evaluates animated transforms.
+- **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
+  is a `NotFoundError`; a relative, malformed or property path is a
+  `ValidationError`.
+
 ## Isaac Sim
 
 Requires a running Isaac Sim 5.1.0, 6.0.0 or 6.0.1 reachable over the bridge
