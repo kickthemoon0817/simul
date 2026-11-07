@@ -11,7 +11,7 @@ review asked for stays in place.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, List
 
 import pytest
 from typer.testing import CliRunner
@@ -75,7 +75,7 @@ def test_unreal_tools_flag_rejects_unknown_value(
 ) -> None:
     result = runner.invoke(app, ["server", "--unreal-tools", "medium"])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 2  # a bad invocation, as docs/cli.md says
     assert "Unknown --unreal-tools value" in result.output
     assert not captured_settings, "server started despite an invalid flag"
 

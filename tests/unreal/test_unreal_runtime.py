@@ -1033,73 +1033,8 @@ class TestUnrealRuntimeSessionPhase3:
         assert result["function_name"] == "GetActorBounds"
         assert result["return_value"] == '{"ReturnValue": 42}'
 
-    # -- set_actor_parent --
-
-    def test_set_actor_parent_attach(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_parent attaches child to parent."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "K2_AttachToActor":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.set_actor_parent(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Child_0",
-            parent_path="/Game/Maps/Test.Test:PersistentLevel.Parent_0",
-        ))
-
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Child_0"
-        assert result["parent_path"] == "/Game/Maps/Test.Test:PersistentLevel.Parent_0"
-
-    def test_set_actor_parent_detach(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_parent detaches when parent_path is None."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "K2_DetachFromActor":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.set_actor_parent(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Child_0",
-            parent_path=None,
-        ))
-
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Child_0"
-        assert result["parent_path"] is None
-
-    # -- add_component --
-
-    def test_add_component_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """add_component creates and returns component path."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "AddComponentByClass":
-                return FakeResponse({
-                    "ReturnValue": "/Game/Maps/Test.Test:PersistentLevel.Cube_0.PointLight_0"
-                })
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.add_component(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0",
-            component_class="PointLightComponent",
-            component_name="PointLight_0",
-        ))
-
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
-        assert result["component_class"] == "PointLightComponent"
-        assert "PointLight_0" in result["component_path"]
+    # set_actor_parent and add_component run editor scripts:
+    # tests/unreal/test_actor_hierarchy.py runs them against a fake editor.
 
     # -- set_actor_visibility --
 

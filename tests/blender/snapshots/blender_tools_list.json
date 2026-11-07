@@ -233,7 +233,7 @@
           "value": {
             "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "set_property only: three finite values for the active object; rotations in radians."
+            "description": "set_property only: three finite values for the active object; rotation_euler is XYZ radians, written in the object's rotation mode (quaternion, axis-angle, other order)."
           },
           "agent_id": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
@@ -300,7 +300,7 @@
     "get_blender_object_info": {
       "name": "get_blender_object_info",
       "title": "Get Blender Object Info",
-      "description": "Get detailed information about a single Blender object.",
+      "description": "Get detailed information about a single Blender object. location, rotation_euler (XYZ radians) and scale are its own transform, relative to its parent as Blender's Location, Rotation and Scale fields show them; world_location, world_rotation_euler, world_rotation_quaternion, world_scale and matrix_world give where it is in the scene. rotation_mode says how Blender stores the rotation (rotation_in_mode); rotation_quaternion gives it as a quaternion.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -642,7 +642,7 @@
     "set_blender_object_transform": {
       "name": "set_blender_object_transform",
       "title": "Set Blender Object Transform",
-      "description": "Set location, rotation, and/or scale on a Blender object.",
+      "description": "Set location, rotation, and/or scale of a Blender object's own transform, relative to its parent (Blender's Location, Rotation and Scale fields). rotation_euler is XYZ Euler radians, or pass rotation_quaternion [w, x, y, z] instead; either is converted to the object's rotation_mode (glTF imports store quaternions), which is kept. The reply reports the result, rotation_mode and world_location.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -651,17 +651,22 @@
           "location": {
             "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "New location [x, y, z] or None to keep current."
+            "description": "New location [x, y, z] relative to the parent, or None to keep current."
           },
           "rotation_euler": {
             "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "New rotation [rx, ry, rz] or None to keep current."
+            "description": "New rotation as XYZ Euler angles [rx, ry, rz] in radians, converted to the object's rotation_mode; None to keep current."
           },
           "scale": {
             "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
             "description": "New scale [sx, sy, sz] or None to keep current."
+          },
+          "rotation_quaternion": {
+            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "New rotation as a quaternion [w, x, y, z], normalized and converted to the object's rotation_mode; instead of rotation_euler."
           }
         },
         "required": ["object_name"]
@@ -672,13 +677,18 @@
     "set_blender_object_parent": {
       "name": "set_blender_object_parent",
       "title": "Set Blender Object Parent",
-      "description": "Parent one Blender object to another.",
+      "description": "Parent one Blender object to another. By default the child keeps its world transform, as Blender's Parent > Object (Keep Transform); keep_transform=false makes its own values relative to the parent, so it moves. A parent that is the child itself or one of its descendants is refused.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "child_name": {"description": "Object to parent.", "type": "string"},
-          "parent_name": {"description": "Object to be the parent.", "type": "string"}
+          "parent_name": {"description": "Object to be the parent.", "type": "string"},
+          "keep_transform": {
+            "default": true,
+            "description": "Keep the child's world transform (default); false clears the parent inverse, so the child's own values become relative to the parent and it moves.",
+            "type": "boolean"
+          }
         },
         "required": ["child_name", "parent_name"]
       },

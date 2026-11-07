@@ -47,38 +47,20 @@ Then add collision to the ground plane so physics objects interact with it:
 ```
 mcp__simul__add_isaac_collision
   prim_path: "/World/GroundPlane"
-  collision_type: "none"
 ```
 
-`collision_type: "none"` on a Plane means the plane uses its analytic shape (the correct choice for flat planes — mesh-based collision is unnecessary and less accurate).
+A Plane collides with its analytic shape (the correct choice for flat planes — mesh-based collision is unnecessary and less accurate), so it takes no `approximation`.
 
 ## Step 3: Create a Physics Scene
 
-The physics scene defines global simulation parameters including gravity. Create it via `execute_isaac_script` since there is no dedicated granular tool for this:
+The physics scene defines global simulation parameters including gravity:
 
 ```
-mcp__simul__execute_isaac_script
-  script: |
-    import json, traceback
-    try:
-        from pxr import UsdPhysics
-        import omni.usd
-        stage = omni.usd.get_context().get_stage()
-        scene_prim = stage.GetPrimAtPath("/physicsScene")
-        if not scene_prim.IsValid():
-            scene = UsdPhysics.Scene.Define(stage, "/physicsScene")
-            scene.CreateGravityDirectionAttr().Set((0, 0, -1))
-            scene.CreateGravityMagnitudeAttr().Set(9.81)
-            result = {"success": True, "created": True}
-        else:
-            result = {"success": True, "created": False, "note": "already exists"}
-    except Exception as e:
-        import traceback
-        result = {"success": False, "error": str(e), "traceback": traceback.format_exc()}
-    print(json.dumps(result))
+mcp__simul__create_isaac_physics_scene
+  prim_path: "/World/PhysicsScene"
 ```
 
-The gravity direction `(0, 0, -1)` is -Z (the Isaac Sim convention with Z-up). Gravity magnitude is in m/s². Check the existing physics scene at any time with `mcp__simul__get_isaac_physics_scene`.
+Gravity defaults to Earth gravity along the stage's negative up axis, scaled to its metersPerUnit (`[0, 0, -1]` at 9.81 on Isaac's Z-up metre stages; `[0, -1, 0]` at 981 on a Y-up centimetre stage). `gravity_magnitude` is taken in m/s². Check the existing physics scene at any time with `mcp__simul__get_isaac_physics_scene`, and set the physics rate or solver with `mcp__simul__configure_isaac_physics_scene`.
 
 ## Step 4: Add Lighting
 
@@ -173,8 +155,8 @@ For a quick working scene with ground, gravity, and lights in the fewest steps:
 1. `mcp__simul__ping_isaac` — confirm connection
 2. `mcp__simul__new_isaac_stage` — blank stage
 3. `mcp__simul__create_isaac_prim` — ground plane at `/World/GroundPlane`, type `"Plane"`, scale `[50,50,1]`
-4. `mcp__simul__add_isaac_collision` — collision on `/World/GroundPlane`, type `"none"`
-5. `mcp__simul__execute_isaac_script` — create `/physicsScene` with gravity
+4. `mcp__simul__add_isaac_collision` — collision on `/World/GroundPlane`
+5. `mcp__simul__create_isaac_physics_scene` — physics scene with gravity for the stage's up axis and units
 6. `mcp__simul__execute_isaac_script` — create `DistantLight` + `DomeLight`
 7. `mcp__simul__set_isaac_camera` — eye `[5,5,3]`, target `[0,0,0]`
 8. `mcp__simul__get_isaac_scene_summary` — verify
