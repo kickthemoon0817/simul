@@ -48,6 +48,8 @@
       "get_blender_object_trajectory",
       "bake_blender_simulation",
       "free_blender_bake",
+      "get_blender_rigid_body_world",
+      "set_blender_rigid_body_world",
       "execute_blender_script",
       "create_blender_mesh_from_data",
       "apply_simready_metadata",
@@ -115,6 +117,8 @@
       "get_blender_object_trajectory",
       "bake_blender_simulation",
       "free_blender_bake",
+      "get_blender_rigid_body_world",
+      "set_blender_rigid_body_world",
       "execute_blender_script",
       "create_blender_mesh_from_data",
       "apply_simready_metadata",
@@ -182,6 +186,8 @@
       "get_blender_object_trajectory",
       "bake_blender_simulation",
       "free_blender_bake",
+      "get_blender_rigid_body_world",
+      "set_blender_rigid_body_world",
       "create_blender_mesh_from_data",
       "apply_simready_metadata",
       "get_simready_metadata",
@@ -905,7 +911,7 @@
     "set_blender_frame_range": {
       "name": "set_blender_frame_range",
       "title": "Set Blender Frame Range",
-      "description": "Set the animation frame range.",
+      "description": "Set the animation frame range. An unbaked rigid-body cache follows it; a baked one keeps its range, with a warning.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1099,11 +1105,18 @@
     "get_blender_physics_state": {
       "name": "get_blender_physics_state",
       "title": "Get Blender Physics State",
-      "description": "Get current physics state of an object.",
+      "description": "Get an object's world pose and rigid-body state at the current frame. An unbaked simulation advances one frame at a time, so after a frame jump a body sits where it was last simulated: by default the scene first steps from the cache start to the current frame, as playback would (up to 400 000 body-frames). pose_source and simulated_for_frame say whether the pose is the simulation's for this frame; frames past the cache end hold the bodies at its last frame (past_cache_end). rigid_body_cache reports the cache range and bake state.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"object_name": {"description": "Name of the object.", "type": "string"}},
+        "properties": {
+          "object_name": {"description": "Name of the object.", "type": "string"},
+          "step_simulation": {
+            "default": true,
+            "description": "Step an unbaked rigid-body simulation from its cache start to the current frame before reading the pose, at most frames x bodies = 400 000; false reads the pose as it is.",
+            "type": "boolean"
+          }
+        },
         "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
@@ -1130,24 +1143,107 @@
     "bake_blender_simulation": {
       "name": "bake_blender_simulation",
       "title": "Bake Blender Simulation",
-      "description": "Bake physics simulation for a frame range.",
+      "description": "Bake the physics simulation for frame_start-frame_end (start before end), replacing an earlier bake: the simulation restarts from frame_start with the bodies' current transforms. scope 'rigid_body' (default) bakes only the rigid-body world's cache; 'all' bakes every point cache (rigid bodies, cloth, soft bodies, dynamic paint, particles). Refused for a disabled rigid body world. The reply gives the range the cache holds and warns about scene frames it leaves out, where bodies hold their pose. Runs on Blender's main thread: a long bake can outlast the client timeout.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "frame_start": {"description": "First frame to bake.", "type": "integer"},
-          "frame_end": {"description": "Last frame to bake.", "type": "integer"}
+          "frame_end": {"description": "Last frame to bake; after frame_start.", "type": "integer"},
+          "scope": {
+            "default": "rigid_body",
+            "description": "rigid_body bakes the rigid-body world's cache only (stepping each frame, then marking the cache baked), leaving cloth and other caches as they are; all frees and bakes every point cache in the scene, as Blender's Bake All Dynamics does: rigid bodies, cloth, soft bodies and dynamic paint over frame_start-frame_end, particle systems over the range their emission settings give.",
+            "enum": ["rigid_body", "all"],
+            "type": "string"
+          }
         },
         "required": ["frame_start", "frame_end"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "free_blender_bake": {
       "name": "free_blender_bake",
       "title": "Free Blender Bake",
-      "description": "Free (delete) baked physics simulation data.",
+      "description": "Free baked physics simulation data over the same scope as bake_blender_simulation ('rigid_body' by default, or 'all'). A freed cache gets the scene's frame range back, so the simulation is not cut off at the last bake's end frame. freed lists the caches that were baked.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scope": {
+            "default": "rigid_body",
+            "description": "rigid_body frees the rigid-body world's cache only; all frees every point cache in the scene (rigid bodies, cloth, soft bodies, dynamic paint, particles).",
+            "enum": ["rigid_body", "all"],
+            "type": "string"
+          }
+        }
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "get_blender_rigid_body_world": {
+      "name": "get_blender_rigid_body_world",
+      "title": "Get Blender Rigid Body World",
+      "description": "Get the scene's rigid body world: enabled, scene gravity, substeps, solver iterations, time scale, split impulse, body and constraint counts, and the cache range and bake state (rigid_body_cache). Bodies hold their pose past the cache end; warnings name a disabled world or a cache that leaves out part of the scene range.",
       "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
+      "annotations": {"readOnlyHint": true, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "set_blender_rigid_body_world": {
+      "name": "set_blender_rigid_body_world",
+      "title": "Set Blender Rigid Body World",
+      "description": "Change the scene's rigid body world, adding one when there is none; only the given settings change. gravity is the scene's, shared with cloth, soft bodies and particles. A baked cache keeps playing its bake (changed settings apply after free_blender_bake and a new bake), and its range cannot change until freed. Replies like get_blender_rigid_body_world.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+            "default": null,
+            "description": "Run the simulation; a disabled world leaves bodies at their own transforms."
+          },
+          "gravity": {
+            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "Scene gravity [x, y, z] in m/s^2, shared with cloth, soft bodies and particles; Blender's default is [0, 0, -9.81]."
+          },
+          "use_gravity": {
+            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+            "default": null,
+            "description": "Apply the scene gravity."
+          },
+          "substeps_per_frame": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Simulation steps per frame, 1-32767."
+          },
+          "solver_iterations": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Constraint solver iterations per step, 1-1000."
+          },
+          "time_scale": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Simulation speed relative to the scene's frame rate, 0-100."
+          },
+          "use_split_impulse": {
+            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+            "default": null,
+            "description": "Reduce extra velocity from penetration recovery."
+          },
+          "cache_frame_start": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "First simulated frame."
+          },
+          "cache_frame_end": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Last simulated frame; after cache_frame_start."
+          }
+        }
+      },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },

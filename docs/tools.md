@@ -294,7 +294,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Objects | `create_blender_object`, `delete_blender_object`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `get_blender_mesh_info`, `add_blender_modifier` |
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
 | Materials and lights | `get_blender_material_info`, `assign_blender_material`, `set_blender_light_params` |
-| Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake` |
+| Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`, `get_blender_rigid_body_world`, `set_blender_rigid_body_world` |
 | Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `delete_blender_keyframe`, `get_blender_keyframes`, `get_blender_object_trajectory` |
 | Camera and viewport | `get_blender_camera_info`, `set_blender_camera_view`, `get_blender_viewport_info`, `focus_blender_on_object`, `capture_blender_viewport`, `capture_blender_viewport_sequence` |
 | UI and attachment | `control_blender_ui`, `attach_blender_window` |
@@ -444,6 +444,49 @@ Behaviour worth knowing:
   collection, are not followed, so a camera that only they need is composed
   as well. An add-on built before this report answers without
   `pose_source` and `warning`, and the server returns them as `null`.
+- Rigid bodies simulate only inside the rigid-body world's cache range
+  (`rigid_body_cache` in the replies of `get_blender_rigid_body_world`,
+  `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`
+  and `set_blender_frame_range`): past its end Blender holds the bodies at the
+  end frame's pose. Blender makes a new world's cache 1-250 whatever the scene
+  range, so a world simul adds covers the scene's frame range instead;
+  `set_blender_frame_range` moves an unbaked cache with the scene range and
+  warns when a baked one leaves part of it out; and `free_blender_bake` gives a
+  freed cache the scene range back. `set_blender_rigid_body_world` sets the
+  range explicitly, along with `enabled`, the scene gravity (shared with cloth,
+  soft bodies and particles), substeps, solver iterations, time scale and split
+  impulse, adding the world when there is none. A baked cache's range changes
+  only after it is freed, and changed settings reach a baked simulation only
+  after a new bake; the reply's `warnings` says so.
+- `bake_blender_simulation` replaces an earlier bake. Blender skips a cache that
+  is already baked, so a second bake used to report the new range over the old
+  frames; the bake is freed first and the simulation restarts at `frame_start`
+  from the bodies' current transforms. `frame_start` must come before
+  `frame_end`: an inverted range baked nothing and left new bodies unable to
+  move. `scope: "rigid_body"` (the default) bakes only the rigid-body cache, by
+  stepping each frame and then marking that cache baked, because Blender 5.0.1's
+  `ptcache.bake` given that cache baked every cache in the scene (a cloth over
+  its own 250 frames) while `ptcache.free_bake` freed only the one.
+  `scope: "all"` frees and bakes every point cache, as Bake All Dynamics does:
+  rigid bodies, cloth, soft bodies and dynamic paint over the requested range,
+  particle systems over the range their emission settings give.
+  `free_blender_bake` takes the same scope and lists what it `freed`. A disabled
+  rigid body world is refused rather than marked baked with no frames. The bake
+  runs on Blender's main thread, stepping every frame, and the scene returns to
+  its current frame afterwards.
+- `get_blender_physics_state` steps an unbaked simulation from the cache start
+  to the current frame before reading the pose (`step_simulation`, default
+  true, at most 400 000 frames x bodies), as playback would: an unbaked
+  simulation advances one frame at a time, so after `set_blender_frame` jumped
+  from 1 to 48 a falling body still sat at its starting pose. Frames Blender has
+  cached are read, not simulated again. `pose_source` says where the pose comes
+  from: `simulation` or `baked`; `before_cache` (the starting pose);
+  `past_cache_end` (held at the cache's last frame); `world_disabled`; `unknown`
+  when it was not stepped; or `evaluated` for an object nothing simulates (no
+  rigid body, passive, animated or disabled). `simulated_for_frame` says whether
+  the pose is the simulation's result for the frame, and `warning` explains
+  when it is not. An add-on built before this report answers without these
+  fields, and the server returns them as `null`.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
   backtracks, and on a long object name such a pattern runs for hours on
