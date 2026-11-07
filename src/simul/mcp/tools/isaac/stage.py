@@ -9,6 +9,7 @@ from ._shared import (
     _compose_script,
     _pyval,
 )
+from .graph import script_guard_source
 from .._meta import SandboxedPath, tool_meta
 
 # What the in-place save is about to write, read before anything is written so
@@ -68,8 +69,10 @@ TIMELINE_GUARD_CORE = """\
 CONVERT_FIRST_SUFFIXES: tuple[str, ...] = (".obj", ".fbx", ".gltf", ".glb", ".stl", ".dae", ".3ds", ".ply")
 
 # Resolves which prim of an asset a reference targets, adds the reference,
-# checks that it composed something, and corrects or reports a metersPerUnit /
-# upAxis mismatch. Defines _reference_asset(...) and _unique_path(stage, path).
+# checks that it composed something and holds no code-running node, and
+# corrects or reports a metersPerUnit / upAxis mismatch. Every failure undoes
+# what the call created or changed. Defines _import_asset(...) and
+# _reference_on_prim(...); needs script_guard_source() for the node check.
 REFERENCE_ASSET_CORE = """\
     import math
 
@@ -81,30 +84,50 @@ REFERENCE_ASSET_CORE = """\
             index += 1
         return path + "_" + str(index)
 
+    def _first_missing(stage, path):
+        # The top-most prim on the way to path that does not exist yet:
+        # removing it undoes every ancestor DefinePrim creates along with path.
+        current = Sdf.Path(path)
+        top = None
+        while current != Sdf.Path.absoluteRootPath and not stage.GetPrimAtPath(current).IsValid():
+            top = current
+            current = current.GetParentPath()
+        return top
+
+    def _failure(message, error_type, code=None, **extra):
+        result = {"error": message, "error_type": error_type}
+        if code is not None:
+            result["details"] = {"code": code}
+        result.update(extra)
+        return result
+
     def _asset_root(layer, asset_prim_path):
-        # (prim path to reference or None for the defaultPrim, warning, error)
+        # (prim path to reference or None for the defaultPrim, its name, warning, failure)
         if asset_prim_path is not None:
             if layer.GetPrimAtPath(asset_prim_path) is None:
-                return None, None, "No prim " + asset_prim_path + " in " + layer.identifier
-            return asset_prim_path, None, None
+                return None, None, None, _failure(
+                    "No prim " + asset_prim_path + " in " + layer.identifier + "; nothing was changed",
+                    "NotFoundError",
+                )
+            return asset_prim_path, Sdf.Path(asset_prim_path).name, None, None
         if layer.defaultPrim:
-            return None, None, None
+            return None, str(layer.defaultPrim).strip("/").split("/")[-1], None, None
         for spec in layer.rootPrims:
             if spec.specifier == Sdf.SpecifierDef:
-                return str(spec.path), (
+                return str(spec.path), spec.name, (
                     "The asset has no defaultPrim; referenced its first root prim "
                     + str(spec.path) + ". Pass asset_prim_path to choose another."
                 ), None
-        return None, None, "The asset has no defaultPrim and no root prim to reference: " + layer.identifier
+        return None, None, None, _failure(
+            "The asset has no defaultPrim and no root prim to reference: " + layer.identifier
+            + "; nothing was changed",
+            "ValidationError", "ASSET_HAS_NO_PRIMS",
+        )
 
-    def _layer_metrics(layer):
+    def _metrics(stage, layer):
         root = layer.pseudoRoot
-        meters = float(root.GetInfo("metersPerUnit")) if root.HasInfo("metersPerUnit") else None
-        up_axis = str(root.GetInfo("upAxis")) if root.HasInfo("upAxis") else None
-        return meters, up_axis
-
-    def _units(stage, prim, layer, correct):
-        asset_meters, asset_up = _layer_metrics(layer)
+        asset_meters = float(root.GetInfo("metersPerUnit")) if root.HasInfo("metersPerUnit") else None
+        asset_up = str(root.GetInfo("upAxis")) if root.HasInfo("upAxis") else None
         stage_meters = float(UsdGeom.GetStageMetersPerUnit(stage)) or 1.0
         stage_up = str(UsdGeom.GetStageUpAxis(stage))
         scale = None
@@ -113,7 +136,12 @@ REFERENCE_ASSET_CORE = """\
         rotate_x = None
         if asset_up is not None and asset_up != stage_up:
             rotate_x = 90.0 if (asset_up, stage_up) == ("Y", "Z") else -90.0
-        report = {
+        notes = []
+        if asset_meters is None:
+            notes.append("the asset does not author metersPerUnit (USD's fallback is centimetres); no scale applied")
+        if asset_up is None:
+            notes.append("the asset does not author upAxis; no rotation applied")
+        return {
             "asset_meters_per_unit": asset_meters,
             "asset_up_axis": asset_up,
             "stage_meters_per_unit": stage_meters,
@@ -121,83 +149,179 @@ REFERENCE_ASSET_CORE = """\
             "scale_needed": scale,
             "rotate_x_needed": rotate_x,
             "applied": False,
+            "notes": notes,
         }
-        notes = []
-        if asset_meters is None:
-            notes.append("the asset does not author metersPerUnit (USD's fallback is centimetres); no scale applied")
-        if asset_up is None:
-            notes.append("the asset does not author upAxis; no rotation applied")
-        if (scale is not None or rotate_x is not None) and correct:
-            if not prim.IsA(UsdGeom.Xformable):
-                notes.append("the referenced prim is a " + prim.GetTypeName() + ", not Xformable; nothing applied")
-            else:
-                # Suffixed ops at the end of the op order: innermost, so the
-                # asset is converted before any transform the caller sets, and
-                # set_isaac_prim_transform leaves them alone.
-                xformable = UsdGeom.Xformable(prim)
-                if rotate_x is not None:
-                    attr = prim.GetAttribute("xformOp:rotateX:unitsResolve")
-                    op = UsdGeom.XformOp(attr) if attr.IsValid() else xformable.AddRotateXOp(
-                        UsdGeom.XformOp.PrecisionFloat, "unitsResolve")
-                    op.Set(rotate_x)
-                if scale is not None:
-                    attr = prim.GetAttribute("xformOp:scale:unitsResolve")
-                    op = UsdGeom.XformOp(attr) if attr.IsValid() else xformable.AddScaleOp(
-                        UsdGeom.XformOp.PrecisionFloat, "unitsResolve")
-                    op.Set(Gf.Vec3f(scale, scale, scale))
-                report["applied"] = True
-                report["xform_op_order"] = [op.GetOpName() for op in xformable.GetOrderedXformOps()]
-        elif scale is not None or rotate_x is not None:
-            notes.append("mismatch reported, not corrected (correct_units=false)")
-        if notes:
-            report["notes"] = notes
-        return report
 
-    def _edit_spec(stage, prim):
+    def _needs_correction(units):
+        return units["scale_needed"] is not None or units["rotate_x_needed"] is not None
+
+    def _add_correction_ops(prim, units):
+        # Suffixed ops, so set_isaac_prim_transform leaves them alone, at the
+        # end of the op order: innermost, converting before any transform the
+        # caller sets on this prim.
+        xformable = UsdGeom.Xformable(prim)
+        if units["rotate_x_needed"] is not None:
+            attr = prim.GetAttribute("xformOp:rotateX:unitsResolve")
+            op = UsdGeom.XformOp(attr) if attr.IsValid() else xformable.AddRotateXOp(
+                UsdGeom.XformOp.PrecisionFloat, "unitsResolve")
+            op.Set(units["rotate_x_needed"])
+        if units["scale_needed"] is not None:
+            scale = units["scale_needed"]
+            attr = prim.GetAttribute("xformOp:scale:unitsResolve")
+            op = UsdGeom.XformOp(attr) if attr.IsValid() else xformable.AddScaleOp(
+                UsdGeom.XformOp.PrecisionFloat, "unitsResolve")
+            op.Set(Gf.Vec3f(scale, scale, scale))
+        units["applied"] = True
+        units["correction_prim"] = str(prim.GetPath())
+        units["xform_op_order"] = [op.GetOpName() for op in xformable.GetOrderedXformOps()]
+
+    def _references_undo(stage, prim):
+        # Restores the edit target's references list op on prim as it is now.
         target = stage.GetEditTarget()
-        return target.GetLayer(), target.MapToSpecPath(prim.GetPath())
+        layer = target.GetLayer()
+        spec_path = target.MapToSpecPath(prim.GetPath())
+        spec = layer.GetPrimAtPath(spec_path)
+        had = spec is not None and spec.HasInfo("references")
+        previous = spec.GetInfo("references") if had else None
 
-    def _reference_asset(stage, prim, asset_path, asset_prim_path, correct_units, created):
-        layer = Sdf.Layer.FindOrOpen(asset_path)
-        root_path, warning, error = _asset_root(layer, asset_prim_path)
-        if error is not None:
-            if created:
-                stage.RemovePrim(prim.GetPath())
-            return {"error": error + "; nothing was changed"}
+        def _undo():
+            current = layer.GetPrimAtPath(spec_path)
+            if current is None:
+                return
+            if had:
+                current.SetInfo("references", previous)
+            else:
+                current.ClearInfo("references")
+
+        return _undo
+
+    def _add_reference(prim, asset_path, root_path):
+        # "already", "nothing" (and undone) or "added"
         reference = Sdf.Reference(asset_path, root_path) if root_path else Sdf.Reference(asset_path)
         existing = prim.GetMetadata("references")
         for item in (existing.GetAppliedItems() if existing else []):
             if item.assetPath == reference.assetPath and item.primPath == reference.primPath:
-                return {"already_referenced": True, "referenced_prim": root_path or layer.defaultPrim}
-        edit_layer, spec_path = _edit_spec(stage, prim)
-        spec = edit_layer.GetPrimAtPath(spec_path)
-        had = spec is not None and spec.HasInfo("references")
-        previous = spec.GetInfo("references") if had else None
+                return "already"
         before = len(prim.GetPrimStack())
         prim.GetReferences().AddReference(reference)
         if len(prim.GetPrimStack()) <= before:
-            # Nothing composed: undo the reference rather than leave an empty
-            # prim behind that reads as an import.
-            if created:
-                stage.RemovePrim(prim.GetPath())
+            return "nothing"
+        return "added"
+
+    def _composed_nothing(asset_path, root_path, root_name):
+        return _failure(
+            "The reference to " + asset_path + " composed nothing"
+            + (" (prim " + root_path + ")" if root_path else " (its defaultPrim " + str(root_name) + ")")
+            + "; nothing was changed",
+            "ValidationError", "REFERENCE_COMPOSED_NOTHING",
+        )
+
+    def _code_nodes_refusal(found):
+        return _failure(
+            "The asset contains node(s) that run Python given as data ("
+            + ", ".join(found[:5]) + "). Script execution is disabled by "
+            "security.allow_script_execution; nothing was changed.",
+            "ScriptExecutionDisabled", None, script_capable_prims=found,
+        )
+
+    def _import_asset(stage, asset_path, requested, asset_prim_path, correct_units, guard):
+        layer = Sdf.Layer.FindOrOpen(asset_path)
+        root_path, root_name, warning, failure = _asset_root(layer, asset_prim_path)
+        if failure is not None:
+            return failure
+        units = _metrics(stage, layer)
+        target = _unique_path(stage, requested)
+        created = _first_missing(stage, target)
+        wrapped = correct_units and _needs_correction(units)
+        if wrapped:
+            # The correction sits on a wrapper Xform with the reference on its
+            # child, so the asset root's own transform (in asset units) is
+            # converted too, and a transform the caller later sets on the
+            # wrapper cannot drop it.
+            wrapper = UsdGeom.Xform.Define(stage, target).GetPrim()
+            _add_correction_ops(wrapper, units)
+            holder = stage.DefinePrim(Sdf.Path(target).AppendChild(root_name))
+        else:
+            holder = stage.DefinePrim(target)
+            if _needs_correction(units):
+                units["notes"].append("mismatch reported, not corrected (correct_units=false)")
+        if _add_reference(holder, asset_path, root_path) != "added":
+            stage.RemovePrim(created)
+            return _composed_nothing(asset_path, root_path, root_name)
+        found = _script_capable_prims_under(holder) if guard else []
+        if found:
+            stage.RemovePrim(created)
+            return _code_nodes_refusal(found)
+        result = {
+            "referenced_prim": root_path or "/" + root_name,
+            "used_default_prim": root_path is None,
+            "asset_root_path": str(holder.GetPath()),
+            "prim_type": holder.GetTypeName(),
+            "child_count": len(holder.GetChildren()),
+            "units": units,
+        }
+        if warning is not None:
+            result["warning"] = warning
+        return result
+
+    def _reference_on_prim(stage, prim_path, asset_path, asset_prim_path, correct_units, guard):
+        layer = Sdf.Layer.FindOrOpen(asset_path)
+        root_path, root_name, warning, failure = _asset_root(layer, asset_prim_path)
+        if failure is not None:
+            return failure
+        prim = stage.GetPrimAtPath(prim_path)
+        created = None
+        if not prim.IsValid():
+            created = _first_missing(stage, prim_path)
+            prim = stage.DefinePrim(prim_path)
+        if prim.IsInstanceProxy():
+            return _failure("Prim is inside an instance and cannot be edited here: " + prim_path, "ValidationError",
+                            "INSTANCE_PROXY")
+        undo = _references_undo(stage, prim)
+
+        def _roll_back():
+            if created is not None:
+                stage.RemovePrim(created)
             else:
-                spec = edit_layer.GetPrimAtPath(spec_path)
-                if had:
-                    spec.SetInfo("references", previous)
-                else:
-                    spec.ClearInfo("references")
-            return {"error": (
-                "The reference to " + asset_path + " composed nothing"
-                + (" (prim " + root_path + ")" if root_path else " (its defaultPrim " + layer.defaultPrim + ")")
-                + "; nothing was changed"
-            )}
+                undo()
+
+        status = _add_reference(prim, asset_path, root_path)
+        if status == "already":
+            return {"already_referenced": True, "referenced_prim": root_path or "/" + root_name}
+        if status == "nothing":
+            _roll_back()
+            return _composed_nothing(asset_path, root_path, root_name)
+        found = _script_capable_prims_under(prim) if guard else []
+        if found:
+            _roll_back()
+            return _code_nodes_refusal(found)
+        units = _metrics(stage, layer)
+        if _needs_correction(units) and correct_units:
+            own_ops = [
+                op.GetOpName() for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
+                if not op.GetOpName().endswith(":unitsResolve")
+            ] if prim.IsA(UsdGeom.Xformable) else None
+            if own_ops is None:
+                units["notes"].append("the prim is a " + prim.GetTypeName() + ", not Xformable; nothing applied")
+            elif own_ops:
+                # Ops from the asset root are in asset units; corrected in
+                # place they would apply unconverted.
+                units["notes"].append(
+                    "the prim already has transform ops (" + ", ".join(own_ops) + "); a correction "
+                    "here would leave them unconverted, so none was applied. import_isaac_asset "
+                    "wraps the reference in a corrected Xform instead."
+                )
+            else:
+                _add_correction_ops(prim, units)
+        elif _needs_correction(units):
+            units["notes"].append("mismatch reported, not corrected (correct_units=false)")
         result = {
             "already_referenced": False,
-            "referenced_prim": root_path or layer.defaultPrim,
+            "referenced_prim": root_path or "/" + root_name,
             "used_default_prim": root_path is None,
             "prim_type": prim.GetTypeName(),
             "child_count": len(prim.GetChildren()),
-            "units": _units(stage, prim, layer, correct_units),
+            "units": units,
         }
         if warning is not None:
             result["warning"] = warning
@@ -501,10 +625,13 @@ class StageAssetMixin:
             "the import goes to the first free target_path_N, reported as target_path. "
             "Without a defaultPrim the asset's first root prim is referenced (reported), or "
             "pass asset_prim_path; a reference that composes nothing is undone and fails. "
-            "A metersPerUnit/upAxis mismatch the asset authors is corrected with "
-            "xformOp:scale:unitsResolve / xformOp:rotateX:unitsResolve on the new prim "
-            "(correct_units=false only reports it). OBJ/FBX/glTF need converting to USD "
-            "first. "
+            "A metersPerUnit/upAxis mismatch the asset authors is corrected: target_path "
+            "becomes an Xform carrying xformOp:scale:unitsResolve / "
+            "xformOp:rotateX:unitsResolve and the asset is referenced on its child "
+            "<target_path>/<asset root name>, reported as asset_root_path "
+            "(correct_units=false only reports it). With security.allow_script_execution "
+            "off, an asset containing code-running OmniGraph nodes is refused. "
+            "OBJ/FBX/glTF need converting to USD first. "
             "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
         read_only=False,
@@ -528,16 +655,19 @@ class StageAssetMixin:
                 the asset's defaultPrim, or its first root prim when it has
                 none.
             correct_units: When the asset authors a metersPerUnit or upAxis
-                that differs from the stage's, add a uniform
-                ``xformOp:scale:unitsResolve`` (asset / stage metersPerUnit)
-                and an ``xformOp:rotateX:unitsResolve`` (+-90 degrees) at the
-                end of the new prim's op order. With false the mismatch is
-                only reported. Metrics the asset does not author are not
-                guessed at.
+                that differs from the stage's, make ``target_path`` an Xform
+                with a uniform ``xformOp:scale:unitsResolve`` (asset / stage
+                metersPerUnit) and an ``xformOp:rotateX:unitsResolve``
+                (+-90 degrees), and reference the asset on its child named
+                after the asset root, so the root's own transform is
+                converted too. With false the mismatch is only reported.
+                Metrics the asset does not author are not guessed at.
 
         Returns:
             Dict with the ``target_path`` used (and ``requested_target_path``),
-            the ``referenced_prim``, the composed ``prim_type`` and
+            ``asset_root_path`` (where the asset's root prim composes:
+            ``target_path``, or its child when a correction was applied), the
+            ``referenced_prim``, the composed ``prim_type`` and
             ``child_count``, and ``units`` (both sides' metrics, the correction
             needed and whether it was applied).
         """
@@ -555,12 +685,14 @@ class StageAssetMixin:
             from pxr import Gf, Sdf, UsdGeom
             """,
             OPEN_ASSET_CORE,
+            script_guard_source(),
             REFERENCE_ASSET_CORE,
             f"""\
             asset_path = {_asset_path}
             requested = {_pyval(target_path)}
             asset_prim_path = {_pyval(asset_prim_path)}
             correct_units = {_pyval(bool(correct_units))}
+            guard = {_pyval(not self.settings.security.allow_script_execution)}
             convert_hint = {_pyval(_convert_first_hint(asset_path))}
             """,
             """\
@@ -569,13 +701,15 @@ class StageAssetMixin:
             if stage is None:
                 print(json.dumps({"error": "No stage is currently open"}))
             elif asset_error is not None:
-                print(json.dumps({"error": asset_error + convert_hint}))
+                print(json.dumps({"error": asset_error + convert_hint, "error_type": "NotFoundError"}))
             elif not Sdf.Path.IsValidPathString(requested) or not Sdf.Path(requested).IsAbsolutePath():
-                print(json.dumps({"error": "target_path is not an absolute prim path: " + requested}))
+                print(json.dumps({
+                    "error": "target_path is not an absolute prim path: " + requested,
+                    "error_type": "ValidationError",
+                }))
             else:
                 target = _unique_path(stage, requested)
-                prim = stage.DefinePrim(target)
-                result = _reference_asset(stage, prim, asset_path, asset_prim_path, correct_units, True)
+                result = _import_asset(stage, asset_path, requested, asset_prim_path, correct_units, guard)
                 if "error" not in result:
                     result.update({
                         "asset_path": asset_path,
@@ -596,8 +730,11 @@ class StageAssetMixin:
             "from another USD file. Without a defaultPrim the asset's first root prim is "
             "referenced (reported), or pass asset_prim_path; a reference that composes nothing "
             "is undone and fails, and the same reference twice is reported, not duplicated. "
-            "A metersPerUnit/upAxis mismatch is reported; correct_units=true corrects it as "
-            "import_isaac_asset does. "
+            "A metersPerUnit/upAxis mismatch is reported; correct_units=true adds unitsResolve "
+            "ops on the prim only when it has no transform ops of its own (otherwise use "
+            "import_isaac_asset, which wraps the reference). With "
+            "security.allow_script_execution off, an asset containing code-running OmniGraph "
+            "nodes is refused. "
             "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
         read_only=False,
@@ -621,9 +758,12 @@ class StageAssetMixin:
                 the asset's defaultPrim, or its first root prim when it has
                 none.
             correct_units: Correct a metersPerUnit/upAxis mismatch the asset
-                authors with ``unitsResolve`` scale and rotateX ops, as
-                import_isaac_asset does. Off by default here: the prim may
-                carry other references and its own transform.
+                authors with ``unitsResolve`` scale and rotateX ops on the
+                prim. Applied only when the prim then has no other transform
+                ops: ops the asset root brings are in asset units and would
+                stay unconverted (reported in ``units.notes``; use
+                import_isaac_asset, which wraps the reference). Off by default
+                here: the prim may carry other references.
 
         Returns:
             Dict with ``added`` (false when the same reference was already
@@ -643,12 +783,14 @@ class StageAssetMixin:
             from pxr import Gf, Sdf, UsdGeom
             """,
             OPEN_ASSET_CORE,
+            script_guard_source(),
             REFERENCE_ASSET_CORE,
             f"""\
             prim_path = {_pyval(prim_path)}
             asset_path = {_ref_path}
             asset_prim_path = {_pyval(asset_prim_path)}
             correct_units = {_pyval(bool(correct_units))}
+            guard = {_pyval(not self.settings.security.allow_script_execution)}
             convert_hint = {_pyval(_convert_first_hint(reference_path))}
             """,
             """\
@@ -657,19 +799,16 @@ class StageAssetMixin:
             if stage is None:
                 print(json.dumps({"error": "No stage is currently open"}))
             elif asset_error is not None:
-                print(json.dumps({"error": asset_error + convert_hint}))
+                print(json.dumps({"error": asset_error + convert_hint, "error_type": "NotFoundError"}))
             elif not Sdf.Path.IsValidPathString(prim_path) or not Sdf.Path(prim_path).IsAbsolutePath():
-                print(json.dumps({"error": "prim_path is not an absolute prim path: " + prim_path}))
+                print(json.dumps({
+                    "error": "prim_path is not an absolute prim path: " + prim_path,
+                    "error_type": "ValidationError",
+                }))
             else:
-                prim = stage.GetPrimAtPath(prim_path)
-                created = not prim.IsValid()
-                if created:
-                    prim = stage.DefinePrim(prim_path)
-                if prim.IsInstanceProxy():
-                    result = {"error": "Prim is inside an instance and cannot be edited here: " + prim_path}
-                else:
-                    result = _reference_asset(stage, prim, asset_path, asset_prim_path, correct_units, created)
+                result = _reference_on_prim(stage, prim_path, asset_path, asset_prim_path, correct_units, guard)
                 if "error" not in result:
+                    prim = stage.GetPrimAtPath(prim_path)
                     references = prim.GetMetadata("references")
                     result.update({
                         "prim_path": prim_path,

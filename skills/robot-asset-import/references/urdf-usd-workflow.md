@@ -55,7 +55,7 @@ print(json.dumps({"articulation_root_added": robot_root_path}))
 `import_isaac_asset`:
 - Creates a new prim and references the asset in one step (an occupied target path gets a `_N` suffix)
 - Best for first-time placement
-- Corrects an authored metersPerUnit / upAxis mismatch with `unitsResolve` xform ops
+- Corrects an authored metersPerUnit / upAxis mismatch with `unitsResolve` xform ops on a wrapper Xform, referencing the asset on its child (`asset_root_path`)
 
 `add_isaac_reference`:
 - Attaches a USD file as a composition arc (reference) on an existing prim

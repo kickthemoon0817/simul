@@ -7,7 +7,7 @@ from ._shared import (
     PROTECTED_CARB_SETTING_PREFIXES,
     _pyval,
 )
-from .graph import SCRIPT_EXTENSIONS, _script_execution_refusal
+from .graph import _script_execution_refusal, is_script_extension
 from .._meta import tool_meta
 
 
@@ -112,7 +112,8 @@ class SystemMixin:
         description=(
             "Enable an extension immediately in the running Isaac Sim instance. With "
             "security.allow_script_execution off, the extensions that run Python attached to "
-            "the stage (omni.graph.scriptnode, omni.kit.scripting) are refused."
+            "the stage (omni.graph.scriptnode, omni.kit.scripting, omni.warp, and any with "
+            "'script' in its name) are refused."
         ),
         read_only=False,
         idempotent=True,
@@ -131,8 +132,7 @@ class SystemMixin:
             ScriptExecutionDisabled error for a script extension while
             script execution is off.
         """
-        bare_name = extension_id.rsplit("-", 1)[0] if "-" in extension_id else extension_id
-        if not self.settings.security.allow_script_execution and bare_name in SCRIPT_EXTENSIONS:
+        if not self.settings.security.allow_script_execution and is_script_extension(extension_id):
             return _script_execution_refusal(
                 f"Refusing to enable {extension_id!r}: it runs Python attached to the stage.",
                 extension_id=extension_id,
@@ -149,7 +149,7 @@ class SystemMixin:
             # Verify by matching on bare name or fully qualified ID — both are
             # accepted by the Kit extension manager, but get_extensions() always
             # returns the version-suffixed form in 'id' and the bare form in 'name'.
-            bare_query = ext_id.rsplit("-", 1)[0] if "-" in ext_id else ext_id
+            bare_query = ext_id.split("-", 1)[0]
             found = False
             for ext in ext_manager.get_extensions():
                 eid = ext.get("id", "")

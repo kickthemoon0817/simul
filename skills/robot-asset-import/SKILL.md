@@ -37,7 +37,7 @@ What the result tells you:
 
 - `target_path` is where the asset landed. An import never merges into an existing prim: when `/World/Robot` is taken it goes to `/World/Robot_1` (`renamed: true`).
 - `referenced_prim` is the asset prim that was referenced: its defaultPrim, or its first root prim when it has none (with a `warning`). Pass `asset_prim_path` to pick another. A reference that composes nothing fails and leaves nothing behind.
-- `units` compares the asset's metersPerUnit and upAxis with the stage's. When the asset authors different ones, the import adds `xformOp:scale:unitsResolve` / `xformOp:rotateX:unitsResolve` to the new prim (`correct_units: false` only reports it). An asset that does not author its units is not guessed at.
+- `units` compares the asset's metersPerUnit and upAxis with the stage's. When the asset authors different ones, `target_path` becomes an Xform carrying `xformOp:scale:unitsResolve` / `xformOp:rotateX:unitsResolve` and the asset is referenced on its child, `asset_root_path` (for example `/World/Robot/franka`). Address joints and links under `asset_root_path`; move the whole asset by transforming `target_path`. `correct_units: false` only reports the mismatch. An asset that does not author its units is not guessed at.
 
 For URDF files, convert to USD first (`references/urdf-usd-workflow.md`), then import the USD.
 

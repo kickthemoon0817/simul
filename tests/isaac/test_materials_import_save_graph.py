@@ -40,7 +40,12 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 from simul.adapters.isaac_socket_client import ScriptResult
 from simul.config import Settings
 from simul.mcp.registration._helpers import apply_success_from_error
-from simul.mcp.tools.isaac.graph import is_script_capable_node_type
+from simul.mcp.tools.isaac.graph import (
+    extension_bare_name,
+    is_script_attribute,
+    is_script_capable_node_type,
+    script_guard_source,
+)
 from simul.mcp.tools.isaac_tools import IsaacTools
 
 Captured = Tuple[IsaacTools, List[str]]
@@ -175,6 +180,12 @@ def test_the_old_example_name_is_refused_with_the_real_one_suggested(
 
     assert result["success"] is False
     assert "reflection_roughness_constant" in result["error"]
+    assert result["error_type"] == "ValidationError" and result["details"]["code"] == "UNKNOWN_INPUT"
+    missing = _call(
+        capturing_tools, run_on_stage, omnipbr_stage, "set_isaac_material_property",
+        material_path="/World/Looks/Nope", property_name="metallic_constant", value=1.0,
+    )
+    assert missing["error_type"] == "NotFoundError"
     assert not _shader(omnipbr_stage).GetInput("roughness_constant")
     real = _call(
         capturing_tools, run_on_stage, omnipbr_stage, "set_isaac_material_property",
@@ -247,6 +258,7 @@ def test_an_empty_property_name_is_refused_before_sending(capturing_tools: Captu
 def _asset(
     path: Path, *, default_prim: bool = True, up_axis: Optional[str] = "Z",
     meters_per_unit: Optional[float] = 1.0, prims: bool = True,
+    root_ops: Optional[str] = None, tip_at: Tuple[float, float, float] = (0, 100, 0),
 ) -> str:
     layer_stage = Usd.Stage.CreateNew(str(path))
     if up_axis is not None:
@@ -254,13 +266,22 @@ def _asset(
     if meters_per_unit is not None:
         UsdGeom.SetStageMetersPerUnit(layer_stage, meters_per_unit)
     if prims:
-        UsdGeom.Xform.Define(layer_stage, "/Robot")
+        root = UsdGeom.Xform.Define(layer_stage, "/Robot")
+        if root_ops == "translate":
+            root.AddTranslateOp().Set(Gf.Vec3d(0, 100, 0))
+        elif root_ops == "matrix":
+            root.AddTransformOp().Set(Gf.Matrix4d(1).SetTranslate(Gf.Vec3d(0, 100, 0)))
         tip = UsdGeom.Xform.Define(layer_stage, "/Robot/tip")
-        tip.AddTranslateOp().Set(Gf.Vec3d(0, 100, 0))
+        tip.AddTranslateOp().Set(Gf.Vec3d(*tip_at))
         if default_prim:
             layer_stage.SetDefaultPrim(layer_stage.GetPrimAtPath("/Robot"))
     layer_stage.Save()
     return str(path)
+
+
+def _world_position(stage: Usd.Stage, path: str) -> List[float]:
+    xformable = UsdGeom.Xformable(stage.GetPrimAtPath(path))
+    return list(xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation())
 
 
 @pytest.fixture
@@ -323,6 +344,7 @@ def test_a_reference_that_composes_nothing_is_undone(
     )
 
     assert imported["success"] is False and "No prim /Nope" in imported["error"]
+    assert imported["error_type"] == referenced["error_type"] == "NotFoundError"
     assert referenced["success"] is False
     assert list(holder.GetMetadata("references").GetAppliedItems()) == [Sdf.Reference(other)]
 
@@ -343,10 +365,15 @@ def test_importing_twice_never_merges_into_the_first_import(
     assert list(references.GetAppliedItems()) == [Sdf.Reference(first)]
 
 
+@pytest.mark.parametrize(
+    ("root_ops", "tip_at"),
+    [(None, (0, 100, 0)), ("translate", (0, 0, 0)), ("matrix", (0, 0, 0))],
+)
 def test_a_y_up_centimetre_asset_is_converted_to_the_z_up_metre_stage(
-    open_tools: Captured, run_on_stage: Any, tmp_path: Path
+    open_tools: Captured, run_on_stage: Any, tmp_path: Path, root_ops: Optional[str], tip_at: Tuple[float, ...]
 ) -> None:
-    asset = _asset(tmp_path / "cm.usda", up_axis="Y", meters_per_unit=0.01)
+    """The asset root's own transform is in asset units too, so it must be converted with the rest."""
+    asset = _asset(tmp_path / "cm.usda", up_axis="Y", meters_per_unit=0.01, root_ops=root_ops, tip_at=tip_at)
     stage = _world_stage()
 
     result = _call(open_tools, run_on_stage, stage, "import_isaac_asset", asset_path=asset)
@@ -354,11 +381,74 @@ def test_a_y_up_centimetre_asset_is_converted_to_the_z_up_metre_stage(
     units = result["units"]
     assert units["applied"] is True
     assert units["scale_needed"] == pytest.approx(0.01) and units["rotate_x_needed"] == 90.0
-    assert units["xform_op_order"][-2:] == ["xformOp:rotateX:unitsResolve", "xformOp:scale:unitsResolve"]
-    tip = UsdGeom.Xformable(stage.GetPrimAtPath("/World/ImportedAsset/tip"))
-    position = tip.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()
+    assert units["correction_prim"] == "/World/ImportedAsset"
+    assert units["xform_op_order"] == ["xformOp:rotateX:unitsResolve", "xformOp:scale:unitsResolve"]
+    assert result["asset_root_path"] == "/World/ImportedAsset/Robot"
     # 100 cm up the asset's Y axis is 1 m up the stage's Z axis.
-    assert list(position) == pytest.approx([0.0, 0.0, 1.0], abs=1e-6)
+    assert _world_position(stage, "/World/ImportedAsset/Robot/tip") == pytest.approx([0.0, 0.0, 1.0], abs=1e-6)
+
+
+def test_a_transform_set_after_import_keeps_the_units_correction(
+    open_tools: Captured, run_on_stage: Any, tmp_path: Path
+) -> None:
+    asset = _asset(tmp_path / "cm.usda", up_axis="Y", meters_per_unit=0.01, root_ops="matrix", tip_at=(0, 0, 0))
+    stage = _world_stage()
+    _call(open_tools, run_on_stage, stage, "import_isaac_asset", asset_path=asset)
+
+    moved = _call(
+        open_tools, run_on_stage, stage, "set_isaac_prim_transform",
+        prim_path="/World/ImportedAsset", translation=[5, 0, 0], rotation_euler=[0, 0, 90],
+    )
+
+    assert moved["success"] is True, moved
+    wrapper = UsdGeom.Xformable(stage.GetPrimAtPath("/World/ImportedAsset"))
+    order = [str(name) for name in wrapper.GetXformOpOrderAttr().Get()]
+    assert order[-2:] == ["xformOp:rotateX:unitsResolve", "xformOp:scale:unitsResolve"]
+    # Up 1 m (the root's own translate, converted), then rotated about Z and moved 5 m along X.
+    assert _world_position(stage, "/World/ImportedAsset/Robot/tip") == pytest.approx([5.0, 0.0, 1.0], abs=1e-6)
+
+
+@pytest.mark.parametrize(("root_ops", "applied"), [(None, True), ("translate", False)])
+def test_add_reference_corrects_units_in_place_only_without_root_transform_ops(
+    open_tools: Captured, run_on_stage: Any, tmp_path: Path, root_ops: Optional[str], applied: bool
+) -> None:
+    asset = _asset(tmp_path / "cm.usda", up_axis="Y", meters_per_unit=0.01, root_ops=root_ops, tip_at=(0, 0, 0))
+    stage = _world_stage()
+
+    result = _call(
+        open_tools, run_on_stage, stage, "add_isaac_reference",
+        prim_path="/World/Ref", reference_path=asset, correct_units=True,
+    )
+
+    assert result["success"] is True and result["units"]["applied"] is applied
+    if not applied:
+        assert any("import_isaac_asset" in note for note in result["units"]["notes"])
+        assert not stage.GetPrimAtPath("/World/Ref").HasAttribute("xformOp:scale:unitsResolve")
+
+
+def test_a_failed_import_removes_the_ancestors_it_created(
+    open_tools: Captured, run_on_stage: Any, tmp_path: Path
+) -> None:
+    dangling = tmp_path / "dangling.usda"
+    layer_stage = Usd.Stage.CreateNew(str(dangling))
+    UsdGeom.Xform.Define(layer_stage, "/Robot")
+    layer_stage.GetRootLayer().defaultPrim = "Missing"
+    layer_stage.Save()
+    stage = _world_stage()
+
+    imported = _call(
+        open_tools, run_on_stage, stage, "import_isaac_asset",
+        asset_path=str(dangling), target_path="/World/New/Deep/Asset",
+    )
+    referenced = _call(
+        open_tools, run_on_stage, stage, "add_isaac_reference",
+        prim_path="/World/Other/Deep/Ref", reference_path=str(dangling),
+    )
+
+    for result in (imported, referenced):
+        assert result["success"] is False and result["error_type"] == "ValidationError"
+        assert result["details"]["code"] == "REFERENCE_COMPOSED_NOTHING"
+    assert [child.GetName() for child in stage.GetPrimAtPath("/World").GetChildren()] == []
 
 
 def test_units_are_only_reported_when_correction_is_off_or_metrics_are_missing(
@@ -599,9 +689,14 @@ class _Node:
 
 
 class _Controller:
-    """``og.Controller``: knows two nodes; ``inputs:bad`` refuses any value."""
+    """``og.Controller``: knows a few nodes; ``inputs:bad`` refuses any value."""
 
     nodes: Dict[str, _Node] = {}
+    connections: List[Tuple[str, str]] = []
+
+    @classmethod
+    def connect(cls, source: str, target: str) -> None:
+        cls.connections.append((source, target))
 
     @classmethod
     def node(cls, path: str) -> _Node:
@@ -625,7 +720,11 @@ def _og_modules() -> Dict[str, types.ModuleType]:
     _Controller.nodes = {
         "/World/Graph/Move": _Node("omni.graph.nodes.Add"),
         "/World/Graph/Script": _Node("omni.graph.scriptnode.ScriptNode"),
+        "/World/Graph/Kernel": _Node("omni.warp.WarpKernel"),
+        "/World/Graph/Augment": _Node("omni.replicator.core.OgnAugment"),
+        "/World/Graph/Const": _Node("omni.graph.nodes.ConstantString"),
     }
+    _Controller.connections = []
     omni = types.ModuleType("omni")
     graph = types.ModuleType("omni.graph")
     core = types.ModuleType("omni.graph.core")
@@ -660,6 +759,7 @@ def test_all_attributes_set_is_a_success(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert result["success"] is True and result["count"] == 1
     assert missing["success"] is False and "Node not found" in missing["error"]
+    assert missing["error_type"] == "NotFoundError"
 
 
 def test_script_writes_are_refused_while_script_execution_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -679,7 +779,153 @@ def test_script_writes_are_refused_while_script_execution_is_off(monkeypatch: py
     assert allowed["success"] is True
 
 
-@pytest.mark.parametrize("node_type", ["omni.graph.scriptnode.ScriptNode", "my.ext.PythonScript"])
+@pytest.mark.parametrize(
+    ("node_path", "values"),
+    [
+        ("/World/Graph/Kernel", {"inputs:codeStr": "import os"}),
+        ("/World/Graph/Kernel", {"inputs:CodeFile": "/tmp/k.py"}),
+        ("/World/Graph/Augment", {"inputs:augmentationScript": "x"}),
+        ("/World/Graph/Const", {"inputs:conditionScript": "x"}),
+    ],
+)
+def test_code_attributes_are_refused_before_sending(
+    monkeypatch: pytest.MonkeyPatch, node_path: str, values: Dict[str, Any]
+) -> None:
+    result, sent = _graph_call(monkeypatch, False, node_path=node_path, values=values)
+
+    assert result["error_type"] == "ScriptExecutionDisabled" and sent == []
+
+
+@pytest.mark.parametrize("node_path", ["/World/Graph/Kernel", "/World/Graph/Augment"])
+def test_any_write_to_a_code_node_without_script_in_its_name_is_refused(
+    monkeypatch: pytest.MonkeyPatch, node_path: str
+) -> None:
+    result, sent = _graph_call(monkeypatch, False, node_path=node_path, values={"inputs:dim": 4})
+
+    assert len(sent) == 1
+    assert result["success"] is False and result["error_type"] == "ScriptExecutionDisabled"
+    assert _Controller.nodes[node_path].values == {}
+
+
+def _connect(
+    monkeypatch: pytest.MonkeyPatch, scripts: bool, source: str, target: str
+) -> Tuple[Dict[str, Any], List[str]]:
+    tools, captured = _recording_tools(_settings(scripts=scripts))
+    payload = asyncio.run(tools.connect_isaac_graph_nodes(source, target))
+    if not captured:
+        return payload, captured
+    return _run_kit_script(captured[-1], monkeypatch, _og_modules()), captured
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["/World/Graph/Script.inputs:script", "/World/Graph/Kernel.inputs:codeStr", "/World/Graph/Kernel.inputs:dim"],
+)
+def test_connections_into_code_are_refused_while_script_execution_is_off(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    _og_modules()  # resets the recorded connections
+    refused, _ = _connect(monkeypatch, False, "/World/Graph/Const.inputs:value", target)
+    assert refused["success"] is False and refused["error_type"] == "ScriptExecutionDisabled"
+    assert _Controller.connections == []
+
+    allowed, _ = _connect(monkeypatch, True, "/World/Graph/Const.inputs:value", target)
+    assert allowed["success"] is True and _Controller.connections == [("/World/Graph/Const.inputs:value", target)]
+
+
+def test_an_ordinary_connection_still_goes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    result, _ = _connect(monkeypatch, False, "/World/Graph/Const.inputs:value", "/World/Graph/Move.inputs:a")
+
+    assert result["success"] is True and result["connected"] is True
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("inputs:script", True), ("inputs:scriptPath", True), ("inputs:codeStr", True),
+        ("inputs:CODEFILE", True), ("inputs:augmentationScript", True),
+        ("/World/G/script.inputs:value", False), ("inputs:value", False), ("outputs:sum", False),
+    ],
+)
+def test_code_attribute_predicate(name: str, expected: bool) -> None:
+    assert is_script_attribute(name) is expected
+
+
+@pytest.mark.parametrize(
+    ("node_type", "expected"),
+    [
+        ("omni.graph.scriptnode.ScriptNode", True), ("omni.warp.WarpKernel", True),
+        ("OMNI.WARP.WARPKERNEL", True), ("omni.replicator.core.OgnAugmentCPU", True),
+        ("omni.replicator.core.OgnConditionScript", True), ("some.ext.WarpKernel", True),
+        ("omni.graph.nodes.Add", False), ("omni.graph.action.OnPlaybackTick", False),
+    ],
+)
+def test_script_capable_node_type_predicate(node_type: str, expected: bool) -> None:
+    assert is_script_capable_node_type(node_type) is expected
+
+
+def test_the_kit_side_guard_finds_code_nodes_in_a_subtree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World/Graph", "OmniGraph")
+    for name, node_type in (("add", "omni.graph.nodes.Add"), ("kernel", "omni.warp.WarpKernel")):
+        node = stage.DefinePrim("/World/Graph/" + name, "OmniGraphNode")
+        node.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(node_type)
+    hidden = stage.DefinePrim("/World/Graph/off", "OmniGraphNode")
+    hidden.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set("omni.graph.scriptnode.ScriptNode")
+    hidden.SetActive(False)
+    namespace: Dict[str, Any] = {}
+    exec(compile(script_guard_source(), "<guard>", "exec"), namespace)  # noqa: S102 - generated guard source
+
+    found = namespace["_script_capable_prims_under"](stage.GetPrimAtPath("/World"))
+
+    assert found == ["/World/Graph/kernel", "/World/Graph/off"]
+    assert namespace["_script_capable_prim"](stage.GetPrimAtPath("/World/Graph/add")) is False
+
+
+def _code_node_asset(path: Path, node_type: str) -> str:
+    layer_stage = Usd.Stage.CreateNew(str(path))
+    UsdGeom.Xform.Define(layer_stage, "/Asset")
+    layer_stage.DefinePrim("/Asset/Graph", "OmniGraph")
+    node = layer_stage.DefinePrim("/Asset/Graph/node", "OmniGraphNode")
+    node.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(node_type)
+    node.CreateAttribute("inputs:script", Sdf.ValueTypeNames.String).Set("import os")
+    layer_stage.SetDefaultPrim(layer_stage.GetPrimAtPath("/Asset"))
+    layer_stage.Save()
+    return str(path)
+
+
+@pytest.mark.parametrize("node_type", ["omni.graph.scriptnode.ScriptNode", "omni.warp.WarpKernel"])
+def test_assets_carrying_code_nodes_are_not_imported_while_script_execution_is_off(
+    run_on_stage: Any, tmp_path: Path, node_type: str
+) -> None:
+    asset = _code_node_asset(tmp_path / "graph.usda", node_type)
+    clean = _asset(tmp_path / "clean.usda")
+    stage = _world_stage()
+    holder = stage.DefinePrim("/World/Holder")
+    holder.GetReferences().AddReference(clean)
+    guarded = _recording_tools(_settings(sandbox=False, scripts=False))
+
+    imported = _call(guarded, run_on_stage, stage, "import_isaac_asset", asset_path=asset, target_path="/World/A/B")
+    referenced = _call(guarded, run_on_stage, stage, "add_isaac_reference", prim_path="/World/Holder",
+                       reference_path=asset)
+
+    for result in (imported, referenced):
+        assert result["success"] is False and result["error_type"] == "ScriptExecutionDisabled"
+        assert result["script_capable_prims"]
+    assert not stage.GetPrimAtPath("/World/A").IsValid()
+    assert list(holder.GetMetadata("references").GetAppliedItems()) == [Sdf.Reference(clean)]
+
+    allowed = _call(
+        _recording_tools(_settings(sandbox=False, scripts=True)), run_on_stage, stage, "import_isaac_asset",
+        asset_path=asset,
+    )
+    assert allowed["success"] is True
+
+
+@pytest.mark.parametrize("node_type", ["omni.graph.scriptnode.ScriptNode", "my.ext.PythonScript",
+                                       "omni.warp.WarpKernel", "omni.replicator.core.OgnAugment"])
 def test_script_nodes_are_not_created_while_script_execution_is_off(node_type: str) -> None:
     off, off_sent = _recording_tools(_settings(scripts=False))
     on, on_sent = _recording_tools(_settings(scripts=True))
@@ -734,7 +980,13 @@ def test_disable_reports_an_extension_that_stayed_enabled(monkeypatch: pytest.Mo
         assert "still enabled" in result["error"]
 
 
-@pytest.mark.parametrize("extension_id", ["omni.graph.scriptnode", "omni.kit.scripting-1.2.0"])
+@pytest.mark.parametrize(
+    "extension_id",
+    [
+        "omni.graph.scriptnode", "omni.kit.scripting-1.2.0", "omni.warp", "omni.warp-1.7.1-rc1",
+        "omni.graph.scriptnode-1.50.0+107.3.0", "omni.behavior.scripting.bundle",
+    ],
+)
 def test_script_extensions_are_not_enabled_while_script_execution_is_off(extension_id: str) -> None:
     off, off_sent = _recording_tools(_settings(scripts=False))
     on, on_sent = _recording_tools(_settings(scripts=True))
@@ -744,3 +996,17 @@ def test_script_extensions_are_not_enabled_while_script_execution_is_off(extensi
 
     assert refused["error_type"] == "ScriptExecutionDisabled" and off_sent == []
     assert len(on_sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("extension_id", "bare"),
+    [("omni.warp-1.7.1-rc1", "omni.warp"), ("khemoo.simul-0.1.0-rc1", "khemoo.simul"), ("omni.physx", "omni.physx")],
+)
+def test_extension_ids_end_their_name_at_the_first_hyphen(extension_id: str, bare: str) -> None:
+    assert extension_bare_name(extension_id) == bare
+
+
+def test_a_prerelease_transport_extension_id_is_still_protected() -> None:
+    tools, captured = _recording_tools(_settings())
+    result = asyncio.run(tools.disable_isaac_extension("khemoo.simul-0.1.0-rc1"))
+    assert result["error_type"] == "RefusedOperation" and captured == []

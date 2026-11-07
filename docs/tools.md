@@ -267,16 +267,21 @@ Notes:
   (convert OBJ, FBX and glTF first). They reference the asset's first root
   prim when it has no defaultPrim, and undo a reference that composes
   nothing. An import never merges into an existing prim (it goes to
-  `<target_path>_N`), and it corrects an authored metersPerUnit / upAxis
-  mismatch with `xformOp:scale:unitsResolve` and
-  `xformOp:rotateX:unitsResolve` on the new prim.
+  `<target_path>_N`). It corrects an authored metersPerUnit / upAxis
+  mismatch by making `target_path` an Xform with
+  `xformOp:scale:unitsResolve` and `xformOp:rotateX:unitsResolve` and
+  referencing the asset on its child `<target_path>/<asset root name>`
+  (`asset_root_path`), so the asset root's own transform is converted too.
+  A failed import removes every prim it created.
 - `save_isaac_stage` checks an in-place save's files against the write
   sandbox, needs `overwrite=true` for URL targets, and refuses while the
   timeline is playing or paused unless `allow_while_playing=true`.
 - `set_isaac_graph_node_values` fails when any attribute fails, still
-  reporting what was set. With script execution disabled, the graph and
-  extension tools refuse script nodes, script attributes and the script
-  extensions ([configuration.md](configuration.md#script-execution)).
+  reporting what was set. With script execution disabled, the graph, import
+  and extension tools refuse code-running nodes (ScriptNode,
+  omni.warp.WarpKernel, Replicator script nodes), code attributes,
+  connections into them and the script extensions
+  ([configuration.md](configuration.md#script-execution)).
   `disable_isaac_extension` fails when the extension stays enabled.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,
   selection, timeline and stage; `get_isaac_ui_window` walks one window's

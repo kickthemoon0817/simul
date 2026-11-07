@@ -149,15 +149,36 @@ default `true`). When `false`, the server does not register
 Unreal's `call_unreal_actor_function` and `batch_unreal_operations`
 dispatchers, and `simul isaac exec` / `simul unreal exec` return a
 `ScriptExecutionDisabled` error. The fixed granular tools, including
-`control_unreal_ui`, keep working. The OmniGraph tools close the
-script-node route to the same code path: `create_isaac_graph_node` refuses
-node types with `script` in their name (such as
-`omni.graph.scriptnode.ScriptNode`), `set_isaac_graph_node_values` refuses
-script attributes and any write to a script-capable node, and
-`enable_isaac_extension` refuses `omni.graph.scriptnode` and
-`omni.kit.scripting`, all with `ScriptExecutionDisabled`.
+`control_unreal_ui`, keep working.
 
-This is the only switch that removes the agent-authored code surface. The
+Isaac Sim also runs Python that an OmniGraph node carries as data:
+`omni.graph.scriptnode.ScriptNode` runs its `inputs:script`,
+`omni.warp.WarpKernel` imports its `inputs:codeStr`, and Replicator's
+augmentation and condition nodes run their `*Script` inputs. Both
+`omni.graph.scriptnode` and `omni.warp` are enabled in Isaac Sim's own
+`.kit`. With the switch off, these tools refuse with `ScriptExecutionDisabled`:
+
+- `create_isaac_graph_node` refuses those node types and any type with
+  `script` in its name.
+- `set_isaac_graph_node_values` refuses code attributes (`inputs:script*`,
+  `inputs:code*`, `*Script`) and any write to a script-capable node.
+- `connect_isaac_graph_nodes` refuses a connection into a code attribute or
+  into a script-capable node.
+- `import_isaac_asset` and `add_isaac_reference` refuse an asset whose
+  composed content holds such a node.
+- `enable_isaac_extension` refuses `omni.graph.scriptnode`,
+  `omni.kit.scripting`, `omni.warp` and any extension with `script` in its
+  name.
+
+Routes this does not close: the prim-editing tools (`set_isaac_prim_attribute`
+on a node's code attribute or `node:type`, `create_isaac_prim` and
+`duplicate_isaac_prim` of a code node) until they adopt the same check; a
+stage opened with `open_isaac_stage` that already contains such a node; and
+nodes already on the stage, which run when the graph evaluates. Treat the
+switch as removing the agent's direct code tools, not as a sandbox for an
+untrusted stage.
+
+The switch is the one that removes the agent-authored code tools. The
 Isaac bridge extension's `allow_unsafe_execution` setting (and
 `simul isaac bridge-set-unsafe`) only gates raw scripts sent over the
 bridge on port 8229. The bridge refuses such a script without running it,

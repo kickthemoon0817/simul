@@ -168,7 +168,7 @@ SET_MATERIAL_INPUT_CORE = """\
     def _set_material_input(stage, material_path, name, value, allow_unknown):
         prim = stage.GetPrimAtPath(material_path)
         if not prim.IsValid() or not prim.IsA(UsdShade.Material):
-            return {"error": "Material not found: " + material_path}
+            return {"error": "Material not found: " + material_path, "error_type": "NotFoundError"}
         material = UsdShade.Material(prim)
         source = material.ComputeSurfaceSource()
         shader = source[0] if source else None
@@ -176,7 +176,10 @@ SET_MATERIAL_INPUT_CORE = """\
             source = material.ComputeSurfaceSource("mdl")
             shader = source[0] if source else None
         if not shader:
-            return {"error": "No surface shader found on material " + material_path}
+            return {
+                "error": "No surface shader found on material " + material_path,
+                "error_type": "NotFoundError",
+            }
         if name.startswith("inputs:"):
             name = name[len("inputs:"):]
         kind = _shader_kind(shader)
@@ -204,12 +207,16 @@ SET_MATERIAL_INPUT_CORE = """\
                     message += ". Did you mean: " + ", ".join(close) + "?"
                 message += " Pass allow_unknown_input=true to create it anyway."
                 result["error"] = message
+                result["error_type"] = "ValidationError"
+                result["details"] = {"code": "UNKNOWN_INPUT", "suggestions": close}
                 result["known_inputs"] = sorted(known)
                 return result
             else:
                 type_name = _inferred_type(name, value)
                 if type_name is None:
                     result["error"] = "Cannot infer an input type for value " + json.dumps(value)
+                    result["error_type"] = "ValidationError"
+                    result["details"] = {"code": "UNINFERABLE_INPUT_TYPE"}
                     return result
                 result["warning"] = (
                     "Created input " + name + " as " + type_name + ", inferred from the value: "
@@ -225,8 +232,12 @@ SET_MATERIAL_INPUT_CORE = """\
             if created:
                 shader.GetPrim().RemoveProperty(shader_input.GetAttr().GetName())
             result["error"] = "Input " + name + " (" + type_name + ") " + str(exc) + "; got " + json.dumps(value)
+            result["error_type"] = "ValidationError"
+            result["details"] = {"code": "VALUE_TYPE_MISMATCH", "input_type": type_name}
             return result
         if not shader_input.Set(coerced):
+            if created:
+                shader.GetPrim().RemoveProperty(shader_input.GetAttr().GetName())
             result["error"] = "USD refused the value for input " + name + " (" + type_name + ")"
             return result
         result["input_type"] = type_name
