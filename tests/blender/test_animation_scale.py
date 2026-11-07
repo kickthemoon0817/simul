@@ -28,6 +28,7 @@ from simul.mcp.result_budget import DEFAULT_RESULT_BUDGET_BYTES, encode_result_b
 from simul.mcp.schemas.blender import (
     BlenderGetKeyframesRequest,
     BlenderGetTrajectoriesRequest,
+    BlenderGetTrajectoriesResponse,
     BlenderGetTrajectoryRequest,
     BlenderGetTrajectoryResponse,
     BlenderInsertKeyframesRequest,
@@ -297,7 +298,118 @@ def _rig() -> Tuple[FakeTransformObject, SimpleNamespace, Animate]:
     return rig, bone, animate
 
 
+def _armature(name: str, bones: List[str]) -> FakeTransformObject:
+    """An armature holding still, with pose bones called ``bones``."""
+    rig = FakeTransformObject(name, "ARMATURE")
+    rig.pose = SimpleNamespace(
+        bones=FakePoseBones(
+            [
+                SimpleNamespace(
+                    name=bone,
+                    rotation_mode="QUATERNION",
+                    rotation_quaternion=FakeVector((1.0, 0.0, 0.0, 0.0)),
+                    rotation_euler=FakeEuler(),
+                    rotation_axis_angle=FakeVector((0.0, 0.0, 1.0, 0.0)),
+                    location=FakeVector(),
+                    scale=FakeVector((1.0, 1.0, 1.0)),
+                    head=FakeVector((0.0, 0.0, 1.0)),
+                    tail=FakeVector((0.0, 0.0, 2.0)),
+                    matrix=FakeMatrix.Identity(4),
+                )
+                for bone in bones
+            ]
+        )
+    )
+    return rig
+
+
+def _reaches_the_client_whole(page: Dict[str, Any]) -> bool:
+    """Whether the server passes the page on as it is, uncut."""
+    dumped = BlenderGetTrajectoriesResponse(success=True, **page).model_dump()
+    return bool(json.loads(encode_result_budget(dumped)) == dumped)
+
+
 class TestBones:
+    def test_refuses_targets_whose_names_overflow_a_reply(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """32 bones of an armature named "é" * 127 made a 39.6 KB page: the server
+        cut a target from it, and its next_offset skipped 29 samples."""
+        name = "é" * 127
+        bones = ["é" * 29 + f"{n:02d}" for n in range(32)]
+        session, _, frames = _session(monkeypatch, _armature(name, bones))
+        targets = [{"object_name": name, "bone_name": bone} for bone in bones]
+
+        with pytest.raises(
+            ValueError,
+            match=r"The 32 targets' names and one sample of each take \d+ bytes of "
+            r"JSON, more than the 38500 a reply holds",
+        ) as refused:
+            session.get_trajectories(targets, 1, 40)
+
+        assert frames == []
+        details = getattr(refused.value, "details")
+        fit = details["targets_that_fit"]
+        assert (details["targets"], details["reply_bytes"]) == (32, 38500)
+        assert details["needed_bytes"] > 38500 and 0 < fit < 32
+        assert f"split the targets over calls (the first {fit} fit in one)" in str(
+            refused.value
+        )
+        assert _reaches_the_client_whole(session.get_trajectories(targets[:fit], 1, 40))
+
+    def test_pages_of_long_names_reach_the_client_whole(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        name = "é" * 100
+        bones = ["é" * 29 + f"{n:02d}" for n in range(32)]
+        session, _, _ = _session(monkeypatch, _armature(name, bones))
+        targets = [{"object_name": name, "bone_name": bone} for bone in bones]
+
+        pages = _every_page(
+            lambda offset: session.get_trajectories(targets, 1, 6, offset=offset)
+        )
+
+        assert all(_reaches_the_client_whole(page) for page in pages)
+        assert all(len(page["trajectories"]) == 32 for page in pages)
+        assert [
+            point["frame"] for page in pages for point in page["trajectories"][31]["points"]
+        ] == [1, 2, 3, 4, 5, 6]
+
+    def test_refuses_a_first_sample_wider_than_the_walk_was_planned_for(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """The check before the walk counts each sample as narrow as it can be."""
+        carts = [FakeTransformObject(f"Cart{n}") for n in range(32)]
+
+        def animate(frame: int) -> None:
+            for n, cart in enumerate(carts):
+                cart.location = FakeVector((0.123456 * frame * (n + 1), -0.5, 1.25))
+
+        session, scene, frames = _session(monkeypatch, *carts, animate=animate, frame=7)
+        targets = [{"object_name": cart.name} for cart in carts]
+        names = [
+            len(json.dumps({k: v for k, v in trajectory.items() if k != "points"}))
+            + len(', "points": []')
+            for trajectory in session.get_trajectories(targets, 1, 1)["trajectories"]
+        ]
+        narrow = blender_runtime.BlenderRuntimeSession._narrowest_point(
+            blender_runtime.TRAJECTORY_FIELDS
+        )
+        # A reply that holds the names and 32 of the narrowest samples, and no more.
+        ceiling = sum(names) + 32 * (len(json.dumps(narrow)) + 2)
+        monkeypatch.setattr(
+            blender_runtime,
+            "RESULT_BUDGET_BYTES",
+            ceiling + blender_runtime.TRAJECTORY_OTHER_BYTES,
+        )
+        frames.clear()
+
+        with pytest.raises(ValueError, match=f"more than the {ceiling} a reply holds"):
+            session.get_trajectories(targets, 1, 40)
+
+        # The frame is put back.
+        assert frames[-1] == 7 and scene.frame_current == 7
+
     def test_samples_a_bone_in_world_space(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
@@ -676,6 +788,7 @@ class TestDeclarations:
     ) -> None:
         """The server cuts a reply over its budget; a page must never need that."""
         assert blender_runtime.RESULT_PAGE_BYTES + 4000 <= DEFAULT_RESULT_BUDGET_BYTES
+        assert blender_runtime.RESULT_BUDGET_BYTES == DEFAULT_RESULT_BUDGET_BYTES
         cart, animate = _cart(123456.789)
         session, _, _ = _session(monkeypatch, cart, animate=animate)
         page = session.get_object_trajectory("Cart", 1, 5000)

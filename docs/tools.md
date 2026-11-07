@@ -1394,13 +1394,17 @@ Behaviour worth knowing:
 - `insert_blender_keyframes` keys many frames in one call: per entry of
   `channels` a `data_path`, an `index` (-1 for every element), `frames` and a
   value per frame, up to 10 000 keys (frames times elements) a call. Each value
-  is keyed as `insert_blender_keyframe` keys a given one (Blender then
-  evaluates the object's animation), and the same `interpolation` and
-  `keyframe_type` go to every key. Every entry is checked before anything is
-  keyed: a channel keyed twice on one frame is refused, and so is an F-curve
-  Blender keys nothing on: locked, sampled, or under an F-modifier, not muted
-  or invalid, that overrides its keys (all but Cycles, Stepped, Noise and an
-  additive Generator; on Blender 5.0.1 a LIMITS modifier did). Should Blender
+  is keyed as `insert_blender_keyframe` keys a given one: the keyed channels
+  then show what their F-curves give at the current frame, and every other
+  channel keeps its value, an unkeyed edit included (on an object with NLA
+  tracks the keyed channels keep theirs too, and `warning` says so). The same
+  `interpolation` and `keyframe_type` go to every key. Every entry is checked
+  before anything is keyed: a channel keyed twice on one frame, or on two
+  frames within 0.01 of each other, which Blender keeps as one key (on Blender
+  5.0.1 a key at 11.005 replaced the one at 11), is refused, and so is an
+  F-curve Blender keys nothing on: locked, sampled, or under an F-modifier, not
+  muted or invalid, that overrides its keys (all but Cycles, Stepped, Noise and
+  an additive Generator; on Blender 5.0.1 a LIMITS modifier did). Should Blender
   still refuse a key part way (an NLA setup it cannot remap a key onto), the
   keys that went in stay, the reply is a `KeyframesPartlyInserted` error whose
   `details` give the keys inserted and the one refused, and in attached mode
@@ -1467,7 +1471,12 @@ Behaviour worth knowing:
   what one long reply would hold, velocities at their edges included. A
   1 000-frame trajectory came back as frames 1-199 before; it is now 9 pages of
   about 120 samples with every field, or 2 with `fields: ["location"]` (596 a
-  page). 32 targets with every field fit 3 frames a page.
+  page). 32 targets with every field fit 3 frames a page. A page holds at
+  least one sample of every target, so targets whose names and one sample each
+  are more than a reply holds are refused, with how many of them, in order,
+  fit (`details.targets_that_fit`): the server writes each non-ASCII character
+  as a 6-byte escape, and 32 bones of an armature named with 127 accented
+  letters made a page the server cut, dropping a target and skipping samples.
 - For an unbaked rigid-body world, frames its memory cache already holds are
   read, not simulated again: the walk jumps to the cache's last frame and steps
   on from there (`simulated_frames` counts the frames it stepped). What the

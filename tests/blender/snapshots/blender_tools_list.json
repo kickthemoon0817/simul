@@ -1433,7 +1433,7 @@
         "properties": {
           "object_name": {"description": "Name of the object.", "type": "string"},
           "channels": {
-            "description": "Up to 10 000 keys in all, as entries with data_path, index (-1, the default, for every element), frames, and values: one per frame, a number for one channel (index >= 0, or a property that is not an array), else one number per element.",
+            "description": "Up to 10 000 keys in all, as entries with data_path, index (-1, the default, for every element), frames (more than 0.01 apart on any one channel, as Blender keeps one key for keys closer than that), and values: one per frame, a number for one channel (index >= 0, or a property that is not an array), else one number per element. The keyed channels then show what their F-curves give at the current frame; every other channel keeps its value.",
             "items": {
               "description": "The keys to insert on one property: a value per frame.",
               "properties": {
@@ -1447,7 +1447,7 @@
                   "type": "integer"
                 },
                 "frames": {
-                  "description": "Frames to key, each once",
+                  "description": "Frames to key, each once and more than 0.01 apart, since Blender keeps one key for keys closer than that",
                   "items": {"type": "number"},
                   "minItems": 1,
                   "type": "array"
@@ -1882,7 +1882,7 @@
         "additionalProperties": false,
         "properties": {
           "targets": {
-            "description": "1 to 32 entries, each an object_name and, for a bone of an armature, its bone_name.",
+            "description": "1 to 32 entries, each an object_name and, for a bone of an armature, its bone_name. Targets whose names and one sample each take more than one reply holds (long non-ASCII names) are refused, with how many of them fit.",
             "items": {
               "description": "An object, or a pose bone of an armature, to sample.",
               "properties": {

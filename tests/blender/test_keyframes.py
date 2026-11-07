@@ -1464,9 +1464,83 @@ class TestInsertKeyframes:
             "LINEAR"
         }
         assert {k.type for points in keys.values() for k in points} == {"BREAKDOWN"}
-        # Blender evaluates the animation: frame 1's keys, and gear's only key.
+        # Each keyed channel shows its curve: frame 1's keys, and gear's only key.
         assert ball.location == [0.0, 0.0, 0.0]
         assert ball.props["gear"] == 3
+        assert "warning" not in result
+
+    def test_keeps_unkeyed_edits_on_the_channels_it_does_not_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-evaluating the object's animation put every animated channel back."""
+        curves = [curve("location", i, (1, 0.0), (10, 10.0)) for i in range(3)]
+        bones = [
+            curve(f'pose.bones["{bone}"].rotation_euler', i, (1, 0.0), (10, 1.0))
+            for bone in ("b0", "b1")
+            for i in range(3)
+        ]
+        ball = keyed_ball(BLENDER_5_0, *curves, *bones, curve('["gear"]', 0, (1, 1.0)))
+        b0 = SimpleNamespace(rotation_euler=[0.5, 0.25, 0.0])
+        b1 = SimpleNamespace(rotation_euler=[0.4, 0.125, 0.0])
+        ball.paths['pose.bones["b0"]'] = b0
+        ball.paths['pose.bones["b1"]'] = b1
+        ball.location = [5.0, 7.0, 2.0]
+        ball.props["gear"] = 3
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframes(
+            "Ball",
+            [
+                {"data_path": "location", "index": 2, "frames": [5], "values": [1.0]},
+                {
+                    "data_path": 'pose.bones["b1"].rotation_euler',
+                    "index": 0,
+                    "frames": [5, 7],
+                    "values": [0.75, 0.5],
+                },
+            ],
+        )
+
+        assert result["key_count"] == 3 and "warning" not in result
+        # The keyed channels show their curves at frame 1; the rest keep their edits.
+        assert ball.location == [5.0, 7.0, 0.0]
+        assert b0.rotation_euler == [0.5, 0.25, 0.0]
+        assert b1.rotation_euler == [0.0, 0.125, 0.0]
+        assert ball.props["gear"] == 3
+
+    def test_nla_tracks_leave_the_keyed_values_until_a_frame_change(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0, curve("location", 0, (1, 0.0), (10, 10.0)))
+        ball.animation_data.nla_tracks = [SimpleNamespace(name="NlaTrack")]
+        ball.location = [6.0, 0.0, 0.0]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframes(
+            "Ball", [{"data_path": "location", "index": 0, "frames": [5], "values": [1]}]
+        )
+
+        assert ball.location == [6.0, 0.0, 0.0]
+        assert "'Ball' has NLA tracks" in result["warning"]
+
+    def test_interpolation_reaches_a_key_merged_into_a_nearby_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blender 5.0.1 replaced a key 0.005 frames away and kept its frame."""
+        x = curve("location", 0, (1, 0.0), (4.995, 0.0))
+        ball = keyed_ball(BLENDER_5_0, x)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        session.insert_keyframes(
+            "Ball",
+            [{"data_path": "location", "index": 0, "frames": [5], "values": [2.0]}],
+            interpolation="LINEAR",
+        )
+
+        assert [(k.co, k.interpolation) for k in x.keyframe_points] == [
+            ([1, 0.0], "BEZIER"),
+            ([4.995, 2.0], "LINEAR"),
+        ]
 
     def test_checks_every_entry_before_keying_any(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1555,7 +1629,10 @@ class TestInsertKeyframes:
                     return False
                 return super().keyframe_insert(data_path, **kwargs)
 
-        ball = RefusesTheThird("Ball", keyed_ball(BLENDER_5_0).animation_data)
+        keyed = keyed_ball(BLENDER_5_0)
+        ball = RefusesTheThird("Ball", keyed.animation_data, keyed.fcurves)
+        keyed.fcurves.append(curve('["gear"]', 0, (1, 1.0), (10, 5.0)))
+        ball.props["gear"] = 4
         ball.location = [7.0, 7.0, 7.0]
         session = session_on(monkeypatch, BLENDER_5_0, ball)
 
@@ -1566,7 +1643,8 @@ class TestInsertKeyframes:
                     "data_path": "location",
                     "frames": [3, 4, 5],
                     "values": [[1, 1, 1]] * 3,
-                }
+                },
+                {"data_path": '["gear"]', "frames": [6], "values": [2]},
             ],
         )
 
@@ -1579,8 +1657,11 @@ class TestInsertKeyframes:
             "inserted": 6,
             "refused": {"data_path": "location", "index": -1, "frame": 5.0},
         }
-        # Blender evaluates what went in: frame 1 holds the first key, 1.
+        # The channels that got keys show them: frame 1 holds the first key, 1.
+        # gear, never reached, keeps its unkeyed value.
         assert ball.location == [1.0, 1.0, 1.0]
+        assert ball.props["gear"] == 4
+        assert "warning" not in result
 
     def test_refuses_a_channel_keyed_twice_on_one_frame(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1604,6 +1685,33 @@ class TestInsertKeyframes:
         assert ball.calls == []
         other = {"data_path": "location", "index": 1, "frames": [6], "values": [9]}
         assert session.insert_keyframes("Ball", [whole, other])["key_count"] == 4
+
+    def test_refuses_frames_blender_would_merge_into_one_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blender keeps one key for keys within 0.01 frames: 2 and 2.005 made one."""
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        near = {"data_path": "location", "index": 0, "frames": [2.0, 2.005], "values": [1, 2]}
+        first = {"data_path": "location", "index": 0, "frames": [2.0], "values": [1]}
+        second = {"data_path": "location", "frames": [2.004], "values": [[2, 2, 2]]}
+
+        with pytest.raises(
+            ValueError,
+            match=r"channels\[0\] keys location\[0\] at frames 2 and 2\.005, which "
+            r"Blender keeps as one key",
+        ):
+            session.insert_keyframes("Ball", [near])
+        with pytest.raises(
+            ValueError,
+            match=r"channels\[1\] and channels\[0\] both key location\[0\] at frames "
+            r"2 and 2\.004",
+        ):
+            session.insert_keyframes("Ball", [first, second])
+        assert ball.calls == []
+        # 0.0101 apart, as 32-bit frames, is two keys in Blender.
+        apart = {"data_path": "location", "index": 0, "frames": [2.0, 2.0101], "values": [1, 2]}
+        assert session.insert_keyframes("Ball", [apart])["key_count"] == 2
 
     @pytest.mark.parametrize(
         ("modifier", "keyed"),

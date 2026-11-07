@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import bisect
 import difflib
 import io
 import json
@@ -1172,6 +1173,10 @@ class _KeyedProperty:
 # here instead and says where the next one starts. The margin covers the
 # reply's other fields and the server's envelope.
 RESULT_PAGE_BYTES = 32_000
+#: The server's result budget: a reply larger than this is cut.
+RESULT_BUDGET_BYTES = 40_000
+#: What a trajectory reply's fields besides its trajectories take, at most.
+TRAJECTORY_OTHER_BYTES = 1_500
 #: Most keys insert_keyframes takes in one call: frames times elements, over all channels.
 MAX_KEYFRAMES_PER_CALL = 10_000
 #: What a trajectory sample can report besides its frame.
@@ -6355,21 +6360,27 @@ class BlenderRuntimeSession:
         Insert many keyframes in one call: for each property, one value per frame.
 
         Each value is keyed through its property, as insert_keyframe keys a
-        given value, so NLA remapping applies; Blender then evaluates the
-        object's animation, so every property shows what its animation gives at
-        the current frame. Every entry is checked before anything is keyed: a
-        channel keyed twice on one frame, and an F-curve Blender keys nothing
-        on (locked, sampled, or under an F-modifier that overrides its keys),
-        are refused up front. Should Blender still refuse a key part way, the
-        keys that went in stay, recorded as one undo step in attached mode, and
-        the reply is a KeyframesPartlyInserted error naming them.
+        given value, so NLA remapping applies, and each keyed channel then
+        shows what its F-curve gives at the current frame; every other channel
+        keeps its value, an unkeyed edit included. Every entry is checked
+        before anything is keyed: a channel keyed twice on one frame, or on
+        frames Blender would merge into one key (within 0.01 of each other),
+        and an F-curve Blender keys nothing on (locked, sampled, or under an
+        F-modifier that overrides its keys), are refused up front. Should
+        Blender still refuse a key part way, the keys that went in stay,
+        recorded as one undo step in attached mode, and the reply is a
+        KeyframesPartlyInserted error naming them.
 
         Args:
             object_name: Name of the object.
             channels: Up to 10 000 keys in all, as entries with data_path,
-                index (-1, the default, for every element), frames, and values:
-                one per frame, a number for one channel (index >= 0, or a
-                property that is not an array), else one number per element.
+                index (-1, the default, for every element), frames (more than
+                0.01 apart on any one channel, as Blender keeps one key for
+                keys closer than that), and values: one per frame, a number for
+                one channel (index >= 0, or a property that is not an array),
+                else one number per element. The keyed channels then show what
+                their F-curves give at the current frame; every other channel
+                keeps its value.
             interpolation: Interpolation of every inserted key, as for
                 insert_keyframe; None leaves Blender's choice.
             keyframe_type: Blender's key type of every inserted key.
@@ -6378,7 +6389,9 @@ class BlenderRuntimeSession:
             Dict with object_name, key_count (keys inserted, one per frame and
             element), frame_range and channels: per keyed channel its
             data_path, array_index, inserted (keys this call inserted) and
-            keyframe_count (keys on the channel afterwards).
+            keyframe_count (keys on the channel afterwards); and a warning when
+            the keyed channels keep their values until a frame change (an
+            object with NLA tracks).
         """
         if interpolation is not None and interpolation not in KEYFRAME_INTERPOLATIONS:
             raise ValueError(
@@ -6395,9 +6408,9 @@ class BlenderRuntimeSession:
         fcurves = action_fcurves(obj.animation_data, self._blender_version) or []
         plans = []
         total = 0
-        # (data_path, element, frame) -> the entry keying it; element -1 for a
-        # property that is not an array.
-        keyed_by: Dict[Tuple[str, int, float], int] = {}
+        # (data_path, element) -> its frames so far, in order, each with the
+        # entry keying it; element -1 for a property that is not an array.
+        keyed_by: Dict[Tuple[str, int], List[Tuple[float, int]]] = {}
         for number, channel in enumerate(channels):
             label = f"channels[{number}]"
             data_path = channel.get("data_path")
@@ -6428,20 +6441,16 @@ class BlenderRuntimeSession:
                 elements = list(range(keyed.length))
             for frame in frames:
                 for element in elements:
-                    slot = (data_path, element, frame)
-                    if slot in keyed_by:
-                        earlier = keyed_by[slot]
-                        twice = (
-                            f"{label} keys"
-                            if earlier == number
-                            else f"{label} and channels[{earlier}] both key"
-                        )
-                        raise ValueError(
-                            f"{twice} {_channel_name(data_path, element)} at frame "
-                            f"{frame:g}{' twice' if earlier == number else ''}; give "
-                            "each channel's frame once"
-                        )
-                    keyed_by[slot] = number
+                    taken = keyed_by.setdefault((data_path, element), [])
+                    place = bisect.bisect_left(taken, (frame, -1))
+                    for near, earlier in taken[max(place - 1, 0) : place + 1]:
+                        if _same_key_frame(near, frame):
+                            raise ValueError(
+                                self._keyed_twice(
+                                    number, earlier, data_path, element, near, frame
+                                )
+                            )
+                    taken.insert(place, (frame, number))
             for fcurve in fcurves:
                 if fcurve.data_path != data_path or index not in (-1, fcurve.array_index):
                     continue
@@ -6465,6 +6474,8 @@ class BlenderRuntimeSession:
             )
 
         inserted = 0
+        # The properties that got a key: only their channels show the new keys.
+        keyed_some: List[_KeyedProperty] = []
         refused: Optional[Dict[str, Any]] = None
         try:
             for keyed, frames, coerced in plans:
@@ -6482,18 +6493,23 @@ class BlenderRuntimeSession:
                             "frame": frame,
                         }
                         break
+                    if not keyed_some or keyed_some[-1] is not keyed:
+                        keyed_some.append(keyed)
                     inserted += keyed.elements
                 if refused is not None:
                     break
         finally:
             for keyed, _frames, _coerced in plans:
                 keyed.restore()
-        if inserted:
-            self._evaluate_animation(obj)
+        fcurves = action_fcurves(obj.animation_data, self._blender_version) or []
         if refused is not None:
+            shown = self._show_keyed_channels(
+                obj,
+                [fcurve for keyed in keyed_some for fcurve in self._curves_of(fcurves, keyed)],
+            )
             # Returned rather than raised: the keys that went in stay, and an
             # attached add-on records a completed call as an undo step.
-            return {
+            failure: Dict[str, Any] = {
                 "success": False,
                 "error": (
                     f"Blender inserted no keyframe on '{object_name}' "
@@ -6505,22 +6521,28 @@ class BlenderRuntimeSession:
                 "error_type": "KeyframesPartlyInserted",
                 "details": {"inserted": inserted, "refused": refused},
             }
+            if shown is not None:
+                failure["warning"] = shown
+            return failure
 
         report: List[Dict[str, Any]] = []
-        fcurves = action_fcurves(obj.animation_data, self._blender_version) or []
+        shown_curves: List[Any] = []
         for keyed, frames, _coerced in plans:
-            wanted = {round(frame, 3) for frame in frames}
-            for fcurve in fcurves:
-                if fcurve.data_path != keyed.data_path or keyed.index not in (
-                    -1,
-                    fcurve.array_index,
-                ):
-                    continue
+            ordered = sorted(frames)
+            for fcurve in self._curves_of(fcurves, keyed):
                 points = fcurve.keyframe_points
                 if interpolation is not None:
                     for point in points:
-                        if round(point.co[0], 3) in wanted:
+                        # A key Blender merged into an existing one kept that
+                        # key's frame; the frames of one channel are more than
+                        # Blender's merge distance apart.
+                        place = bisect.bisect_left(ordered, point.co[0])
+                        if any(
+                            _same_key_frame(point.co[0], frame)
+                            for frame in ordered[max(place - 1, 0) : place + 1]
+                        ):
                             point.interpolation = interpolation
+                shown_curves.append(fcurve)
                 report.append(
                     {
                         "data_path": keyed.data_path,
@@ -6529,25 +6551,45 @@ class BlenderRuntimeSession:
                         "keyframe_count": len(points),
                     }
                 )
+        # After the interpolation is set: it shapes the curve after each key.
+        shown = self._show_keyed_channels(obj, shown_curves)
         every_frame = [frame for _keyed, frames, _coerced in plans for frame in frames]
-        return {
+        result: Dict[str, Any] = {
             "object_name": object_name,
             "key_count": inserted,
             "frame_range": [_f32(min(every_frame)), _f32(max(every_frame))],
             "channels": report,
         }
+        if shown is not None:
+            result["warning"] = shown
+        return result
 
     @staticmethod
-    def _evaluate_animation(obj: Any) -> None:
-        """Have Blender evaluate the object's animation at the current frame, now.
+    def _curves_of(fcurves: List[Any], keyed: "_KeyedProperty") -> List[Any]:
+        """The F-curves of the channels ``keyed`` keys."""
+        return [
+            fcurve
+            for fcurve in fcurves
+            if fcurve.data_path == keyed.data_path and keyed.index in (-1, fcurve.array_index)
+        ]
 
-        Tagging the object's time-dependent data and evaluating the depsgraph
-        writes what its animation (NLA included) gives back to its properties,
-        as a frame change does, without running frame-change handlers.
-        """
-        blender_module: Any = bpy
-        obj.update_tag(refresh={"TIME"})
-        blender_module.context.evaluated_depsgraph_get()
+    @staticmethod
+    def _keyed_twice(
+        number: int, earlier: int, data_path: str, element: int, near: float, frame: float
+    ) -> str:
+        """Why insert_keyframes refuses entry ``number`` keying a channel's frame twice."""
+        label = f"channels[{number}]"
+        both = f"{label} keys" if earlier == number else f"{label} and channels[{earlier}] both key"
+        channel = _channel_name(data_path, element)
+        if _float32(near) == _float32(frame):
+            once = " twice" if earlier == number else ""
+            return f"{both} {channel} at frame {frame:g}{once}; give each channel's frame once"
+        low, high = sorted((near, frame))
+        return (
+            f"{both} {channel} at frames {low:g} and {high:g}, which Blender keeps as one "
+            f"key (a key within {KEY_MERGE_DISTANCE:g} frames of another replaces it); "
+            f"give each channel's frames more than {KEY_MERGE_DISTANCE:g} apart"
+        )
 
     @staticmethod
     def _show_keyed_channels(obj: Any, fcurves: List[Any]) -> Optional[str]:
@@ -7690,7 +7732,9 @@ class BlenderRuntimeSession:
 
         Args:
             targets: 1 to 32 entries, each an object_name and, for a bone of an
-                armature, its bone_name.
+                armature, its bone_name. Targets whose names and one sample each
+                take more than one reply holds (long non-ASCII names) are
+                refused, with how many of them fit.
             start_frame: First frame of trajectory.
             end_frame: Last frame of trajectory (inclusive); not before start_frame.
             step: Frames between samples; at least 1.
@@ -7765,14 +7809,20 @@ class BlenderRuntimeSession:
         # A page holds the samples that fit in one reply, measured as they are
         # written. Its most samples (each as narrow as a sample can be) bound
         # the walk planned before any frame is set.
-        headers = sum(
+        names = [
             _json_size({key: value for key, value in target.items() if key != "obj"})
             + len(', "points": []')
             for target in resolved
-        )
-        room = RESULT_PAGE_BYTES - 1500 - headers
-        narrowest = len(resolved) * (_json_size(self._narrowest_point(wanted)) + 2)
-        most = max(1, room // narrowest)
+        ]
+        headers = sum(names)
+        narrow = _json_size(self._narrowest_point(wanted)) + 2
+        # A page holds at least one sample, which the server must not cut: a
+        # cut reply drops targets, and its next_offset skips samples.
+        ceiling = RESULT_BUDGET_BYTES - TRAJECTORY_OTHER_BYTES
+        if headers + len(resolved) * narrow > ceiling:
+            raise self._targets_overflow([size + narrow for size in names], ceiling)
+        room = RESULT_PAGE_BYTES - TRAJECTORY_OTHER_BYTES - headers
+        most = max(1, room // (len(resolved) * narrow))
         count = min(total - offset, most if limit is None else min(limit, most))
         # The sample before the page gives its first velocity and continuity.
         seed = 1 if offset > 0 else 0
@@ -7812,9 +7862,15 @@ class BlenderRuntimeSession:
                         for number, sample in enumerate(samples)
                     ]
                     cost = sum(_json_size(point) + 2 for point in row)
-                    # A page always holds its first sample.
-                    if points[0] and used + cost > room:
-                        break
+                    if points[0]:
+                        if used + cost > room:
+                            break
+                    elif headers + cost > ceiling:
+                        # Wider than the narrowest sample the walk was planned for.
+                        raise self._targets_overflow(
+                            [size + _json_size(point) + 2 for size, point in zip(names, row)],
+                            ceiling,
+                        )
                     for number, point in enumerate(row):
                         points[number].append(point)
                     used += cost
@@ -7866,6 +7922,47 @@ class BlenderRuntimeSession:
                 for number, target in enumerate(resolved)
             ],
         }
+
+    @staticmethod
+    def _targets_overflow(needs: List[int], ceiling: int) -> ValueError:
+        """The refusal of targets whose names and one sample each overflow a reply.
+
+        The server writes each non-ASCII character as a 6-byte ``\\u`` escape,
+        so 32 bones of an armature with a long non-ASCII name outgrew the
+        budget. ``details`` say how many of the targets, in order, fit.
+
+        Args:
+            needs: Per target, the bytes of its header and one sample.
+            ceiling: The bytes a reply's trajectories may take.
+        """
+        fit, used = 0, 0
+        for need in needs:
+            if used + need > ceiling:
+                break
+            used += need
+            fit += 1
+        advice = (
+            f"split the targets over calls (the first {fit} fit in one)"
+            if fit
+            else "ask for fewer fields"
+        )
+        error = ValueError(
+            f"The {len(needs)} targets' names and one sample of each take "
+            f"{sum(needs)} bytes of JSON, more than the {ceiling} a reply holds (the "
+            "server writes each non-ASCII character of a name as a 6-byte escape); "
+            f"{advice}"
+        )
+        setattr(
+            error,
+            "details",
+            {
+                "targets": len(needs),
+                "targets_that_fit": fit,
+                "needed_bytes": sum(needs),
+                "reply_bytes": ceiling,
+            },
+        )
+        return error
 
     @staticmethod
     def _trajectory_fields(fields: Optional[List[str]]) -> Tuple[str, ...]:

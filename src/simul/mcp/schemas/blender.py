@@ -2388,7 +2388,14 @@ class BlenderKeyframeChannelData(BaseModel):
 
     data_path: str = Field(..., description="Property data path, as for insert_blender_keyframe")
     index: int = Field(-1, description="Array index (-1 for all elements)")
-    frames: List[float] = Field(..., min_length=1, description="Frames to key, each once")
+    frames: List[float] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Frames to key, each once and more than 0.01 apart, since Blender keeps one "
+            "key for keys closer than that"
+        ),
+    )
     values: List[Union[float, List[float]]] = Field(
         ...,
         min_length=1,
@@ -2495,6 +2502,13 @@ class BlenderInsertKeyframesResponse(BaseModel):
     )
     channels: List[BlenderInsertedChannel] = Field(
         default_factory=list, description="Per keyed channel"
+    )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the keyed channels keep their values until a frame change (an "
+            "object with NLA tracks)"
+        ),
     )
 
 
