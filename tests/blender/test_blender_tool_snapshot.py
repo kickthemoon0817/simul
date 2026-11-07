@@ -94,7 +94,12 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
     "list_blender_scene_objects": {
         "minimal": {},
-        "full": {"collection_name": "Props", "include_hidden": True, "max_items": 7},
+        "full": {
+            "collection_name": "Props",
+            "include_hidden": True,
+            "max_items": 7,
+            "offset": 14,
+        },
     },
     "get_blender_object_info": {"minimal": {"object_name": "Cube"}},
     "get_blender_mesh_info": {"minimal": {"object_name": "Cube"}},
@@ -104,7 +109,12 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
     "search_blender_objects": {
         "minimal": {},
-        "full": {"name_pattern": "Cu*", "object_type": "MESH", "max_results": 3},
+        "full": {
+            "name_pattern": "Cu*",
+            "object_type": "mesh",
+            "max_results": 3,
+            "offset": 6,
+        },
     },
     "summarize_blender_scene": {"minimal": {}},
     "get_blender_material_info": {"minimal": {"material_name": "Metal"}},
@@ -166,7 +176,14 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "scale": [2, 2, 2],
         },
     },
-    "delete_blender_object": {"minimal": {"object_name": "Cube"}},
+    "delete_blender_object": {
+        "minimal": {"object_name": "Cube"},
+        "full": {"object_name": "Cube", "use_global": True},
+    },
+    "set_blender_object_mode": {
+        "minimal": {},
+        "full": {"mode": "edit", "object_name": "Cube"},
+    },
     "set_blender_object_transform": {
         "minimal": {"object_name": "Cube"},
         "full": {
