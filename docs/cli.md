@@ -146,7 +146,10 @@ bad invocation, and sends nothing to Isaac Sim when:
 ## `simul unreal`
 
 Commands accept `-H/--host` and `-p/--port` for the Remote Control endpoint
-(default `localhost:30010`).
+(default `localhost:30010`). With `UNREAL__MODE=attached`, the commands that talk
+to the editor act on the attached one, and `--host`/`--port` exit 2 with
+`InvalidArgument`; `instances`, `attach` and `setup --port` take them in either
+mode.
 
 | Command | Purpose |
 |---|---|

@@ -72,15 +72,23 @@ def _session(
     ``_passphrase_to_md5``. Used by the setup CLI so its polling
     loop can authenticate when --passphrase enabled enforcement on
     the editor.
+
+    With ``unreal.mode`` attached and no ``mode`` override, a ``host`` or
+    ``port`` (``--host``/``--port``) exits 2 with ``InvalidArgument``, in
+    the output mode the command was run in, before any session exists.
     """
     settings = get_settings()
     overrides: Dict[str, Any] = {}
     if mode is not None:
         overrides["mode"] = mode
     elif settings.unreal.mode == "attached" and (host is not None or port is not None):
-        emit_error(
+        # A bad invocation, not a failed operation: the command names an
+        # endpoint that attached mode never dials, so it can't succeed until
+        # the arguments change, whatever state the editor is in.
+        fail(
             "Host/port overrides cannot replace an attached editor; attach the desired endpoint first",
-            "ValueError",
+            "InvalidArgument",
+            exit_code=2,
         )
     if host is not None:
         overrides["host"] = host

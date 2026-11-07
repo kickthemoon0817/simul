@@ -296,14 +296,71 @@ def test_cli_status_refuses_missing_attachment(monkeypatch, settings):
     assert "No Unreal editor attached" in json.loads(result.stdout)["error"]
 
 
-@pytest.mark.parametrize("option,value", [("--host", "localhost"), ("--port", "30019")])
-def test_cli_attached_endpoint_override_returns_json_error(
-    monkeypatch, settings, option, value
-):
+ATTACHED_OVERRIDE = "Host/port overrides cannot replace an attached editor; attach the desired endpoint first"
+
+
+@pytest.fixture
+def no_session(monkeypatch, settings):
+    """Attached-mode settings for the CLI, and a test failure if it builds a session anyway."""
+
+    def built(*args, **kwargs):
+        raise AssertionError("the CLI built a session")
+
     monkeypatch.setattr("simul.cli.unreal_cli.get_settings", lambda: settings)
-    result = CliRunner().invoke(app, ["--json", "unreal", "health", option, value])
-    assert result.exit_code == 1
-    payload = json.loads(result.stdout)
-    assert payload["success"] is False
-    assert payload["error_type"] == "ValueError"
-    assert "Host/port overrides cannot replace an attached editor" in payload["error"]
+    monkeypatch.setattr("simul.adapters.unreal_runtime.UnrealRuntimeSession", built)
+
+
+@pytest.mark.parametrize("command", [["health"], ["scene"], ["exec", "print(1)"]], ids=" ".join)
+@pytest.mark.parametrize("option,value", [("--host", "localhost"), ("--port", "30019")])
+def test_cli_attached_endpoint_override_is_a_bad_invocation(no_session, command, option, value):
+    """An endpoint that attached mode never dials: exit 2, the usage-error code, before any session."""
+    result = CliRunner().invoke(app, ["--json", "unreal", *command, option, value])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": ATTACHED_OVERRIDE,
+        "error_type": "InvalidArgument",
+    }
+
+
+@pytest.mark.parametrize("option,value", [("--host", "localhost"), ("--port", "30019")])
+def test_cli_attached_endpoint_override_is_text_in_human_mode(monkeypatch, no_session, option, value):
+    """Without --json the refusal is red text on stderr, as the CLI's other exit-2 refusals are, not JSON."""
+    from simul.cli import output
+
+    printed = []
+    monkeypatch.setattr(output, "is_json_mode", lambda: False)
+    monkeypatch.setattr(output.console, "print", lambda *args, **kwargs: printed.append(str(args[0])))
+
+    result = CliRunner().invoke(app, ["unreal", "health", option, value])
+
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert printed == [f"[red]{ATTACHED_OVERRIDE}[/red]"]
+
+
+def test_cli_attached_mode_builds_the_session_without_an_override(monkeypatch, settings):
+    """Only an explicit --host/--port is refused; setup's poller names its endpoint through mode."""
+    from simul.cli import unreal_cli
+
+    built = []
+
+    class Session:
+        def __init__(self, session_settings):
+            built.append((session_settings.unreal.mode, session_settings.unreal.port))
+
+        async def health_check(self):
+            return {"connected": True}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("simul.cli.unreal_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("simul.adapters.unreal_runtime.UnrealRuntimeSession", Session)
+
+    result = CliRunner().invoke(app, ["--json", "unreal", "health"])
+    unreal_cli._session(host="127.0.0.1", port=30011, mode="endpoint")
+
+    assert result.exit_code == 0, result.output
+    assert built == [("attached", settings.unreal.port), ("endpoint", 30011)]
