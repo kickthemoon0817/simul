@@ -71,11 +71,47 @@ No running application needed. File arguments must be inside the sandbox
   depth-first (path, type, depth, child count, API schemas), paged with
   `max_results`/`offset`. `include_properties` adds each prim's authored
   attributes and relationship targets, so a whole robot reads in one call.
+- **Meshes.** `get_mesh_info` is computed with numpy over whole arrays (a
+  million-vertex mesh in about 0.3 s). It reports normals from
+  `primvars:normals` or `normals` (`normals_source`), `uv_sets`, and the
+  materials `UsdShade.MaterialBindingAPI` resolves: the mesh's, then each
+  `materialBind` subset's (also on the subset entry), plus a
+  `physics_material` that carries `PhysicsMaterialAPI`. `surface_area`, `volume` and
+  `bbox` are in the mesh's own space; `volume` is null unless the mesh is
+  closed, `surface_area` null for invalid topology, and `bbox` null without
+  points. Face areas use Newell's method, exact for planar faces, concave
+  ones included. Faces listed in `holeIndices` add no area and leave their
+  edges open. `time_code` reads a deforming mesh, and `points_time_samples`
+  says whether it deforms. A mesh whose points or topology exist only as
+  time samples has nothing to measure at the default time: it comes back
+  `measured: false`, with null topology and geometry (not invalid), its
+  `sampled_time_range` and a `note`. Subset indices are summarised
+  (`index_count` plus the first 16).
+- **Summaries.** `summarize_scene` reports:
+  - `scene_size_meters` next to `scene_size`;
+  - `has_animation` from an authored time range or time samples spanning
+    more than one time (`time_sample_range`), with `duration_seconds` (time
+    codes divided by `timeCodesPerSecond`);
+  - `warnings` for layers whose authored `upAxis` or `metersPerUnit` differs
+    from the stage's (USD rescales and reorients nothing), one entry per
+    mismatch and value with `layer_count` and up to 5 example `layers`;
+    at most 10 groups, then a `MoreUnitMismatches` count;
+  - `materials`, `root_prims` and their counts;
+  - `(typeless)` as the type key of untyped prims.
+
+  Instanced meshes count once per instance and are measured once. Mesh
+  `total_surface_area` and `total_volume` sum each mesh in its own space,
+  before transforms. A deforming mesh with time-sampled points is measured
+  at its first sample and counted in `meshes_measured_at_first_sample`.
+  `layer_count` (here and in `load_usd_file`) counts the file's layer stack,
+  not the session layer, and `load_usd_file`'s `has_animation` follows the
+  same rule as the summary.
 - **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
   lists of rows, asset paths their authored string.
 - **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
   is a `NotFoundError`; a relative, malformed or property path is a
-  `ValidationError`.
+  `ValidationError` with `details.code` `InvalidPrimPath`, as the edit tools
+  report it.
 
 `validate_usd_file` opens the file with pxr, as `load_usd_file` does, and
 keeps no stage. `can_read` says whether pxr opened it (so whether
