@@ -16,7 +16,9 @@ import math
 import numbers
 import os
 import re
+import shutil
 import tempfile
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,8 +36,10 @@ from typing import (
     overload,
 )
 
-# The Blender add-on bundles this standard-library module next to this one.
+# The Blender add-on bundles these modules next to this one; simready_usd
+# imports pxr only when it is called.
 from ..utils.regex_guard import exponential_regex_construct
+from .simready_usd import author_simready_layer, usd_identifier
 
 try:
     import bpy
@@ -6005,46 +6009,10 @@ class BlenderRuntimeSession:
             Dict with object_name, metadata (or None), and has_simready_data.
         """
         obj = self._get_object_or_raise(object_name)
-
-        semantic: Dict[str, Any] = {}
-        physics: Dict[str, Any] = {}
-        material: Dict[str, Any] = {}
-        prefix = self._SIMREADY_PREFIX
-        additional_labels: Dict[str, str] = {}
-
-        for key in obj.keys():
-            if not key.startswith(prefix):
-                continue
-            stripped = key[len(prefix) :]
-            val = obj[key]
-            # Convert IDPropertyArray / other exotic types to Python
-            if hasattr(val, "to_list"):
-                val = val.to_list()
-
-            if stripped.startswith("label_"):
-                additional_labels[stripped[6:]] = str(val)
-            elif stripped in ("semantic_class", "semantic_hierarchy", "semantic_qcode"):
-                semantic[stripped] = val
-            elif stripped in (
-                "mass_kg",
-                "collider_type",
-                "static_friction",
-                "dynamic_friction",
-                "restitution",
-                "density",
-                "is_rigid_body",
-            ):
-                physics[stripped] = val
-            elif stripped in (
-                "substrate_type",
-                "material_naming",
-                "shader_type",
-                "texel_density",
-            ):
-                material[stripped] = val
-
-        if additional_labels:
-            semantic["additional_labels"] = additional_labels
+        stored = self._read_simready_properties(obj)
+        semantic = stored["semantic"]
+        physics = stored["physics"]
+        material = stored["material"]
 
         has_data = bool(semantic or physics or material)
         result_metadata: Optional[Dict[str, Any]] = None
@@ -6064,6 +6032,57 @@ class BlenderRuntimeSession:
             "metadata": result_metadata,
             "has_simready_data": has_data,
         }
+
+    _SIMREADY_SEMANTIC_KEYS = ("semantic_class", "semantic_hierarchy", "semantic_qcode")
+    _SIMREADY_PHYSICS_KEYS = (
+        "mass_kg",
+        "collider_type",
+        "static_friction",
+        "dynamic_friction",
+        "restitution",
+        "density",
+        "is_rigid_body",
+    )
+    _SIMREADY_MATERIAL_KEYS = (
+        "substrate_type",
+        "material_naming",
+        "shader_type",
+        "texel_density",
+    )
+
+    def _read_simready_properties(self, obj: Any) -> Dict[str, Dict[str, Any]]:
+        """The object's ``simready_*`` custom properties as stored, grouped like the metadata.
+
+        Additional labels (``simready_label_<key>``) are gathered under
+        ``semantic["additional_labels"]``; unknown ``simready_`` keys are left out.
+        """
+        semantic: Dict[str, Any] = {}
+        physics: Dict[str, Any] = {}
+        material: Dict[str, Any] = {}
+        additional_labels: Dict[str, str] = {}
+        prefix = self._SIMREADY_PREFIX
+        for key in obj.keys():
+            if not key.startswith(prefix):
+                continue
+            stripped = key[len(prefix) :]
+            val = obj[key]
+            # Convert IDPropertyArray / other exotic types to Python
+            if hasattr(val, "to_list"):
+                val = val.to_list()
+            elif hasattr(val, "to_dict"):
+                val = val.to_dict()
+
+            if stripped.startswith("label_"):
+                additional_labels[stripped[6:]] = str(val)
+            elif stripped in self._SIMREADY_SEMANTIC_KEYS:
+                semantic[stripped] = val
+            elif stripped in self._SIMREADY_PHYSICS_KEYS:
+                physics[stripped] = val
+            elif stripped in self._SIMREADY_MATERIAL_KEYS:
+                material[stripped] = val
+        if additional_labels:
+            semantic["additional_labels"] = additional_labels
+        return {"semantic": semantic, "physics": physics, "material": material}
 
     def validate_simready_compliance(
         self,
@@ -6093,6 +6112,7 @@ class BlenderRuntimeSession:
             Dict with compliant flag, object_count, issue_count, issues list.
         """
         issues: List[Dict[str, Any]] = []
+        unit_scale = self._scene_unit_scale()
 
         if object_names is None:
             targets = [o for o in self._resolve_object_source(None) if o.type == "MESH"]
@@ -6119,35 +6139,8 @@ class BlenderRuntimeSession:
                     }
                 )
 
-            if check_scale and hasattr(obj, "dimensions"):
-                dims = list(obj.dimensions)
-                max_dim = max(abs(d) for d in dims) if dims else 0.0
-                if max_dim > 1000.0:
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "scale",
-                            "severity": "warning",
-                            "message": (
-                                f"Largest dimension {max_dim:.2f}m exceeds "
-                                "1000m — verify scene is in meters"
-                            ),
-                            "suggestion": "Ensure scene unit scale is 1.0 (meters)",
-                        }
-                    )
-                if max_dim < 1e-4 and max_dim > 0:
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "scale",
-                            "severity": "warning",
-                            "message": (
-                                f"Largest dimension {max_dim:.6f}m is very small "
-                                "— may not be in meter scale"
-                            ),
-                            "suggestion": "Verify units; SimReady uses meters",
-                        }
-                    )
+            if check_scale:
+                issues.extend(self._simready_size_issues(obj, unit_scale))
 
             if check_transforms:
                 rot = tuple(obj.rotation_euler)
@@ -6221,7 +6214,107 @@ class BlenderRuntimeSession:
             "object_count": len(targets),
             "issue_count": len(issues),
             "issues": issues,
+            "meters_per_unit": unit_scale,
         }
+
+    # A part's largest real-world dimension (Blender units times the scene's
+    # Unit Scale) outside these bounds means the scene's units are not the ones
+    # it was modelled in: a 0.5 m part modelled in millimetres in a metre scene
+    # measures 500 m. Above the warning size an asset is plausible (a vehicle,
+    # a rack) but worth a second look.
+    _SIMREADY_MAX_SIZE_M = 100.0
+    _SIMREADY_WARN_SIZE_M = 20.0
+    _SIMREADY_MIN_SIZE_M = 0.001
+
+    def _scene_unit_scale(self) -> float:
+        """Meters per Blender unit: the scene's Unit Scale, 1.0 when unset or invalid."""
+        blender_module: Any = bpy
+        scene = getattr(blender_module.context, "scene", None)
+        settings = getattr(scene, "unit_settings", None)
+        try:
+            scale = float(getattr(settings, "scale_length", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+        if not math.isfinite(scale) or scale <= 0:
+            return 1.0
+        # Blender stores the scale in single precision (0.01 reads 0.00999999977).
+        return float(f"{scale:.7g}")
+
+    @staticmethod
+    def _world_dimensions(obj: Any) -> List[float]:
+        """The object's world-space bounding-box size in Blender units.
+
+        Read from the bounding box corners and the world matrix, so a parent's
+        scale counts; ``dimensions`` (object scale only) when either is missing.
+        """
+        corners = getattr(obj, "bound_box", None)
+        matrix = getattr(obj, "matrix_world", None)
+        if corners is not None and matrix is not None:
+            try:
+                rows = [[float(matrix[i][j]) for j in range(4)] for i in range(3)]
+                points = [
+                    [row[0] * c[0] + row[1] * c[1] + row[2] * c[2] + row[3] for row in rows]
+                    for c in (tuple(corner) for corner in corners)
+                ]
+                if points:
+                    return [
+                        max(p[axis] for p in points) - min(p[axis] for p in points)
+                        for axis in range(3)
+                    ]
+            except (TypeError, ValueError, IndexError):
+                pass
+        return [abs(float(d)) for d in getattr(obj, "dimensions", ())]
+
+    def _simready_size_issues(self, obj: Any, unit_scale: float) -> List[Dict[str, Any]]:
+        """A scale issue when a mesh's real-world size is implausible in the declared units."""
+        if getattr(obj, "type", "MESH") != "MESH":
+            return []
+        dimensions = self._world_dimensions(obj)
+        largest_units = max(dimensions) if dimensions else 0.0
+        largest = largest_units * unit_scale
+        if largest <= 0:
+            return []
+        declared = (
+            f"{largest:.4g} m ({largest_units:.4g} Blender units at a Unit Scale of "
+            f"{unit_scale:g} m)"
+        )
+        if largest > self._SIMREADY_MAX_SIZE_M:
+            severity = "error"
+            message = (
+                f"Largest dimension {declared} is implausibly large for a SimReady "
+                f"asset (over {self._SIMREADY_MAX_SIZE_M:g} m)"
+            )
+        elif largest < self._SIMREADY_MIN_SIZE_M:
+            severity = "error"
+            message = (
+                f"Largest dimension {declared} is implausibly small for a SimReady "
+                f"asset (under {self._SIMREADY_MIN_SIZE_M * 1000:g} mm)"
+            )
+        elif largest > self._SIMREADY_WARN_SIZE_M:
+            severity = "warning"
+            message = f"Largest dimension {declared} is large for a SimReady asset"
+        else:
+            return []
+        return [
+            {
+                "object_name": obj.name,
+                "check": "scale",
+                "severity": severity,
+                "message": message,
+                "suggestion": (
+                    "If it was modelled in other units, set Scene > Units > Unit Scale "
+                    "to the modelling unit (0.001 for millimetres, 0.01 for centimetres) "
+                    "or scale the mesh to its real size; pass check_scale=false for an "
+                    "asset this size"
+                ),
+            }
+        ]
+
+    _SIMREADY_USD_EXTENSIONS = EXPORT_EXTENSIONS["USD"]
+    # Object types left out unless include_lights_and_cameras is true.
+    _SIMREADY_SCENE_TYPES = frozenset({"LIGHT", "CAMERA"})
+    # Longest lists an export result carries; the counts give the totals.
+    _SIMREADY_RESULT_ITEMS = 50
 
     def export_simready_usd(
         self,
@@ -6229,65 +6322,357 @@ class BlenderRuntimeSession:
         object_names: Optional[List[str]] = None,
         embed_metadata: bool = True,
         validate_before_export: bool = True,
+        include_children: bool = True,
+        include_lights_and_cameras: bool = False,
+        force: bool = False,
     ) -> Dict[str, Any]:
         """
-        Export a SimReady-compliant USD file.
+        Export a SimReady asset as USD that a simulator reads as physics and semantics.
 
-        Validates objects before export (optionally), selects the requested
-        objects, and delegates to the version-aware USD exporter.  SimReady
-        custom properties on the Blender objects are carried into the USD
-        as custom attributes automatically by Blender's USD exporter.
+        Blender's USD exporter writes the geometry and render materials; the
+        export then authors, from each object's simready_ metadata, UsdPhysics
+        RigidBodyAPI, MassAPI (mass, and density in stage units), CollisionAPI
+        with a MeshCollisionAPI approximation on the meshes, a physics material
+        bound with the physics purpose, and UsdSemantics LabelsAPI labels (Isaac
+        Sim's SemanticsAPI convention where Blender's USD has no UsdSemantics).
+        The asset root is the default prim and holds the materials (Looks,
+        PhysicsMaterials); metersPerUnit is the scene's Unit Scale. The file is
+        written only when everything succeeded. As export_file does, the export
+        applies modifiers, leaves Edit, Pose and paint modes for the export (so
+        unsaved mesh edits are included) and enters them again, and restores the
+        selection; a SimReady asset is static, so animation is left out.
 
         Args:
-            file_path: Output .usd / .usda / .usdc path.
-            object_names: Objects to export (None = all).
-            embed_metadata: Include simready_ custom properties.
-            validate_before_export: Run validation first.
+            file_path: Output .usd, .usda, .usdc or .usdz path.
+            object_names: Objects to export, each with its descendants unless
+                include_children is false; listed objects are exported even when
+                hidden. Null exports the scene's objects that are visible in
+                renders. An empty list is refused.
+            embed_metadata: Also keep the simready_ custom properties (and
+                Blender's names) as userProperties attributes, which Blender's
+                USD import reads back as custom properties.
+            validate_before_export: Validate the meshes first.
+            include_children: Export the descendants of the listed objects.
+            include_lights_and_cameras: Also export lights, cameras and the
+                World's dome light, which are left out of an asset by default.
+            force: Export although validation found errors.
 
         Returns:
-            Dict with file_path, object_count, validation_passed, issues.
+            Dict with file_path (written exactly there; a missing folder is
+            created), files_written, object_count (objects written), prims (object
+            name and USD path), default_prim, meters_per_unit, up_axis, physics
+            and semantics summaries, skipped_objects, validation_passed, issues
+            and warnings. When validation found errors and force is false, an
+            error result with the issues instead, and no file is written.
 
         Raises:
             PermissionError: If the path is outside the sandbox policy.
+            ValueError: For an unsupported extension, an empty object_names, an
+                unknown object, or a listed object that cannot be exported.
         """
-        file_path = self._deny_outside_sandbox(file_path, write=True)
-        issues: Optional[List[Dict[str, Any]]] = None
-        validation_passed = True
-
-        if object_names:
-            targets = [self._get_object_or_raise(n) for n in object_names]
-        else:
-            targets = list(self._resolve_object_source(None))
-
-        if validate_before_export:
-            # SimReady rules apply to mesh prims; cameras and lights would
-            # only produce spurious "No material" errors.
-            names = [o.name for o in targets if o.type == "MESH"]
-            result = self.validate_simready_compliance(object_names=names)
-            issues = result.get("issues")
-            validation_passed = result.get("compliant", True)
-
-        op_func = self._operator(self._export_op_path("USD"))
-        kwargs: Dict[str, Any] = {"filepath": file_path}
-        if object_names:
-            kwargs["selected_objects_only"] = True
-        # An older exporter without the option writes no custom properties.
-        if self._operator_property(op_func, ("export_custom_properties",)):
-            kwargs["export_custom_properties"] = embed_metadata
-        # The requested objects are selected for the export only.
-        self._run_export(
-            f"Failed to export SimReady USD file '{file_path}'",
-            op_func,
-            kwargs,
-            to_select=targets if object_names else None,
+        # Written at file_path exactly, as export_file does.
+        file_path = self._export_target(self._deny_outside_sandbox(file_path, write=True))
+        extension = os.path.splitext(file_path)[1].lower()
+        if extension not in self._SIMREADY_USD_EXTENSIONS:
+            raise ValueError(
+                f"Unsupported SimReady export extension '{extension or file_path}'; "
+                f"use one of {', '.join(self._SIMREADY_USD_EXTENSIONS)}"
+            )
+        if object_names is not None and not object_names:
+            raise ValueError(
+                "object_names is empty; list the objects to export, or pass null "
+                "to export the whole scene"
+            )
+        targets, listed, skipped = self._simready_export_targets(
+            object_names, include_children, include_lights_and_cameras
         )
+        if not targets:
+            raise ValueError(
+                "Nothing to export: "
+                + "; ".join(f"{s['object_name']}: {s['reason']}" for s in skipped)
+            )
 
+        issues: Optional[List[Dict[str, Any]]] = None
+        validation_passed: Optional[bool] = None
+        if validate_before_export:
+            result = self.validate_simready_compliance(
+                object_names=[o.name for o in targets if o.type == "MESH"]
+            )
+            issues = list(result.get("issues") or [])
+            validation_passed = bool(result.get("compliant", True))
+            if not validation_passed and not force:
+                return self._simready_validation_refusal(issues)
+
+        plan = {
+            "objects": [
+                {
+                    "name": obj.name,
+                    "parent": obj.parent.name if obj.parent is not None else None,
+                    **self._read_simready_properties(obj),
+                }
+                for obj in targets
+            ],
+            "asset_name": usd_identifier(os.path.splitext(os.path.basename(file_path))[0]),
+            "meters_per_unit": self._scene_unit_scale(),
+            "embed_metadata": embed_metadata,
+        }
+        main_file = Path(file_path)
+        created = self._make_folders(main_file.parent)
+        before = self._folder_state(main_file.parent)
+        workdir = tempfile.mkdtemp(prefix="simul-simready-")
+        raw_path = self._simready_raw_path(file_path, workdir)
+        export_warning: Optional[str] = None
+        try:
+            op_func = self._operator(self._export_op_path("USD"))
+            # export_file's option translation: the selection keyword this
+            # Blender's exporter defines, modifiers applied, Z up. A SimReady
+            # asset is static, so animation is left out.
+            kwargs = self._export_options(
+                op_func,
+                "USD",
+                raw_path,
+                None,
+                subset=True,
+                apply_modifiers=True,
+                export_animation=False,
+                frame_range=False,
+                axes=(None, None),
+                global_scale=None,
+                usd_up_axis="Z",
+                meters_per_unit=None,
+                root_prim_path=None,
+            )
+            defined = op_func.get_rna_type().properties.keys()
+            optional = {
+                # The layer is read back through Blender's object names.
+                "export_custom_properties": True,
+                "author_blender_name": True,
+                "root_prim_path": "/root",
+                "export_lights": include_lights_and_cameras,
+                "export_cameras": include_lights_and_cameras,
+                "convert_world_material": include_lights_and_cameras,
+                # Blender units go out unscaled; metersPerUnit declares them.
+                "convert_scene_units": "METERS",
+            }
+            kwargs.update({k: v for k, v in optional.items() if k in defined})
+            with self._simready_shown(targets, listed):
+                # Object Mode, then exactly the targets selected; both restored.
+                export_warning = self._run_export(
+                    f"Failed to export SimReady USD file '{file_path}'",
+                    op_func,
+                    kwargs,
+                    to_select=targets,
+                )
+            layer, report = author_simready_layer(raw_path, plan)
+            missing = report["missing_objects"]
+            listed_missing = sorted(name for name in missing if name in listed)
+            if listed_missing:
+                raise RuntimeError(
+                    "Blender's USD exporter did not write "
+                    + ", ".join(listed_missing)
+                    + "; nothing was written to "
+                    + file_path
+                )
+            skipped.extend(
+                {"object_name": name, "reason": "not written by Blender's USD exporter"}
+                for name in missing
+            )
+            self._simready_write(layer, file_path, workdir)
+        except Exception:
+            self._remove_empty_folders(created)
+            raise
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+            if os.path.exists(raw_path) and not raw_path.startswith(workdir):
+                os.remove(raw_path)
+
+        prims = sorted(report["prims"].items(), key=lambda item: item[1])
+        limit = self._SIMREADY_RESULT_ITEMS
+        warnings = report["warnings"] + ([export_warning] if export_warning else [])
         return {
             "file_path": file_path,
-            "object_count": len(targets),
+            "files_written": self._written_files(main_file.parent, before, file_path),
+            "object_count": len(prims),
+            "default_prim": report["default_prim"],
+            "prims": [{"object_name": n, "prim_path": p} for n, p in prims[:limit]],
+            "meters_per_unit": report["meters_per_unit"],
+            "up_axis": report["up_axis"],
+            "kilograms_per_unit": report["kilograms_per_unit"],
+            "physics": {
+                "rigid_body_count": len(report["rigid_bodies"]),
+                "collider_count": len(report["colliders"]),
+                "mass_count": len(report["mass_prims"]),
+                "physics_material_count": len(report["physics_materials"]),
+                "rigid_bodies": report["rigid_bodies"][:limit],
+                "colliders": report["colliders"][:limit],
+                "physics_materials": report["physics_materials"][:limit],
+            },
+            "semantics": {
+                "labels_schema": report["semantics_schema"],
+                "labelled_prim_count": len(report["labelled_prims"]),
+                "labelled_prims": report["labelled_prims"][:limit],
+            },
+            "skipped_objects": skipped[:limit],
             "validation_passed": validation_passed,
-            "issues": issues,
+            "forced": bool(force and validation_passed is False),
+            "issue_count": len(issues) if issues is not None else 0,
+            "issues": issues[:limit] if issues is not None else None,
+            "warnings": warnings[:limit],
         }
+
+    def _simready_validation_refusal(self, issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """The error result of an export that validation stopped."""
+        errors = [i for i in issues if i.get("severity") == "error"]
+        checks = sorted({str(i.get("check")) for i in errors})
+        first = errors[0] if errors else {}
+        return {
+            "success": False,
+            "error_type": "SimReadyValidationFailed",
+            "error": (
+                f"Not exported: validation found {len(errors)} error(s) "
+                f"({', '.join(checks)}), first {first.get('object_name')}: "
+                f"{first.get('message')}. Fix them, or pass force=true to export anyway"
+            ),
+            "details": {
+                "file_written": False,
+                "issue_count": len(issues),
+                "issues": issues[: self._SIMREADY_RESULT_ITEMS],
+            },
+        }
+
+    @staticmethod
+    def _descendants(obj: Any) -> List[Any]:
+        """Every object parented below ``obj``, depth first."""
+        recursive = getattr(obj, "children_recursive", None)
+        if recursive is not None:
+            return list(recursive)
+        found: List[Any] = []
+        for child in getattr(obj, "children", ()) or ():
+            found.append(child)
+            found.extend(BlenderRuntimeSession._descendants(child))
+        return found
+
+    @staticmethod
+    def _render_hidden(obj: Any) -> bool:
+        """Hidden in renders by the object itself or one of its collections."""
+        if getattr(obj, "hide_render", False):
+            return True
+        return any(
+            getattr(c, "hide_render", False) for c in getattr(obj, "users_collection", ())
+        )
+
+    def _simready_export_targets(
+        self,
+        object_names: Optional[List[str]],
+        include_children: bool,
+        include_lights_and_cameras: bool,
+    ) -> Tuple[List[Any], set, List[Dict[str, str]]]:
+        """The objects to export, the listed ones' names, and the left-out ones with why."""
+        blender_module: Any = bpy
+        layer_objects = blender_module.context.view_layer.objects
+        listed: List[Any] = []
+        if object_names is None:
+            candidates = list(blender_module.context.scene.objects)
+        else:
+            listed = [self._get_object_or_raise(name) for name in object_names]
+            outside = sorted(o.name for o in listed if layer_objects.get(o.name) is None)
+            if outside:
+                raise ValueError(
+                    "Cannot export "
+                    + ", ".join(outside)
+                    + ": not in the active view layer (another scene, or an excluded "
+                    "collection)"
+                )
+            candidates = list(listed)
+            if include_children:
+                for obj in listed:
+                    candidates.extend(self._descendants(obj))
+        listed_names = {o.name for o in listed}
+        targets: List[Any] = []
+        skipped: List[Dict[str, str]] = []
+        seen: set = set()
+        for obj in candidates:
+            if obj.name in seen:
+                continue
+            seen.add(obj.name)
+            reason = None
+            if obj.type in self._SIMREADY_SCENE_TYPES and not include_lights_and_cameras:
+                reason = "lights and cameras are left out; pass include_lights_and_cameras"
+            elif obj.name not in listed_names:
+                if layer_objects.get(obj.name) is None:
+                    reason = "not in the active view layer"
+                elif self._render_hidden(obj):
+                    reason = "hidden in renders; list it in object_names to export it"
+            if reason is None:
+                targets.append(obj)
+            else:
+                skipped.append({"object_name": obj.name, "reason": reason})
+        return targets, listed_names, skipped
+
+    @staticmethod
+    def _simready_raw_path(file_path: str, workdir: str) -> str:
+        """Where Blender's exporter writes before the SimReady layer is authored.
+
+        Next to the destination, so texture paths stay relative to it; a .usdz
+        is packaged from a .usdc in ``workdir`` instead, as Blender does.
+        """
+        directory, base = os.path.split(file_path)
+        stem, extension = os.path.splitext(base)
+        if extension.lower() == ".usdz":
+            return os.path.join(workdir, f"blender_{usd_identifier(stem)}.usdc")
+        return os.path.join(directory, f".{stem}.simul-{uuid.uuid4().hex[:8]}{extension}")
+
+    @staticmethod
+    def _simready_write(layer: Any, file_path: str, workdir: str) -> None:
+        """Write the authored layer to ``file_path``; a .usdz is packaged with its textures."""
+        if not file_path.lower().endswith(".usdz"):
+            if not layer.Export(file_path):
+                raise RuntimeError(f"Could not write {file_path}")
+            return
+        from pxr import Sdf, UsdUtils
+
+        stem = usd_identifier(os.path.splitext(os.path.basename(file_path))[0])
+        root_layer = os.path.join(workdir, f"{stem}.usdc")
+        if not layer.Export(root_layer):
+            raise RuntimeError(f"Could not write {root_layer}")
+        directory = os.path.dirname(file_path) or "."
+        package = os.path.join(directory, f".{stem}.simul-{uuid.uuid4().hex[:8]}.usdz")
+        try:
+            if not UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(root_layer), package):
+                raise RuntimeError(f"Could not package {file_path}")
+            os.replace(package, file_path)
+        finally:
+            if os.path.exists(package):
+                os.remove(package)
+
+    @staticmethod
+    @contextmanager
+    def _simready_shown(targets: List[Any], listed: set) -> Iterator[None]:
+        """Show ``targets`` to Blender's exporter for the block, then hide them again.
+
+        An object hidden in the viewport cannot be selected, so _run_export
+        could not export it; a listed object is also shown in renders, which
+        the exporter otherwise skips. _run_export leaves Edit Mode for the
+        export and selects exactly the targets, and restores both.
+        """
+        shown: List[Tuple[Any, Tuple[bool, bool, bool, bool]]] = []
+        try:
+            for obj in targets:
+                shown.append(
+                    (obj, (obj.hide_get(), obj.hide_viewport, obj.hide_render, obj.hide_select))
+                )
+                obj.hide_viewport = False
+                obj.hide_select = False
+                obj.hide_set(False)
+                if obj.name in listed:
+                    obj.hide_render = False
+            yield
+        finally:
+            for obj, (hidden, viewport, render, unselectable) in reversed(shown):
+                obj.hide_viewport = viewport
+                obj.hide_render = render
+                obj.hide_select = unselectable
+                obj.hide_set(hidden)
 
     def setup_simready_hierarchy(
         self,
