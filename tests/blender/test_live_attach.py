@@ -647,7 +647,90 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             )
             with pytest.raises(RuntimeError, match="Object Mode"):
                 client.create_object("CUBE", name="MustNotModifyActiveMesh")
-            client.execute_script("bpy.ops.object.mode_set(mode='OBJECT')")
+            # The way back without a script.
+            left = tool("set_blender_object_mode")
+            assert left["success"] is True, left
+            assert (left["previous_mode"], left["context_mode"]) == ("EDIT", "OBJECT")
+            # Under the Enter Edit Mode preference creation left the window in Edit Mode.
+            client.execute_script("bpy.context.preferences.edit.use_enter_edit_mode = True")
+            try:
+                pref = tool("create_blender_object", object_type="CUBE", name="PrefProbe")
+            finally:
+                client.execute_script(
+                    "bpy.context.preferences.edit.use_enter_edit_mode = False"
+                )
+            assert pref["success"] is True and pref["mode"] == "OBJECT", pref
+            client.delete_object("PrefProbe")
+            # With the active collection disabled in viewports, creation failed
+            # on the 3D View's missing active object and left an unnamed cube.
+            hidden = client.execute_script(
+                "col = bpy.data.collections.new('HiddenWork')\n"
+                "bpy.context.scene.collection.children.link(col)\n"
+                "col.hide_viewport = True\n"
+                "layer = bpy.context.view_layer.layer_collection.children[col.name]\n"
+                "bpy.context.view_layer.active_layer_collection = layer\n"
+                "__result__ = bpy.context.view_layer.active_layer_collection.name"
+            )
+            assert "HiddenWork" in hidden["return_value"], hidden
+            boxed = tool(
+                "create_blender_object",
+                object_type="CUBE",
+                name="HiddenProbe",
+                scale=[3, 3, 3],
+            )
+            assert boxed["success"] is True, boxed
+            assert boxed["collection"] == "Scene Collection"
+            assert "HiddenWork" in boxed["warning"]
+            made = client.execute_script(
+                "__result__ = (sorted(o.name for o in bpy.data.objects"
+                " if o.name.startswith(('Cube.', 'HiddenProbe'))),"
+                " bpy.context.view_layer.active_layer_collection.name,"
+                " bpy.data.objects['HiddenProbe'].visible_get())"
+            )
+            assert ast.literal_eval(made["return_value"]) == (
+                ["HiddenProbe"],
+                "HiddenWork",
+                True,
+            )
+            # The 6 m probe's bounding box is not within a 2 m box around its
+            # origin, which was all the check tested.
+            bounds = tool(
+                "check_blender_object_bounds",
+                object_name="HiddenProbe",
+                bounds_min=[-1, -1, -1],
+                bounds_max=[1, 1, 1],
+            )
+            assert (
+                bounds["within_bounds"],
+                bounds["relation"],
+                bounds["origin_within_bounds"],
+            ) == (False, "intersecting", True), bounds
+            # A page is accurate about what it holds and what follows.
+            visible = client.execute_script(
+                "__result__ = sum(o.visible_get() for o in bpy.context.scene.objects)"
+            )
+            total = int(visible["return_value"])
+            page = tool("list_blender_scene_objects", max_items=1, offset=1)
+            assert (page["count"], page["total"], page["offset"]) == (1, total, 1)
+            assert page["next_offset"] == (2 if total > 2 else None)
+            assert page["objects"][0]["collection"] is not None
+            # Delete leaves the object in another scene that links it.
+            client.execute_script(
+                "bpy.data.scenes.new('VariantProbe').collection.objects.link("
+                "bpy.data.objects['HiddenProbe'])"
+            )
+            deleted = tool("delete_blender_object", object_name="HiddenProbe")
+            assert deleted["success"] is True, deleted
+            assert deleted["remaining_scenes"] == ["VariantProbe"]
+            assert deleted["removed_from_file"] is False
+            cleaned = client.execute_script(
+                "bpy.data.objects.remove(bpy.data.objects['HiddenProbe'])\n"
+                "bpy.data.scenes.remove(bpy.data.scenes['VariantProbe'])\n"
+                "bpy.context.view_layer.active_layer_collection = "
+                "bpy.context.view_layer.layer_collection\n"
+                "bpy.data.collections.remove(bpy.data.collections['HiddenWork'])"
+            )
+            assert cleaned.get("error") is None, cleaned
             capture = client.capture_viewport(
                 width=64, height=64, use_render_fallback=True, agent_id="viewer"
             )

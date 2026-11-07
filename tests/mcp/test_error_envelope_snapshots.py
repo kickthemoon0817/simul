@@ -553,7 +553,12 @@ def test_blender_validation_error(
 
     payload = _call(instance, "list_blender_scene_objects", max_items=0)
 
-    arguments = {"collection_name": None, "include_hidden": False, "max_items": 0}
+    arguments = {
+        "collection_name": None,
+        "include_hidden": False,
+        "max_items": 0,
+        "offset": 0,
+    }
     message = _validation_message(BlenderSceneObjectsRequest, **arguments)
     assert payload == {
         "success": False,
