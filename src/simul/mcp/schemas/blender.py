@@ -1179,6 +1179,13 @@ class BlenderOpenFileRequest(BaseModel):
     """Request to open a .blend file."""
 
     file_path: str = Field(..., description="Absolute path to the .blend file")
+    discard_unsaved: bool = Field(
+        False,
+        description=(
+            "Open even though the current file has unsaved changes, which are then lost; "
+            "save first with save_blender_file to keep them"
+        ),
+    )
 
 
 class BlenderOpenFileResponse(BaseModel):
