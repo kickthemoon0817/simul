@@ -12,11 +12,13 @@ All human-readable chrome goes to **stderr** (via the Rich console).
 import asyncio
 import codecs
 import json
+import math
 import sys
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, BinaryIO, Coroutine, Dict, NoReturn, Optional, TypeVar, Union
 
+import click
 import typer
 from rich.console import Console
 from rich.markup import escape as rich_escape
@@ -102,6 +104,59 @@ def fail(
         emit_error(message, error_type, details, exit_code=exit_code)
     console.print(f"[red]{rich_escape(message)}[/red]")
     raise typer.Exit(exit_code)
+
+
+def _bad_option_value(param: Optional[click.Parameter], value: Any, expected: str) -> NoReturn:
+    """Exit 2 with ``InvalidArgument`` because an option's value is not ``expected``."""
+    opts = list(getattr(param, "opts", None) or ["option"])
+    name = next((opt for opt in opts if opt.startswith("--")), opts[0])
+    fail(f"{name} takes {expected}, got {value!r}", "InvalidArgument", exit_code=2)
+
+
+class _PortNumber(click.types.IntParamType):
+    """Click type for a port option: an integer from 1 to 65535.
+
+    Any other value, an integer out of range or not an integer at all, exits
+    2 with ``InvalidArgument`` through ``fail`` while the command line is
+    parsed, before the command runs. A ``click.BadParameter`` would exit 2
+    too, but as a usage message on stderr, without the JSON envelope even
+    under ``--json``. Valid values parse as Click's ``INT`` parses them, and
+    the type keeps its name, ``integer``, in ``--help`` and ``simul commands``.
+    """
+
+    def convert(self, value: Any, param: Optional[click.Parameter], ctx: Optional[click.Context]) -> int:
+        try:
+            port = int(super().convert(value, param, ctx))
+        except click.BadParameter:
+            port = 0  # not an integer: refused below like any port out of range
+        if not 1 <= port <= 65535:
+            _bad_option_value(param, value, "a port number from 1 to 65535")
+        return port
+
+
+class _TimeoutSeconds(click.types.FloatParamType):
+    """Click type for a timeout option: a finite number of seconds greater than 0.
+
+    Zero, a negative number, ``nan``, ``inf`` or a value that is not a number
+    exits 2 with ``InvalidArgument`` as ``_PortNumber`` does, instead of
+    reaching a transport that reports an immediate "timed out after nans".
+    The type keeps the name ``float``.
+    """
+
+    def convert(self, value: Any, param: Optional[click.Parameter], ctx: Optional[click.Context]) -> float:
+        try:
+            seconds = float(super().convert(value, param, ctx))
+        except click.BadParameter:
+            seconds = math.nan  # not a number: refused below like nan itself
+        if not (math.isfinite(seconds) and seconds > 0):
+            _bad_option_value(param, value, "a finite number of seconds greater than 0")
+        return seconds
+
+
+#: ``click_type`` of every port option (``--port``, ``--socket-port``, ...).
+PORT_NUMBER = _PortNumber()
+#: ``click_type`` of every timeout option (``--timeout``, ``--wait-timeout``).
+TIMEOUT_SECONDS = _TimeoutSeconds()
 
 
 def _failure_message(result: Dict[str, Any]) -> str:
