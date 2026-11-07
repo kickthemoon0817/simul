@@ -71,6 +71,8 @@ ISAAC_MAX_CAPTURE_DIMENSION = 3840
 #: (``FOCUS_MAX_ASPECT_RATIO``); the narrowest field of view Unreal renders
 #: (``FOCUS_MIN_FOV_DEGREES``).
 UNREAL_MAX_CAPTURE_DIMENSION = 16384
+#: Longest array preview get_prim_info returns (``MAX_ARRAY_PREVIEW``).
+USD_MAX_ARRAY_PREVIEW = 10_000
 UNREAL_MAX_ASPECT_RATIO = 16384.0
 UNREAL_MIN_FOV_DEGREES = 0.001
 
@@ -98,7 +100,11 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     "list_isaac_materials": {"max_results": _PAGE, "offset": _OFFSET},
     "list_isaac_physics_objects": {"max_results": _PAGE, "offset": _OFFSET},
     "list_isaac_aovs": {"max_results": _PAGE},
-    "query_isaac_typed_prims": {"max_results": Bounds(ge=1, le=2000), "offset": _OFFSET},
+    "query_isaac_typed_prims": {
+        "max_results": Bounds(ge=1, le=2000),
+        "offset": _OFFSET,
+        "max_array_elements": Bounds(ge=0, le=10000),
+    },
     "list_isaac_render_vars": {"max_results": _PAGE},
     "list_isaac_prims": {"max_results": _PAGE, "offset": _OFFSET},
     "search_isaac_prims": {"max_results": _PAGE, "offset": _OFFSET},
@@ -128,6 +134,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     },
     "create_isaac_physics_scene": {"gravity_magnitude": Bounds(gt=0)},
     # -- Headless USD ----------------------------------------------------------
+    "get_prim_info": {"array_preview": Bounds(ge=0, le=USD_MAX_ARRAY_PREVIEW)},
     "search_prims": {"search_type": Choices(("by_type", "by_name"))},
     "summarize_scene": {"format": Choices(("json", "text"))},
     # -- Unreal ----------------------------------------------------------------

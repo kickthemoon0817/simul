@@ -2153,7 +2153,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "enable": true,
-      "simulate_physics": true
+      "kinematic": false,
+      "make_movable": true,
+      "allow_detach": false
      }
     }
    ],
@@ -2176,7 +2178,9 @@
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "enable": false,
-    "simulate_physics": false
+    "kinematic": true,
+    "make_movable": false,
+    "allow_detach": true
    },
    "envelope": [
     {
@@ -2192,7 +2196,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "enable": false,
-      "simulate_physics": false
+      "kinematic": true,
+      "make_movable": false,
+      "allow_detach": true
      }
     }
    ],

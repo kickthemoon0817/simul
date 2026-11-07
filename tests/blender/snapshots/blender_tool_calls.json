@@ -1112,7 +1112,12 @@
     "open_blender_file": {
       "minimal": {
         "arguments": {"file_path": "/tmp/scene.blend"},
-        "session_calls": [{"method": "open_blend_file", "arguments": {"file_path": "'/tmp/scene.blend'"}}],
+        "session_calls": [
+          {
+            "method": "open_blend_file",
+            "arguments": {"file_path": "'/tmp/scene.blend'", "discard_unsaved": "False"}
+          }
+        ],
         "response": {"checked_against": "BlenderOpenFileResponse"},
         "usage": [{"tool": "open_blender_file", "success": false}]
       },
@@ -1131,7 +1136,7 @@
                 "type": "string_type"
               }
             ],
-            "input": {"file_path": {"bogus": 1}}
+            "input": {"file_path": {"bogus": 1}, "discard_unsaved": false}
           }
         }
       }

@@ -37,6 +37,106 @@ from .protocol import (
 
 logger = logging.getLogger(__name__)
 
+#: Operations that change the open document, by the MCP tool that calls them.
+#: Each completed call is recorded as one undo step named ``simul: <tool>``.
+#: ``execute_script`` is recorded even when the script reports an error, since
+#: it may have changed data before raising.
+UNDO_STEPS: dict[str, str] = {
+    "add_force_field": "add_blender_force_field",
+    "add_modifier": "add_blender_modifier",
+    "add_rigid_body_constraint": "add_blender_rigid_body_constraint",
+    "apply_simready_metadata": "apply_simready_metadata",
+    "assign_material": "assign_blender_material",
+    "bake_simulation": "bake_blender_simulation",
+    "clear_object_parent": "clear_blender_object_parent",
+    "create_mesh_from_data": "create_blender_mesh_from_data",
+    "create_object": "create_blender_object",
+    "delete_keyframe": "delete_blender_keyframe",
+    "delete_object": "delete_blender_object",
+    "execute_script": "execute_blender_script",
+    # It leaves the exported objects selected.
+    "export_simready_usd": "export_simready_usd",
+    "focus_on_object": "focus_blender_on_object",
+    "free_bake": "free_blender_bake",
+    "import_file": "import_blender_file",
+    "insert_keyframe": "insert_blender_keyframe",
+    "set_camera_view": "set_blender_camera_view",
+    # Blender records frame changes as undo steps too.
+    "set_frame": "set_blender_frame",
+    "set_frame_range": "set_blender_frame_range",
+    "set_light_params": "set_blender_light_params",
+    "set_object_parent": "set_blender_object_parent",
+    "set_object_transform": "set_blender_object_transform",
+    "setup_rigid_body": "setup_blender_rigid_body",
+    "setup_simready_hierarchy": "setup_simready_hierarchy",
+}
+#: ``control_ui`` actions that change scene data: the selection and the active
+#: object's transform, which Blender's own selection and property edits record.
+UNDO_UI_ACTIONS = frozenset({"select_object", "set_property"})
+#: Operations recorded as no undo step and that leave the modified flag alone.
+NO_UNDO_STEP = frozenset(
+    {
+        # Reads, including captures and samplers that restore the frame and
+        # render settings they change.
+        "capture_viewport",
+        "capture_viewport_sequence",
+        "get_bounding_box",
+        "get_camera_info",
+        "get_constraint_info",
+        "get_distance_between",
+        "get_file_info",
+        "get_force_field_info",
+        "get_frame",
+        "get_keyframes",
+        "get_material_info",
+        "get_mesh_info",
+        "get_object_info",
+        "get_object_trajectory",
+        "get_physics_state",
+        "get_runtime_info",
+        "get_simready_metadata",
+        "get_viewport_info",
+        "is_object_within_bounds",
+        "list_scene_objects",
+        "search_objects",
+        "summarize_scene",
+        "validate_simready_compliance",
+        # Loading a file starts a new undo history; a step after saving would
+        # mark the saved file modified again.
+        "open_blend_file",
+        "save_blend_file",
+        # Writes only the exported file.
+        "export_file",
+        # Playback, which Blender does not record either.
+        "play_animation",
+        # Recorded per action: UNDO_UI_ACTIONS.
+        "control_ui",
+    }
+)
+
+
+def undo_step_name(method: str, arguments: dict[str, Any]) -> str | None:
+    """Name the undo step a completed operation is recorded as, or None for none.
+
+    An operation in neither table is recorded under its own name: an
+    unrecorded edit can be lost, a spare step cannot.
+
+    Args:
+        method: The ``BlenderRuntimeSession`` operation.
+        arguments: Its bound arguments.
+
+    Returns:
+        ``simul: <tool>``, or None when the operation changes no document data.
+    """
+    if method == "control_ui":
+        action = arguments.get("agent_control")
+        if action not in UNDO_UI_ACTIONS:
+            return None
+        return f"simul: control_blender_ui ({action})"
+    if method in NO_UNDO_STEP:
+        return None
+    return f"simul: {UNDO_STEPS.get(method, method)}"
+
 
 class AttachmentTargetChanged(ValueError):
     """The pinned document, window or scene is gone; the reply carries the new identity."""
@@ -71,6 +171,8 @@ class BlenderBridge:
         self.token = secrets.token_urlsafe(32)
         self.listener: socket.socket | None = None
         self.connections: list[PendingConnection] = []
+        # An undo step that waits for the next poll; see _push_undo_step.
+        self.deferred_undo_step: str | None = None
         self.discovery_path = self.discovery_dir / f"instance-{self.instance_id}.json"
         self._timer = self.poll
         self._load_handler = persistent(lambda unused: self._on_load(unused))
@@ -121,6 +223,9 @@ class BlenderBridge:
         """Read and execute bounded requests from Blender's main-thread timer."""
         if self.listener is None:
             return None
+        if self.deferred_undo_step is not None:
+            step, self.deferred_undo_step = self.deferred_undo_step, None
+            self._push_undo_step(step, "")
         cursors.prune()
         observations.prune()
         for _ in range(8):
@@ -191,7 +296,11 @@ class BlenderBridge:
             else:
                 result = self._execute(request)
             return {"request_id": request_id, "success": True, "result": result}
-        except Exception as exc:
+        except BaseException as exc:
+            # SystemExit and KeyboardInterrupt too: nothing above this timer
+            # handles them. Blender prints an exception that escapes a timer
+            # with PyErr_Print, which exits the process on SystemExit, and
+            # unregisters the timer, which would stop the bridge, on any other.
             message = exception_message(exc)
             logger.error("Blender bridge request %s failed: %s", request_id, message)
             return {
@@ -319,6 +428,7 @@ class BlenderBridge:
         # pointers on exiting a context override.
         if method == "open_blend_file":
             return dict(operation(*arguments.args, **arguments.kwargs))
+        document_id = self.document_id
         with bpy.context.temp_override(**context):
             # A primitive-add operator in Edit Mode edits the user's active mesh
             # instead of creating an object. Require an explicit mode change.
@@ -366,7 +476,51 @@ class BlenderBridge:
                     pid=os.getpid(),
                     is_dirty=bool(bpy.data.is_dirty),
                 )
+        step = undo_step_name(method, arguments.arguments)
+        if step is not None and self.document_id != document_id:
+            # A script loaded a file. Blender marks the loaded file unmodified
+            # when its event loop handles the load's notifier, after this timer
+            # returns, so a step recorded now would leave what the script did
+            # after the load counted as saved. The next poll records it.
+            self.deferred_undo_step = step
+        elif step is not None:
+            self._push_undo_step(step, target["window_id"])
         return dict(result)
+
+    def _push_undo_step(self, name: str, window_id: str) -> None:
+        """Record a completed operation as one undo step, marking the file modified.
+
+        Blender records an operator the user runs as an undo step once it
+        finishes, but neither ``bpy.ops`` called from Python nor an RNA write
+        records one. An agent's edits then joined whatever step the user's next
+        action recorded, so one Ctrl+Z took back all of them, and the file never
+        counted as modified, so quitting asked nothing. ``ed.undo_push`` records
+        the step and also marks the file modified (``WM_file_tag_modified``).
+
+        A script that loaded a file is recorded too, in the new file's history,
+        on the next poll (``deferred_undo_step``): what it did after the load
+        would otherwise be in no step and count as saved.
+
+        Args:
+            name: The step's name in Edit > Undo History.
+            window_id: The attached window, which gives the operator its context
+                while it is open; any window serves, the undo history being
+                global, and a loaded file has new windows.
+        """
+        windows = list(bpy.context.window_manager.windows)
+        window = next(
+            (w for w in windows if str(w.as_pointer()) == window_id),
+            windows[0] if windows else None,
+        )
+        if window is None:
+            logger.error("No Blender window to record the undo step %r", name)
+            return
+        try:
+            with bpy.context.temp_override(window=window):
+                bpy.ops.ed.undo_push(message=name)
+        except Exception:
+            # The operation itself completed; failing it now would invite a retry.
+            logger.exception("Blender did not record the undo step %r", name)
 
     def _on_load(self, _unused: Any) -> None:
         reset_ui()

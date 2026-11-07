@@ -1,6 +1,6 @@
 """Strict pxr import surface for USD modules."""
 
-from pxr import Gf, Kind, Sdf, Tf, Usd, UsdGeom, UsdShade, Vt
+from pxr import Gf, Kind, Pcp, Sdf, Tf, Usd, UsdGeom, UsdShade, Vt
 
 __all__ = [
     "Usd",
@@ -10,5 +10,6 @@ __all__ = [
     "Tf",
     "Gf",
     "Kind",
+    "Pcp",
     "Vt",
 ]
