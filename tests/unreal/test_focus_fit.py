@@ -46,7 +46,12 @@ from simul.mcp import server as server_module
 from simul.mcp.registration._unreal_tools import UNREAL_TOOLS
 from simul.mcp.usage_tracker import ToolUsageTracker
 from tests.fakes import AvailableAdapter
-from tests.unreal.editor_world import SUBSYSTEM_NAMES, World, editor_subsystems, is_valid
+from tests.unreal.editor_world import (
+    SUBSYSTEM_NAMES,
+    World,
+    editor_subsystems,
+    is_valid,
+)
 
 LEVEL = "/Game/Maps/Lab.Lab:PersistentLevel."
 WORLD = World("/Game/Maps/Lab.Lab")

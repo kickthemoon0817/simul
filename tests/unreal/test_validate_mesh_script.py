@@ -17,7 +17,12 @@ from typing import Any, Dict
 import pytest
 
 from simul.adapters.unreal_runtime import UnrealRuntimeSession
-from tests.unreal.editor_world import SUBSYSTEM_NAMES, World, editor_subsystems, is_valid
+from tests.unreal.editor_world import (
+    SUBSYSTEM_NAMES,
+    World,
+    editor_subsystems,
+    is_valid,
+)
 
 MESH_PATH = "/Game/Map.Map:PersistentLevel.DynamicMeshActor_0"
 WORLD = World("/Game/Map.Map")
