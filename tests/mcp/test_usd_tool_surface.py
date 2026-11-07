@@ -149,8 +149,9 @@ def test_edit_tools_round_trip(usd_driver: UsdToolDriver) -> None:
     )
     updated = usd_driver.call("get_prim_info", extra)
     _assert_ok(updated)
-    assert updated["attributes"]["custom:mass"] == 2.5
-    assert "xformOp:translate" in updated["attributes"]
+    assert updated["attributes"]["custom:mass"]["value"] == 2.5
+    assert updated["attributes"]["custom:mass"]["authored"] is True
+    assert updated["attributes"]["xformOp:translate"]["value"] == [1.0, 2.0, 3.0]
 
     _assert_ok(usd_driver.call("delete_prim", extra))
     gone = usd_driver.call("get_prim_info", extra)
