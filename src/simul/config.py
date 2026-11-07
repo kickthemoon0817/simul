@@ -537,6 +537,13 @@ class SecurityConfig(BaseModel):
         default_factory=list,
         description="URL schemes that may be written to; empty keeps writes local-only",
     )
+    relative_path_base: Optional[str] = Field(
+        default=None,
+        description=(
+            "Directory a relative path passed to a tool resolves against; unset uses "
+            "the directory the server was started in"
+        ),
+    )
     allow_script_execution: bool = Field(
         default=True,
         description=(
@@ -749,7 +756,6 @@ def _normalise_isaac_instances(value: Any) -> Optional[List[Dict[str, Any]]]:
         if not isinstance(item, dict):
             raise ValueError(f"Each instance must be a dict, got {type(item).__name__}")
 
-
         bridge = item.get("bridge") or {}
         instances.append(
             _compact_dict(
@@ -928,6 +934,10 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     "allowed_write_url_schemes": _coalesce(
                         security.get("allowed_write_url_schemes"),
                         security_sandbox.get("allowed_write_url_schemes"),
+                    ),
+                    "relative_path_base": _coalesce(
+                        security.get("relative_path_base"),
+                        security_sandbox.get("relative_path_base"),
                     ),
                     "allow_script_execution": security.get("allow_script_execution"),
                     "rate_limiting_enabled": _coalesce(

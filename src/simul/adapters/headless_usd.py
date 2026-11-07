@@ -22,7 +22,13 @@ from ..usd import USDReader, BBoxCache, MeshOperations, SceneSummarizer
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
 from ..usd.sandbox import CompositionSandbox
-from ..usd.validation import USDLoadError, check_usd_file, open_root_layer
+from ..usd.validation import (
+    USDLoadError,
+    check_usd_file,
+    check_usd_url,
+    open_root_layer,
+    url_scheme,
+)
 from ..utils.paths import SandboxDenied
 
 logger = get_logger(__name__)
@@ -99,14 +105,22 @@ class HeadlessUSDSession(LoggerMixin):
                 error carries pxr's own reason.
             SandboxDenied: The file's composition reaches outside the sandbox.
         """
-        file_path = str(Path(file_path).resolve())
-        facts = check_usd_file(file_path, self.settings.usd)
-        # Held while the reader opens the stage, which then finds these layers
-        # in pxr's registry instead of parsing the files a second time.
-        root_layer = open_root_layer(file_path, facts.head)
+        remote = url_scheme(str(file_path)) is not None
+        if remote:
+            # Only with an asset resolver registered for the scheme.
+            file_path = str(file_path)
+            check_usd_url(file_path)
+            root_layer = open_root_layer(file_path)
+        else:
+            file_path = str(Path(file_path).resolve())
+            facts = check_usd_file(file_path, self.settings.usd)
+            # Held while the reader opens the stage, which then finds these
+            # layers in pxr's registry instead of parsing the files again.
+            root_layer = open_root_layer(file_path, facts.head)
         walked = sandbox.check_layers(root_layer) if sandbox is not None else []
 
-        stage = self.usd_reader.open_stage(file_path)
+        # The reader caches local files by path; a URL opens directly.
+        stage = Usd.Stage.Open(root_layer) if remote else self.usd_reader.open_stage(file_path)
         if not stage:
             raise USDLoadError(
                 file_path,
@@ -130,6 +144,11 @@ class HeadlessUSDSession(LoggerMixin):
         self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
         return stage_id
     
+    def stage_id_for(self, file_path: Union[str, Path]) -> str:
+        """The identifier ``load_stage_or_raise`` gives the stage of ``file_path``."""
+        key = str(file_path) if url_scheme(str(file_path)) else str(Path(file_path).resolve())
+        return self._generate_stage_id(key)
+
     def unload_stage(self, stage_id: str) -> bool:
         """
         Unload a USD stage.
