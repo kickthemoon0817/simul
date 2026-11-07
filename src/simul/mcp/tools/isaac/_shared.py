@@ -20,11 +20,18 @@ PROTECTED_EXTENSIONS: frozenset[str] = frozenset(
     }
 )
 
-# Carb settings namespaces that configure those transports.
+# Carb settings namespaces that configure those transports: the bridge, 6.0's
+# python_server and 5.x's VS Code socket (host, port, auth on 6.0).
 PROTECTED_CARB_SETTING_PREFIXES: tuple[str, ...] = (
     "/exts/khemoo.simul/",
     "/exts/isaacsim.code_editor.python_server/",
+    "/exts/isaacsim.code_editor.vscode/",
 )
+
+# Carb settings under this prefix are saved to the user's Kit configuration
+# (Isaac Sim's .kit files set settings.persistent = true) and apply to every
+# later session, not just this one.
+PERSISTENT_CARB_SETTING_PREFIX = "/persistent/"
 
 # Prim paths whose removal empties the scene rather than editing it.
 STAGE_ROOT_PATH = "/"
@@ -88,6 +95,74 @@ MAX_SCRIPT_BYTES = 100_000
 # bridge's per-script ceiling (its 120 s request timeout less 5 s) so the
 # bridge still interrupts and reports instead of abandoning the request.
 HEAVY_SCRIPT_TIMEOUT_SECONDS = 110.0
+
+# step_isaac_simulation's wall-clock budget: the warm-up a stopped timeline
+# spends after play() plus a floor of 10 frames per second (Isaac Sim's full
+# app is rate-limited to 60 Hz, and heavy scenes run slower), never below the
+# default script budget and never above the heavy one. Stepping stops and
+# reports how far it got when the budget runs out.
+STEP_BUDGET_BASE_SECONDS = 10.0
+STEP_BUDGET_SECONDS_PER_FRAME = 0.1
+
+# Script core shared by the step tool: the rates that decide how many physics
+# steps one frame runs. PhysX consumes the timeline's time in steps of the
+# physics scene's dt (Isaac Sim's SimulationContext derives its substeps as
+# rendering_dt / physics_dt), so a frame is frame_dt * steps_per_second of
+# them. Mirrors _physics_rates in the bridge's service.py.
+PHYSICS_RATES_CORE = """\
+    def _physics_rates(timeline, frame_dt, time_delta):
+        rates = {
+            "physics_scene": None,
+            "physics_steps_per_second": None,
+            "physics_dt": None,
+            "rate_source": None,
+            "timeline_time_codes_per_second": None,
+            "rate_limit_hz": None,
+            "physics_steps_per_frame": None,
+            "physics_steps_estimated": None,
+        }
+        try:
+            rates["timeline_time_codes_per_second"] = timeline.get_time_codes_per_seconds()
+        except Exception:
+            pass
+        try:
+            import carb.settings
+            settings = carb.settings.get_settings()
+            if settings.get("/app/runLoops/main/rateLimitEnabled"):
+                rates["rate_limit_hz"] = settings.get("/app/runLoops/main/rateLimitFrequency")
+        except Exception:
+            pass
+        rate = None
+        try:
+            import omni.usd
+            from pxr import PhysxSchema, Usd, UsdPhysics
+            stage = omni.usd.get_context().get_stage()
+            prims = iter(Usd.PrimRange(stage.GetPseudoRoot())) if stage is not None else iter(())
+            for prim in prims:
+                # Only the top two levels: /physicsScene, /World/physicsScene.
+                if prim.GetPath().pathElementCount >= 2:
+                    prims.PruneChildren()
+                if not prim.IsA(UsdPhysics.Scene):
+                    continue
+                rates["physics_scene"] = str(prim.GetPath())
+                if prim.HasAPI(PhysxSchema.PhysxSceneAPI):
+                    rate = PhysxSchema.PhysxSceneAPI(prim).GetTimeStepsPerSecondAttr().Get()
+                    rates["rate_source"] = "physxScene:timeStepsPerSecond"
+                else:
+                    rate = 60.0
+                    rates["rate_source"] = "PhysxSceneAPI fallback"
+                break
+        except Exception:
+            pass
+        if rate:
+            rate = float(rate)
+            rates["physics_steps_per_second"] = rate
+            rates["physics_dt"] = 1.0 / rate
+            if frame_dt:
+                rates["physics_steps_per_frame"] = round(frame_dt * rate, 3)
+            rates["physics_steps_estimated"] = int(round(time_delta * rate))
+        return rates
+"""
 
 # 4K on the long edge, so a capture can't grow to tens of megabytes before
 # anything checks whether the result can be delivered.
@@ -771,3 +846,106 @@ COLLISION_APPROXIMATIONS: tuple[str, ...] = (
 # Default cap on list-shaped tool results, applied inside the generated script
 # so the trim happens before Kit serialises the payload.
 DEFAULT_MAX_RESULTS = 200
+
+# Annotations: checks appended to a tool script, after the line printing the
+# tool's own JSON, that report a condition about the result rather than the
+# result itself. Each prints one line starting with ANNOTATION_MARKER followed
+# by {"fields": {...}, "warnings": [...]}; the tool layer strips those lines
+# before parsing the result and merges them into it. Each is a function that
+# is called and deleted, so the shared script namespace keeps no names, and
+# swallows every exception: an annotation must never fail a tool that worked.
+ANNOTATION_MARKER = "[simul-annotation] "
+
+# Isaac Sim's SimulationManager switches PhysX to Fabric for GPU physics:
+# enable_fabric() enables omni.physx.fabric and sets /physics/updateToUsd and
+# /physics/updateVelocitiesToUsd to false (v5.1.0 simulation_manager.py
+# set_physics_sim_device / enable_fabric; v6.0.1 set_device). From then on the
+# simulation no longer writes poses and velocities back to USD, so every USD
+# read below returns the values from before play while the robot moves.
+USD_READBACK_STALE_WARNING = (
+    "PhysX is writing simulation results to Fabric, not USD "
+    "(/physics/updateToUsd or /physics/updateVelocitiesToUsd is false, as Isaac "
+    "Sim's SimulationManager sets for GPU physics), so the poses and velocities "
+    "read from USD here are the values from before play, not the simulated state. "
+    "Read the simulated state through a physics view (omni.physics.tensors, or "
+    "isaacsim.core.experimental.prims on 6.0) with execute_isaac_script."
+)
+
+USD_READBACK_ANNOTATION = f'''\
+def _simul_annotate_usd_readback():
+    try:
+        import json
+        import carb.settings
+        import omni.timeline
+        if omni.timeline.get_timeline_interface().is_stopped():
+            return
+        settings = carb.settings.get_settings()
+        update_to_usd = settings.get("/physics/updateToUsd")
+        update_velocities_to_usd = settings.get("/physics/updateVelocitiesToUsd")
+        fabric_enabled = None
+        try:
+            import omni.kit.app
+            manager = omni.kit.app.get_app().get_extension_manager()
+            fabric_enabled = bool(manager.is_extension_enabled("omni.physx.fabric"))
+        except Exception:
+            pass
+        stale = update_to_usd is False or update_velocities_to_usd is False
+        if not stale and not fabric_enabled:
+            return
+        fields = {{
+            "usd_readback": {{
+                "update_to_usd": update_to_usd,
+                "update_velocities_to_usd": update_velocities_to_usd,
+                "physx_fabric_enabled": fabric_enabled,
+                "stale_under_fabric": stale,
+            }},
+        }}
+        warnings = []
+        if stale:
+            fields["stale_under_fabric"] = True
+            warnings.append({USD_READBACK_STALE_WARNING!r})
+        print({ANNOTATION_MARKER!r} + json.dumps({{"fields": fields, "warnings": warnings}}))
+    except Exception:
+        pass
+
+
+_simul_annotate_usd_readback()
+del _simul_annotate_usd_readback
+'''
+
+# Isaac Sim's apps set physics.resetOnStop = true (base and full .kit files of
+# 5.1.0 and 6.0.1): stopping or resetting restores what the simulation moved to
+# its pre-play state. step_isaac_simulation leaves the timeline paused, so an
+# edit made then to a simulated prim is reverted by the next stop or reset.
+PAUSED_EDIT_WARNING = (
+    "The timeline is paused (step_isaac_simulation leaves it paused) and "
+    "/physics/resetOnStop is on: stopping or resetting the simulation restores the "
+    "prims it simulates to their pre-play state, which also reverts edits made now "
+    "to those prims. Stop the simulation before editing to keep the edit."
+)
+
+PAUSED_EDIT_ANNOTATION = f'''\
+def _simul_annotate_paused_edit():
+    try:
+        import json
+        import carb.settings
+        import omni.timeline
+        timeline = omni.timeline.get_timeline_interface()
+        if timeline.is_playing() or timeline.is_stopped():
+            return
+        if carb.settings.get_settings().get("/physics/resetOnStop") is False:
+            return
+        note = {{"fields": {{"timeline_state": "paused"}}, "warnings": [{PAUSED_EDIT_WARNING!r}]}}
+        print({ANNOTATION_MARKER!r} + json.dumps(note))
+    except Exception:
+        pass
+
+
+_simul_annotate_paused_edit()
+del _simul_annotate_paused_edit
+'''
+
+SCRIPT_ANNOTATIONS: dict[str, str] = {
+    "usd_readback": USD_READBACK_ANNOTATION,
+    "paused_edit": PAUSED_EDIT_ANNOTATION,
+}

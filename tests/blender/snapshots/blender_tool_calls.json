@@ -2151,7 +2151,10 @@
               "file_path": "'/tmp/asset.usd'",
               "object_names": "None",
               "embed_metadata": "True",
-              "validate_before_export": "True"
+              "validate_before_export": "True",
+              "include_children": "True",
+              "include_lights_and_cameras": "False",
+              "force": "False"
             }
           }
         ],
@@ -2163,7 +2166,10 @@
           "file_path": "/tmp/asset.usd",
           "object_names": ["Cube"],
           "embed_metadata": false,
-          "validate_before_export": false
+          "validate_before_export": false,
+          "include_children": false,
+          "include_lights_and_cameras": true,
+          "force": true
         },
         "session_calls": [
           {
@@ -2172,7 +2178,10 @@
               "file_path": "'/tmp/asset.usd'",
               "object_names": "['Cube']",
               "embed_metadata": "False",
-              "validate_before_export": "False"
+              "validate_before_export": "False",
+              "include_children": "False",
+              "include_lights_and_cameras": "True",
+              "force": "True"
             }
           }
         ],
@@ -2191,7 +2200,10 @@
               "file_path": {"bogus": 1},
               "object_names": null,
               "embed_metadata": true,
-              "validate_before_export": true
+              "validate_before_export": true,
+              "include_children": true,
+              "include_lights_and_cameras": false,
+              "force": false
             }
           }
         }
