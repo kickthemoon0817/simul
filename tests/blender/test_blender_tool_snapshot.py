@@ -117,7 +117,10 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
         },
     },
     "summarize_blender_scene": {"minimal": {}},
-    "get_blender_material_info": {"minimal": {"material_name": "Metal"}},
+    "get_blender_material_info": {
+        "minimal": {"material_name": "Metal"},
+        "full": {"material_name": "Metal", "max_nodes": 10},
+    },
     "get_blender_distance_between": {
         "minimal": {"object_name_a": "Cube", "object_name_b": "Sphere"}
     },
@@ -218,6 +221,15 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "base_color": [1, 0, 0, 1],
             "metallic": 0.5,
             "roughness": 0.25,
+            "slot_index": 1,
+            "face_indices": [0, 2],
+            "link": "OBJECT",
+            "single_user": True,
+            "reuse_existing": False,
+            "base_color_texture": "/tmp/albedo.png",
+            "metallic_texture": "/tmp/metallic.png",
+            "roughness_texture": "/tmp/roughness.png",
+            "normal_texture": "/tmp/normal.png",
         },
     },
     "add_blender_modifier": {
@@ -245,6 +257,11 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "spot_size": 0.8,
             "spot_blend": 0.2,
             "shadow_soft_size": 0.1,
+            "light_type": "AREA",
+            "angle": 0.1,
+            "size": 2,
+            "size_y": 1,
+            "shape": "RECTANGLE",
         },
     },
     "open_blender_file": {"minimal": {"file_path": "/tmp/scene.blend"}},
@@ -433,6 +450,17 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "recalculate_normals": True,
         },
     },
+    "uv_unwrap_blender_mesh": {
+        "minimal": {"object_name": "Cube"},
+        "full": {
+            "object_name": "Cube",
+            "method": "CUBE_PROJECT",
+            "uv_map_name": "Lightmap",
+            "angle_limit": 1.0,
+            "island_margin": 0.02,
+            "cube_size": 2,
+        },
+    },
     "apply_simready_metadata": {
         "minimal": {
             "object_name": "Cube",
@@ -441,7 +469,12 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
                 "physics": {"mass_kg": 2, "collider_type": "box"},
                 "material": {"substrate_type": "metal"},
             },
-        }
+        },
+        "full": {
+            "object_name": "Cube",
+            "metadata": {"physics": {"is_rigid_body": False}},
+            "clear": ["mass_kg", "additional_labels"],
+        },
     },
     "get_simready_metadata": {"minimal": {"object_name": "Cube"}},
     "validate_simready_compliance": {
@@ -453,6 +486,13 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "check_transforms": False,
             "check_materials": False,
             "check_hierarchy": False,
+            "check_metadata": False,
+            "check_physics": False,
+            "check_geometry": False,
+            "include_children": False,
+            "severity": "error",
+            "offset": 5,
+            "limit": 10,
         },
     },
     "export_simready_usd": {
@@ -465,6 +505,7 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "include_children": False,
             "include_lights_and_cameras": True,
             "force": True,
+            "skip_checks": ["naming", "scale"],
         },
     },
     "setup_simready_hierarchy": {
@@ -473,6 +514,7 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "root_name": "asset_root",
             "child_names": ["Cube"],
             "semantic": {"semantic_class": "cup", "semantic_qcode": "Q81727"},
+            "reuse_root": True,
         },
     },
 }
