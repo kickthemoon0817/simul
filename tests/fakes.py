@@ -500,6 +500,33 @@ class FakeMatrix:
     def inverted(self) -> "FakeMatrix":
         return FakeMatrix(np.linalg.inv(np.asarray(self.rows)))
 
+    def inverted_safe(self) -> "FakeMatrix":
+        """The inverse, or the nearest one of a singular matrix (mathutils nudges its diagonal)."""
+        try:
+            return self.inverted()
+        except np.linalg.LinAlgError:
+            return FakeMatrix(np.linalg.pinv(np.asarray(self.rows)))
+
+    def _rotation_and_scale(self) -> Tuple[np.ndarray, np.ndarray]:
+        """The rotation and scale ``decompose`` gives: a mirror's scale negative on every axis."""
+        linear = np.asarray(self.rows)[:3, :3]
+        scale = np.linalg.norm(linear, axis=0)
+        if np.linalg.det(linear) < 0:
+            scale = -scale
+        return linear / scale, scale
+
+    def decompose(self) -> Tuple[FakeVector, "FakeQuaternion", FakeVector]:
+        """(location, rotation, scale), as ``mathutils.Matrix.decompose`` returns them."""
+        rotation, scale = self._rotation_and_scale()
+        return (
+            self.translation,
+            FakeQuaternion(matrix_quaternion(rotation)),
+            FakeVector(scale),
+        )
+
+    def to_quaternion(self) -> "FakeQuaternion":
+        return FakeQuaternion(matrix_quaternion(self._rotation_and_scale()[0]))
+
     def copy(self) -> "FakeMatrix":
         """A matrix of these values that no later change to its source reaches."""
         return FakeMatrix(self.rows)
@@ -515,13 +542,6 @@ class FakeMatrix:
         scale of (-1.5, 1.5, 1.5))."""
         lengths = np.linalg.norm(np.asarray(self.rows)[:3, :3], axis=0)
         return FakeVector(-lengths if self.is_negative else lengths)
-
-    def to_quaternion(self) -> "FakeQuaternion":
-        """The rotation as a quaternion (w, x, y, z), scale divided out, as mathutils gives it."""
-        rotation = np.asarray(self.rows)[:3, :3]
-        return FakeQuaternion(
-            matrix_quaternion(rotation / np.linalg.norm(rotation, axis=0))
-        )
 
     def to_euler(self, order: str = "XYZ", compatible: Any = None) -> FakeEuler:
         if compatible is not None and not isinstance(compatible, FakeEuler):

@@ -1,5 +1,6 @@
 """Blender MCP schemas."""
 
+import math
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import (
@@ -160,13 +161,88 @@ class BlenderObjectInfoResponse(BaseModel):
     name: str = Field(..., description="Object name")
     object_type: str = Field(..., description="Blender object type")
     location: List[float] = Field(
-        ..., description="World location [x, y, z]", min_length=3, max_length=3
+        ...,
+        description=(
+            "Location [x, y, z] of the object's own transform (Blender's Location field): "
+            "relative to its parent, before constraints; world_location is in world space"
+        ),
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: List[float] = Field(
-        ..., description="Rotation in Euler radians [x, y, z]", min_length=3, max_length=3
+        ...,
+        description=(
+            "Rotation of the object's own transform as XYZ Euler radians [x, y, z], "
+            "converted from rotation_mode; world_rotation_euler is in world space"
+        ),
+        min_length=3,
+        max_length=3,
     )
     scale: List[float] = Field(
-        ..., description="Scale [x, y, z]", min_length=3, max_length=3
+        ...,
+        description="Scale [x, y, z] of the object's own transform; world_scale is in world space",
+        min_length=3,
+        max_length=3,
+    )
+    # Optional from here to visible: an add-on built before them still answers.
+    rotation_mode: Optional[str] = Field(
+        None,
+        description="How Blender stores the rotation: an Euler order (XYZ, ZXY, ...), QUATERNION or AXIS_ANGLE",
+    )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description="Rotation of the object's own transform as a unit quaternion [w, x, y, z]",
+        min_length=4,
+        max_length=4,
+    )
+    rotation_in_mode: Optional[List[float]] = Field(
+        None,
+        description=(
+            "The rotation as Blender stores it for rotation_mode: Euler angles [x, y, z] "
+            "applied in that order, a quaternion [w, x, y, z], or [angle, x, y, z] for AXIS_ANGLE"
+        ),
+        min_length=3,
+        max_length=4,
+    )
+    world_location: Optional[List[float]] = Field(
+        None,
+        description="World-space location [x, y, z], from matrix_world (parents and constraints included)",
+        min_length=3,
+        max_length=3,
+    )
+    world_rotation_euler: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World-space rotation as XYZ Euler radians [x, y, z]: the rotation nearest "
+            "matrix_world, also where a parent's non-uniform scale shears it"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    world_rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description="World-space rotation as a unit quaternion [w, x, y, z], the same rotation",
+        min_length=4,
+        max_length=4,
+    )
+    world_scale: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World-space scale [x, y, z], from matrix_world; negative on every axis for a "
+            "mirrored object, as Blender decomposes it"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    matrix_world: Optional[List[List[float]]] = Field(
+        None,
+        description=(
+            "Blender's matrix_world as four rows of four; exact where the decomposed world "
+            "values cannot be, such as the shear of a turned child under a parent with "
+            "non-uniform scale"
+        ),
+        min_length=4,
+        max_length=4,
     )
     parent_name: Optional[str] = Field(None, description="Parent object name")
     children_names: List[str] = Field(
@@ -865,13 +941,17 @@ class BlenderSetTransformRequest(BaseModel):
     object_name: str = Field(..., description="Object to transform")
     location: Optional[List[float]] = Field(
         None,
-        description="New location [x, y, z]",
+        description="New location [x, y, z] relative to the object's parent (Blender's Location field)",
         min_length=3,
         max_length=3,
     )
     rotation_euler: Optional[List[float]] = Field(
         None,
-        description="New rotation [rx, ry, rz] radians",
+        description=(
+            "New rotation as XYZ Euler radians [rx, ry, rz], relative to the parent; converted "
+            "to the object's rotation_mode (quaternion, axis-angle or another Euler order), "
+            "which is kept"
+        ),
         min_length=3,
         max_length=3,
     )
@@ -881,6 +961,27 @@ class BlenderSetTransformRequest(BaseModel):
         min_length=3,
         max_length=3,
     )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description=(
+            "New rotation as a quaternion [w, x, y, z] instead of rotation_euler; normalized "
+            "and converted to the object's rotation_mode"
+        ),
+        min_length=4,
+        max_length=4,
+    )
+
+    @model_validator(mode="after")
+    def _one_rotation(self) -> "BlenderSetTransformRequest":
+        """Refuse two rotations, and a quaternion that is no rotation."""
+        if self.rotation_euler is not None and self.rotation_quaternion is not None:
+            raise ValueError("Give either rotation_euler or rotation_quaternion, not both")
+        if self.rotation_quaternion is not None:
+            if not all(math.isfinite(v) for v in self.rotation_quaternion):
+                raise ValueError("rotation_quaternion must be four finite numbers")
+            if not any(self.rotation_quaternion):
+                raise ValueError("rotation_quaternion must not have zero length")
+        return self
 
 
 class BlenderSetTransformResponse(BaseModel):
@@ -893,19 +994,35 @@ class BlenderSetTransformResponse(BaseModel):
     object_name: str = Field(..., description="Object name")
     location: List[float] = Field(
         ...,
-        description="Final location [x, y, z]",
+        description="Final location [x, y, z] relative to the parent",
         min_length=3,
         max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
-        description="Final rotation [rx, ry, rz]",
+        description="Final rotation as XYZ Euler radians [rx, ry, rz], relative to the parent",
         min_length=3,
         max_length=3,
     )
     scale: List[float] = Field(
         ...,
         description="Final scale [sx, sy, sz]",
+        min_length=3,
+        max_length=3,
+    )
+    # Optional: an add-on built before them still answers.
+    rotation_mode: Optional[str] = Field(
+        None, description="The object's rotation mode, which the write keeps"
+    )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description="Final rotation as a unit quaternion [w, x, y, z], relative to the parent",
+        min_length=4,
+        max_length=4,
+    )
+    world_location: Optional[List[float]] = Field(
+        None,
+        description="World-space location [x, y, z] after the change (parents and constraints included)",
         min_length=3,
         max_length=3,
     )
@@ -916,6 +1033,14 @@ class BlenderSetParentRequest(BaseModel):
 
     child_name: str = Field(..., description="Object to parent")
     parent_name: str = Field(..., description="Object to be the parent")
+    keep_transform: bool = Field(
+        True,
+        description=(
+            "Keep the child's world transform, as Blender's Parent > Object (Keep Transform); "
+            "false clears the parent inverse, so the child's own values become relative to "
+            "the parent and it moves"
+        ),
+    )
 
 
 class BlenderSetParentResponse(BaseModel):
@@ -927,6 +1052,19 @@ class BlenderSetParentResponse(BaseModel):
     )
     child_name: str = Field(..., description="Child object name")
     parent_name: str = Field(..., description="Parent object name")
+    # Optional: an add-on built before them still answers.
+    keep_transform: Optional[bool] = Field(
+        None, description="Whether the child's world transform was kept"
+    )
+    previous_parent: Optional[str] = Field(
+        None, description="The child's parent before the call, if it had one"
+    )
+    world_location: Optional[List[float]] = Field(
+        None,
+        description="The child's world-space location [x, y, z] afterwards",
+        min_length=3,
+        max_length=3,
+    )
 
 
 class BlenderClearParentRequest(BaseModel):
@@ -1114,7 +1252,8 @@ class BlenderSaveFileRequest(BaseModel):
     """Request to save the current .blend file."""
 
     file_path: Optional[str] = Field(
-        None, description="Path to save to. None saves in place."
+        None,
+        description="Path of the .blend file to save to. None saves in place.",
     )
 
 
@@ -1135,6 +1274,15 @@ class BlenderImportFileRequest(BaseModel):
     file_format: str = Field(
         ..., description="File format: OBJ, FBX, GLTF, USD, STL, PLY"
     )
+    scale: float = Field(
+        1.0,
+        gt=0.0,
+        le=1_000_000.0,
+        description=(
+            "Uniform scale applied to the imported objects about the world origin; "
+            "1.0 keeps the file's size"
+        ),
+    )
 
 
 class BlenderImportFileResponse(BaseModel):
@@ -1149,16 +1297,90 @@ class BlenderImportFileResponse(BaseModel):
     imported_objects: List[str] = Field(
         default_factory=list, description="Names of newly imported objects"
     )
+    # Optional: an add-on built before these were reported still answers.
+    scale: Optional[float] = Field(None, description="Scale applied to the imported objects")
+    warning: Optional[str] = Field(
+        None, description="Something about the import that needs attention; null otherwise"
+    )
+
+
+ExportAxisName = Literal["X", "Y", "Z", "-X", "-Y", "-Z"]
 
 
 class BlenderExportFileRequest(BaseModel):
     """Request to export scene objects to a file."""
 
-    file_path: str = Field(..., description="Absolute path to export to")
+    file_path: str = Field(
+        ...,
+        description=(
+            "Absolute path to export to, ending in the format's extension: .obj, .fbx, "
+            ".glb or .gltf, .usd/.usda/.usdc/.usdz, .stl, .ply"
+        ),
+    )
     file_format: str = Field(
         ..., description="File format: OBJ, FBX, GLTF, USD, STL, PLY"
     )
     selected_only: bool = Field(False, description="Export only selected objects")
+    object_names: Optional[List[str]] = Field(
+        None, min_length=1, description="Export exactly these objects"
+    )
+    collection_name: Optional[str] = Field(
+        None, min_length=1, description="Export the objects of this collection"
+    )
+    apply_modifiers: bool = Field(True, description="Apply modifiers to exported meshes")
+    export_animation: bool = Field(True, description="Include animation (glTF, FBX, USD)")
+    frame_start: Optional[int] = Field(None, description="First frame of exported animation")
+    frame_end: Optional[int] = Field(None, description="Last frame of exported animation")
+    gltf_format: Optional[Literal["GLB", "GLTF_SEPARATE", "GLTF_EMBEDDED"]] = Field(
+        None, description="glTF layout; default from the extension"
+    )
+    axis_forward: Optional[ExportAxisName] = Field(None, description="Forward axis written")
+    axis_up: Optional[ExportAxisName] = Field(None, description="Up axis written")
+    global_scale: Optional[float] = Field(
+        None, gt=0.0, le=1_000_000.0, description="Scale applied to exported data"
+    )
+    usd_up_axis: Optional[Literal["Y", "Z"]] = Field(None, description="USD stage up axis")
+    meters_per_unit: Optional[float] = Field(
+        None, ge=0.0001, le=1000.0, description="USD stage metersPerUnit"
+    )
+    root_prim_path: Optional[str] = Field(
+        None,
+        pattern=r"^(/[A-Za-z_][A-Za-z0-9_]*)*$",
+        description="USD prim everything is exported under; empty for none",
+    )
+    overwrite_companion_files: bool = Field(
+        False, description="Replace an unrelated .bin/.mtl beside file_path"
+    )
+
+    @model_validator(mode="after")
+    def _check_choices(self) -> "BlenderExportFileRequest":
+        """Refuse combinations export_file would refuse, before reaching Blender."""
+        chosen = [
+            name
+            for name, value in (
+                ("selected_only", self.selected_only),
+                ("object_names", self.object_names is not None),
+                ("collection_name", self.collection_name is not None),
+            )
+            if value
+        ]
+        if len(chosen) > 1:
+            raise ValueError(f"Pass only one of {', '.join(chosen)}")
+        if (self.frame_start is None) != (self.frame_end is None):
+            raise ValueError("Pass frame_start and frame_end together")
+        if (
+            self.frame_start is not None
+            and self.frame_end is not None
+            and self.frame_start > self.frame_end
+        ):
+            raise ValueError("frame_start must not be after frame_end")
+        if self.frame_start is not None and not self.export_animation:
+            raise ValueError("frame_start and frame_end need export_animation")
+        if (self.axis_forward is None) != (self.axis_up is None):
+            raise ValueError("Pass axis_forward and axis_up together")
+        if self.axis_forward and self.axis_up and self.axis_forward[-1] == self.axis_up[-1]:
+            raise ValueError("axis_forward and axis_up must be different axes")
+        return self
 
 
 class BlenderExportFileResponse(BaseModel):
@@ -1170,6 +1392,28 @@ class BlenderExportFileResponse(BaseModel):
     )
     file_path: str = Field(..., description="Path the file was exported to")
     file_format: str = Field(..., description="Format that was exported")
+    # Optional: an add-on built before these were reported still answers.
+    gltf_format: Optional[str] = Field(
+        None, description="GLTF only: the layout written, GLB, GLTF_SEPARATE or GLTF_EMBEDDED"
+    )
+    files_written: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Every file the export created or changed, file_path first: a glTF's .bin and "
+            "textures, an OBJ's .mtl, USD textures"
+        ),
+    )
+    object_count: Optional[int] = Field(
+        None,
+        description="Objects chosen for export (selection, list or collection); null for the scene",
+    )
+    exporter_options: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The Blender exporter's operator properties that were set, besides filepath",
+    )
+    warning: Optional[str] = Field(
+        None, description="Something about the export that needs attention; null otherwise"
+    )
 
 
 class BlenderFileInfoResponse(BaseModel):
