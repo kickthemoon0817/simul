@@ -80,6 +80,15 @@ PRIM_DETAIL_ASPECTS = {
 # log's code_bytes reports a script's size in.
 MAX_SCRIPT_BYTES = 100_000
 
+# Script budget, in seconds, for operations that routinely outlast the default
+# (the socket timeout less one second, 29 s): opening or creating a stage, a
+# camera's first render while shaders compile, enabling a large extension. Past
+# the budget the bridge interrupts the script while Kit finishes the work, so
+# the tool reported failure for work that then completed. Kept under the
+# bridge's per-script ceiling (its 120 s request timeout less 5 s) so the
+# bridge still interrupts and reports instead of abandoning the request.
+HEAVY_SCRIPT_TIMEOUT_SECONDS = 110.0
+
 # 4K on the long edge, so a capture can't grow to tens of megabytes before
 # anything checks whether the result can be delivered.
 MAX_CAPTURE_DIMENSION = 3840

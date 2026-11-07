@@ -66,7 +66,7 @@ def _recording_tools(settings: Settings, outputs: Optional[List[Dict[str, Any]]]
     captured: List[str] = []
     replies = list(outputs or [])
 
-    def _record(code: str) -> ScriptResult:
+    def _record(code: str, **_kwargs: Any) -> ScriptResult:
         captured.append(code)
         reply = replies.pop(0) if replies else {"ok": True}
         return ScriptResult(success=True, output=json.dumps(reply))
@@ -466,7 +466,7 @@ def _saving_tools(**settings: Any) -> Tuple[IsaacTools, List[str], List[Any]]:
     captured: List[str] = []
     kit: List[Any] = []  # [monkeypatch, modules]
 
-    async def _record(code: str) -> ScriptResult:
+    async def _record(code: str, **_kwargs: Any) -> ScriptResult:
         captured.append(code)
         payload = await _run_kit_script_async(code, kit[0], kit[1])
         return ScriptResult(success=True, output=json.dumps(payload))
@@ -557,8 +557,8 @@ def test_a_stage_swapped_between_probe_and_save_is_not_saved(monkeypatch: pytest
 
     original = tools._execute_json_script
 
-    async def _swap_after_probe(script: str, transport_mode: str = "default") -> Dict[str, Any]:
-        result = await original(script, transport_mode)
+    async def _swap_after_probe(script: str, transport_mode: str = "default", **kwargs: Any) -> Dict[str, Any]:
+        result = await original(script, transport_mode, **kwargs)
         context.url = "/tmp/simul-work/other.usd"
         return result
 
