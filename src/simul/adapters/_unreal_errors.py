@@ -82,6 +82,13 @@ class UnrealTimeoutError(UnrealError, TimeoutError):
     """The editor did not answer in time; still a ``TimeoutError`` to ``except`` clauses."""
 
 
+class UnrealValidationError(UnrealError, ValueError):
+    """A request refused before anything was sent; still a ``ValueError`` to ``except`` clauses."""
+
+    def __init__(self, message: str, *, details: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(message, VALIDATION_ERROR, details=details)
+
+
 class UnrealConnectionError(UnrealError, ConnectionError):
     """Nothing answered at the endpoint; still a ``ConnectionError`` to ``except`` clauses.
 

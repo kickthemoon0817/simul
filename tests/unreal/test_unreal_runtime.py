@@ -470,7 +470,8 @@ class TestUnrealRuntimeSessionPhase1:
             requests.append(path)
             fn = (json or {}).get("functionName", "")
             if path == "/remote/object/call" and fn == "ExecutePythonCommandEx":
-                # Class keys are UClass path names, as UE 5.7 reports them.
+                # Class keys are UClass path names, as UE 5.7 reports them;
+                # the script counts static meshes, lights and cameras by class.
                 return python_json_response({
                     "map_path": "/Game/Maps/TestMap",
                     "total_actors": 3,
@@ -478,6 +479,9 @@ class TestUnrealRuntimeSessionPhase1:
                         "/Script/Engine.StaticMeshActor": 2,
                         "/Script/Engine.PointLight": 1,
                     },
+                    "static_meshes": 2,
+                    "lights": 1,
+                    "cameras": 0,
                 })
             return FakeResponse({}, 404)
 
@@ -992,12 +996,16 @@ class TestUnrealRuntimeSessionPhase3:
     # -- set_actor_property --
 
     def test_set_actor_property_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_property writes a named property."""
+        """set_actor_property checks the target, writes the property and reads it back."""
         session = self._make_session(monkeypatch)
+        accesses = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
+            if (json or {}).get("functionName") == "ExecutePythonCommandEx":
+                return python_json_response({"target_class": "StaticMeshComponent", "container": None, "length": None})
             if path == "/remote/object/property":
-                return FakeResponse({})
+                accesses.append(json["access"])
+                return FakeResponse({"Mobility": "Movable"} if json["access"] == "READ_ACCESS" else {})
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
@@ -1008,8 +1016,14 @@ class TestUnrealRuntimeSessionPhase3:
             property_value='"Movable"',
         ))
 
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
-        assert result["property_name"] == "Mobility"
+        assert result == {
+            "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Cube_0",
+            "property_name": "Mobility",
+            "target_class": "StaticMeshComponent",
+            "value": "Movable",
+            "applied": True,
+        }
+        assert accesses == ["WRITE_TRANSACTION_ACCESS", "READ_ACCESS"]
 
     # -- call_actor_function --
 
@@ -1031,7 +1045,9 @@ class TestUnrealRuntimeSessionPhase3:
 
         assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
         assert result["function_name"] == "GetActorBounds"
-        assert result["return_value"] == '{"ReturnValue": 42}'
+        # JSON, not a JSON string inside the JSON reply.
+        assert result["return_value"] == 42
+        assert result["outputs"] == {"ReturnValue": 42}
 
     # -- set_actor_parent --
 

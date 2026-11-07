@@ -60,6 +60,7 @@ used by `simul isaac launch` and `install-bridge`; the YAML default for
 | `BLENDER__TOOL_SURFACE` | `full` | `thin` registers only the essentials in `THIN_BLENDER_TOOLS` (`--blender-tools` overrides) |
 | `UNREAL__MODE` | `endpoint` | `attached` uses the editor chosen by `simul unreal attach` |
 | `UNREAL__PASSPHRASE` | unset | Plaintext or MD5 hex for an editor set up with `--passphrase` |
+| `UNREAL__MAX_ACTORS` | `200` | Default `max_results` of `list_unreal_actors` and `simul unreal list-actors` |
 | `BLENDER__MODE` | `embedded` | `attached` uses the window chosen by `simul blender attach` |
 | `VIEWPORT__MAX_SIZE` | `2048` | Largest capture dimension |
 

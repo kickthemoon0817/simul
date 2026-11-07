@@ -379,7 +379,9 @@ def map(
 def list_actors(
     actor_class: Optional[str] = typer.Option(None, "--class", "-c", help="Filter by actor class"),
     tag: Optional[str] = typer.Option(None, "--tag", help="Filter by actor tag"),
-    limit: int = typer.Option(200, "--limit", "-n", help="Max actors to return"),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", "-n", help="Max actors to return (default: unreal.max_actors, 200)"
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:

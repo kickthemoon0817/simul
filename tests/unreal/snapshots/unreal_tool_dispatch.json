@@ -513,7 +513,7 @@
      "arguments": {
       "class_filter": null,
       "tag_filter": null,
-      "max_results": 200
+      "max_results": null
      }
     }
    ],

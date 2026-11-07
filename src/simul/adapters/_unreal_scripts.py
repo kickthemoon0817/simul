@@ -467,19 +467,30 @@ print(json.dumps({"actors": actors, "total_matches": total,
 
 # Scene digest in one round trip. Class keys are UClass path names
 # (``/Script/Engine.StaticMeshActor``), the same strings Remote Control's
-# ``/remote/object/describe`` reports as ``Class``.
+# ``/remote/object/describe`` reports as ``Class``. Static meshes, lights and
+# cameras are counted by class, subclasses included: a light is a Light actor
+# (directional, point, spot, rect) or a SkyLight, which is not a Light; a
+# camera is a CameraActor (CineCameraActor included). A class name containing
+# "Light" or "Camera" (LightmassImportanceVolume, CameraBlockingVolume) is
+# neither.
 SCENE_SUMMARY = EDITOR_WORLD + """
 world = editor_world()
 counts = {}
-total = 0
+total = static_meshes = lights = cameras = 0
 for actor in level_actors():
     name = actor.get_class().get_path_name()
     counts[name] = counts.get(name, 0) + 1
     total += 1
+    static_meshes += isinstance(actor, unreal.StaticMeshActor)
+    lights += isinstance(actor, (unreal.Light, unreal.SkyLight))
+    cameras += isinstance(actor, unreal.CameraActor)
 print(json.dumps({
     "map_path": world.get_path_name() if world else "",
     "total_actors": total,
     "actor_class_counts": counts,
+    "static_meshes": static_meshes,
+    "lights": lights,
+    "cameras": cameras,
     "pie_active": pie_active(),
 }))
 """

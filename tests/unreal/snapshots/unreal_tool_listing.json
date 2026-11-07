@@ -350,9 +350,16 @@
       "type": "string"
      },
      "max_results": {
-      "default": 200,
-      "description": "Maximum number of actors to return.",
-      "type": "integer"
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Maximum number of actors to return, 1 to 5000. Default: the unreal.max_actors setting (UNREAL__MAX_ACTORS, 200)."
      }
     }
    },
@@ -487,23 +494,23 @@
   {
    "name": "get_unreal_actor_thumbnail",
    "title": "Get Unreal Actor Thumbnail",
-   "description": "Get a thumbnail image for an Unreal asset. The image arrives as an MCP image content block, followed by a JSON block with asset_path, format, width, height and image_attached=true.",
+   "description": "Get the thumbnail Unreal stores for an asset (mesh, material, texture, Blueprint), or for an actor or component in the editor world the thumbnail of its Blueprint or mesh. It is scaled down to fit width x height, keeping its proportions; Unreal stores 256 x 256, the largest returned. The image arrives as an MCP image content block, followed by a JSON block with asset_path, thumbnail_of, format, width, height and image_attached=true. An asset without a stored thumbnail is NotFoundError.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "asset_path": {
-      "description": "Full asset path.",
+      "description": "Asset path, or an actor's or component's path.",
       "type": "string"
      },
      "width": {
       "default": 256,
-      "description": "Thumbnail width in pixels.",
+      "description": "Largest width wanted, 1 to 1024 pixels.",
       "type": "integer"
      },
      "height": {
       "default": 256,
-      "description": "Thumbnail height in pixels.",
+      "description": "Largest height wanted, 1 to 1024 pixels.",
       "type": "integer"
      }
     },
@@ -911,26 +918,26 @@
   {
    "name": "set_unreal_actor_property",
    "title": "Set Unreal Actor Property",
-   "description": "Set a property on an Unreal actor by name and JSON value.",
+   "description": "Set a property of an actor, or of one of its components, in the open editor world by Unreal's property name (Tags, bHidden) and a JSON value, then read it back. An array, set or map is replaced whole ([] empties it). The reply has value (read back) and applied; a value that reads back different fails with PropertyNotApplied. Only loaded actors and components of the editor world are edited: assets, engine objects, Play In Editor actors and paths into maps that are not open are refused (NotFoundError or ValidationError) before anything is written.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
-      "description": "Full actor path.",
+      "description": "Full path of the actor or component.",
       "type": "string"
      },
      "property_name": {
-      "description": "Property name to set.",
+      "description": "Property name, as Unreal names it (Tags, bHidden).",
       "type": "string"
      },
      "property_value": {
-      "description": "Property value as JSON string.",
+      "description": "The value as JSON text; text that is not JSON is taken as a string.",
       "type": "string"
      },
      "generate_transaction": {
       "default": true,
-      "description": "Whether to generate an undo transaction.",
+      "description": "Whether the write can be undone.",
       "type": "boolean"
      }
     },
@@ -959,7 +966,7 @@
   {
    "name": "call_unreal_actor_function",
    "title": "Call Unreal Actor Function",
-   "description": "Call a BlueprintCallable UFUNCTION on an actor.",
+   "description": "Call a BlueprintCallable UFUNCTION on an actor. return_value is the function's ReturnValue as JSON; outputs holds everything Remote Control returned, out parameters included.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,

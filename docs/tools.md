@@ -159,6 +159,57 @@ Behaviour worth knowing:
   `r.RayTracing`, which only startup configuration sets, and one Unreal limits
   or rounds. Post-process settings live on PostProcessVolume actors, not in
   console variables, and this tool does not change them.
+- `set_unreal_actor_property` edits an actor in the open editor world, or one
+  of its components, by Unreal's property name (`Tags`, `bHidden`), and reads
+  the property back. The target is looked up among loaded objects and never
+  loaded. Anything else is refused before a write: an asset, a class, an
+  engine object, a Play In Editor actor, or a path into a map that is not open
+  (`NotFoundError` or `ValidationError`). That rule applies with script
+  execution disabled too.
+
+  An array, set or map is replaced whole, so `[]` empties it. Remote Control's
+  own write only ever grows a container, so a container of strings, numbers
+  or booleans (`Tags`) is written through the editor's Python API. Any other
+  value goes through Remote Control, which converts structs, enums by name and
+  objects by path. An array it wrote is then cut to the new length, and undo
+  reverts that cut as a second step.
+
+  The reply has `value`, read back as Remote Control reads it, and `applied`.
+  A value that reads back different fails with `PropertyNotApplied`, for
+  example an enum name Unreal does not have. `applied` is `null`, with a
+  `warning`, when Unreal will not read the property back, or when the two
+  values cannot be compared (an enum written as a number). A struct written in
+  part is compared on the fields given.
+- `describe_unreal_object` reads every property's current `value` in one more
+  request. `readable` is false, and `value` null, for the properties Remote
+  Control does not read: delegates, and protected properties without a getter.
+- `get_unreal_actor_thumbnail` returns the thumbnail Unreal stores, at most at
+  its stored size (256 x 256). It is scaled down to fit `width` x `height`
+  (1 to 1024), keeping its proportions.
+  - For an actor or component path, the tool shows the actor's Blueprint, or
+    else its static or skeletal mesh, and names that asset in `thumbnail_of`.
+  - An actor with neither, such as a light, and an asset without a stored
+    thumbnail (Unreal answers those with a class icon) fail with
+    `NotFoundError`.
+- `summarize_unreal_scene` counts by class, subclasses included:
+  - `lights`: Light actors (directional, point, spot, rect) and SkyLights.
+  - `cameras`: CameraActors, CineCameraActors included.
+  - `static_meshes`: StaticMeshActors.
+
+  A LightmassImportanceVolume or CameraBlockingVolume is neither a light nor a
+  camera.
+- `ping_unreal` and `unreal_health_check` tell a busy editor from a down one.
+  An editor that accepts the connection but does not answer in time is
+  running a script, loading or compiling. It is reported with `busy: true` and
+  `error_type: InstanceBusy`, still `reachable: false`, and
+  `list_unreal_instances` lists it with that reason. `unreal_health_check`
+  reports a busy editor after its first attempt; it retries only a refused
+  connection, from an editor still starting up.
+- `call_unreal_actor_function` returns `return_value` as JSON (the function's
+  `ReturnValue`) and `outputs`, everything Remote Control returned, out
+  parameters included.
+- `list_unreal_actors` lists at most `max_results` actors, by default the
+  `unreal.max_actors` setting (`UNREAL__MAX_ACTORS`, 200).
 - Actor inspection, physics, materials and PIE start/stop/pause/resume use
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
