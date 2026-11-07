@@ -144,7 +144,7 @@ class TestAllOrNothing:
 
         reasons = {problem["attribute"]: problem["reason"] for problem in error.details["problems"]}
         assert set(reasons) == {"size", "custom:none", "bad name"}
-        assert reasons["size"] == "a string cannot be stored in a double attribute"
+        assert reasons["size"] == "double takes a number, not the string 'big'"
         assert "null is not a value" in reasons["custom:none"]
         assert "not a valid attribute name" in reasons["bad name"]
         assert "'size'" in error.message and "nothing was changed" in error.message
@@ -427,8 +427,8 @@ class TestMetadataAndProperties:
             ({"active": 0}, "takes true or false"),
             ({"instanceable": "yes"}, "takes true or false"),
             ({"kind": "building"}, "registered kind"),
-            ({"documentation": "text"}, "is prim metadata, not an attribute"),
-            ({"typeName": "Sphere"}, "is prim metadata, not an attribute"),
+            ({"documentation": "text"}, "prim metadata, not an attribute"),
+            ({"typeName": "Sphere"}, "prim metadata, not an attribute"),
         ],
     )
     def test_bad_metadata_is_refused(self, session, scene, attributes, fragment) -> None:

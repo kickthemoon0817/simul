@@ -25,8 +25,9 @@ from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tupl
 
 from pxr import Pcp
 
-from . import lookup
-from ._pxr import Kind, Sdf, Tf, Usd
+from . import coerce, lookup
+from ._pxr import Kind, Sdf, Tf, Usd, UsdGeom
+from .timecode import resolve_time_code
 
 # Error types, from the vocabulary every backend's envelope uses.
 VALIDATION = "ValidationError"
@@ -41,10 +42,12 @@ INVALID_PRIM_PATH = "InvalidPrimPath"
 UNKNOWN_PRIM_TYPE = "UnknownPrimType"
 INVALID_ATTRIBUTE = "InvalidAttribute"
 EDIT_FAILED = "EditFailed"
+INVALID_TIME_CODE = "InvalidTimeCode"
 CODE_ERROR_TYPES: Dict[str, str] = {
     INVALID_PRIM_PATH: VALIDATION,
     UNKNOWN_PRIM_TYPE: VALIDATION,
     INVALID_ATTRIBUTE: VALIDATION,
+    INVALID_TIME_CODE: VALIDATION,
     EDIT_FAILED: ENGINE,
 }
 
@@ -73,6 +76,7 @@ _TF_ERROR = re.compile(
 )
 
 _ROOT = Sdf.Path.absoluteRootPath
+_XFORMABLE_TYPE = Tf.Type.FindByName("UsdGeomXformable")
 
 
 class USDEditError(Exception):
@@ -399,7 +403,12 @@ class PlannedWrite:
         kind: ``attribute``, ``relationship`` or ``metadata``.
         value: The value converted for pxr (targets for a relationship).
         type_name: The attribute's value type; None for the other kinds.
-        create: The attribute does not exist yet and is created as custom.
+        create: The attribute does not exist yet and is created by the write.
+        time: Time code of the sample to write; None writes the default.
+        xform_op: ``(op type name, precision, suffix)`` when the write
+            creates a transform op.
+        append_to_op_order: Add the op to the prim's ``xformOpOrder`` so it
+            takes effect.
     """
 
     name: str
@@ -407,6 +416,9 @@ class PlannedWrite:
     value: Any
     type_name: Optional[Sdf.ValueTypeName] = None
     create: bool = False
+    time: Optional[float] = None
+    xform_op: Optional[Tuple[str, Any, str]] = None
+    append_to_op_order: bool = False
 
     @property
     def label(self) -> str:
@@ -417,79 +429,16 @@ class _Problem(Exception):
     """One rejected entry, collected by the planner."""
 
 
-def _infer_value_type(value: Any) -> Optional[Sdf.ValueTypeName]:
-    """Pick a value type for a new attribute from its JSON value."""
-    if isinstance(value, bool):
-        return Sdf.ValueTypeNames.Bool
-    if isinstance(value, int):
-        return Sdf.ValueTypeNames.Int
-    if isinstance(value, float):
-        return Sdf.ValueTypeNames.Float
-    if isinstance(value, str):
-        return Sdf.ValueTypeNames.String
-    if isinstance(value, (list, tuple)):
-        if not value:
-            return None
-        if all(isinstance(v, bool) for v in value):
-            return Sdf.ValueTypeNames.BoolArray
-        if all(isinstance(v, int) and not isinstance(v, bool) for v in value):
-            return Sdf.ValueTypeNames.IntArray
-        if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
-            return {
-                2: Sdf.ValueTypeNames.Float2,
-                3: Sdf.ValueTypeNames.Float3,
-                4: Sdf.ValueTypeNames.Float4,
-            }.get(len(value), Sdf.ValueTypeNames.FloatArray)
-        if all(isinstance(v, str) for v in value):
-            return Sdf.ValueTypeNames.StringArray
-    return None
-
-
-def _to_pxr(value: Any, type_name: Sdf.ValueTypeName) -> Any:
-    """Shape a JSON value the way pxr's Python conversion expects for ``type_name``.
-
-    Fixed-size vector types take a tuple; arrays take a list whose vector
-    elements are tuples.
-    """
-    if type_name.isArray:
-        if isinstance(value, (list, tuple)):
-            return [tuple(item) if isinstance(item, list) else item for item in value]
-        return value
-    if isinstance(value, list):
-        return tuple(value)
-    return value
-
-
-class _ConversionCheck:
-    """Dry-run ``Set`` calls on a scratch in-memory stage."""
-
-    def __init__(self) -> None:
-        self._prim: Optional[Usd.Prim] = None
-        self._stage: Optional[Usd.Stage] = None
-        self._count = 0
-
-    def accepts(self, type_name: Sdf.ValueTypeName, value: Any) -> bool:
-        if self._prim is None:
-            self._stage = Usd.Stage.CreateInMemory("simul-conversion-check.usda")
-            self._prim = self._stage.DefinePrim("/Check")
-        self._count += 1
-        attr = self._prim.CreateAttribute(f"v{self._count}", type_name)
-        try:
-            return bool(attr.Set(value))
-        except Tf.ErrorException:
-            return False
-
-
 def _plan_metadata(name: str, value: Any) -> PlannedWrite:
     if name in ("active", "instanceable"):
         if not isinstance(value, bool):
-            raise _Problem(f"{name} is prim metadata and takes true or false, not {describe_value(value)}")
+            raise _Problem(f"prim metadata that takes true or false, not {describe_value(value)}")
         return PlannedWrite(name, "metadata", value)
     # kind
     if not isinstance(value, str) or not Kind.Registry.HasKind(value):
         kinds = ", ".join(str(kind) for kind in Kind.Registry.GetAllKinds())
         shown = repr(value) if isinstance(value, str) else describe_value(value)
-        raise _Problem(f"kind is prim metadata and takes a registered kind ({kinds}), not {shown}")
+        raise _Problem(f"prim metadata that takes a registered kind ({kinds}), not {shown}")
     return PlannedWrite(name, "metadata", value)
 
 
@@ -497,44 +446,261 @@ def _plan_relationship(name: str, value: Any) -> PlannedWrite:
     raw_targets = [value] if isinstance(value, str) else value
     if not isinstance(raw_targets, (list, tuple)) or not all(isinstance(t, str) for t in raw_targets):
         raise _Problem(
-            f"{name} is a relationship; it takes a target path or a list of target paths, "
+            "a relationship, which takes a target path or a list of target paths, "
             f"not {describe_value(value)}"
         )
     targets: List[Sdf.Path] = []
     for target in raw_targets:
         if not target.startswith("/") or _path_string_problem(target) is not None:
-            raise _Problem(f"{name} is a relationship; target {target!r} is not an absolute USD path")
+            raise _Problem(f"a relationship, and target {target!r} is not an absolute USD path")
         targets.append(Sdf.Path(target))
     return PlannedWrite(name, "relationship", targets)
 
 
-def _reject_non_value(value: Any) -> None:
-    """Refuse the JSON values no attribute type can hold."""
-    if value is None:
-        raise _Problem("null is not a value (clearing an authored value is not supported)")
-    if isinstance(value, Mapping):
-        raise _Problem("a JSON object is not an attribute value")
+def _time_samples_note(attribute: Usd.Attribute) -> Optional[str]:
+    """Describe an attribute's animation, or None when it has a default value only."""
+    samples = attribute.GetTimeSamples()
+    if samples:
+        span = f"{samples[0]:g}" if len(samples) == 1 else f"{samples[0]:g} to {samples[-1]:g}"
+        return f"{len(samples)} time sample(s) at {span}"
+    if attribute.ValueMightBeTimeVarying():
+        return "values from clips"
+    return None
 
 
-def _plan_attribute(
-    name: str,
-    value: Any,
-    type_name: Sdf.ValueTypeName,
-    allowed_tokens: Optional[Sequence[str]],
-    create: bool,
-    check: _ConversionCheck,
-) -> PlannedWrite:
-    _reject_non_value(value)
-    converted = _to_pxr(value, type_name)
-    if not check.accepts(type_name, converted):
-        raise _Problem(f"{describe_value(value)} cannot be stored in a {type_name} attribute")
-    tokens = [str(token) for token in allowed_tokens or ()]
-    if tokens and type_name.scalarType == Sdf.ValueTypeNames.Token:
-        values = converted if type_name.isArray else [converted]
-        bad = [str(item) for item in values if str(item) not in tokens]
-        if bad:
-            raise _Problem(f"{bad[0]!r} is not an allowed token; allowed: {', '.join(tokens)}")
-    return PlannedWrite(name, "attribute", converted, type_name=type_name, create=create)
+def _time_sample_layer(attribute: Usd.Attribute) -> Optional[Sdf.Layer]:
+    """Return the layer whose time samples the attribute resolves, or None without samples.
+
+    Value resolution takes every sample from the strongest spec that has
+    any, so that layer owns the animation.
+    """
+    for spec in attribute.GetPropertyStack(Usd.TimeCode.Default()):
+        if spec.layer.GetNumTimeSamplesForPath(spec.path):
+            return spec.layer
+    return None
+
+
+class _Planner:
+    """Resolves each requested entry to a typed write, or to the reason it is refused."""
+
+    def __init__(
+        self,
+        prim: Optional[Usd.Prim],
+        definition: Optional[Usd.PrimDefinition],
+        attributes: Mapping[str, Any],
+        attribute_types: Mapping[str, Any],
+        time_code: Optional[float],
+        xformable: bool,
+        edit_layer: Optional[Sdf.Layer] = None,
+    ) -> None:
+        self.prim = prim
+        self.definition = definition
+        self.attributes = attributes
+        self.time_code = time_code
+        self.xformable = xformable
+        self.edit_layer = edit_layer
+        self.explicit_op_order = "xformOpOrder" in attributes
+        self.op_order: List[str] = []
+        if prim is not None and xformable:
+            self.op_order = [str(entry) for entry in UsdGeom.Xformable(prim).GetXformOpOrderAttr().Get() or []]
+        self.problems: List[Dict[str, str]] = []
+        self.requested: Dict[str, Sdf.ValueTypeName] = {}
+        for name, text in attribute_types.items():
+            if name not in attributes:
+                self.reject(name, "attribute_types names an attribute that is not in attributes")
+                continue
+            try:
+                self.requested[name] = coerce.parse_type_name(text)
+            except coerce.ValueProblem as problem:
+                self.reject(name, str(problem))
+
+    def reject(self, name: Any, reason: str) -> None:
+        self.problems.append({"attribute": str(name), "reason": reason})
+
+    def plan(self) -> List[PlannedWrite]:
+        properties: List[PlannedWrite] = []
+        metadata: List[PlannedWrite] = []
+        for name, value in self.attributes.items():
+            if any(problem["attribute"] == str(name) for problem in self.problems):
+                continue
+            try:
+                write = self._plan_one(name, value)
+            except (_Problem, coerce.ValueProblem) as problem:
+                self.reject(name, str(problem))
+                continue
+            (metadata if write.kind == "metadata" else properties).append(write)
+        for write in properties:
+            if write.name == "xformOpOrder":
+                try:
+                    self._check_op_order(write.value)
+                except _Problem as problem:
+                    self.reject(write.name, str(problem))
+        return properties + metadata
+
+    def _plan_one(self, name: Any, value: Any) -> PlannedWrite:
+        if not isinstance(name, str) or not name:
+            raise _Problem("attribute names must be non-empty strings")
+        if name in SETTABLE_METADATA:
+            if self.time_code is not None:
+                raise _Problem(
+                    "prim metadata, which has no time samples; set it in a call without time_code"
+                )
+            if name in self.requested:
+                raise _Problem("attribute_types does not apply to prim metadata")
+            return _plan_metadata(name, value)
+        if not Sdf.Path.IsValidNamespacedIdentifier(name):
+            raise _Problem("not a valid attribute name (use identifiers joined by ':', such as custom:mass)")
+        prim, definition = self.prim, self.definition
+        attribute = prim.GetAttribute(name) if prim is not None else None
+        relationship = prim.GetRelationship(name) if prim is not None else None
+        if relationship or (not attribute and definition is not None and definition.GetRelationshipDefinition(name)):
+            if self.time_code is not None:
+                raise _Problem(
+                    "a relationship, which has no time samples; set it in a call without time_code"
+                )
+            if name in self.requested:
+                raise _Problem("a relationship, which attribute_types does not apply to")
+            return _plan_relationship(name, value)
+        requested = self.requested.get(name)
+        if attribute:
+            return self._plan_existing(name, value, attribute, requested)
+        attr_def = definition.GetAttributeDefinition(name) if definition is not None else None
+        if attr_def:
+            type_name = attr_def.GetTypeName()
+            self._check_requested(name, type_name, requested)
+            return self._plan_value(
+                name, value, type_name, attr_def.GetMetadata("allowedTokens"), attr_def.GetVariability()
+            )
+        if name in _prim_metadata_keys():
+            raise _Problem(
+                "prim metadata, not an attribute; these tools set only the "
+                f"{', '.join(SETTABLE_METADATA)} metadata"
+            )
+        op = coerce.parse_xform_op_name(name)
+        if op is not None:
+            return self._plan_new_op(name, value, op, requested)
+        type_name = requested or coerce.infer_type(value)
+        if type_name is None:
+            if value is None or isinstance(value, Mapping):
+                coerce.coerce(value, Sdf.ValueTypeNames.String)  # raises with the reason for these
+            raise _Problem(
+                f"cannot infer a USD type for a new attribute from {describe_value(value)}; name one "
+                f'with attribute_types, for example {{"{name}": "float3[]"}}'
+            )
+        write = self._plan_value(name, value, type_name, None, Sdf.VariabilityVarying)
+        write.create = True
+        return write
+
+    @staticmethod
+    def _check_requested(
+        name: str, type_name: Sdf.ValueTypeName, requested: Optional[Sdf.ValueTypeName]
+    ) -> None:
+        if requested is not None and requested != type_name:
+            raise _Problem(f"a {type_name} attribute; attribute_types cannot change it to {requested}")
+
+    def _plan_existing(
+        self,
+        name: str,
+        value: Any,
+        attribute: Usd.Attribute,
+        requested: Optional[Sdf.ValueTypeName],
+    ) -> PlannedWrite:
+        type_name = attribute.GetTypeName()
+        self._check_requested(name, type_name, requested)
+        if self.time_code is None:
+            animation = _time_samples_note(attribute)
+            if animation is not None:
+                raise _Problem(
+                    f"animated ({animation}), so a default value would be hidden at every "
+                    "frame; pass time_code to write the sample at one time"
+                )
+        else:
+            source = _time_sample_layer(attribute)
+            if source is not None and self.edit_layer is not None and source != self.edit_layer:
+                raise _Problem(
+                    f"its time samples come from {_layer_label(source)}, a weaker layer than "
+                    f"{_layer_label(self.edit_layer)}; USD takes all of an attribute's samples from "
+                    "the strongest layer that has any, so one sample written here would replace "
+                    "that whole animation"
+                )
+        write = self._plan_value(
+            name, value, type_name, attribute.GetMetadata("allowedTokens"), attribute.GetVariability()
+        )
+        try:
+            op = coerce.parse_xform_op_name(name) if self.xformable else None
+        except coerce.ValueProblem:
+            op = None  # an existing attribute in the xformOp namespace that is not an op
+        if op is not None:
+            try:
+                coerce.xform_op_precision(op[0], type_name)
+            except coerce.ValueProblem as problem:
+                raise _Problem(
+                    f"exists but cannot drive the transform: {problem}; write a new op "
+                    f"name such as xformOp:{op[0]}:offset instead"
+                ) from None
+            if not self.explicit_op_order and name not in self.op_order:
+                write.append_to_op_order = True
+        return write
+
+    def _plan_new_op(
+        self,
+        name: str,
+        value: Any,
+        op: Tuple[str, str],
+        requested: Optional[Sdf.ValueTypeName],
+    ) -> PlannedWrite:
+        op_name, suffix = op
+        if not self.xformable:
+            raise _Problem("a transform op, but this prim's type is not xformable")
+        precision = coerce.xform_op_precision(op_name, requested)
+        type_name = coerce.xform_op_value_type(op_name, precision)
+        write = self._plan_value(name, value, type_name, None, Sdf.VariabilityVarying)
+        write.create = True
+        write.xform_op = (op_name, precision, suffix)
+        # An order that already lists the op (its attribute was missing) needs no entry.
+        write.append_to_op_order = not self.explicit_op_order and name not in self.op_order
+        return write
+
+    def _plan_value(
+        self,
+        name: str,
+        value: Any,
+        type_name: Sdf.ValueTypeName,
+        allowed_tokens: Optional[Sequence[str]],
+        variability: Any,
+    ) -> PlannedWrite:
+        converted = coerce.coerce(value, type_name)
+        tokens = [str(token) for token in allowed_tokens or ()]
+        if tokens and type_name.scalarType == Sdf.ValueTypeNames.Token:
+            items = list(converted) if type_name.isArray else [converted]
+            bad = [str(item) for item in items if str(item) not in tokens]
+            if bad:
+                raise _Problem(f"{bad[0]!r} is not an allowed token; allowed: {', '.join(tokens)}")
+        if self.time_code is not None and variability == Sdf.VariabilityUniform:
+            raise _Problem("uniform, so it cannot have time samples; set it in a call without time_code")
+        return PlannedWrite(name, "attribute", converted, type_name=type_name, time=self.time_code)
+
+    def _check_op_order(self, order: Sequence[Any]) -> None:
+        if not self.xformable:
+            raise _Problem("xformOpOrder applies to xformable prims only")
+        for index, raw in enumerate(order):
+            entry = str(raw)
+            if entry == coerce.RESET_XFORM_STACK:
+                if index:
+                    raise _Problem(f"{coerce.RESET_XFORM_STACK} may only come first")
+                continue
+            op_name = entry[len(coerce.INVERT_PREFIX):] if entry.startswith(coerce.INVERT_PREFIX) else entry
+            try:
+                if coerce.parse_xform_op_name(op_name) is None:
+                    raise coerce.ValueProblem(f"{entry!r} is not a transform op name")
+            except coerce.ValueProblem as problem:
+                raise _Problem(f"xformOpOrder entry {index}: {problem}") from None
+            exists = self.prim is not None and bool(self.prim.GetAttribute(op_name))
+            if not exists and op_name not in self.attributes:
+                raise _Problem(
+                    f"xformOpOrder lists {entry!r}, but the prim has no {op_name} attribute and this call "
+                    "does not create one"
+                )
 
 
 def plan_writes(
@@ -543,92 +709,58 @@ def plan_writes(
     attributes: Optional[Mapping[str, Any]],
     *,
     prim_path: Sdf.Path,
+    attribute_types: Optional[Mapping[str, Any]] = None,
+    time_code: Optional[float] = None,
+    xformable: bool = False,
+    edit_layer: Optional[Sdf.Layer] = None,
 ) -> List[PlannedWrite]:
-    """Validate every requested change without writing anything.
+    """Validate and type every requested change without writing anything.
 
     Each name resolves, in order, to settable prim metadata (``active``,
     ``instanceable``, ``kind``); a property the prim already has (authored
-    or defined by its schemas); a property the target type's schema defines
-    (when creating); or a new custom attribute whose type is inferred from
-    the value. Other prim metadata keys are refused, since writing them as
-    attributes would silently do nothing.
+    or defined by its schemas); a property the type being created defines;
+    a new transform op (``xformOp:<type>[:<suffix>]``), typed by the op and
+    added to ``xformOpOrder``; or a new custom attribute typed by
+    ``attribute_types`` or inferred from the value. Other prim metadata keys
+    are refused, since writing them as attributes would silently do nothing.
+    Values are converted to the resolved type (see :mod:`simul.usd.coerce`).
 
     Args:
         prim: The existing prim, or None when it is about to be created.
         definition: The prim definition of the type being created, if any.
         attributes: Name to JSON value.
         prim_path: The prim's path, for messages.
+        attribute_types: Name to USD value type name, for new attributes
+            (and the precision of new transform ops).
+        time_code: Write attribute values as samples at this time; None
+            writes defaults, and refuses attributes that are animated.
+        xformable: The prim is (or will be) a UsdGeomXformable.
+        edit_layer: The layer the writes go to; a time sample is refused
+            for an attribute whose animation a weaker layer holds.
 
     Returns:
         The planned writes: properties in request order, then metadata.
 
     Raises:
-        USDEditError: ``ValidationError`` (code ``InvalidAttribute``) listing
-            every rejected entry in ``details.problems``.
+        USDEditError: ``ValidationError`` with code ``InvalidAttribute``
+            listing every rejected entry in ``details.problems``, or with
+            code ``InvalidTimeCode``.
     """
-    properties: List[PlannedWrite] = []
-    metadata: List[PlannedWrite] = []
-    problems: List[Dict[str, str]] = []
-    check = _ConversionCheck()
-    for name, value in (attributes or {}).items():
+    if time_code is not None:
         try:
-            if not isinstance(name, str) or not name:
-                raise _Problem("attribute names must be non-empty strings")
-            if name in SETTABLE_METADATA:
-                metadata.append(_plan_metadata(name, value))
-                continue
-            if not Sdf.Path.IsValidNamespacedIdentifier(name):
-                raise _Problem(
-                    "not a valid attribute name (use identifiers joined by ':', such as custom:mass)"
-                )
-            relationship = prim.GetRelationship(name) if prim is not None else None
-            attribute = prim.GetAttribute(name) if prim is not None else None
-            if relationship:
-                properties.append(_plan_relationship(name, value))
-                continue
-            if attribute:
-                properties.append(
-                    _plan_attribute(
-                        name,
-                        value,
-                        attribute.GetTypeName(),
-                        attribute.GetMetadata("allowedTokens"),
-                        False,
-                        check,
-                    )
-                )
-                continue
-            if definition is not None:
-                if definition.GetRelationshipDefinition(name):
-                    properties.append(_plan_relationship(name, value))
-                    continue
-                attr_def = definition.GetAttributeDefinition(name)
-                if attr_def:
-                    properties.append(
-                        _plan_attribute(
-                            name,
-                            value,
-                            attr_def.GetTypeName(),
-                            attr_def.GetMetadata("allowedTokens"),
-                            False,
-                            check,
-                        )
-                    )
-                    continue
-            if name in _prim_metadata_keys():
-                raise _Problem(
-                    f"{name} is prim metadata, not an attribute; these tools set only the "
-                    f"{', '.join(SETTABLE_METADATA)} metadata"
-                )
-            _reject_non_value(value)
-            type_name = _infer_value_type(value)
-            if type_name is None:
-                raise _Problem(f"cannot infer a USD type for a new attribute from {describe_value(value)}")
-            properties.append(_plan_attribute(name, value, type_name, None, True, check))
-        except _Problem as problem:
-            problems.append({"attribute": str(name), "reason": str(problem)})
-    if problems:
-        count = len(attributes or {})
+            if not coerce.is_finite_time(time_code):
+                raise ValueError(f"time_code must be a finite number, got {time_code!r}")
+            resolve_time_code(time_code)  # the read tools' rule, so both refuse the same values
+        except (TypeError, ValueError) as exc:
+            raise USDEditError(
+                INVALID_TIME_CODE, f"{exc}.", prim_path=str(prim_path), time_code=repr(time_code)
+            ) from None
+    attributes = attributes or {}
+    planner = _Planner(prim, definition, attributes, attribute_types or {}, time_code, xformable, edit_layer)
+    writes = planner.plan()
+    if planner.problems:
+        problems = planner.problems
+        count = len(attributes)
         listing = "; ".join(f"{p['attribute']!r}: {p['reason']}" for p in problems)
         raise USDEditError(
             INVALID_ATTRIBUTE,
@@ -636,7 +768,7 @@ def plan_writes(
             prim_path=str(prim_path),
             problems=problems,
         )
-    return properties + metadata
+    return writes
 
 
 # ---------------------------------------------------------------------------
@@ -653,15 +785,33 @@ class _WriteFailure(Exception):
         self.reason = reason
 
 
+def _write_attribute(prim: Usd.Prim, write: PlannedWrite) -> None:
+    time = resolve_time_code(write.time)
+    if write.xform_op is not None:
+        op_name, precision, suffix = write.xform_op
+        if write.append_to_op_order:
+            op = UsdGeom.Xformable(prim).AddXformOp(coerce.xform_op_type(op_name), precision, suffix)
+            attr = op.GetAttr() if op else None
+        else:
+            attr = prim.CreateAttribute(write.name, write.type_name, False)
+    else:
+        attr = prim.GetAttribute(write.name)
+        if not attr:
+            attr = prim.CreateAttribute(write.name, write.type_name, True)
+    if not attr or not attr.Set(write.value, time):
+        raise _WriteFailure(write.name, "pxr rejected the value")
+    if write.append_to_op_order and write.xform_op is None:
+        order_attr = UsdGeom.Xformable(prim).GetXformOpOrderAttr()
+        order = [str(entry) for entry in order_attr.Get() or []]
+        if not order_attr.Set(order + [write.name]):
+            raise _WriteFailure("xformOpOrder", f"pxr rejected adding {write.name}")
+
+
 def _apply_write(prim: Usd.Prim, write: PlannedWrite) -> None:
     """Apply one planned write, raising _WriteFailure when pxr rejects it."""
     try:
         if write.kind == "attribute":
-            attr = prim.GetAttribute(write.name)
-            if not attr:
-                attr = prim.CreateAttribute(write.name, write.type_name, True)
-            if not attr or not attr.Set(write.value):
-                raise _WriteFailure(write.name, "pxr rejected the value")
+            _write_attribute(prim, write)
         elif write.kind == "relationship":
             rel = prim.GetRelationship(write.name) or prim.CreateRelationship(write.name, True)
             if not rel or not rel.SetTargets(write.value):
@@ -684,6 +834,15 @@ def _apply_write(prim: Usd.Prim, write: PlannedWrite) -> None:
 def _apply_writes(prim: Usd.Prim, writes: Sequence[PlannedWrite]) -> None:
     for write in writes:
         _apply_write(prim, write)
+
+
+def _summary(writes: Sequence[PlannedWrite]) -> Dict[str, Any]:
+    """The ``changed`` names and ``created_attributes`` types an edit reports."""
+    changed = [write.label for write in writes]
+    if any(write.append_to_op_order for write in writes) and "xformOpOrder" not in changed:
+        changed.append("xformOpOrder")
+    created = {write.name: str(write.type_name) for write in writes if write.create}
+    return {"changed": changed, "created_attributes": created}
 
 
 def _owner_spec(layer: Sdf.Layer, path: Sdf.Path) -> Sdf.PrimSpec:
@@ -847,6 +1006,8 @@ def create_prim(
     attributes: Optional[Mapping[str, Any]] = None,
     *,
     redefine_existing: bool = False,
+    attribute_types: Optional[Mapping[str, Any]] = None,
+    time_code: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Define a prim of a registered concrete type, with its initial attributes.
 
@@ -859,9 +1020,12 @@ def create_prim(
             ``active`` / ``instanceable`` / ``kind`` metadata.
         redefine_existing: Allow ``prim_path`` to name an existing prim,
             whose type is changed to ``prim_type``.
+        attribute_types: USD value type per new attribute name.
+        time_code: Write the attribute values as samples at this time.
 
     Returns:
-        ``prim_path``, ``prim_type``, ``redefined`` and the ``changed`` names.
+        ``prim_path``, ``prim_type``, ``redefined``, the ``changed`` names,
+        ``created_attributes`` (name to type) and ``time_code``.
 
     Raises:
         USDEditError: For any refusal or failure; nothing was changed.
@@ -893,7 +1057,16 @@ def create_prim(
     else:
         existing = None
         _check_creatable_under(stage, path)
-    writes = plan_writes(existing, definition, attributes, prim_path=path)
+    writes = plan_writes(
+        existing,
+        definition,
+        attributes,
+        prim_path=path,
+        attribute_types=attribute_types,
+        time_code=time_code,
+        xformable=Usd.SchemaRegistry.GetTypeFromName(prim_type).IsA(_XFORMABLE_TYPE),
+        edit_layer=_edit_layer(stage),
+    )
     journal = EditJournal(_edit_layer(stage), path)
     try:
         try:
@@ -910,12 +1083,18 @@ def create_prim(
         "prim_path": str(path),
         "prim_type": prim_type,
         "redefined": existing is not None,
-        "changed": [write.label for write in writes],
+        "time_code": time_code,
+        **_summary(writes),
     }
 
 
 def update_prim(
-    stage: Usd.Stage, prim_path: Any, attributes: Optional[Mapping[str, Any]]
+    stage: Usd.Stage,
+    prim_path: Any,
+    attributes: Optional[Mapping[str, Any]],
+    *,
+    attribute_types: Optional[Mapping[str, Any]] = None,
+    time_code: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Set attributes, relationship targets and metadata on an existing prim, all or nothing.
 
@@ -923,9 +1102,13 @@ def update_prim(
         stage: The stage to edit.
         prim_path: Absolute path of an existing prim.
         attributes: Name to JSON value; see :func:`plan_writes`.
+        attribute_types: USD value type per new attribute name.
+        time_code: Write the attribute values as samples at this time;
+            without it, animated attributes are refused.
 
     Returns:
-        ``prim_path`` and the ``changed`` names.
+        ``prim_path``, the ``changed`` names, ``created_attributes`` and
+        ``time_code``.
 
     Raises:
         USDEditError: For any refusal or failure; nothing was changed.
@@ -939,16 +1122,24 @@ def update_prim(
         )
     prim = require_prim(stage, path)
     refuse_instance_proxy(prim, "edit")
-    writes = plan_writes(prim, prim.GetPrimDefinition(), attributes, prim_path=path)
-    if not writes:
-        return {"prim_path": str(path), "changed": []}
-    journal = EditJournal(_edit_layer(stage), path)
-    try:
-        _apply_writes(prim, writes)
-    except _WriteFailure as failure:
-        journal.restore()
-        raise _rolled_back("Updating", path, failure) from failure
-    return {"prim_path": str(path), "changed": [write.label for write in writes]}
+    writes = plan_writes(
+        prim,
+        prim.GetPrimDefinition(),
+        attributes,
+        prim_path=path,
+        attribute_types=attribute_types,
+        time_code=time_code,
+        xformable=prim.IsA(UsdGeom.Xformable),
+        edit_layer=_edit_layer(stage),
+    )
+    if writes:
+        journal = EditJournal(_edit_layer(stage), path)
+        try:
+            _apply_writes(prim, writes)
+        except _WriteFailure as failure:
+            journal.restore()
+            raise _rolled_back("Updating", path, failure) from failure
+    return {"prim_path": str(path), "time_code": time_code, **_summary(writes)}
 
 
 def surviving_opinions(stage: Usd.Stage, prim: Usd.Prim, layer: Sdf.Layer) -> List[Dict[str, str]]:
@@ -1099,6 +1290,7 @@ __all__ = [
     "VALIDATION",
     "INVALID_ATTRIBUTE",
     "INVALID_PRIM_PATH",
+    "INVALID_TIME_CODE",
     "NOT_FOUND",
     "REFUSED",
     "SETTABLE_METADATA",

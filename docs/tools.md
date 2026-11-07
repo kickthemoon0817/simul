@@ -119,8 +119,9 @@ changed nothing.
 
 Edit errors use the same types as the lookups above. Invalid input is a
 `ValidationError` whose `details.code` says which check failed
-(`InvalidPrimPath`, `UnknownPrimType`, `InvalidAttribute`). A missing stage or
-prim is a `NotFoundError`. A write that fails after the checks passed is an
+(`InvalidPrimPath`, `UnknownPrimType`, `InvalidAttribute`,
+`InvalidTimeCode`). A missing stage or prim is a `NotFoundError`. A write
+that fails after the checks passed is an
 `EngineError` with `details.rolled_back: true`. A refusal that an explicit flag
 overrides is a `RefusedOperation` naming the flag in `details.override`, and
 an edit USD cannot express is an `UnsupportedOperation`.
@@ -138,13 +139,37 @@ an edit USD cannot express is an `UnsupportedOperation`.
   its children, properties and composition arcs.
 - **Attributes** are checked against the prim's existing property or its
   schema definition: the value must fit the attribute's type, and a token
-  must be one of its `allowedTokens`. A new attribute is created as a custom
-  attribute with a type inferred from the value. An existing relationship
-  takes a target path or a list of them. The keys `active`, `instanceable`
-  and `kind` set prim metadata through USD's API; other metadata keys are
-  refused rather than written as attributes. One error
-  (`details.code: InvalidAttribute`) lists every rejected key with its reason
-  in `details.problems`.
+  must be one of its `allowedTokens`. An existing relationship takes a target
+  path or a list of them. The keys `active`, `instanceable` and `kind` set
+  prim metadata through USD's API; other metadata keys are refused rather
+  than written as attributes. One error (`details.code: InvalidAttribute`)
+  lists every rejected key with its reason in `details.problems`.
+- **Values** are converted to the attribute's type: JSON numbers widen
+  (`45` into a `float`, ints into a `double3`), an integer type refuses a
+  fraction, vectors are lists (`[x, y, z]`), quaternions are `[w, x, y, z]`
+  with the real part first, matrices are a list of rows or the flat
+  row-major list, assets are path strings, and arrays are lists of their
+  element's form.
+- **Transform ops**: a new `xformOp:<type>[:<suffix>]` (`translate`,
+  `scale`, `rotateX`..`rotateZYX`, `orient`, `transform`) is created with the
+  op's value type (`double3` translate, `float3` scale, `quatf` orient,
+  `matrix4d` transform) and added to `xformOpOrder`, so it takes effect. An
+  existing op that is missing from the order is added to it. Pass
+  `xformOpOrder` in the same call to set the order yourself; every entry
+  must name an op the prim has or the call creates.
+- **New custom attributes** take their type from `attribute_types`
+  (`{"custom:offset": "double3"}`, which also picks a new op's precision), or
+  else from the value: `bool`, `int`, `float`, `string`, `float2`..`float4`
+  for 2 to 4 numbers, `int[]` / `float[]`, `float3[]` for a list of
+  3-number lists, `string[]`.
+- **Time samples**: `time_code` writes the values as samples at that time.
+  An attribute that already has time samples is refused without it, since a
+  default value is hidden by the samples at every frame. Uniform attributes
+  (such as `xformOpOrder`), relationships and metadata cannot take a
+  `time_code`. A sample is also refused when the attribute's animation comes
+  from a weaker layer (a sublayer or a referenced asset): USD takes all of an
+  attribute's samples from the strongest layer that has any, so one sample
+  in the root layer would replace that whole animation.
 - **`delete_prim`** refuses `/`, and the stage's default prim unless
   `allow_root_delete=true`. It also refuses a prim the delete cannot remove
   because opinions outside the root layer keep it alive: a sublayer defines
