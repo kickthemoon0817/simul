@@ -18,7 +18,6 @@ import os
 import re
 import secrets
 import shutil
-import struct
 import tempfile
 import time
 import uuid
@@ -42,6 +41,14 @@ from typing import (
 
 # The Blender add-on bundles these modules next to this one; simready_usd
 # imports pxr only when it is called.
+from ..utils.asset_references import (
+    UncheckableReferences,
+    blender_fbx_reads as _fbx_reads,
+    blender_gltf_reads as _gltf_reads,
+    blender_obj_reads as _obj_reads,
+    outside_references,
+)
+from ..utils.asset_references import resolve_ncase as _resolve_ncase  # noqa: F401 - re-exported for tests
 from ..utils.regex_guard import exponential_regex_construct
 from .simready_usd import COLLIDER_TYPES as SIMREADY_COLLIDER_TYPES
 from .simready_usd import author_simready_layer, usd_identifier
@@ -1013,242 +1020,12 @@ def _channel_name(data_path: str, index: int) -> str:
 
 # -- Files an import reads besides the one named (B1-20) ---------------------
 #
-# The sandbox checked only the path handed to import_file, so a glTF inside the
-# allowed folders whose image URI pointed outside them imported that image, and
-# a later GLB export embedded it. Each function below lists, for one reference
-# the file makes, the paths Blender's importer tries in the order it tries
-# them; the first that exists is what it reads.
-
-# MTL texture options and how many arguments each takes at most (the OBJ
-# importer's parse_texture_option); numeric ones stop at the first non-number.
-_MTL_OPTION_ARGUMENTS = {
-    "-o": 3,
-    "-s": 3,
-    "-t": 3,
-    "-mm": 2,
-    "-bm": 1,
-    "-boost": 1,
-    "-texres": 1,
-    "-blendu": 1,
-    "-blendv": 1,
-    "-clamp": 1,
-    "-cc": 1,
-    "-imfchan": 1,
-    "-type": 1,
-}
-_MTL_NUMERIC_OPTIONS = frozenset({"-o", "-s", "-t", "-mm", "-bm", "-boost", "-texres"})
-_MTL_MAP_KEYWORDS = frozenset({"bump", "refl", "norm", "disp", "decal"})
+# The readers for glTF, OBJ and FBX live in utils/asset_references.py, shared
+# with the Unreal backend; the USD reader below follows a stage's layers with
+# the pxr Blender bundles.
 
 # USD layers an import composes, and so reads, besides textures.
 _USD_LAYER_EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
-
-
-def _unquote_path(text: str) -> str:
-    """Strip whitespace and the surrounding double quotes the OBJ importer strips."""
-    text = text.strip()
-    if len(text) > 2 and text.startswith('"') and text.endswith('"'):
-        text = text[1:-1]
-    return text
-
-
-def _joined(directory: str, path: str) -> str:
-    """Join as Blender's BLI_path_join does: a later absolute part stays inside."""
-    return os.path.normpath(os.path.join(directory, path.lstrip("/\\")))
-
-
-def _gltf_document(path: Path) -> Dict[str, Any]:
-    """Read the JSON of a .gltf, or the JSON chunk of a .glb."""
-    with path.open("rb") as handle:
-        header = handle.read(20)
-        if header[:4] == b"glTF":
-            length, kind = struct.unpack_from("<II", header, 12)
-            if kind != 0x4E4F534A:  # "JSON"
-                raise ValueError(f"{path.name} has no JSON chunk")
-            return dict(json.loads(handle.read(length)))
-        return dict(json.loads(header + handle.read()))
-
-
-def _gltf_reads(path: Path) -> List[List[str]]:
-    """List the buffer and image files a glTF or GLB names, as its importer opens them."""
-    from urllib.parse import unquote
-
-    document = _gltf_document(path)
-    base = str(path.parent)
-    reads = []
-    for key in ("buffers", "images"):
-        for entry in document.get(key) or []:
-            uri = entry.get("uri") if isinstance(entry, dict) else None
-            if not isinstance(uri, str) or not uri or uri.startswith("data:"):
-                continue
-            # io_scene_gltf2: join(dirname(gltf), normpath(unquote(uri))).
-            local = os.path.normpath(unquote(uri.replace("\\", "/")))
-            reads.append([os.path.join(base, local)])
-    return reads
-
-
-def _mtl_texture_path(rest: str) -> str:
-    """Return the image path of an MTL map line, after its options."""
-    text = rest.strip()
-    while text.startswith("-"):
-        option, _, text = text.partition(" ")
-        text = text.lstrip()
-        for _ in range(_MTL_OPTION_ARGUMENTS.get(option, 1)):
-            argument, _, remainder = text.partition(" ")
-            if not argument:
-                break
-            if option in _MTL_NUMERIC_OPTIONS:
-                try:
-                    float(argument)
-                except ValueError:
-                    break
-            text = remainder.lstrip()
-    return _unquote_path(text)
-
-
-def _obj_reads(path: Path) -> List[List[str]]:
-    """List the MTL libraries an OBJ names and the textures they name.
-
-    The OBJ importer joins each mtllib to the OBJ's folder, and tries a
-    texture joined to the MTL's folder, as given (absolute, or relative to the
-    working directory), with underscores turned to spaces, and its base name
-    in the MTL's folder.
-    """
-    reads: List[List[str]] = []
-    folder = str(path.parent)
-    libraries: List[str] = []
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            if line.startswith("mtllib"):
-                name = _unquote_path(line[6:])
-                if name:
-                    libraries.append(_joined(folder, name))
-    for library in dict.fromkeys(libraries):
-        reads.append([library])
-        if not os.path.isfile(library):
-            continue
-        library_folder = os.path.dirname(library)
-        with open(library, "r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                keyword, _, rest = line.strip().partition(" ")
-                keyword = keyword.lower()
-                if not (keyword.startswith("map_") or keyword in _MTL_MAP_KEYWORDS):
-                    continue
-                image = _mtl_texture_path(rest)
-                if image:
-                    reads.append(
-                        [
-                            _joined(library_folder, image),
-                            os.path.abspath(image),
-                            os.path.abspath(image.replace("_", " ")),
-                            os.path.join(library_folder, os.path.basename(image)),
-                        ]
-                    )
-    return reads
-
-
-def _resolve_ncase(path: str) -> str:
-    """Find a path's real spelling on a case-sensitive file system.
-
-    Mirrors ``bpy.path.resolve_ncase`` (Blender 4.2 through 5.0.1), which
-    ``bpy_extras.image_utils.load_image`` tries after each path: a component
-    that does not exist is matched case-insensitively among its folder's
-    entries. Returns the path unchanged when nothing matches.
-    """
-
-    def found(candidate: str) -> Tuple[str, bool]:
-        if not candidate or os.path.exists(candidate):
-            return candidate, True
-        filename, folder = os.path.basename(candidate), os.path.dirname(candidate)
-        suffix = ""
-        if not filename:
-            if len(folder) < len(candidate):
-                suffix = candidate[len(folder) :]
-            filename, folder = os.path.basename(folder), os.path.dirname(folder)
-        if not os.path.exists(folder):
-            if folder == candidate:
-                return candidate, False
-            folder, ok = found(folder)
-            if not ok:
-                return candidate, False
-        if not os.path.isdir(folder):
-            return candidate, False
-        try:
-            entries = os.listdir(folder)
-        except OSError:
-            return candidate, False
-        lower = filename.lower()
-        match = next((entry for entry in entries if entry.lower() == lower), None)
-        if match is None:
-            return candidate, False
-        return os.path.join(folder, match) + suffix, True
-
-    return found(path)[0]
-
-
-def _fbx_element_name(element: Any) -> str:
-    """An FBX object's name: the part of its name property before the class."""
-    props = getattr(element, "props", None) or []
-    if len(props) < 2 or not isinstance(props[-2], bytes):
-        return ""
-    return props[-2].split(b"\x00\x01")[0].decode("utf-8", "replace")
-
-
-def _fbx_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
-    """List the texture files an FBX names, as Blender's FBX importer looks for them.
-
-    blen_read_texture_image takes a texture's RelativeFilename joined to the
-    FBX's folder (stripped of a leading separator), else its FileName or
-    Filename, else the texture's name. bpy_extras.image_utils.load_image then
-    tries that path, the path joined to the folder and its base name there,
-    each also with its case resolved (resolve_ncase). Its recursive search of
-    folders, the importer's use_image_search, is switched off for an import
-    the sandbox checks (import_file), so it reads nothing found that way.
-    Blender's own FBX parser reads the file; a file it cannot parse fails the
-    import itself.
-    """
-    try:
-        from io_scene_fbx import parse_fbx  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise UncheckableReferences("Blender's FBX add-on is not available") from exc
-
-    try:
-        root, _version = parse_fbx.parse(str(path))
-    except Exception:
-        return []
-    base = str(path.parent)
-    reads: List[List[str]] = []
-    for section in root.elems:
-        if section.id != b"Objects":
-            continue
-        for element in section.elems:
-            if element.id not in (b"Texture", b"Video"):
-                continue
-            names: Dict[bytes, str] = {}
-            for prop in element.elems:
-                if prop.id in (b"RelativeFilename", b"FileName", b"Filename") and prop.props:
-                    value = prop.props[0]
-                    if isinstance(value, bytes):
-                        value = value.decode("utf-8", "replace")
-                    names.setdefault(prop.id, str(value))
-            relative = names.get(b"RelativeFilename")
-            if relative:
-                # str.lstrip(None) strips whitespace, as the importer's
-                # lstrip(os.path.altsep) does where altsep is None.
-                image = os.path.join(base, relative.lstrip(os.path.sep).lstrip(os.path.altsep))
-            else:
-                image = names.get(b"FileName") or names.get(b"Filename") or ""
-            if not image:
-                image = _fbx_element_name(element)
-            if not image:
-                continue
-            # bpy.path.native_pathsep, as load_image applies it.
-            image = image.replace("\\", "/") if os.sep == "/" else image.replace("/", "\\")
-            short = image[2:] if image[:2] == "//" else image
-            candidates = [image]
-            for variant in (image, os.path.join(base, image), os.path.join(base, os.path.basename(short))):
-                candidates.extend((variant, _resolve_ncase(variant)))
-            reads.append(list(dict.fromkeys(candidates)))
-    return reads
 
 
 def _usd_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
@@ -1355,10 +1132,6 @@ def _usda_text_reads(path: Path) -> List[List[str]]:
             )
         reads.append([os.path.normpath(os.path.join(str(path.parent), local))])
     return reads
-
-
-class UncheckableReferences(Exception):
-    """The files an import would read cannot be listed, so the sandbox cannot vouch for them."""
 
 
 # Importer options that search folders for a file a reference names, set off
@@ -5688,14 +5461,8 @@ class BlenderRuntimeSession:
                 ),
             )
             raise SandboxDenied(file_path, details) from exc
-        outside: List[str] = []
-        for candidates in reads:
-            found = next((c for c in candidates if os.path.exists(c)), None)
-            if found is not None and not self._path_policy.is_allowed(found):
-                # Reported as the file it is, without ../ steps or symlinks.
-                real = str(self._path_policy.resolve(found))
-                if real not in outside:
-                    outside.append(real)
+        # Each refused file is reported as it is, without ../ steps or symlinks.
+        outside = outside_references(reads, self._path_policy)
         if not outside:
             return
         details = self._path_policy.denial_details(outside[0])
