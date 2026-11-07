@@ -9,11 +9,13 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from unittest.mock import AsyncMock, patch
 
+import click
 import pytest
 import typer
+from click.shell_completion import ShellComplete
 from typer.testing import CliRunner
 
 from simul.cli import isaac as isaac_cli
@@ -242,6 +244,245 @@ def test_fail_human_mode_prints_escaped_message(human_mode: list[str]) -> None:
     assert result.exit_code == 2
     assert result.stdout == ""
     assert human_mode == [r"[red]expected one of \[a, b][/red]"]
+
+
+# ---------------------------------------------------------------------------
+# Port and timeout options
+# ---------------------------------------------------------------------------
+_PORT_ERROR = "{option} takes a port number from 1 to 65535, got {value!r}"
+_TIMEOUT_ERROR = "{option} takes a finite number of seconds greater than 0, got {value!r}"
+
+
+def _cli_options(matches: Callable[[str], bool]) -> List[Tuple[Tuple[str, ...], str]]:
+    """``(command path, long option)`` for every option of the ``simul`` CLI whose name ``matches``."""
+    found: List[Tuple[Tuple[str, ...], str]] = []
+
+    def walk(command: click.Command, path: Tuple[str, ...]) -> None:
+        if isinstance(command, click.Group):
+            for name, sub in command.commands.items():
+                walk(sub, (*path, name))
+            return
+        for param in command.params:
+            found.extend((path, opt) for opt in param.opts if matches(opt))
+
+    walk(typer.main.get_command(main_app), ())
+    return found
+
+
+# Every port option, the shared --port and the others (--socket-port, --websocket-port, ...),
+# and every timeout option (--timeout, --wait-timeout). Not --viewport.
+PORT_OPTIONS = _cli_options(lambda opt: opt == "--port" or opt.endswith("-port"))
+TIMEOUT_OPTIONS = _cli_options(lambda opt: opt == "--timeout" or opt.endswith("-timeout"))
+
+
+def _option_id(case: Any) -> str:
+    """``isaac exec --port`` for a ``(path, option)`` case, ``isaac exec print(1)`` for an argv."""
+    return " ".join([*case[0], case[1]] if isinstance(case, tuple) else case)
+
+
+@pytest.fixture
+def no_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a command that gets as far as building an Isaac Sim client or an Unreal session."""
+
+    def reached(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("the command reached the engine")
+
+    monkeypatch.setattr(isaac_cli, "_tools", reached)
+    monkeypatch.setattr(unreal_cli, "_session", reached)
+    # Without an install root, a launch that got past its options stops at once.
+    monkeypatch.delenv("ISAAC_SIM_PATH", raising=False)
+
+
+def test_the_option_walk_finds_the_shared_options() -> None:
+    """The cases below come from walking the CLI; it must reach both backends' shared options."""
+    ports = {
+        (("isaac", "exec"), "--port"),
+        (("isaac", "launch"), "--socket-port"),
+        (("unreal", "health"), "--port"),
+        (("unreal", "instances"), "--port"),
+        (("unreal", "setup"), "--websocket-port"),
+    }
+    timeouts = {
+        (("isaac", "exec"), "--timeout"),
+        (("isaac", "launch"), "--wait-timeout"),
+        (("unreal", "setup"), "--wait-timeout"),
+    }
+    assert ports <= set(PORT_OPTIONS)
+    assert timeouts <= set(TIMEOUT_OPTIONS)
+    assert not [case for case in PORT_OPTIONS if case[1] == "--viewport"]
+
+
+@pytest.mark.parametrize("case", PORT_OPTIONS, ids=_option_id)
+def test_every_port_option_refuses_an_impossible_port_as_a_bad_invocation(
+    case: Tuple[Tuple[str, ...], str], no_engine: None
+) -> None:
+    """Exit 2 with the envelope while the command line is parsed, for every command that takes a port.
+
+    The option is the only argument: Click processes what was given before
+    what is missing, so a command's required argument does not get in first.
+    """
+    path, option = case
+    result = runner.invoke(main_app, ["--json", *path, option, "70000"])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": _PORT_ERROR.format(option=option, value="70000"),
+        "error_type": "InvalidArgument",
+    }
+
+
+@pytest.mark.parametrize("case", TIMEOUT_OPTIONS, ids=_option_id)
+def test_every_timeout_option_refuses_an_impossible_timeout_as_a_bad_invocation(
+    case: Tuple[Tuple[str, ...], str], no_engine: None
+) -> None:
+    path, option = case
+    result = runner.invoke(main_app, ["--json", *path, option, "nan"])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": _TIMEOUT_ERROR.format(option=option, value="nan"),
+        "error_type": "InvalidArgument",
+    }
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "65536", "70000", "abc", "8226.0", ""])
+@pytest.mark.parametrize("argv", [["isaac", "exec", "print(1)"], ["unreal", "health"]], ids=_option_id)
+def test_a_port_outside_1_to_65535_or_not_an_integer_exits_2(argv: List[str], value: str, no_engine: None) -> None:
+    """A value Click cannot parse as an integer gets the same envelope, not Click's usage error on stderr."""
+    result = runner.invoke(main_app, ["--json", *argv, "-p", value])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": _PORT_ERROR.format(option="--port", value=value),
+        "error_type": "InvalidArgument",
+    }
+
+
+@pytest.mark.parametrize("value", ["0", "-0.5", "-1", "nan", "inf", "-inf", "abc", ""])
+@pytest.mark.parametrize("argv", [["isaac", "exec", "print(1)"], ["isaac", "ping"]], ids=_option_id)
+def test_a_timeout_that_is_not_a_finite_number_above_0_exits_2(
+    argv: List[str], value: str, no_engine: None
+) -> None:
+    """0, -1 and nan used to reach the socket and come back as 'timed out after nans'."""
+    result = runner.invoke(main_app, ["--json", *argv, "-t", value])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": _TIMEOUT_ERROR.format(option="--timeout", value=value),
+        "error_type": "InvalidArgument",
+    }
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["isaac", "exec", "print(1)", "--port", "70000"], _PORT_ERROR.format(option="--port", value="70000")),
+        (["isaac", "ping", "--timeout", "0"], _TIMEOUT_ERROR.format(option="--timeout", value="0")),
+        (["unreal", "health", "-p", "abc"], _PORT_ERROR.format(option="--port", value="abc")),
+    ],
+    ids=["isaac exec --port", "isaac ping --timeout", "unreal health -p"],
+)
+def test_a_bad_port_or_timeout_is_text_on_stderr_in_human_mode(
+    argv: List[str], message: str, human_mode: list[str], no_engine: None
+) -> None:
+    result = runner.invoke(main_app, argv)
+
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert human_mode == [f"[red]{message}[/red]"]
+
+
+@pytest.mark.parametrize(
+    ("args", "incomplete", "expected"),
+    [
+        (["isaac", "exec", "--port", "70000"], "--ti", ["--timeout"]),
+        (["isaac", "ping", "--timeout", "nan"], "--ho", ["--host"]),
+        (["unreal", "health", "-p", "abc"], "--ho", ["--host"]),
+    ],
+    ids=["isaac exec --port", "isaac ping --timeout", "unreal health -p"],
+)
+def test_shell_completion_drops_a_bad_port_or_timeout_without_printing(
+    args: List[str], incomplete: str, expected: List[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Completion parses the line as Click does for a bad ``INT``: the value is dropped and nothing is printed.
+
+    What the CLI writes while it completes is what the shell reads as the
+    candidates, so an envelope there would become one, and in zsh, which
+    reads three lines per candidate, it would shift every candidate after it.
+    """
+    completions = ShellComplete(typer.main.get_command(main_app), {}, "simul", "_SIMUL_COMPLETE").get_completions(
+        args, incomplete
+    )
+
+    assert [item.value for item in completions] == expected
+    assert capsys.readouterr() == ("", "")
+
+
+def test_valid_ports_and_timeouts_reach_the_command_as_numbers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Values at both ends of the range arrive as Click parsed them, and leaving the options out still means None."""
+    seen: list[tuple] = []
+
+    def tools(host: Optional[str] = None, port: Optional[int] = None, timeout: Optional[float] = None) -> Any:
+        seen.append((port, timeout))
+        return SimpleNamespace(_client=SimpleNamespace(ping=AsyncMock(return_value=True), address="h:1"))
+
+    monkeypatch.setattr(isaac_cli, "_tools", tools)
+    for port, timeout in (("1", "0.001"), ("8226", "30"), ("65535", "1e3")):
+        result = runner.invoke(main_app, ["--json", "isaac", "ping", "--port", port, "--timeout", timeout])
+        assert result.exit_code == 0, result.output
+    result = runner.invoke(main_app, ["--json", "isaac", "ping"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == [(1, 0.001), (8226, 30.0), (65535, 1000.0), (None, None)]
+
+
+@pytest.mark.parametrize(
+    ("extra", "port", "websocket_port", "wait"),
+    [
+        ([], 30010, None, 90.0),
+        (["--port", "30011", "--websocket-port", "30021", "--wait-timeout", "5"], 30011, 30021, 5.0),
+    ],
+    ids=["defaults", "given"],
+)
+def test_setup_port_and_wait_options_keep_their_defaults_and_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra: List[str],
+    port: int,
+    websocket_port: Optional[int],
+    wait: float,
+) -> None:
+    uproject = tmp_path / "Demo.uproject"
+    uproject.write_text(json.dumps({"FileVersion": 3, "EngineAssociation": "5.4"}), encoding="utf-8")
+    waited: list[float] = []
+
+    async def poll(session: Any, timeout: float, interval: float, **kwargs: Any) -> Dict[str, Any]:
+        waited.append(timeout)
+        return {"connected": True}
+
+    monkeypatch.setattr(unreal_cli, "_poll_health", poll)
+    result = runner.invoke(main_app, ["--json", "unreal", "setup", str(uproject), "--no-launch", "--yes", *extra])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert (payload["port"], payload["websocket_port"], waited) == (port, websocket_port, [wait])
+    assert f"RemoteControlHttpServerPort={port}" in (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+
+
+def test_port_and_timeout_options_keep_their_types_in_the_commands_manifest() -> None:
+    result = runner.invoke(main_app, ["commands"])
+
+    types = {
+        (entry["command"], param["name"]): param["type"]
+        for entry in json.loads(result.stdout)["commands"]
+        for param in entry["params"]
+    }
+    assert types[("isaac exec", "port")] == types[("unreal setup", "websocket_port")] == "integer"
+    assert types[("isaac exec", "timeout")] == types[("unreal setup", "wait_timeout")] == "float"
 
 
 # ---------------------------------------------------------------------------
