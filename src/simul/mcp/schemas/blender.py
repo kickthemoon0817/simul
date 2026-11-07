@@ -65,6 +65,20 @@ MeshIndex = Annotated[int, Field(ge=0, strict=True)]
 MeshEdge = Annotated[List[MeshIndex], Field(min_length=2, max_length=2)]
 MeshFace = Annotated[List[MeshIndex], Field(min_length=3)]
 
+# A colour channel or factor in [0, 1] (the physics schemas below have their own UnitFloat).
+ColorFactor = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+
+LightType = Literal["POINT", "SUN", "SPOT", "AREA"]
+AreaLightShape = Literal["SQUARE", "RECTANGLE", "DISK", "ELLIPSE"]
+# The spot cone and sun angle limits as Blender 5.0.1 stores them (single
+# precision: 1 degree and pi rounded), so a value read back is accepted again.
+# Mirrors _LIGHT_LIMITS in simul.adapters.blender_runtime, which ships in the
+# Blender add-on and cannot import this module; a test keeps them in step.
+LIGHT_ANGLE_MIN = 0.01745329238474369
+LIGHT_ANGLE_MAX = 3.1415927410125732
+# Smart UV Project's default island angle, 66 degrees.
+UV_ANGLE_LIMIT_DEFAULT = math.radians(66.0)
+
 
 class BlenderInfoResponse(BaseModel):
     """Response with Blender runtime information."""
@@ -469,6 +483,9 @@ class BlenderMaterialInfoRequest(BaseModel):
     """Request for material information."""
 
     material_name: str = Field(..., description="Name of the Blender material")
+    max_nodes: int = Field(
+        50, ge=1, le=500, description="Most nodes to list, those feeding the output first"
+    )
 
 
 class BlenderNodeEntry(BaseModel):
@@ -479,8 +496,28 @@ class BlenderNodeEntry(BaseModel):
     label: str = Field("", description="Node label")
 
 
+class BlenderMaterialLinkedInput(BaseModel):
+    """What drives one linked input of a Principled BSDF."""
+
+    from_node: str = Field(..., description="Name of the node the link comes from")
+    from_node_type: str = Field(..., description="That node's bl_idname")
+    from_socket: str = Field(..., description="Output socket the link comes from")
+    image_name: Optional[str] = Field(
+        None, description="Image of the texture driving the input (also behind a Normal Map node)"
+    )
+    image_path: Optional[str] = Field(None, description="Absolute path of that image's file")
+    image_colorspace: Optional[str] = Field(
+        None, description="Colour space the image is read in (sRGB, Non-Color, ...)"
+    )
+    image_packed: Optional[bool] = Field(None, description="Whether the image is packed into the .blend")
+
+
 class BlenderMaterialInfoResponse(BaseModel):
-    """Material information with bounded node tree traversal."""
+    """Material information: Principled BSDF values, what drives them, and a bounded node list.
+
+    node_count, linked_inputs, surface_render_method and users are null from
+    an add-on built before they existed.
+    """
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
@@ -489,15 +526,24 @@ class BlenderMaterialInfoResponse(BaseModel):
     material_name: str = Field(..., description="Material name")
     use_nodes: bool = Field(..., description="Whether material uses node tree")
     nodes: List[BlenderNodeEntry] = Field(
-        default_factory=list, description="Shader nodes (bounded traversal)"
+        default_factory=list,
+        description="At most max_nodes shader nodes, those feeding the active output first",
     )
+    node_count: Optional[int] = Field(None, description="Number of nodes in the tree")
     principled_params: Optional[Dict[str, Any]] = Field(
         None,
         description=(
-            "Principled BSDF parameters if present "
-            "(base_color, metallic, roughness, etc.)"
+            "Values of the Principled BSDF feeding the output (Base Color, Metallic, "
+            "Roughness, Alpha, ...); null for an input a link drives, see linked_inputs"
         ),
     )
+    linked_inputs: Optional[Dict[str, BlenderMaterialLinkedInput]] = Field(
+        None, description="Linked Principled BSDF inputs by socket name, with their image if any"
+    )
+    surface_render_method: Optional[str] = Field(
+        None, description="DITHERED or BLENDED (blend_method before Blender 4.2)"
+    )
+    users: Optional[int] = Field(None, description="Number of users of the material")
 
 
 class BlenderDistanceRequest(BaseModel):
@@ -1389,18 +1435,60 @@ class BlenderAssignMaterialRequest(BaseModel):
     object_name: str = Field(..., description="Object to assign material to")
     material_name: Optional[str] = Field(
         None,
-        description="Material name (auto-generated if omitted)",
+        description=(
+            "Material name, reused when it exists (Material_<object> if omitted)"
+        ),
     )
-    base_color: List[float] = Field(
-        default_factory=lambda: [0.8, 0.8, 0.8, 1.0],
-        description="Base color RGBA [r, g, b, a]",
+    base_color: Optional[List[ColorFactor]] = Field(
+        None,
+        min_length=3,
+        max_length=4,
+        description=(
+            "Base color RGB [r, g, b] or RGBA [r, g, b, a] in 0-1; a sets the Principled "
+            "Alpha. Omit to keep the material's own"
+        ),
     )
-    metallic: float = Field(0.0, description="Metallic value (0-1)", ge=0.0, le=1.0)
-    roughness: float = Field(0.5, description="Roughness value (0-1)", ge=0.0, le=1.0)
+    metallic: Optional[ColorFactor] = Field(
+        None, description="Metallic value (0-1); omit to keep the material's own"
+    )
+    roughness: Optional[ColorFactor] = Field(
+        None, description="Roughness value (0-1); omit to keep the material's own"
+    )
+    slot_index: Optional[MeshIndex] = Field(
+        None, description="Slot to put the material in; the slot count adds a slot"
+    )
+    face_indices: Optional[List[MeshIndex]] = Field(
+        None, min_length=1, description="Mesh faces to assign the material to"
+    )
+    link: Literal["DATA", "OBJECT"] = Field(
+        "DATA",
+        description=(
+            "DATA: the mesh's slot (shared by linked duplicates); OBJECT: this object's slot. "
+            "Faces and the slot count are the mesh's either way"
+        ),
+    )
+    single_user: bool = Field(
+        False,
+        description=(
+            "Give the object its own copy of data it shares first, so the change leaves the "
+            "other objects alone (required to change faces or add a slot with link OBJECT on "
+            "shared data); the object and its data must be in Object Mode"
+        ),
+    )
+    reuse_existing: bool = Field(
+        True, description="Reuse a material of that name when one exists; false creates a new one"
+    )
+    base_color_texture: Optional[str] = Field(None, description="Image file driving Base Color")
+    metallic_texture: Optional[str] = Field(None, description="Image file driving Metallic")
+    roughness_texture: Optional[str] = Field(None, description="Image file driving Roughness")
+    normal_texture: Optional[str] = Field(None, description="Tangent-space normal map image file")
 
 
 class BlenderAssignMaterialResponse(BaseModel):
-    """Response after assigning a material."""
+    """Response after assigning a material.
+
+    The fields after material_name are null from an add-on built before them.
+    """
 
     success: bool = Field(..., description="Whether assignment succeeded")
     error: Optional[str] = Field(
@@ -1408,6 +1496,29 @@ class BlenderAssignMaterialResponse(BaseModel):
     )
     object_name: str = Field(..., description="Object name")
     material_name: str = Field(..., description="Material name assigned")
+    created: Optional[bool] = Field(
+        None, description="Whether the material was created (false: an existing one was reused)"
+    )
+    slot_index: Optional[int] = Field(None, description="Slot the material is in")
+    link: Optional[str] = Field(None, description="DATA or OBJECT")
+    faces_assigned: Optional[int] = Field(
+        None, description="Faces set to the slot; null when the faces were left alone"
+    )
+    material_slots: Optional[List[Optional[str]]] = Field(
+        None, description="The object's slots afterwards, by material name (null: empty slot)"
+    )
+    principled_params: Optional[Dict[str, Any]] = Field(
+        None, description="The Principled BSDF values as stored; null for an input a texture drives"
+    )
+    surface_render_method: Optional[str] = Field(
+        None, description="DITHERED, or BLENDED for a transparent material"
+    )
+    textures: Optional[Dict[str, str]] = Field(
+        None, description="Texture files linked, by input (base_color, metallic, roughness, normal)"
+    )
+    warnings: List[str] = Field(
+        default_factory=list, description="Shared mesh or material data, a mesh without UVs"
+    )
 
 
 class BlenderAddModifierRequest(BaseModel):
@@ -1494,25 +1605,55 @@ class BlenderRemoveModifierResponse(BaseModel):
 
 
 class BlenderSetLightParamsRequest(BaseModel):
-    """Request to set light properties."""
+    """Request to set light properties; each setting must belong to the light's type."""
 
     light_name: str = Field(..., description="Light object name")
-    energy: Optional[float] = Field(None, description="Light energy/power")
-    color: Optional[List[float]] = Field(
-        None, min_length=3, max_length=3, description="Light color RGB [r, g, b]"
+    energy: Optional[FiniteFloat] = Field(
+        None, ge=0, description="Power in watts (W/m² irradiance for SUN); not negative"
+    )
+    color: Optional[List[Annotated[FiniteFloat, Field(ge=0)]]] = Field(
+        None, min_length=3, max_length=3, description="Light color RGB [r, g, b], each >= 0"
     )
     use_shadow: Optional[bool] = Field(None, description="Enable shadow casting")
     spot_size: Optional[float] = Field(
-        None, description="Spot cone angle radians (SPOT only)"
+        None,
+        ge=LIGHT_ANGLE_MIN,
+        le=LIGHT_ANGLE_MAX,
+        description="Spot cone angle in radians, 1 degree to pi (SPOT only)",
     )
-    spot_blend: Optional[float] = Field(None, description="Spot edge blend (SPOT only)")
-    shadow_soft_size: Optional[float] = Field(
-        None, description="Shadow soft size / radius (POINT/SUN/AREA)"
+    spot_blend: Optional[float] = Field(
+        None, ge=0, le=1, description="Spot edge softness 0-1 (SPOT only)"
+    )
+    shadow_soft_size: Optional[FiniteFloat] = Field(
+        None,
+        ge=0,
+        description=(
+            "Light radius for soft shadows (POINT and SPOT only; a SUN's softness is "
+            "angle, an AREA light's is size)"
+        ),
+    )
+    light_type: Optional[LightType] = Field(
+        None, description="Change the light's type first: POINT, SUN, SPOT or AREA"
+    )
+    angle: Optional[float] = Field(
+        None, ge=0, le=LIGHT_ANGLE_MAX, description="Sun's angular diameter in radians, 0 to pi (SUN only)"
+    )
+    size: Optional[FiniteFloat] = Field(
+        None, ge=0, description="Area light size; its width for RECTANGLE and ELLIPSE (AREA only)"
+    )
+    size_y: Optional[FiniteFloat] = Field(
+        None, ge=0, description="Area light height (AREA with shape RECTANGLE or ELLIPSE)"
+    )
+    shape: Optional[AreaLightShape] = Field(
+        None, description="Area light shape: SQUARE, RECTANGLE, DISK or ELLIPSE (AREA only)"
     )
 
 
 class BlenderSetLightParamsResponse(BaseModel):
-    """Response after setting light parameters."""
+    """Response after setting light parameters: every setting of the light's type, as stored.
+
+    The fields after color are null from an add-on built before them.
+    """
 
     success: bool = Field(..., description="Whether light params were set")
     error: Optional[str] = Field(
@@ -1522,6 +1663,66 @@ class BlenderSetLightParamsResponse(BaseModel):
     light_type: str = Field(..., description="Light type (POINT/SUN/SPOT/AREA)")
     energy: float = Field(..., description="Current energy")
     color: List[float] = Field(..., description="Current color RGB")
+    use_shadow: Optional[bool] = Field(None, description="Whether the light casts shadows")
+    shadow_soft_size: Optional[float] = Field(None, description="Light radius (POINT, SPOT)")
+    spot_size: Optional[float] = Field(None, description="Spot cone angle in radians (SPOT)")
+    spot_blend: Optional[float] = Field(None, description="Spot edge softness (SPOT)")
+    angle: Optional[float] = Field(None, description="Sun's angular diameter in radians (SUN)")
+    shape: Optional[str] = Field(None, description="Area light shape (AREA)")
+    size: Optional[float] = Field(None, description="Area light size (AREA)")
+    size_y: Optional[float] = Field(None, description="Area light height (AREA)")
+    warnings: List[str] = Field(
+        default_factory=list, description="Light data shared by several objects"
+    )
+
+
+class BlenderUVUnwrapRequest(BaseModel):
+    """Request to generate UV coordinates for a mesh object."""
+
+    object_name: str = Field(..., description="Mesh object to unwrap")
+    method: Literal["SMART_PROJECT", "CUBE_PROJECT"] = Field(
+        "SMART_PROJECT", description="Smart UV Project, or a projection onto a cube's sides"
+    )
+    uv_map_name: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=63,
+        description="UV map to write, created when missing; the active one (or a new UVMap) if omitted",
+    )
+    angle_limit: float = Field(
+        UV_ANGLE_LIMIT_DEFAULT,
+        gt=0,
+        le=math.pi / 2,
+        description="SMART_PROJECT: faces meeting at a larger angle in radians split into islands",
+    )
+    island_margin: float = Field(
+        0.0, ge=0, le=1, description="SMART_PROJECT: space between islands, 0-1"
+    )
+    cube_size: FiniteFloat = Field(
+        1.0, gt=0, description="CUBE_PROJECT: size of the projection cube"
+    )
+
+
+class BlenderUVUnwrapResponse(BaseModel):
+    """Response after unwrapping a mesh."""
+
+    success: bool = Field(..., description="Whether the mesh was unwrapped")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    uv_map: str = Field(..., description="UV map written")
+    created_uv_map: bool = Field(..., description="Whether the UV map was created")
+    method: str = Field(..., description="SMART_PROJECT or CUBE_PROJECT")
+    uv_layer_names: List[str] = Field(default_factory=list, description="The mesh's UV maps")
+    active_uv_map: Optional[str] = Field(
+        None, description="The active UV map (left as it was, or the mesh's first one)"
+    )
+    render_uv_map: Optional[str] = Field(
+        None, description="The render UV map, which image textures read and USD export names st"
+    )
+    face_count: int = Field(..., description="Faces unwrapped")
+    warnings: List[str] = Field(default_factory=list, description="Mesh data shared by several objects")
 
 
 # ---------------------------------------------------------------------------
@@ -3126,6 +3327,7 @@ __all__ = [
     "BlenderSceneSummaryResponse",
     "BlenderMaterialInfoRequest",
     "BlenderNodeEntry",
+    "BlenderMaterialLinkedInput",
     "BlenderMaterialInfoResponse",
     "BlenderDistanceRequest",
     "BlenderDistanceResponse",
@@ -3163,6 +3365,8 @@ __all__ = [
     "BlenderRemoveModifierResponse",
     "BlenderSetLightParamsRequest",
     "BlenderSetLightParamsResponse",
+    "BlenderUVUnwrapRequest",
+    "BlenderUVUnwrapResponse",
     "BlenderOpenFileRequest",
     "BlenderOpenFileResponse",
     "BlenderAttachWindowRequest",

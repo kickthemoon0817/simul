@@ -43,12 +43,17 @@ UNKNOWN_PRIM_TYPE = "UnknownPrimType"
 INVALID_ATTRIBUTE = "InvalidAttribute"
 EDIT_FAILED = "EditFailed"
 INVALID_TIME_CODE = "InvalidTimeCode"
+# Stage lifecycle (save, export, reload) codes, used by the headless session.
+INVALID_FILE_PATH = "InvalidFilePath"
+SAVE_FAILED = "SaveFailed"
 CODE_ERROR_TYPES: Dict[str, str] = {
     INVALID_PRIM_PATH: VALIDATION,
     UNKNOWN_PRIM_TYPE: VALIDATION,
     INVALID_ATTRIBUTE: VALIDATION,
     INVALID_TIME_CODE: VALIDATION,
+    INVALID_FILE_PATH: VALIDATION,
     EDIT_FAILED: ENGINE,
+    SAVE_FAILED: ENGINE,
 }
 
 # Prim metadata the tools set through the proper USD API rather than as an
