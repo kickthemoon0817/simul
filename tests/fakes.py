@@ -515,10 +515,11 @@ class FakeConstraint:
 
     Only a type in ``TARGET_CONSTRAINT_TYPES`` has ``target`` (and may have
     ``subtarget``), only an Armature has ``targets`` (each with ``target``,
-    ``subtarget`` and ``weight``), only an Action ``use_eval_time`` and only a
-    Track To ``use_target_z`` (False, Blender's default, unless given), as on
-    a real constraint, so code reading them from another type fails here as
-    it does in Blender. Deleting a target object leaves ``target`` None and
+    ``subtarget`` and ``weight``), only an Action ``use_eval_time``, only a
+    Track To ``use_target_z`` (False, Blender's default, unless given) and
+    only an IK ``use_tail`` (True, Blender's default, unless given), as on a
+    real constraint, so code reading them from another type fails here as it
+    does in Blender. Deleting a target object leaves ``target`` None and
     ``is_valid`` True, since Blender 5.0.1 checks the targets only when the
     constraint is edited, and Blender's evaluation then does nothing; nor
     does ``apply``. Likewise for an Armature constraint once a target with
@@ -549,6 +550,10 @@ class FakeConstraint:
         if constraint_type == "TRACK_TO":
             # Target Z: the target's Z axis, not world Z, is the up direction.
             defaults["use_target_z"] = False
+        if constraint_type == "IK":
+            # Use Tail: the bone's tail, not its head, reaches for the target,
+            # so the bone itself is in the chain.
+            defaults["use_tail"] = True
         optional |= set(defaults)
         if not required <= set(settings) <= required | optional:
             raise TypeError(
@@ -620,6 +625,18 @@ class FakeObjectModifier:
     def values(self) -> List[Any]:
         """The custom properties' values, in order."""
         return list(self._inputs.values())
+
+
+class FakePoseBones(list):
+    """``Pose.bones`` stand-in: the pose bones in order, and ``get`` by name as on a bpy collection.
+
+    Each pose bone is a namespace with ``name``, ``constraints`` and
+    ``parent`` (the parent pose bone, or None).
+    """
+
+    def get(self, name: str, default: Any = None) -> Any:
+        """The pose bone called ``name``, or ``default``."""
+        return next((bone for bone in self if bone.name == name), default)
 
 
 class FakeLiveMatrix(FakeMatrix):
@@ -702,6 +719,8 @@ class FakeTransformObject:
         self.animation_data: Optional["FakeAnimData"] = None
         self.parent = parent
         self.parent_type = "OBJECT"
+        # The bone a BONE parent type names.
+        self.parent_bone = ""
         # What Blender's Parent (Keep Transform) sets.
         self.matrix_parent_inverse = (
             parent.matrix_world.inverted()

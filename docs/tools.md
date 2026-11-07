@@ -409,7 +409,34 @@ Behaviour worth knowing:
   needs is composed. A constraint on a bone, and a modifier,
   count while their armature or object is enabled: through a disabled one,
   Blender 5.0.1 evaluated the camera or left it stale depending on the order
-  of the view layer's objects alone. One that only a driver, or a constraint
+  of the view layer's objects alone. A child parented to the bone whose
+  constraint targets the camera (parent type BONE), or to a bone below it,
+  counts whatever its armature: Blender relates the child to its bone and
+  each bone to the one above it, and 5.0.1 evaluated the camera for such a
+  child in all 24 orders of the child, an object reading it, the armature
+  and the camera, but for a child of the armature itself, of a bone above
+  the constrained one or of another bone only in the 12 where the child came
+  before its reader. An IK constraint counts only on a bone that has a parent
+  or uses its tail, and a Spline IK only on a bone: Blender relates their
+  targets to an armature's IK solver, so to nothing on an object or for an
+  IK without a chain, and 5.0.1 left the camera stale for those. A particle
+  system's boid rule that avoids or follows the camera (Avoid, Follow
+  Leader), and a texture its settings map through the camera (OBJECT
+  coordinates), count while the depsgraph holds the
+  object they name for something else, the particle system's modifier
+  enabled in viewports or not: Blender builds that object for neither, so
+  without another reference it relates them to nothing, and 5.0.1 left the
+  camera stale then. Its instance
+  object and instance collection are not followed: Blender relates them
+  only while `render_type` shows them and rebuilds no relations when
+  `render_type` changes, so on 5.0.1 a camera named while `render_type` was
+  HALO, switched to OBJECT by a script afterwards, stayed 11 m from a render
+  while a muted Hook held it. Nor are keyed targets, which Blender 5.0.1
+  evaluated only when the mesh came before an object reading it in the view
+  layer, or the camera's force field: Blender 5.0.1 took a camera disabled
+  in viewports for no effector, except one only excluded from the view
+  layer that an effector collection named, and evaluated that one only
+  while something else held it. One that only a driver, or a constraint
   that is muted or has no influence, depends on is composed: Blender 5.0.1
   evaluated it for those too, but such a constraint needs nothing of its
   target, and a driver that reads only a custom property of the camera left

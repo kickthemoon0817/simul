@@ -26,6 +26,7 @@ from tests.fakes import (
     FakeNlaStrip,
     FakeNlaTrack,
     FakeObjectModifier,
+    FakePoseBones,
     FakePropArray,
     FakeTransformObject,
     FakeVector,
@@ -4635,10 +4636,11 @@ class TestVisualObservationTools:
         So did a disabled armature whose bone's Copy Location targeted the
         camera, although a visible object's Copy Location targeted the
         armature: that needs the armature's transform, not its pose. With a
-        visible child of the armature instead, Blender 5.0.1 evaluated the
-        camera when the child came first in the view layer, and left it stale
-        when an object reading the child came first, which built the armature
-        without its pose; Python cannot tell those apart.
+        visible child of the armature itself instead (parent type OBJECT),
+        Blender 5.0.1 evaluated the camera when the child came first in the
+        view layer, and left it stale when an object reading the child came
+        first, which built the armature without its pose; Python cannot tell
+        those apart.
 
         A muted constraint needs nothing of its target. Blender 5.0.1 evaluated
         the camera for one all the same, on an object or a bone, but nothing
@@ -4672,6 +4674,382 @@ class TestVisualObservationTools:
         assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
         assert result["pose_source"] == "transform"
         assert "'Track To' (TRACK_TO)" in result["warning"]
+
+    def _side_camera_under_a_bone_child(
+        self,
+        parent_bone: str,
+        constrained: str = "Bone",
+        through_child: bool = False,
+        kid: str = "enabled",
+        mute: bool = False,
+    ) -> Tuple[FakeTransformObject, FakeViewLayer, List[FakeTransformObject]]:
+        """
+        Camera "Side" (_side_camera, with a Track To), a disabled armature "Rig2" whose
+        bone follows it, and an object "Kid" parented to one of Rig2's bones.
+
+        Rig2's bones are Root > Bone > Below, and Other under Root.
+
+        Args:
+            parent_bone: The bone Kid is parented to (parent type BONE), or a
+                name the pose lacks, as Blender keeps one ("Missing").
+            constrained: The bone whose Copy Location targets Side.
+            through_child: Have it target a disabled child "Child" of Side.
+            kid: "enabled", "disabled", or "grandchild" (Kid disabled, with
+                an enabled child "GrandKid").
+            mute: Mute the Copy Location.
+
+        Returns:
+            Side, the view layer and every object to put in the scene.
+        """
+        side, view_layer = self._side_camera("object", _track_to((5.0, 5.0, 0.0)))
+        root = view_layer.layer_collection.collection
+        objects = [side]
+        followed = side
+        if through_child:
+            followed = FakeTransformObject("Child")
+            followed.parent = side
+            followed.hide_viewport = True
+            objects.append(followed)
+        rig = FakeTransformObject(
+            "Rig2",
+            "ARMATURE",
+            SimpleNamespace(bones=["Root", "Bone", "Below", "Other"]),
+        )
+        rig.hide_viewport = True
+        bones: Dict[str, SimpleNamespace] = {}
+        for name, above in (
+            ("Root", None),
+            ("Bone", "Root"),
+            ("Below", "Bone"),
+            ("Other", "Root"),
+        ):
+            bones[name] = SimpleNamespace(
+                name=name, constraints=[], parent=bones.get(above or "")
+            )
+        bones[constrained].constraints.append(self._following(followed, mute=mute))
+        rig.pose = SimpleNamespace(bones=FakePoseBones(bones.values()))
+        child = FakeTransformObject("Kid", parent=rig)
+        child.parent_type = "BONE"
+        child.parent_bone = parent_bone
+        child.hide_viewport = kid != "enabled"
+        objects += [rig, child]
+        if kid == "grandchild":
+            objects.append(FakeTransformObject("GrandKid", parent=child))
+        for obj in objects[1:]:
+            root.link(obj)
+        return side, view_layer, objects
+
+    @pytest.mark.parametrize(
+        ("parent_bone", "constrained", "through_child", "kid"),
+        [
+            ("Bone", "Bone", False, "enabled"),
+            ("Below", "Bone", False, "enabled"),
+            ("Below", "Root", False, "enabled"),
+            ("Bone", "Bone", True, "enabled"),
+            ("Below", "Bone", False, "grandchild"),
+        ],
+        ids=[
+            "constrained_bone",
+            "bone_below",
+            "two_bones_below",
+            "through_child",
+            "grandchild",
+        ],
+    )
+    def test_get_camera_info_keeps_the_evaluated_pose_of_a_camera_a_bone_child_needs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        parent_bone: str,
+        constrained: str,
+        through_child: bool,
+        kid: str,
+    ) -> None:
+        """A child of a bone needs the targets of the constraints of that bone and of
+        the bones above it, whether its armature is enabled or not: Blender relates
+        the child to its bone, and each bone to its parent bone.
+
+        On Blender 5.0.1 a disabled camera that a bone of a disabled armature
+        followed with a Copy Location kept the matrix_world a render gave it,
+        its Track To included, in each of 24 orders of the view layer's
+        objects, for a visible object parented to that bone or to a bone one
+        or two below it, also with the Copy Location targeting a disabled
+        child of the camera, and for a disabled object so parented with a
+        visible child. The reply composed its pose and left the Track To out
+        (0.355 rad).
+        """
+        side, view_layer, objects = self._side_camera_under_a_bone_child(
+            parent_bone, constrained, through_child, kid
+        )
+        # Blender holds the camera without evaluating it until it is tagged.
+        session = self._session_in(monkeypatch, view_layer, *objects, lagging=[side])
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "evaluated"
+        assert result["warning"] is None
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert self._looks_at(result, (5.0, 5.0, 0.0))
+        assert side.update_tags == [{"OBJECT"}]
+
+    @pytest.mark.parametrize(
+        ("parent_bone", "kid", "mute"),
+        [
+            ("Root", "enabled", False),
+            ("Other", "enabled", False),
+            ("Missing", "enabled", False),
+            ("Bone", "disabled", False),
+            ("Bone", "enabled", True),
+        ],
+        ids=["bone_above", "other_bone", "missing_bone", "disabled_child", "muted"],
+    )
+    def test_get_camera_info_composes_a_camera_no_bone_child_needs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        parent_bone: str,
+        kid: str,
+        mute: bool,
+    ) -> None:
+        """A child of a bone above the constrained one, of another bone, or of one the
+        pose lacks, needs nothing of that bone's pose.
+
+        Blender 5.0.1 evaluated the camera for such a child as for a child of
+        the armature itself: in the 12 of 24 orders where the child came
+        before an object reading it, and kept a matrix_world 11 m from a
+        render in the 12 others. A disabled child that nothing visible needs
+        left it stale. A muted constraint needs nothing of its target
+        (Blender 5.0.1 evaluated the camera for it all the same).
+        """
+        side, view_layer, objects = self._side_camera_under_a_bone_child(
+            parent_bone, kid=kid, mute=mute
+        )
+        # Blender holds the camera that the bone follows without evaluating
+        # it, so only the child's bone and state decide; it leaves out a
+        # disabled child that nothing needs.
+        session = self._session_in(
+            monkeypatch,
+            view_layer,
+            *objects,
+            left_out=objects[-1:] if kid == "disabled" else [],
+            lagging=[side],
+        )
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "transform"
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
+        assert "'Track To' (TRACK_TO)" in result["warning"]
+        assert side.update_tags == []
+
+    def test_get_camera_info_reads_each_bone_chain_once(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """The constraints of the bones above a child's bone are read once for all its
+        children, not once per child: a rig with hundreds of props on its bones
+        would otherwise read its chains hundreds of times per call."""
+        side, view_layer, objects = self._side_camera_under_a_bone_child("Below")
+        rig = objects[1]
+        reads: Dict[str, int] = {}
+
+        class CountedBone:
+            """A pose bone counting the reads of its constraints."""
+
+            def __init__(self, bone: SimpleNamespace, parent: Any) -> None:
+                self.name = bone.name
+                self.parent = parent
+                self._constraints = bone.constraints
+
+            @property
+            def constraints(self) -> List[FakeConstraint]:
+                reads[self.name] = reads.get(self.name, 0) + 1
+                return self._constraints
+
+        counted: Dict[str, CountedBone] = {}
+        for bone in rig.pose.bones:
+            above = None if bone.parent is None else counted[bone.parent.name]
+            counted[bone.name] = CountedBone(bone, above)
+        rig.pose = SimpleNamespace(bones=FakePoseBones(counted.values()))
+        props = [FakeTransformObject(f"Prop{i}", parent=rig) for i in range(50)]
+        for prop in props:
+            prop.parent_type = "BONE"
+            prop.parent_bone = "Below"
+            view_layer.layer_collection.collection.link(prop)
+        session = self._session_in(
+            monkeypatch, view_layer, *objects, *props, lagging=[side]
+        )
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "evaluated"
+        # Once for the armature's own pose, once for the chain of its children.
+        assert reads == {"Root": 2, "Bone": 2, "Below": 2, "Other": 1}
+
+    def _side_camera_an_ik_targets(
+        self,
+        kind: str,
+        constrained: Optional[str],
+        kid_bone: Optional[str],
+        use_tail: bool,
+    ) -> Tuple[FakeTransformObject, FakeViewLayer, List[FakeTransformObject]]:
+        """
+        Camera "Side" (_side_camera, with a Track To) and an IK or a Spline IK that targets it.
+
+        Args:
+            kind: "IK", or "SPLINE_IK", which targets a disabled curve "Path"
+                parented to Side instead, as a Spline IK needs a curve.
+            constrained: The bone of armature "Rig2" the constraint is on:
+                "Root" (without a parent) or "Bone" (under Root); None for an
+                enabled empty "Owner" instead.
+            kid_bone: The bone of a disabled Rig2 that an enabled empty "Kid"
+                is parented to (parent type BONE); None for Rig2 enabled,
+                without Kid.
+            use_tail: The IK's.
+
+        Returns:
+            Side, the view layer and every object to put in the scene.
+        """
+        side, view_layer = self._side_camera("object", _track_to((5.0, 5.0, 0.0)))
+        objects = [side]
+        target = side
+        if kind == "SPLINE_IK":
+            target = FakeTransformObject("Path", "CURVE", parent=side)
+            target.hide_viewport = True
+            objects.append(target)
+        settings = {"use_tail": use_tail} if kind == "IK" else {}
+        # The fake evaluates no pose, so the solve is never called on a bone.
+        ik = FakeConstraint(
+            "IK", kind, lambda matrix: matrix, target=target, **settings
+        )
+        if constrained is None:
+            objects.append(FakeTransformObject("Owner", constraints=[ik]))
+        else:
+            rig = FakeTransformObject(
+                "Rig2", "ARMATURE", SimpleNamespace(bones=["Root", "Bone"])
+            )
+            top = SimpleNamespace(name="Root", constraints=[], parent=None)
+            below = SimpleNamespace(name="Bone", constraints=[], parent=top)
+            {"Root": top, "Bone": below}[constrained].constraints.append(ik)
+            rig.pose = SimpleNamespace(bones=FakePoseBones([top, below]))
+            objects.append(rig)
+            if kid_bone is not None:
+                rig.hide_viewport = True
+                kid = FakeTransformObject("Kid", parent=rig)
+                kid.parent_type = "BONE"
+                kid.parent_bone = kid_bone
+                objects.append(kid)
+        for obj in objects[1:]:
+            view_layer.layer_collection.collection.link(obj)
+        return side, view_layer, objects
+
+    @pytest.mark.parametrize(
+        ("kind", "constrained", "kid_bone", "use_tail"),
+        [
+            ("IK", None, None, True),
+            ("SPLINE_IK", None, None, True),
+            ("IK", "Root", None, False),
+            ("IK", "Root", "Root", False),
+            ("IK", "Root", "Bone", False),
+        ],
+        ids=[
+            "object_ik",
+            "object_spline_ik",
+            "armature_ik_without_chain",
+            "bone_child_ik_without_chain",
+            "child_below_ik_without_chain",
+        ],
+    )
+    def test_get_camera_info_composes_a_camera_an_ik_without_a_solver_targets(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        kind: str,
+        constrained: Optional[str],
+        kid_bone: Optional[str],
+        use_tail: bool,
+    ) -> None:
+        """Blender relates an IK's or a Spline IK's targets to a pose's IK solver only,
+        so to nothing on an object, or for an IK without a chain.
+
+        On Blender 5.0.1 a disabled camera kept a matrix_world 11 m from a
+        render, held by the depsgraph, when it was the target of a visible
+        empty's IK, of a visible empty's Spline IK (through a disabled curve
+        parented to it), or of an IK with use_tail off on a bone without a
+        parent: of a visible armature, or of a disabled one with a visible
+        empty parented to that bone or to the bone below it. The reply called
+        that matrix evaluated, 11 m and 0.157 rad off.
+        """
+        side, view_layer, objects = self._side_camera_an_ik_targets(
+            kind, constrained, kid_bone, use_tail
+        )
+        # Blender holds the camera that the constraint targets without
+        # evaluating it.
+        session = self._session_in(monkeypatch, view_layer, *objects, lagging=[side])
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "transform"
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
+        assert "'Track To' (TRACK_TO)" in result["warning"]
+        assert side.update_tags == []
+
+    @pytest.mark.parametrize(
+        ("kind", "constrained", "kid_bone", "use_tail"),
+        [
+            ("IK", "Root", None, True),
+            ("IK", "Bone", None, False),
+            ("IK", "Root", "Root", True),
+            ("IK", "Bone", "Bone", False),
+            ("SPLINE_IK", "Root", None, True),
+            ("SPLINE_IK", "Root", "Root", True),
+        ],
+        ids=[
+            "armature_ik_with_tail",
+            "armature_ik_under_a_parent",
+            "bone_child_ik_with_tail",
+            "bone_child_ik_under_a_parent",
+            "armature_spline_ik",
+            "bone_child_spline_ik",
+        ],
+    )
+    def test_get_camera_info_keeps_the_evaluated_pose_of_a_camera_an_ik_chain_targets(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        kind: str,
+        constrained: Optional[str],
+        kid_bone: Optional[str],
+        use_tail: bool,
+    ) -> None:
+        """An IK with a chain to solve, and a bone's Spline IK, need their targets.
+
+        On Blender 5.0.1 a disabled camera kept the matrix_world a render gave
+        it, its Track To included, when it was the target of an IK on a bone
+        without a parent whose use_tail was on, or with use_tail off on a bone
+        with a parent, or of a Spline IK on a bone without a parent (through a
+        disabled curve parented to it): of a visible armature, or of a
+        disabled one with a visible empty parented to that bone.
+        """
+        side, view_layer, objects = self._side_camera_an_ik_targets(
+            kind, constrained, kid_bone, use_tail
+        )
+        # Blender holds the camera without evaluating it until it is tagged.
+        session = self._session_in(monkeypatch, view_layer, *objects, lagging=[side])
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "evaluated"
+        assert result["warning"] is None
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert self._looks_at(result, (5.0, 5.0, 0.0))
+        assert side.update_tags == [{"OBJECT"}]
 
     @staticmethod
     def _modifier_naming(
@@ -5006,6 +5384,189 @@ class TestVisualObservationTools:
             objects.append(other)
             held = [side]
         session = self._session_in(monkeypatch, view_layer, *objects, held=held)
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "transform"
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
+        assert "'Track To' (TRACK_TO)" in result["warning"]
+        assert side.update_tags == []
+
+    def _side_camera_a_particle_system_names(
+        self,
+        setup: str,
+        through_child: bool = False,
+        owner_disabled: bool = False,
+        show_viewport: bool = True,
+    ) -> Tuple[FakeTransformObject, FakeViewLayer, List[FakeTransformObject]]:
+        """
+        Camera "Side", disabled (_side_camera), and a mesh whose particle system names it.
+
+        Args:
+            setup: Read its transform: "avoid" and "follow_leader" (a boid
+                rule, after a Separate rule, which has no object, in a second
+                boid state) and "texture" (a slot with a texture, in OBJECT
+                coordinates). Do not: "goal" (a Goal rule), "texture_none" (a
+                slot without a texture), "texture_uv" (UV coordinates), and,
+                not followed, "instance_object" (render_type OBJECT) and
+                "keyed_target" (a keyed target).
+            through_child: Name a disabled empty "Child" of Side instead of Side.
+            owner_disabled: Disable the mesh too.
+            show_viewport: The particle system modifier's.
+
+        Returns:
+            Side, with a Track To, the view layer and every object to put in
+            the scene.
+        """
+        side, view_layer = self._side_camera("object", _track_to((5.0, 5.0, 0.0)))
+        root = view_layer.layer_collection.collection
+        objects = [side]
+        named = side
+        if through_child:
+            named = FakeTransformObject("Child")
+            named.parent = side
+            named.hide_viewport = True
+            root.link(named)
+            objects.append(named)
+        boids = None
+        if setup in ("avoid", "follow_leader", "goal"):
+            rules = [
+                SimpleNamespace(type="SEPARATE"),
+                SimpleNamespace(type=setup.upper(), object=named),
+            ]
+            boids = SimpleNamespace(
+                states=[SimpleNamespace(rules=[]), SimpleNamespace(rules=rules)]
+            )
+        slots: List[Any] = [None] * 18
+        if setup.startswith("texture"):
+            slots[1] = SimpleNamespace(
+                texture=None if setup == "texture_none" else SimpleNamespace(),
+                texture_coords="UV" if setup == "texture_uv" else "OBJECT",
+                object=named,
+            )
+        settings = SimpleNamespace(
+            boids=boids,
+            texture_slots=slots,
+            physics_type="KEYED" if setup == "keyed_target" else "NEWTON",
+            render_type="OBJECT" if setup == "instance_object" else "HALO",
+            instance_object=named if setup == "instance_object" else None,
+        )
+        system = SimpleNamespace(
+            settings=settings,
+            targets=[SimpleNamespace(object=named)] if setup == "keyed_target" else [],
+        )
+        owner = FakeTransformObject("Emitter", "MESH")
+        owner.modifiers.append(
+            FakeObjectModifier(
+                "PARTICLE_SYSTEM", show_viewport=show_viewport, particle_system=system
+            )
+        )
+        owner.hide_viewport = owner_disabled
+        root.link(owner)
+        objects.append(owner)
+        return side, view_layer, objects
+
+    @pytest.mark.parametrize(
+        ("setup", "through_child", "show_viewport"),
+        [
+            ("avoid", False, True),
+            ("follow_leader", False, True),
+            ("texture", False, True),
+            ("avoid", False, False),
+            ("texture", True, True),
+        ],
+        ids=["avoid", "follow_leader", "texture", "modifier_off", "texture_child"],
+    )
+    def test_get_camera_info_keeps_the_evaluated_pose_of_a_held_camera_a_particle_system_reads(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        setup: str,
+        through_child: bool,
+        show_viewport: bool,
+    ) -> None:
+        """Blender relates a visible mesh's particle system to the transform of an
+        object it holds that a boid rule avoids or follows, or that the settings map
+        a texture through, so it evaluates that object in full.
+
+        On Blender 5.0.1 a disabled camera that a muted Hook of another mesh
+        held, named so (also through a held disabled child of it), its
+        particle system's modifier enabled in viewports or not, kept the
+        matrix_world a render gave it, its Track To included; the reply
+        composed its pose and left the Track To out (0.355 rad).
+        """
+        side, view_layer, objects = self._side_camera_a_particle_system_names(
+            setup, through_child, show_viewport=show_viewport
+        )
+        # Held, as by the muted Hook, and evaluated again only once tagged.
+        session = self._session_in(monkeypatch, view_layer, *objects, lagging=[side])
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "evaluated"
+        assert result["warning"] is None
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert self._looks_at(result, (5.0, 5.0, 0.0))
+        assert side.update_tags == [{"OBJECT"}]
+
+    @pytest.mark.parametrize(
+        ("setup", "through_child", "owner_disabled"),
+        [
+            ("goal", False, False),
+            ("texture_none", False, False),
+            ("texture_uv", False, False),
+            ("avoid", False, True),
+            ("avoid", True, False),
+            ("instance_object", False, False),
+            ("keyed_target", False, False),
+        ],
+        ids=[
+            "goal",
+            "texture_none",
+            "texture_uv",
+            "owner_disabled",
+            "unheld_child",
+            "instance_object",
+            "keyed_target",
+        ],
+    )
+    def test_get_camera_info_composes_a_camera_a_particle_system_names_without_reading_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        setup: str,
+        through_child: bool,
+        owner_disabled: bool,
+    ) -> None:
+        """A particle system reads only what Blender relates to it and holds.
+
+        On Blender 5.0.1 a disabled camera that a muted Hook held kept a
+        matrix_world 11 m from a render for a Goal rule, a texture slot
+        without a texture or in UV coordinates, a disabled mesh, and an Avoid
+        rule naming a disabled child of the camera that nothing held: Blender
+        builds no object a particle system's settings name, so it related the
+        rule to nothing. The instance object and keyed targets are not
+        followed: Blender relates an instance object only while render_type
+        shows it, and a script switched render_type from HALO to OBJECT
+        without a relations update left the camera 11 m off, while a keyed
+        target got it evaluated only when the mesh came before an object
+        reading it in the view layer.
+        """
+        side, view_layer, objects = self._side_camera_a_particle_system_names(
+            setup, through_child, owner_disabled
+        )
+        # Blender holds the camera without evaluating it, and leaves out the
+        # child that nothing holds.
+        session = self._session_in(
+            monkeypatch,
+            view_layer,
+            *objects,
+            left_out=objects[1:2] if through_child else [],
+            lagging=[side],
+        )
         self._move(side)
 
         result = session.get_camera_info("Side")
