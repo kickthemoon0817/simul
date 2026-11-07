@@ -30,7 +30,7 @@ No running application needed. File arguments must be inside the sandbox
 | Group | Tools |
 |---|---|
 | Load and validate | `load_usd_file`, `validate_usd_file` |
-| Query | `get_prim_info`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
+| Query | `get_prim_info`, `get_prim_subtree`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
 | Edit | `create_prim`, `delete_prim`, `update_prim_attributes` |
 
 - **Bounds.** `get_bounding_box`, and the bounds in `get_prim_info` and
@@ -53,6 +53,24 @@ No running application needed. File arguments must be inside the sandbox
   elements (default 16, up to 10000), so a million-point mesh costs a few
   KB; `attribute_filter` takes glob patterns, `time_code` reads animated
   values.
+- **Traversal and counts.** Every listing walks the composed stage with one
+  rule: active, defined, loaded, non-abstract prims, plus the instance
+  proxies inside instanceable prims. So `load_usd_file`'s `total_prims`,
+  `summarize_scene`'s `total_prims` and a match-everything `search_prims`
+  agree, and an instance's children are counted.
+- **Search.** `search_prims` matches `by_name`, `by_path`, `by_type` or
+  `by_api_schema`; `match` is `auto`, `exact`, `substring`, `glob` or `regex`,
+  and names compare case-insensitively unless `case_sensitive`. With `auto`,
+  a registered type matches its schema family (`PhysicsJoint` finds every
+  joint, `Gprim` every geometric primitive), and an API schema matches its
+  multiple-apply instances (`PhysicsDriveAPI` finds `PhysicsDriveAPI:angular`).
+  `root_path` limits the search and `include_instance_proxies: false` skips
+  instances. Results are pages: `offset`/`limit` (default 200, up to 5000),
+  with `total_matches`, `truncated` and `next_offset`.
+- **Subtrees.** `get_prim_subtree` lists a prim and its descendants
+  depth-first (path, type, depth, child count, API schemas), paged with
+  `max_results`/`offset`. `include_properties` adds each prim's authored
+  attributes and relationship targets, so a whole robot reads in one call.
 - **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
   lists of rows, asset paths their authored string.
 - **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
