@@ -30,7 +30,7 @@ No running application needed. File arguments must be inside the sandbox
 | Group | Tools |
 |---|---|
 | Load and validate | `load_usd_file`, `validate_usd_file` |
-| Query | `get_prim_info`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
+| Query | `get_prim_info`, `get_prim_subtree`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
 | Edit | `create_prim`, `delete_prim`, `update_prim_attributes` |
 | Stages | `list_usd_stages`, `save_usd_stage`, `export_usd_stage`, `reload_usd_stage`, `unload_usd_stage` |
 
@@ -54,6 +54,24 @@ No running application needed. File arguments must be inside the sandbox
   elements (default 16, up to 10000), so a million-point mesh costs a few
   KB; `attribute_filter` takes glob patterns, `time_code` reads animated
   values.
+- **Traversal and counts.** Every listing walks the composed stage with one
+  rule: active, defined, loaded, non-abstract prims, plus the instance
+  proxies inside instanceable prims. So `load_usd_file`'s `total_prims`,
+  `summarize_scene`'s `total_prims` and a match-everything `search_prims`
+  agree, and an instance's children are counted.
+- **Search.** `search_prims` matches `by_name`, `by_path`, `by_type` or
+  `by_api_schema`; `match` is `auto`, `exact`, `substring`, `glob` or `regex`,
+  and names compare case-insensitively unless `case_sensitive`. With `auto`,
+  a registered type matches its schema family (`PhysicsJoint` finds every
+  joint, `Gprim` every geometric primitive), and an API schema matches its
+  multiple-apply instances (`PhysicsDriveAPI` finds `PhysicsDriveAPI:angular`).
+  `root_path` limits the search and `include_instance_proxies: false` skips
+  instances. Results are pages: `offset`/`limit` (default 200, up to 5000),
+  with `total_matches`, `truncated` and `next_offset`.
+- **Subtrees.** `get_prim_subtree` lists a prim and its descendants
+  depth-first (path, type, depth, child count, API schemas), paged with
+  `max_results`/`offset`. `include_properties` adds each prim's authored
+  attributes and relationship targets, so a whole robot reads in one call.
 - **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
   lists of rows, asset paths their authored string.
 - **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
@@ -196,10 +214,35 @@ Registered by default only on Linux and Windows, where Isaac Sim runs
 
 Notes:
 
-- `get_isaac_prim_detail` reads one aspect of a prim per call: `info`,
-  `transform`, `ancestors`, `relationships`, `variants`, `bounding_box`,
-  `mesh`, `light`, `material`, `rigid_body`, `collision`, `joint`, `mass`,
-  `animation`.
+- `get_isaac_prim_detail` reads one or more aspects of a prim per call:
+  `info`, `transform`, `ancestors`, `relationships`, `variants`,
+  `bounding_box`, `mesh`, `light`, `material`, `rigid_body`, `collision`,
+  `joint`, `mass`, `animation`.
+- Poses (the `transform` aspect, `info`'s transform, `get_isaac_camera_info`
+  and the reply of `set_isaac_prim_transform`) are factored out of the
+  composed matrix, so rotation and scale stay right under scaled parents and
+  for matrix ops. Each carries `space` plus `local` and `world` blocks with
+  `translation`, `rotation_quat` (`[w, x, y, z]`), `rotation_euler_xyz`
+  (degrees, the order `set_isaac_prim_transform` takes) and `scale`;
+  `sheared: true` marks a rotated prim under a non-uniform scale, where no
+  rotation and per-axis scale reproduce the matrix exactly.
+- `set_isaac_prim_transform` takes local values (relative to the parent). A
+  prim whose stack holds a matrix op (`xformOp:transform`) is converted to
+  the equivalent translate/orient/scale stack first; a sheared matrix is
+  refused. An op with time samples is refused unless `time_code` names the
+  sample to write, and an animated rotate op the XYZ rotation would replace
+  is refused outright.
+- `set_isaac_prim_attribute` converts the JSON value to the attribute's type:
+  quaternions (`xformOp:orient`, `physics:localRot0`) as `[w, x, y, z]`,
+  matrices as rows or a flat row-major list, arrays as lists.
+- `query_isaac_typed_prims` resolves `type_name` through the schema registry
+  (`UsdPhysics.RevoluteJoint`, `PhysicsRevoluteJoint`,
+  `UsdPhysics.RigidBodyAPI`, any `pxr` module) and refuses a name that
+  resolves to nothing. Values come back as JSON; arrays longer than
+  `max_array_elements` (default 16) come back as a length summary, and
+  non-finite floats as `null`.
+- The `mass` and `rigid_body` aspects report an unset centre of mass (the
+  schema's `-inf` fallback) as `null` with `center_of_mass_note`.
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,
@@ -254,6 +297,48 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 
 Behaviour worth knowing:
 
+- A failed call names its cause with one `error_type` from the set the
+  backends share:
+  - `ConnectionError`: nothing answered at the Remote Control endpoint, or
+    the editor closed the connection without answering (it may have crashed).
+  - `TimeoutError`: no answer within `UNREAL__TIMEOUT`. A script or a change
+    may still be running in the editor, and Remote Control cannot cancel it,
+    so check the editor's state before retrying.
+  - `EngineError`: Remote Control answered with HTTP 5xx.
+  - `ValidationError`: Remote Control refused the request as made (HTTP 400),
+    for example a read-only, `EditConst` or protected property, or a value of
+    the wrong type.
+  - `NotFoundError`: the object, property, function or console variable
+    named does not exist, whether Remote Control (HTTP 404, or a 400 saying
+    so) or a tool's editor script reports it.
+  - `InstanceBusy`: the editor was saving or collecting garbage.
+  - `AuthenticationError`: Remote Control refused this client (HTTP 401).
+
+  `error` carries Remote Control's own message, and `details` carries the
+  `status`, the `route` and `remote_control_message`. The domain types
+  (`PIEActive`, `TransformNotApplied` and the like) are unchanged.
+- `batch_unreal_operations` (registered with script execution allowed) sends
+  each operation as `RequestId`, `URL`, `Verb`, `Body`, in that order, with a
+  unique `RequestId`. Operations without one are numbered. Remote Control
+  hands each `Body` to the last `RequestId` before it, so an operation
+  without one, a repeated one or one written after its `Body` would run with
+  another operation's body. A malformed batch is refused with
+  `ValidationError` before anything is sent: at most 100 operations, `/remote/`
+  routes only and no batch inside a batch, with `Verb` one of GET, PUT, POST,
+  PATCH or DELETE. Every batch carries a `Passphrase` header, a placeholder
+  when `UNREAL__PASSPHRASE` is unset. UE 5.7's batch route reads that header
+  unchecked and aborts the editor without it; Remote Control ignores the value
+  unless it enforces passphrases. A failed operation's result also has
+  `error` and `error_type`.
+- `set_unreal_render_settings` sets one existing numeric `r.*` or `sg.*`
+  console variable and reads it back: `applied` is true only when it holds the
+  value afterwards, with `value` and `previous_value` as Unreal formats them
+  (`true`/`false` for a bool). A name Unreal has no variable for fails with
+  `NotFoundError`, and nothing is run. A value Unreal did not take fails with
+  `RenderSettingNotApplied`. That covers a read-only variable, such as
+  `r.RayTracing`, which only startup configuration sets, and one Unreal limits
+  or rounds. Post-process settings live on PostProcessVolume actors, not in
+  console variables, and this tool does not change them.
 - Actor inspection, physics, materials and PIE start/stop/pause/resume use
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the

@@ -25,12 +25,16 @@ from ..schemas.usd import (
     PrimDeleteRequest,
     PrimInfo,
     PrimInfoRequest,
+    MatchMode,
     PrimSearchRequest,
     PrimSearchResponse,
+    PrimSubtreeRequest,
+    PrimSubtreeResponse,
     PrimUpdateRequest,
     Purpose,
     SceneSummaryRequest,
     SceneSummaryResponse,
+    SearchType,
     StageDiscardRequest,
     StageExportRequest,
     StageExportResponse,
@@ -40,6 +44,7 @@ from ..schemas.usd import (
     StageSaveRequest,
     StageSaveResponse,
     StageUnloadResponse,
+    SummaryFormat,
     USDFileInfo,
     USDFileRequest,
     USDValidateRequest,
@@ -621,7 +626,20 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="search_prims",
-        description="Search for prims in a USD stage.",
+        description=(
+            "Search a USD stage for prims, one page at a time. search_type picks "
+            "what the query is matched against: by_name (prim name), by_path "
+            "(full path), by_type (prim type: with match auto a registered schema "
+            "matches its whole family, so PhysicsJoint finds every joint and "
+            "Gprim every geometric primitive) or by_api_schema (applied API "
+            "schemas: PhysicsRigidBodyAPI; PhysicsDriveAPI also finds "
+            "PhysicsDriveAPI:angular). match is auto, exact, substring, glob or "
+            "regex; names compare case-insensitively unless case_sensitive. "
+            "Instances are searched (include_instance_proxies), root_path limits "
+            "the search to a subtree, and offset/limit page the matches: "
+            "total_matches counts them all and next_offset starts the next page. "
+            "An empty by_name query lists every prim."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
@@ -629,16 +647,37 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     )
     @with_param_descriptions()
     async def search_prims(
-        stage_id: str, search_type: str, query: str, exact_match: bool = False
+        stage_id: str,
+        search_type: SearchType,
+        query: str,
+        exact_match: bool = False,
+        match: MatchMode = "auto",
+        case_sensitive: bool = False,
+        root_path: Optional[str] = None,
+        include_instance_proxies: bool = True,
+        offset: int = 0,
+        limit: int = 200,
     ) -> ToolResult:
         """
         Search for prims in a USD stage.
 
         Args:
             stage_id: Stage identifier
-            search_type: Search type (by_type, by_name)
-            query: Search query
-            exact_match: Use exact matching for name search
+            search_type: by_name, by_path, by_type or by_api_schema
+            query: Name, path, type or API schema to find; may be empty for
+                by_name and by_path (matches every prim)
+            exact_match: Same as match="exact"; kept for older callers
+            match: auto (substring for names and paths, the schema family for
+                types, the schema and its instances for API schemas), exact,
+                substring, glob (* and ?) or regex
+            case_sensitive: Compare case-sensitively (default: ignore case)
+            root_path: Absolute prim path to search under (the prim itself
+                included); None searches the whole stage
+            include_instance_proxies: Search the prims inside instanceable
+                prims (default true)
+            offset: Matches to skip, in traversal order; pass the previous
+                page's next_offset to continue
+            limit: Matches per page, 1 to 5000
 
         Returns:
             Search results or error
@@ -651,26 +690,43 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 search_type=search_type,
                 query=query,
                 exact_match=exact_match,
+                match=match,
+                case_sensitive=case_sensitive,
+                root_path=root_path,
+                include_instance_proxies=include_instance_proxies,
+                offset=offset,
+                limit=limit,
             )
             if isinstance(input_data, dict):
                 return input_data
 
-            results: List[str] = []
-            if input_data.search_type == "by_type":
-                results = session.find_prims_by_type(input_data.stage_id, input_data.query)
-            elif input_data.search_type == "by_name":
-                results = session.find_prims_by_name(
-                    input_data.stage_id, input_data.query, input_data.exact_match
-                )
-            # The envelope's result budget trims ``results`` when a broad
-            # query matches every mesh in the file; ``count`` stays the true total.
+            from ...usd.lookup import lookup_prim
+            from ...usd.search import search_prims as run_search
+
+            stage = _loaded_stage(session, input_data.stage_id)
+            root = lookup_prim(stage, input_data.root_path) if input_data.root_path else None
+            mode = "exact" if input_data.exact_match and input_data.match == "auto" else input_data.match
+            page = run_search(
+                stage,
+                input_data.search_type,
+                input_data.query,
+                match=mode,
+                case_sensitive=input_data.case_sensitive,
+                root=root,
+                include_instance_proxies=input_data.include_instance_proxies,
+                offset=input_data.offset,
+                limit=input_data.limit,
+            )
             return PrimSearchResponse(
                 success=True,
                 stage_id=input_data.stage_id,
                 search_type=input_data.search_type,
                 query=input_data.query,
-                results=results,
-                count=len(results),
+                match=mode,
+                case_sensitive=input_data.case_sensitive,
+                root_path=input_data.root_path,
+                include_instance_proxies=input_data.include_instance_proxies,
+                **page,
             ).model_dump()
 
         return await server._exec_backend(
@@ -679,7 +735,112 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "USD",
             PrimSearchResponse,
             _search,
-            params={"stage_id": stage_id, "search_type": search_type, "query": query},
+            params={
+                "stage_id": stage_id,
+                "search_type": search_type,
+                "query": query,
+                "match": match,
+                "root_path": root_path,
+                "offset": offset,
+            },
+        )
+
+    @server.mcp.tool(
+        name="get_prim_subtree",
+        description=(
+            "List a prim and its descendants (a robot, an imported asset) in one "
+            "call: a flat, depth-first page with path, type, depth, child count "
+            "and applied API schemas per prim, instances included. With "
+            "include_properties each prim also carries its authored attributes "
+            "({type, value, authored}) and relationship targets (joint bodies, "
+            "material bindings), so a whole articulation is read without one "
+            "get_prim_info call per link. Paged with max_results/offset; total "
+            "counts the subtree and next_offset starts the next page."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=False
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def get_prim_subtree(
+        stage_id: str,
+        root_path: str = "/",
+        max_depth: int = 5,
+        max_results: int = 150,
+        offset: int = 0,
+        include_instance_proxies: bool = True,
+        include_properties: bool = False,
+        attribute_filter: Optional[List[str]] = None,
+        array_preview: int = 4,
+    ) -> ToolResult:
+        """
+        List the prims under one prim.
+
+        Args:
+            stage_id: Stage identifier
+            root_path: Absolute path of the subtree root (listed at depth 0);
+                "/" lists the whole stage
+            max_depth: Deepest level below root_path to list, 0 to 64
+            max_results: Prims per page, 1 to 1000
+            offset: Prims to skip, in traversal order; pass the previous
+                page's next_offset to continue
+            include_instance_proxies: Descend into instanceable prims
+                (default true)
+            include_properties: Add each prim's authored attributes and
+                authored relationship targets
+            attribute_filter: Glob patterns (physics:*) limiting the
+                properties include_properties adds
+            array_preview: Leading elements of array attributes to include,
+                0 to 10000
+
+        Returns:
+            One page of the subtree or error
+        """
+
+        def _subtree(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(
+                PrimSubtreeRequest,
+                stage_id=stage_id,
+                root_path=root_path,
+                max_depth=max_depth,
+                max_results=max_results,
+                offset=offset,
+                include_instance_proxies=include_instance_proxies,
+                include_properties=include_properties,
+                attribute_filter=attribute_filter,
+                array_preview=array_preview,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+
+            from ...usd.lookup import lookup_prim
+            from ...usd.search import list_subtree
+
+            stage = _loaded_stage(session, input_data.stage_id)
+            root = lookup_prim(stage, input_data.root_path)
+            page = list_subtree(
+                stage,
+                root,
+                max_depth=input_data.max_depth,
+                include_instance_proxies=input_data.include_instance_proxies,
+                include_properties=input_data.include_properties,
+                attribute_filter=input_data.attribute_filter,
+                array_preview=input_data.array_preview,
+                offset=input_data.offset,
+                limit=input_data.max_results,
+            )
+            return PrimSubtreeResponse(
+                success=True, stage_id=input_data.stage_id, **page
+            ).model_dump()
+
+        return await server._exec_backend(
+            "get_prim_subtree",
+            server.headless_adapter,
+            "USD",
+            PrimSubtreeResponse,
+            _subtree,
+            params={"stage_id": stage_id, "root_path": root_path, "offset": offset},
         )
 
     @server.mcp.tool(
@@ -799,7 +960,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     )
     @with_param_descriptions()
     async def summarize_scene(
-        stage_id: str, include_meshes: bool = True, format: str = "json"
+        stage_id: str, include_meshes: bool = True, format: SummaryFormat = "json"
     ) -> ToolResult:
         """
         Generate a summary of a USD scene.

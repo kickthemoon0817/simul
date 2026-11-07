@@ -198,6 +198,7 @@ HEADLESS_USD_TOOLS: frozenset[str] = frozenset({
     "search_prims",
     "get_bounding_box",
     "summarize_scene",
+    "get_prim_subtree",
     "list_usd_stages",
     "save_usd_stage",
     "export_usd_stage",

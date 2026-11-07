@@ -6,6 +6,8 @@ from typing import Any, Dict, Optional
 from ...schemas.common import ErrorResponse
 from ._shared import (
     BULK_GEOMETRY_ATTRIBUTES,
+    XFORM_READ_CORE,
+    _compose_script,
     _pyval,
 )
 from .._meta import DeprecatedAlias, tool_meta
@@ -248,10 +250,14 @@ class SceneInspectionMixin:
 
         _prim_path = _pyval(prim_path)
         _bulk_attrs = _pyval(set(BULK_GEOMETRY_ATTRIBUTES))
-        script = textwrap.dedent(f"""\
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Gf, Sdf, Usd, UsdGeom
+            """,
+            XFORM_READ_CORE,
+            f"""\
 
             stage = omni.usd.get_context().get_stage()
             if stage is None:
@@ -316,29 +322,12 @@ class SceneInspectionMixin:
                         except Exception:
                             attrs[attr.GetName()] = "<unreadable>"
 
-                    # Transform
+                    # Transform: world pose, with the local one beside it.
                     xform_data = None
                     if prim.IsA(UsdGeom.Xformable):
-                        xformable = UsdGeom.Xformable(prim)
-                        local_xform = xformable.ComputeLocalToWorldTransform(
-                            Usd.TimeCode.Default()
+                        xform_data = _transform_report(
+                            UsdGeom.Xformable(prim), True, Usd.TimeCode.Default()
                         )
-                        t = local_xform.ExtractTranslation()
-                        r = local_xform.ExtractRotation()
-                        quat = r.GetQuat()
-                        s = Gf.Vec3d(1, 1, 1)
-                        try:
-                            xform_vecs = xformable.GetOrderedXformOps()
-                            for op in xform_vecs:
-                                if op.GetOpType() == UsdGeom.XformOp.TypeScale:
-                                    s = Gf.Vec3d(op.Get())
-                        except Exception:
-                            pass
-                        xform_data = {{
-                            "translation": list(t),
-                            "rotation_quat": [quat.GetReal()] + list(quat.GetImaginary()),
-                            "scale": list(s),
-                        }}
 
                     # Material bindings
                     mat_paths = []
@@ -358,8 +347,12 @@ class SceneInspectionMixin:
                         "is_active": prim.IsActive(),
                         "is_defined": prim.IsDefined(),
                         "is_instance": prim.IsInstance(),
-                        "purpose": UsdGeom.Imageable(prim).ComputePurpose() if prim.IsA(UsdGeom.Imageable) else None,
-                        "visibility": UsdGeom.Imageable(prim).ComputeVisibility() if prim.IsA(UsdGeom.Imageable) else None,
+                        "purpose": (
+                            UsdGeom.Imageable(prim).ComputePurpose() if prim.IsA(UsdGeom.Imageable) else None
+                        ),
+                        "visibility": (
+                            UsdGeom.Imageable(prim).ComputeVisibility() if prim.IsA(UsdGeom.Imageable) else None
+                        ),
                         "children_count": len(children),
                         "children_types": child_types,
                         "children": children[:50],
@@ -367,7 +360,8 @@ class SceneInspectionMixin:
                         "transform": xform_data,
                         "attributes": attrs,
                     }}))
-        """)
+            """,
+        )
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
@@ -379,12 +373,22 @@ class SceneInspectionMixin:
         """
         Get the transform of a prim in world or local space.
 
+        Rotation and scale are factored out of the composed matrix
+        (Gf.Transform), so they stay right under scaled parents and for
+        matrix ops.
+
         Args:
             prim_path: USD path of the prim.
-            world_space: If True, return world-space transform; otherwise local.
+            world_space: If True, the top-level values are world space;
+                otherwise local (relative to the parent).
 
         Returns:
-            Dict with translation, rotation (quaternion), and scale.
+            Dict with ``space`` and that space's ``translation``,
+            ``rotation_quat`` ([w, x, y, z]), ``rotation_euler_xyz``
+            (degrees, the order set_isaac_prim_transform takes) and
+            ``scale``; ``local`` and ``world`` hold both spaces, plus
+            ``xform_op_order``. ``sheared`` and ``note`` flag a transform no
+            rotation and per-axis scale reproduce exactly.
         """
         bridge_result = await self._execute_bridge_action(
             "get_prim_transform",
@@ -395,11 +399,14 @@ class SceneInspectionMixin:
 
         _prim_path = _pyval(prim_path)
         world_str = "True" if world_space else "False"
-        script = textwrap.dedent(f"""\
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom, Gf
-
+            """,
+            XFORM_READ_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -410,32 +417,13 @@ class SceneInspectionMixin:
                 elif not prim.IsA(UsdGeom.Xformable):
                     print(json.dumps({{"error": "Prim is not Xformable: " + {_prim_path}}}))
                 else:
-                    xformable = UsdGeom.Xformable(prim)
-                    world = {world_str}
-                    if world:
-                        xform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                    else:
-                        xform = xformable.GetLocalTransformation(Usd.TimeCode.Default())
-
-                    t = xform.ExtractTranslation()
-                    r = xform.ExtractRotation().GetQuat()
-                    # Extract scale from xform ops
-                    s = [1.0, 1.0, 1.0]
-                    for op in xformable.GetOrderedXformOps():
-                        if op.GetOpType() == UsdGeom.XformOp.TypeScale:
-                            sv = op.Get()
-                            if sv is not None:
-                                s = list(Gf.Vec3d(sv))
-                            break
-
-                    print(json.dumps({{
-                        "prim_path": {_prim_path},
-                        "space": "world" if world else "local",
-                        "translation": list(t),
-                        "rotation_quat": [r.GetReal()] + list(r.GetImaginary()),
-                        "scale": s,
-                    }}))
-        """)
+                    report = {{"prim_path": {_prim_path}}}
+                    report.update(_transform_report(
+                        UsdGeom.Xformable(prim), {world_str}, Usd.TimeCode.Default()
+                    ))
+                    print(json.dumps(report))
+            """,
+        )
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
@@ -614,4 +602,3 @@ class SceneInspectionMixin:
                 }))
         """)
         return await self._execute_json_script(script)
-
