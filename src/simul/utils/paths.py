@@ -26,7 +26,7 @@ import re
 import stat
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
@@ -299,31 +299,9 @@ class PathPolicy:
         """
         if not self._enabled:
             return path_str
-        if not path_str:
-            # An empty path names nothing, so it cannot be shown to be inside
-            # the sandbox.
-            raise SandboxDenied(path_str, self.denial_details(path_str, write=write))
-
-        scheme = self.url_scheme(path_str)
-        if scheme is not None and scheme != "file":
-            allowed = self._allowed_write_url_schemes if write else self._allowed_url_schemes
-            if scheme in allowed:
-                return path_str
-            raise SandboxDenied(path_str, self.denial_details(path_str, write=write))
-
-        try:
-            candidate = self.resolve(path_str)
-        except ValueError:
-            # A file:// URL naming a remote host is not a local path.
-            raise SandboxDenied(path_str, self.denial_details(path_str, write=write)) from None
-        untrusted: Optional[Tuple[Path, str]] = None
-        for allowed_root in self._allowed_roots:
-            if not self._is_relative_to(candidate, allowed_root):
-                continue
-            problem = self._root_problem(allowed_root, create=write)
-            if problem is None:
-                return str(candidate)
-            untrusted = untrusted or (allowed_root, problem)
+        authorized, untrusted = self._judge(path_str, write=write, root_problem=self._root_problem)
+        if authorized is not None:
+            return authorized
         details = self.denial_details(path_str, write=write)
         if untrusted is not None:
             root, problem = untrusted
@@ -335,6 +313,73 @@ class PathPolicy:
                 f"chmod 700) or configure a private directory in security.allowed_paths."
             )
         raise SandboxDenied(path_str, details)
+
+    def _judge(
+        self,
+        path_str: str,
+        *,
+        write: bool,
+        root_problem: Callable[..., Optional[str]],
+        resolve: Optional[Callable[[str], Path]] = None,
+    ) -> Tuple[Optional[str], Optional[Tuple[Path, str]]]:
+        """The verdict ``authorize`` reports, without building a denial.
+
+        Args:
+            path_str: Path or URL supplied by the caller.
+            write: Whether the caller intends to write to the location.
+            root_problem: Judges an allowed root's trust; ``_root_problem``,
+                or a ``ReadCheck``'s memo of it.
+            resolve: Turns a local path into the absolute, symlink-resolved
+                path the containment test sees; ``resolve`` when None.
+
+        Returns:
+            The value to pass onward and None when the location is allowed;
+            otherwise None and the untrusted root that held it, if one did.
+        """
+        if not path_str:
+            # An empty path names nothing, so it cannot be shown to be inside
+            # the sandbox.
+            return None, None
+        scheme = self.url_scheme(path_str)
+        if scheme is not None and scheme != "file":
+            allowed = self._allowed_write_url_schemes if write else self._allowed_url_schemes
+            return (path_str if scheme in allowed else None), None
+        try:
+            candidate = (resolve or self.resolve)(path_str)
+        except ValueError:
+            # A file:// URL naming a remote host is not a local path.
+            return None, None
+        untrusted: Optional[Tuple[Path, str]] = None
+        for allowed_root in self._allowed_roots:
+            if not self._is_relative_to(candidate, allowed_root):
+                continue
+            problem = root_problem(allowed_root, create=write)
+            if problem is None:
+                return str(candidate), None
+            untrusted = untrusted or (allowed_root, problem)
+        return None, untrusted
+
+    def read_check(self) -> "ReadCheck":
+        """A read-access check for many paths in one operation, such as a USD layer walk.
+
+        ``is_allowed`` re-resolves every path and re-judges a shared root's
+        trust on every call, which is right for one path but costs a USD stack
+        that names tens of thousands of asset paths several times its own load
+        time. The check this returns judges each distinct path once, resolves
+        each directory once, and judges each shared root's trust once, for its
+        own life. Build one per operation and drop it after: a long-lived one
+        would keep a verdict after the filesystem changed.
+
+        Unlike ``is_allowed`` it takes an absolute path literally, without
+        expanding ``~`` or ``$VARS``: such a path comes from a file (a USD
+        layer's asset path), and the program that opens it does not expand
+        them either, so expanding here would check a different file than the
+        one opened.
+
+        Returns:
+            The check; call it with a path or URL.
+        """
+        return ReadCheck(self)
 
     def _root_problem(self, root: Path, *, create: bool) -> Optional[str]:
         """Explain why an allowed root cannot be used right now, or None.
@@ -541,8 +586,72 @@ class PathPolicy:
 
     @staticmethod
     def _is_relative_to(path: Path, ancestor: Path) -> bool:
+        if os.name == "posix" and path.is_absolute() and ancestor.is_absolute():
+            # Both normalised absolute paths (resolve() output): a component
+            # prefix test is what relative_to decides, at a fraction of the cost
+            # a USD walk over tens of thousands of paths would pay.
+            here, root = str(path), str(ancestor)
+            return here == root or here.startswith(root if root.endswith("/") else root + "/")
         try:
             path.relative_to(ancestor)
         except ValueError:
             return False
         return True
+
+
+class ReadCheck:
+    """``PathPolicy.is_allowed`` for reads of file-named paths, memoised for one operation.
+
+    Built by ``PathPolicy.read_check``. Verdicts are cached per path string,
+    resolved directories per directory, and shared roots' trust per root, so
+    a walk that names one texture from a thousand layers resolves it once and
+    walks a shared root's ancestry once. An absolute path is taken literally
+    (no ``~`` or ``$VARS`` expansion); a relative path or a ``file://`` URL is
+    normalised as ``PathPolicy.resolve`` does.
+    """
+
+    def __init__(self, policy: PathPolicy) -> None:
+        self._policy = policy
+        self._verdicts: Dict[str, bool] = {}
+        self._root_problems: Dict[Path, Optional[str]] = {}
+        self._directories: Dict[str, str] = {}
+
+    def __call__(self, path_str: str) -> bool:
+        """Return whether ``path_str`` may be read."""
+        if not self._policy.enabled:
+            return True
+        verdict = self._verdicts.get(path_str)
+        if verdict is None:
+            authorized, _ = self._policy._judge(
+                path_str, write=False, root_problem=self._root_problem, resolve=self._resolve
+            )
+            verdict = self._verdicts[path_str] = authorized is not None
+        return verdict
+
+    def _resolve(self, path_str: str) -> Path:
+        """``os.path.realpath`` with each directory resolved once.
+
+        ``realpath(dir/leaf)`` is ``realpath(realpath(dir)/leaf)``, so only the
+        leaf is looked at per path: it is followed when it is a symlink and
+        appended as it is otherwise, as ``realpath`` does.
+        """
+        if not os.path.isabs(path_str):
+            return self._policy.resolve(path_str)
+        if any(part in (".", "..") for part in path_str.split(os.sep)):
+            # ``..`` after a symlink means the link's parent: leave it to realpath.
+            return Path(os.path.realpath(path_str))
+        head, leaf = os.path.split(path_str.rstrip(os.sep) or os.sep)
+        if not leaf:
+            return Path(os.path.realpath(path_str))
+        directory = self._directories.get(head)
+        if directory is None:
+            directory = self._directories[head] = os.path.realpath(head)
+        candidate = os.path.join(directory, leaf)
+        if os.path.islink(candidate):
+            return Path(os.path.realpath(candidate))
+        return Path(candidate)
+
+    def _root_problem(self, root: Path, *, create: bool) -> Optional[str]:
+        if root not in self._root_problems:
+            self._root_problems[root] = self._policy._root_problem(root, create=create)
+        return self._root_problems[root]

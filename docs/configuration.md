@@ -177,13 +177,19 @@ anchored to the layer that names it and resolved the way composition
 resolves it. A symlink is followed, and a search-path reference that pxr
 would find in the server's working directory is checked there. A path
 outside the sandbox fails the call with `SandboxError`;
-`details.outside_sandbox` lists each offender's `kind` (`sublayer`,
-`reference`, `payload` or `asset`, or `layer` when the post-composition
-check caught it), its authored `asset_path`, the
-`location` it names, and the `layer` that names it, and `outside_count`
-gives the total. Only layers that pass are opened, so a refused file is never
-read. After composition, the layers the stage really uses are checked again
-as a backstop.
+`details.outside_sandbox` lists each offender's `kind`, its authored
+`asset_path`, the `location` it names, and the `layer` that names it, and
+`outside_count` gives the total. The kinds are `sublayer`, `reference`,
+`payload`, `clip` (a value clip or clip manifest), `asset` (a texture or
+other non-layer file), and `layer` when the post-composition check caught
+it. Only layers that pass are opened, so a refused file is never read.
+After composition, the layers the stage uses by then are checked again as a
+backstop. That check cannot see value clips: when a clip set authors a
+`manifestAssetPath`, pxr opens its clip layers only on the first read of a
+time-varying value, after the load. Clips therefore rely on the first pass,
+which checks every clip and manifest path before anything opens. Each load
+resolves a path named from many layers once and checks a shared root's
+trust once, so the walk adds a fraction of the stack's own load time.
 
 An asset path outside the sandbox is refused even when nothing exists there,
 so the error never reveals whether an outside file exists. Textures are held
