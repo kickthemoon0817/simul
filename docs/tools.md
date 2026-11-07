@@ -921,19 +921,23 @@ Behaviour worth knowing:
   link OBJECT may change only an existing slot's material: assigning faces or
   adding a slot is refused (`details.code: "shared_data"`, naming the other
   objects) unless `single_user: true` gives this object its own copy of the
-  mesh first, which the reply reports. With link DATA the change is meant for
-  every object sharing the mesh, and the reply names them. `single_user` also
-  makes library-linked data local; a library-linked object is refused.
+  mesh first, which the reply reports. That copy needs the object, and its
+  data, in Object Mode: Blender 5.0.1 ignores a new data block for an object in
+  Edit Mode without an error. With link DATA the change is meant for every
+  object sharing the mesh, and the reply names them. `single_user` also makes
+  library-linked data local; a library-linked object is refused.
   `base_color` is RGB or RGBA in 0-1: the alpha sets the Principled BSDF's
   Alpha (exported as USD `opacity`) and, below 1,
   `surface_render_method: BLENDED`. Image files can drive Base Color, Metallic
   and Roughness, and Normal through a Normal Map node; a new texture replaces
   the nodes of the old one. Data maps are read Non-Color; a base colour keeps
   the colour space Blender loads the file in (sRGB for an 8-bit image, linear
-  for an EXR or other float image). An image already in the file is never
-  changed, since other materials may read it: when its colour space is the
-  other kind, the input gets its own image datablock of the same file
-  (`albedo.png.001`). Textures pass the filesystem sandbox; a missing file is
+  for an EXR or other float image). An image of the same file already read
+  the way the input needs is reused, so repeating a call adds no datablock.
+  An image already in the file is never changed, since other materials may
+  read it: when every datablock of the file reads the other way, the input
+  gets one of its own (`albedo.png.001`). A texture replaced behind Reroute
+  nodes takes the Reroutes and its old nodes with it. Textures pass the filesystem sandbox; a missing file is
   a `NotFoundError` and a file Blender cannot read as an image a
   `ValidationError`. Textures need UV coordinates (`uv_unwrap_blender_mesh`);
   a mesh without a UV map gets a warning, and so does a replaced material left

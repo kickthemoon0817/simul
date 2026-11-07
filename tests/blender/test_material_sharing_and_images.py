@@ -445,3 +445,135 @@ def test_the_fake_mesh_tracks_edit_mode_and_libraries() -> None:
     registry = SimpleNamespace(bpy=SimpleNamespace(data=SimpleNamespace(objects=[])))
     mesh = FakeMesh(registry, "m")  # type: ignore[arg-type]
     assert (mesh.is_editmode, mesh.library) == (False, None)
+
+
+# ---------------------------------------------------------------------------
+# Re-review: single_user in Edit Mode, repeated textures, reroutes
+# ---------------------------------------------------------------------------
+
+
+class TestSingleUserSafety:
+    @pytest.fixture
+    def za(self, fake_bpy: FakeBpy) -> Any:
+        """ZA and ZB share ZAMesh, which has two slots."""
+        za = fake_bpy.add_mesh_object("ZA", CUBE_VERTICES, CUBE_FACES)
+        za.data.name = "ZAMesh"
+        fake_bpy.data.objects.new("ZB", za.data)
+        za.data.materials.extend([fake_bpy.data.materials.new("a"), fake_bpy.data.materials.new("b")])
+        return za
+
+    @pytest.mark.parametrize("arguments", [{"slot_index": 2}, {"slot_index": 0}])
+    def test_single_user_in_edit_mode_is_refused_and_removes_nothing(
+        self, fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession, za: Any, arguments: Any
+    ) -> None:
+        """Blender ignores obj.data = copy in Edit Mode; the rollback then removed ZAMesh, ZA and ZB."""
+        za.mode = "EDIT"
+        shared = za.data
+
+        with pytest.raises(ValidationError, match="to give it its own copy of its data") as refused:
+            session.assign_material("ZA", "za_own", single_user=True, **arguments)
+
+        assert refused.value.details["code"] == "wrong_mode"
+        assert za.data is shared and fake_bpy.data.objects.get("ZB").data is shared
+        assert [obj.name for obj in fake_bpy.data.objects] == ["ZA", "ZB"]
+        assert [mesh.name for mesh in fake_bpy.data.meshes] == ["ZAMesh"]
+        assert fake_bpy.data.meshes.removed == []
+        assert _slots(za) == ["a", "b"]
+
+    def test_a_copy_blender_does_not_take_is_dropped_and_the_original_kept(
+        self, fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession, za: Any
+    ) -> None:
+        """Only the copy this call made is removed, never the data the object still uses."""
+        shared = za.data
+        za.data_locked = True
+
+        with pytest.raises(RuntimeError, match="Blender kept 'ZAMesh' on 'ZA' instead of its copy"):
+            session.assign_material("ZA", "za_own", slot_index=0, single_user=True)
+
+        assert za.data is shared and fake_bpy.data.objects.get("ZB").data is shared
+        assert [mesh.name for mesh in fake_bpy.data.meshes] == ["ZAMesh"]
+        assert [mesh.name for mesh in fake_bpy.data.meshes.removed] == ["ZAMesh.001"]
+        assert _slots(za) == ["a", "b"]
+        assert fake_bpy.data.materials.get("za_own") is None
+
+    def test_a_local_copy_of_library_data_is_worded_as_one(
+        self, fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession
+    ) -> None:
+        """It read "own copy 'LibMesh' of mesh data 'LibMesh'"."""
+        obj = fake_bpy.add_mesh_object("lib_user", CUBE_VERTICES, CUBE_FACES)
+        obj.data.name = "LibMesh"
+        obj.data.library = SimpleNamespace(name="props.blend")
+
+        result = session.assign_material("lib_user", "steel", single_user=True)
+
+        assert result["warnings"] == [
+            "'lib_user' now has a local copy of mesh data 'LibMesh' from library 'props.blend'"
+        ]
+
+
+class TestRepeatedTextures:
+    @pytest.fixture
+    def crate(self, fake_bpy: FakeBpy) -> Any:
+        obj = fake_bpy.add_mesh_object("AgentBox", CUBE_VERTICES, CUBE_FACES)
+        obj.data.uv_layers.new("UVMap")
+        return obj
+
+    def test_a_repeated_call_reuses_the_image_it_loaded(
+        self, fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession, crate: Any, tmp_path: Path
+    ) -> None:
+        """Four calls left albedo.png plus .001 to .004, the older ones with no users."""
+        albedo = _image(tmp_path, "albedo.png")
+        other = fake_bpy.add_mesh_object("painted", CUBE_VERTICES, CUBE_FACES)
+        other.data.uv_layers.new("UVMap")
+        session.assign_material("painted", "painted_mat", base_color_texture=albedo)
+
+        for _ in range(4):
+            session.assign_material("AgentBox", "agent_rough", roughness_texture=albedo)
+
+        assert sorted(image.name for image in fake_bpy.data.images) == ["albedo.png", "albedo.png.001"]
+
+    def test_one_file_as_colour_and_data_stays_at_two_datablocks(
+        self, fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession, crate: Any, tmp_path: Path
+    ) -> None:
+        path = _image(tmp_path, "packed.png")
+
+        for _ in range(3):
+            session.assign_material("AgentBox", "m", base_color_texture=path, roughness_texture=path)
+
+        assert len(fake_bpy.data.images) == 2
+
+    def test_the_same_file_by_another_spelling_is_reused(
+        self, fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession, crate: Any, tmp_path: Path
+    ) -> None:
+        path = _image(tmp_path, "albedo.png")
+        session.assign_material("AgentBox", "m", base_color_texture=path)
+
+        session.assign_material("AgentBox", "m", base_color_texture=str(tmp_path / "." / "albedo.png"))
+
+        assert len(fake_bpy.data.images) == 1
+
+    def test_a_texture_replaced_behind_a_reroute_leaves_no_stray_nodes(
+        self, fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession, crate: Any, tmp_path: Path
+    ) -> None:
+        """The old Image Texture and Reroute nodes stayed in the tree."""
+        session.assign_material("AgentBox", "m", base_color_texture=_image(tmp_path, "a.png"))
+        material = fake_bpy.data.materials.get("m")
+        tree = material.node_tree
+        texture = material.principled.inputs["Base Color"].links[0].from_node
+        reroute = tree.nodes.new("NodeReroute")
+        tree.links.new(texture.outputs["Color"], reroute.inputs["Input"])
+        tree.links.new(reroute.outputs["Output"], material.principled.inputs["Base Color"])
+
+        session.assign_material("AgentBox", "m", base_color_texture=_image(tmp_path, "b.png"))
+
+        kinds = sorted(node.type for node in tree.nodes)
+        assert kinds == ["BSDF_PRINCIPLED", "OUTPUT_MATERIAL", "TEX_IMAGE"]
+        assert material.principled.inputs["Base Color"].links[0].from_node.image.name == "b.png"
+
+
+def test_a_missing_object_is_a_typed_not_found(
+    fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession
+) -> None:
+    with pytest.raises(NotFoundError, match="Object not found: Ghost") as missing:
+        session.assign_material("Ghost", "m")
+    assert missing.value.details == {"code": "object_not_found", "object_name": "Ghost"}

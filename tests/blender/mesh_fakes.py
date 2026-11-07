@@ -725,12 +725,15 @@ class FakeMeshObject:
 
     ``evaluated_mesh`` is what the depsgraph makes of the object; None means
     the depsgraph holds no evaluated copy (the object is not in the view layer).
+    Like Blender 5.0.1, assigning ``data`` while the object is in Edit Mode is
+    ignored without an error; ``data_locked`` makes every assignment ignored.
     """
 
     def __init__(self, name: str, object_type: str = "MESH", data: Any = None, mode: str = "OBJECT") -> None:
         self.name = name
         self.type = object_type
-        self.data = data
+        self.data_locked = False
+        self._data = data
         self.mode = mode
         self.location: Tuple[float, ...] = (0.0, 0.0, 0.0)
         self.modifiers = FakeModifierStack(self)
@@ -744,6 +747,16 @@ class FakeMeshObject:
         # Per slot: its link, and the material an OBJECT-linked slot holds.
         self.slot_links: Dict[int, str] = {}
         self.object_materials: Dict[int, Any] = {}
+
+    @property
+    def data(self) -> Any:
+        return self._data
+
+    @data.setter
+    def data(self, value: Any) -> None:
+        if self.data_locked or getattr(self, "mode", "OBJECT") == "EDIT":
+            return
+        self._data = value
 
     @property
     def material_slots(self) -> List["FakeMaterialSlot"]:
@@ -922,7 +935,7 @@ class FakeBpy:
             evaluated_depsgraph_get=lambda: "depsgraph",
             temp_override=self._temp_override,
         )
-        self.path = SimpleNamespace(abspath=lambda path: path)
+        self.path = SimpleNamespace(abspath=lambda path, **_options: path)
         self.applied: List[Dict[str, Any]] = []
         self.apply_result = {"FINISHED"}
         # Edit Mode operator calls, in order: (operator, keyword arguments).

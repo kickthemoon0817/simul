@@ -1472,7 +1472,7 @@ class BlenderAssignMaterialRequest(BaseModel):
         description=(
             "Give the object its own copy of data it shares first, so the change leaves the "
             "other objects alone (required to change faces or add a slot with link OBJECT on "
-            "shared data)"
+            "shared data); the object and its data must be in Object Mode"
         ),
     )
     reuse_existing: bool = Field(

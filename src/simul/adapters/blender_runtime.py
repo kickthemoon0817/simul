@@ -1358,6 +1358,24 @@ def _unit_color(value: Any, what: str) -> Tuple[float, float, float, Optional[fl
     return (channels[0], channels[1], channels[2], channels[3] if len(channels) == 4 else None)
 
 
+def _real_path(path: str) -> str:
+    """A file path in one spelling: absolute, symlinks resolved, case-folded where the OS folds."""
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _image_file(image: Any) -> Optional[str]:
+    """The file an image datablock reads, as ``_real_path`` spells it; None when it reads none."""
+    path = getattr(image, "filepath", "") or ""
+    if not path:
+        return None
+    resolve = getattr(getattr(bpy, "path", None), "abspath", None)
+    if resolve is not None:
+        # Blender-relative paths (//textures/a.png) are relative to the .blend
+        # file, or to the library the image is linked from.
+        path = resolve(path, library=getattr(image, "library", None))
+    return _real_path(path)
+
+
 def _name_list(names: Sequence[str], limit: int = 5) -> str:
     """``'a', 'b' and 3 more`` for the first ``limit`` names."""
     shown = ", ".join(f"'{name}'" for name in names[:limit])
@@ -3410,20 +3428,32 @@ class BlenderRuntimeSession:
                 "to an existing slot",
                 "linked_from_library",
             )
+        if copy_data:
+            # Blender 5.0.1 ignores obj.data = copy, without an error, while
+            # the object is in Edit Mode.
+            self._require_object_mode(obj, "give it its own copy of its data")
         warnings = self._material_warnings(obj, link, textures, sharers, copy_data)
         replaced = None if appends else obj.material_slots[index].material
 
         created = material is None
         new_images: List[Any] = []
         appended = False
-        original_data = None
+        made_copy: Any = None
+        # Set once the copy really is the object's data.
+        original_data: Any = None
         previous_slot: Optional[Tuple[int, str, Any]] = None
         faces_written = False
         try:
             images = self._load_texture_images(textures, new_images)
             if copy_data:
-                original_data, data = data, data.copy()
-                obj.data = data
+                made_copy = data.copy()
+                obj.data = made_copy
+                if obj.data != made_copy:
+                    raise RuntimeError(
+                        f"Blender kept '{data.name}' on '{object_name}' instead of its copy; "
+                        "nothing was changed"
+                    )
+                original_data, data = data, made_copy
             if material is None:
                 material = blender_module.data.materials.new(name=name)
                 if material.node_tree is None:
@@ -3456,10 +3486,21 @@ class BlenderRuntimeSession:
                     self._set_face_materials(data, previous_faces)
 
             def restore_data() -> None:
-                # The copy is discarded whole, its faces and slots with it.
-                if original_data is not None:
-                    copy, obj.data = obj.data, original_data
-                    self._data_collection(obj).remove(copy)
+                # Only the copy this call made is removed, its faces and slots
+                # with it, and only once no object uses it: removing data an
+                # object still uses deletes that object.
+                if made_copy is None:
+                    return
+                if original_data is not None and obj.data == made_copy:
+                    obj.data = original_data
+                if obj.data == made_copy:
+                    self.logger.error(
+                        "Left the copy '%s' on '%s': Blender did not take the original back",
+                        made_copy.name,
+                        object_name,
+                    )
+                    return
+                self._data_collection(obj).remove(made_copy)
 
             def restore_slot() -> None:
                 # The slot's link and an OBJECT-linked material are the
@@ -3485,11 +3526,20 @@ class BlenderRuntimeSession:
             raise
 
         if original_data is not None:
-            kept = f", which {_name_list(sharers)} keep" if sharers else " (a local copy)"
-            warnings.append(
-                f"'{object_name}' now has its own copy '{data.name}' of {kind.lower()} data "
-                f"'{original_data.name}'{kept}"
-            )
+            library = getattr(original_data, "library", None)
+            if library is not None:
+                # A local copy of library data keeps its name.
+                kept = f"; {_name_list(sharers)} keep the linked one" if sharers else ""
+                warnings.append(
+                    f"'{object_name}' now has a local copy of {kind.lower()} data "
+                    f"'{original_data.name}' from library '{library.name}'{kept}"
+                )
+            else:
+                kept = f", which {_name_list(sharers)} keep" if sharers else ""
+                warnings.append(
+                    f"'{object_name}' now has its own copy '{data.name}' of {kind.lower()} data "
+                    f"'{original_data.name}'{kept}"
+                )
         if not created and shading and material.users > 1:
             warnings.append(
                 f"Material '{material.name}' has {material.users} users; the changed shading "
@@ -3602,26 +3652,39 @@ class BlenderRuntimeSession:
 
     @staticmethod
     def _load_texture_images(textures: Dict[str, str], new_images: List[Any]) -> Dict[str, Any]:
-        """Load each texture image, in the colour space its socket reads it in.
+        """Find or load each texture image, in the colour space its socket reads it in.
 
         A data map (metallic, roughness, normal) is read Non-Color; a base
-        colour keeps the colour space Blender loads the file in: sRGB for an
-        8-bit image, linear for a float one such as an EXR. An image already in
-        the file is never changed, since other materials may read it: when its
-        colour space is the other kind, this input gets its own datablock of
-        the file. Images the call loads are added to ``new_images``, for the
-        caller to remove on failure. bpy.data.images.load accepts a file that
-        is no image and only fails to read it later, so an image that reads as
-        0 x 0 pixels is refused.
+        colour reads the colour space Blender loads the file in: sRGB for an
+        8-bit image, linear for a float one such as an EXR. An image of the same
+        file already read that way is reused, so a repeated call adds no
+        datablock. An image already in the file is never changed, since other
+        materials may read it: when every one of the file reads the other way,
+        this input gets a datablock of its own. Images the call loads are added
+        to ``new_images``, for the caller to remove on failure.
+        bpy.data.images.load accepts a file that is no image and only fails to
+        read it later, so an image that reads as 0 x 0 pixels is refused.
         """
         blender_module: Any = bpy
         images: Dict[str, Any] = {}
         for key, path in textures.items():
             data_map = key != "base_color"
-            known = list(blender_module.data.images)
-            image = blender_module.data.images.load(path, check_existing=True)
-            fresh = image not in known
-            if fresh:
+            same_file = [
+                image
+                for image in blender_module.data.images
+                if _image_file(image) == _real_path(path)
+            ]
+            image = next(
+                (
+                    candidate
+                    for candidate in same_file
+                    if bool(candidate.colorspace_settings.is_data) == data_map
+                ),
+                None,
+            )
+            fresh = image is None
+            if image is None:
+                image = blender_module.data.images.load(path, check_existing=False)
                 new_images.append(image)
             if not image.size[0]:
                 raise ValidationError(
@@ -3630,10 +3693,6 @@ class BlenderRuntimeSession:
                     field=f"{key}_texture",
                     path=path,
                 )
-            if not fresh and bool(image.colorspace_settings.is_data) != data_map:
-                image = blender_module.data.images.load(path, check_existing=False)
-                new_images.append(image)
-                fresh = True
             if fresh and data_map:
                 image.colorspace_settings.name = "Non-Color"
             images[key] = image
@@ -3730,8 +3789,12 @@ class BlenderRuntimeSession:
             tree.links.new(texture.outputs["Color"], socket)
 
     def _drop_unused_texture_node(self, tree: Any, node: Any) -> None:
-        """Remove an Image Texture or Normal Map node that no longer feeds anything."""
-        if node.type not in ("TEX_IMAGE", "NORMAL_MAP") or any(
+        """Remove an Image Texture, Normal Map or Reroute node that no longer feeds anything.
+
+        The nodes upstream of it go too when nothing else uses them, so a
+        replaced texture behind Reroutes leaves no stray nodes.
+        """
+        if node.type not in ("TEX_IMAGE", "NORMAL_MAP", "REROUTE") or any(
             output.is_linked for output in node.outputs
         ):
             return
@@ -8844,7 +8907,7 @@ class BlenderRuntimeSession:
 
     def _get_object_or_raise(self, object_name: str) -> Any:
         """
-        Look up a Blender object by name or raise ValueError.
+        Look up a Blender object by name or raise NotFoundError (a ValueError).
 
         Args:
             object_name: Object name to look up.
@@ -8860,7 +8923,9 @@ class BlenderRuntimeSession:
         )
         obj = objects.get(object_name)
         if obj is None:
-            raise ValueError(f"Object not found: {object_name}")
+            raise NotFoundError(
+                f"Object not found: {object_name}", "object_not_found", object_name=object_name
+            )
         return obj
 
     def _extract_principled_params(self, node: Any) -> Dict[str, Any]:
