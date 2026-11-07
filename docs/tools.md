@@ -958,9 +958,12 @@ Behaviour worth knowing:
 - `insert_blender_keyframe` keys the property's current value, as Blender's I
   key does, unless `value` gives one: one number for one channel (`index` 0 or
   more, or a property that is not an array), else one per element. A given
-  value is keyed through the property, so NLA remapping applies, and the
-  property then shows what it showed before unless the key is on the current
-  frame; it follows its new F-curve at the next frame change. `interpolation`
+  value is keyed through the property, so NLA remapping applies, and Blender
+  then evaluates the object's animation, so the property shows what its
+  animation gives at the current frame (the keyed value on that frame, or
+  where the key is the property's only one). Left to itself, a GUI Blender
+  5.0.1 showed a first key at once and a later one only at the next frame
+  change, and background Blender neither. `interpolation`
   sets the key's interpolation (otherwise Blender's choice: the previous key's
   on a curve with two keys or more, else its preference, Bezier by default)
   and `keyframe_type` its key type. The reply's `keyframes` give each keyed
@@ -981,7 +984,11 @@ Behaviour worth knowing:
   half a turn between samples, `rotation_quaternion` (w, x, y, z, its sign kept
   continuous) and `local_rotation`, the object's own rotation channels as its
   `rotation_mode` stores them, unwrapped: a joint keyed from 0 to 6 pi reads 6
-  pi there.
+  pi there. The world rotation is the one nearest the world matrix, as
+  `get_blender_object_info` reports it: a turned child of a parent with
+  non-uniform scale has a sheared matrix, from which a plain Euler or
+  quaternion read takes another rotation (0.190 rad for a child turned 30
+  degrees under a parent scaled 3 on X).
 - `export_blender_file` writes `file_path` exactly. The path must end in the
   format's extension (`.obj`, `.fbx`, `.glb`/`.gltf`, `.usd`/`.usda`/`.usdc`/`.usdz`,
   `.stl`, `.ply`); anything else is refused before Blender runs, as Blender's glTF

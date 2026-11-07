@@ -11,23 +11,19 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
 
+import numpy as np
 import pytest
 
 from simul.adapters import blender_runtime
+from tests.fakes import FakeMatrix, euler_matrix
 
 
-class _Matrix:
-    def __init__(self, translation: List[float], euler: List[float]) -> None:
-        self.translation = translation
-        self._euler = euler
-        self.orders: List[str] = []
-
-    def to_euler(self, order: str, compatible: Any = None) -> List[float]:
-        self.orders.append(order)
-        return self._euler
-
-    def to_quaternion(self) -> List[float]:
-        return [1.0, 0.0, 0.0, 0.0]
+def _Matrix(translation: List[float], euler: List[float]) -> FakeMatrix:
+    """A world matrix at ``translation``, turned by the XYZ Euler angles ``euler``."""
+    rows = np.eye(4)
+    rows[:3, :3] = euler_matrix(euler)
+    rows[:3, 3] = translation
+    return FakeMatrix(rows)
 
 
 class _Objects(dict):
@@ -56,7 +52,7 @@ def _object(name: str, kind: str = "MESH", **extra: Any) -> SimpleNamespace:
 def _fake_bpy(
     objects: List[Any],
     rigidbody_world: Optional[Any] = None,
-    evaluated: Optional[Dict[int, _Matrix]] = None,
+    evaluated: Optional[Dict[int, FakeMatrix]] = None,
 ) -> SimpleNamespace:
     calls: Dict[str, Any] = {"frames": [], "overrides": [], "ops": []}
     scene = SimpleNamespace(
@@ -152,7 +148,7 @@ def _rigidbody_world(baked: bool = False, *bodies: Any) -> SimpleNamespace:
     )
 
 
-def _falling(frames: range) -> Dict[int, _Matrix]:
+def _falling(frames: range) -> Dict[int, FakeMatrix]:
     return {f: _Matrix([0.0, 0.0, 10.0 - 0.5 * (f - 1)], [0.1 * f, 0.0, 0.0]) for f in frames}
 
 

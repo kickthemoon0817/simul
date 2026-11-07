@@ -524,3 +524,43 @@ def test_an_older_addon_still_answers_calls_that_leave_the_new_parameters_alone(
     ]
     assert unsupported["success"] is False
     assert "keep_transform" in unsupported["error"]
+
+
+class _AddonBeforeTheAnimationFixes:
+    """The session of an add-on built before insert_keyframe took value,
+    interpolation and keyframe_type: it refuses those keywords."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def insert_keyframe(
+        self, object_name: str, data_path: str, frame: int, index: int = -1
+    ) -> dict:
+        self.calls.append(("insert_keyframe", object_name, data_path, frame, index))
+        return {"object_name": object_name, "data_path": data_path, "frame": frame}
+
+
+def test_an_older_addon_still_keys_the_current_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sent on every call, value, interpolation and keyframe_type made an add-on
+    built before them refuse every insert_blender_keyframe call."""
+    session = _AddonBeforeTheAnimationFixes()
+    instance = _strict_server(monkeypatch, session, "attached")  # type: ignore[arg-type]
+
+    keyed = _call(
+        instance,
+        "insert_blender_keyframe",
+        {"object_name": "Cube", "data_path": "location", "frame": 10, "index": 2},
+    )
+    unsupported = _call(
+        instance,
+        "insert_blender_keyframe",
+        {"object_name": "Cube", "data_path": "location", "frame": 10, "value": [1, 2, 3]},
+    )
+
+    assert keyed["success"] is True
+    assert keyed["value_source"] is None and keyed["keyframes"] == []
+    assert session.calls == [("insert_keyframe", "Cube", "location", 10, 2)]
+    assert unsupported["success"] is False
+    assert "value" in unsupported["error"]

@@ -1036,6 +1036,8 @@
         "properties": {
           "frame": {
             "description": "Frame number to set, within -1048574..1048574 (Blender's limits).",
+            "maximum": 1048574,
+            "minimum": -1048574,
             "type": "integer"
           }
         },
@@ -1060,9 +1062,16 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "frame_start": {"description": "Start frame of the animation range, 0..1048574.", "type": "integer"},
+          "frame_start": {
+            "description": "Start frame of the animation range, 0..1048574.",
+            "maximum": 1048574,
+            "minimum": 0,
+            "type": "integer"
+          },
           "frame_end": {
             "description": "End frame of the animation range, 0..1048574; may equal frame_start for a one-frame range.",
+            "maximum": 1048574,
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -1320,7 +1329,12 @@
             "description": "Last frame of trajectory (inclusive); not before start_frame.",
             "type": "integer"
           },
-          "step": {"default": 1, "description": "Frames between samples; at least 1.", "type": "integer"}
+          "step": {
+            "default": 1,
+            "description": "Frames between samples; at least 1.",
+            "minimum": 1,
+            "type": "integer"
+          }
         },
         "required": ["object_name", "start_frame", "end_frame"]
       },

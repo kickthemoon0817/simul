@@ -1536,11 +1536,20 @@ class BlenderFileInfoResponse(BaseModel):
 # Blender animation & timeline schemas (Phase 5)
 # ---------------------------------------------------------------------------
 
+# Blender's frame limits; mirror FRAME_LIMIT and SCENE_FRAME_MIN in
+# simul.adapters.blender_runtime. Blender clamps a frame outside them.
+#: A current frame Blender keeps as given.
+BlenderFrame = Annotated[int, Field(ge=-1_048_574, le=1_048_574)]
+#: A frame of a scene's frame range.
+BlenderSceneFrame = Annotated[int, Field(ge=0, le=1_048_574)]
+#: Frames between trajectory samples.
+BlenderFrameStep = Annotated[int, Field(ge=1)]
+
 
 class BlenderSetFrameRequest(BaseModel):
     """Request to set the current animation frame."""
 
-    frame: int = Field(..., description="Frame number to set")
+    frame: BlenderFrame = Field(..., description="Frame number to set")
 
 
 class BlenderSetFrameResponse(BaseModel):
@@ -1579,8 +1588,12 @@ class BlenderGetFrameResponse(BaseModel):
 class BlenderSetFrameRangeRequest(BaseModel):
     """Request to set the animation frame range."""
 
-    frame_start: int = Field(..., description="Start frame of the animation range")
-    frame_end: int = Field(..., description="End frame of the animation range")
+    frame_start: BlenderSceneFrame = Field(
+        ..., description="Start frame of the animation range"
+    )
+    frame_end: BlenderSceneFrame = Field(
+        ..., description="End frame of the animation range"
+    )
 
     @model_validator(mode="after")
     def _start_not_after_end(self) -> "BlenderSetFrameRangeRequest":
@@ -2172,7 +2185,7 @@ class BlenderGetTrajectoryRequest(BaseModel):
     object_name: str = Field(..., description="Name of the object to track")
     start_frame: int = Field(..., description="First frame of trajectory")
     end_frame: int = Field(..., description="Last frame of trajectory")
-    step: int = Field(1, ge=1, description="Frames between samples; at least 1")
+    step: BlenderFrameStep = Field(1, description="Frames between samples; at least 1")
 
     @model_validator(mode="after")
     def _start_not_after_end(self) -> "BlenderGetTrajectoryRequest":

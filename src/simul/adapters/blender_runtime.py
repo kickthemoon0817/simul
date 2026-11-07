@@ -806,6 +806,31 @@ def _watch_playback() -> None:
         hooks.append(handler)
 
 
+def stop_watching_playback() -> None:
+    """Remove the playback handlers ``_watch_playback`` added, and forget the record.
+
+    The handlers are persistent, so they outlive a file load; the add-on's
+    unregister calls this so they do not outlive the add-on.
+    """
+    _playback.clear()
+    if not BLENDER_AVAILABLE:
+        return
+    blender_module: Any = bpy
+    handlers = blender_module.app.handlers
+    for name in ("animation_playback_pre", "animation_playback_post"):
+        hooks = getattr(handlers, name)
+        for hook in [
+            hook
+            for hook in hooks
+            if hook is _forget_playback
+            or (
+                getattr(hook, "__module__", None) == __name__
+                and getattr(hook, "__name__", None) == _forget_playback.__name__
+            )
+        ]:
+            hooks.remove(hook)
+
+
 #: Keyframe.interpolation values; None keeps Blender's preference (Bezier by default).
 KEYFRAME_INTERPOLATIONS = (
     "CONSTANT",
@@ -3823,9 +3848,12 @@ class BlenderRuntimeSession:
 
         Without ``value`` Blender keys the property's current value, as the I
         key does: set it first (set_blender_object_transform, for instance).
-        With ``value`` that value is keyed and the property keeps showing what
-        it showed, unless ``frame`` is the current frame; it follows its new
-        F-curve at the next frame change.
+        With ``value`` that value is keyed, and Blender then evaluates the
+        object's animation, so the property shows what its animation gives at
+        the current frame: the keyed value on that frame or where the key is
+        the property's only one. A GUI Blender evaluated a first key at once
+        and a later one only at the next frame change, and background Blender
+        neither, so the call has Blender evaluate it either way.
 
         Args:
             object_name: Name of the object.
@@ -3866,7 +3894,6 @@ class BlenderRuntimeSession:
                 f"Invalid keyframe_type '{keyframe_type}'. Must be one of {KEYFRAME_TYPES}"
             )
         obj = self._get_object_or_raise(object_name)
-        blender_module: Any = bpy
         restore = (
             None
             if value is None
@@ -3885,13 +3912,13 @@ class BlenderRuntimeSession:
                 data_path, index=index, frame=frame, keytype=keyframe_type
             )
         finally:
-            # Keying the property's value through the property applies the NLA
-            # remapping keyframe_insert does; the property then shows what it
-            # showed before, unless the key is on the frame it shows.
-            if restore is not None and (
-                not inserted or frame != blender_module.context.scene.frame_current
-            ):
+            # Keying the value through the property applies the NLA remapping
+            # keyframe_insert does. Restoring it leaves nothing changed when
+            # Blender refused the key.
+            if restore is not None:
                 restore()
+        if inserted and restore is not None:
+            self._evaluate_animation(obj)
         if not inserted:
             raise RuntimeError(
                 f"Blender inserted no keyframe on '{object_name}' "
@@ -3993,6 +4020,18 @@ class BlenderRuntimeSession:
         old_values = list(current)
         write([_like(old, new) for old, new in zip(old_values, value)])
         return lambda: write(old_values)
+
+    @staticmethod
+    def _evaluate_animation(obj: Any) -> None:
+        """Have Blender evaluate the object's animation at the current frame, now.
+
+        Tagging the object's time-dependent data and evaluating the depsgraph
+        writes what its animation (NLA included) gives back to its properties,
+        as a frame change does, without running frame-change handlers.
+        """
+        blender_module: Any = bpy
+        obj.update_tag(refresh={"TIME"})
+        blender_module.context.evaluated_depsgraph_get()
 
     def _keys_on_frame(
         self, obj: Any, data_path: str, index: int, frame: float
@@ -4608,12 +4647,17 @@ class BlenderRuntimeSession:
             compatible = _mathutils().Euler(tuple(local), euler_order)
         else:
             compatible = None
+        # The rotation nearest the matrix, as get_object_info reads it: a
+        # turned child of a parent with non-uniform scale has a sheared matrix,
+        # from which to_euler and to_quaternion read different rotations.
+        nearest = _nearest_rotation([[float(v) for v in row][:3] for row in matrix][:3])
+        rotation = matrix if nearest is None else _mathutils().Matrix(nearest)
         euler = (
-            matrix.to_euler(euler_order)
+            rotation.to_euler(euler_order)
             if compatible is None
-            else matrix.to_euler(euler_order, compatible)
+            else rotation.to_euler(euler_order, compatible)
         )
-        quaternion = [float(v) for v in matrix.to_quaternion()]
+        quaternion = [float(v) for v in rotation.to_quaternion()]
         if previous is not None and (
             sum(a * b for a, b in zip(quaternion, previous["rotation_quaternion"])) < 0
         ):
