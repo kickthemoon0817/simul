@@ -189,7 +189,8 @@ Behaviour worth knowing:
   less the camera looks at the center of the actor's bounds and stands back until
   their bounding sphere fills the narrower side of the view with 10% to spare,
   and at least until the sphere, with that margin, is beyond Unreal's 10 cm
-  near clip plane, which a small actor in a wide or square view needs.
+  near clip plane, which a small actor in a wide or square view needs (the
+  engine's default near clip; a project that changes it is not detected).
   The view is `fov` degrees across (default 90, UE's default; at least 0.001,
   the narrowest Unreal renders, and less than 180) and `aspect_ratio` wide per
   unit of height (default 16:9, the default 1920x1080 capture's; from 1/16384
@@ -197,7 +198,8 @@ Behaviour worth knowing:
   the width, as Unreal's viewports and captures do. Editor Python cannot read
   the level viewport's field of view, so pass `fov` when it was changed, and
   `aspect_ratio` for a capture of another shape: otherwise a narrower field of
-  view, or a view wider than about 2:1, can crop the actor. An actor whose
+  view, or a view wider than about 2:1, can crop the actor. Both are checked
+  even when a positive `distance` makes them unused. An actor whose
   bounds have no size, such as a StaticMeshActor without a mesh, gets 500 cm
   from its location instead, with a `fit_warning`; an empty actor or a light
   is framed by its editor icon. The editor-only components the editor's own
@@ -212,7 +214,10 @@ Behaviour worth knowing:
   collides with nothing, like a SphereReflectionCapture's influence sphere
   (30 m in radius by default) or a BoxReflectionCapture's boxes, so a
   reflection capture is framed by its icon, as a light is. Any other component
-  that is not editor-only counts, such as a trigger box's collision shape. An
+  that is not editor-only counts, such as a trigger box's collision shape;
+  with the actor's own collision turned off (Actor Enable Collision) its
+  shapes collide with nothing either, so such a trigger box is framed by its
+  icon. An
   actor whose bounds are not the box around its components, such as a level
   instance or a NavLinkProxy, is framed by the bounds Unreal reports.
 - While Play In Editor (or Simulate In Editor) runs, Unreal's editor refuses
