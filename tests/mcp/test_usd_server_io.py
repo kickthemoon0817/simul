@@ -66,35 +66,61 @@ def root(tmp_path: Path) -> Path:
     return path
 
 
+class StageGate:
+    """Hold the next stage-bound call inside its worker thread until released.
+
+    Every stage-bound USD tool fetches its stage through
+    ``HeadlessUSDSession.get_stage`` once the scheduler has admitted it, so
+    gating that one method holds a real call mid-work whatever the tool does
+    with the stage afterwards.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, hold_seconds: float = 5.0) -> None:
+        self.armed = threading.Event()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.threads: List[int] = []
+        self._hold = hold_seconds
+        original = HeadlessUSDSession.get_stage
+
+        def gated(session: HeadlessUSDSession, stage_id: str) -> Any:
+            if self.armed.is_set():
+                self.armed.clear()
+                self.threads.append(threading.get_ident())
+                self.entered.set()
+                self.release.wait(self._hold)
+            return original(session, stage_id)
+
+        monkeypatch.setattr(HeadlessUSDSession, "get_stage", gated)
+
+    async def wait_entered(self) -> None:
+        while not self.entered.is_set():
+            await asyncio.sleep(0.01)
+
+
 class TestOffTheEventLoop:
     def test_a_slow_call_does_not_hold_up_validate(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         robot = str(fx.write_robot(root / "robot.usda"))
         server = _server(root)
-        original = HeadlessUSDSession.get_mesh_info
-        threads: List[int] = []
-
-        def slow_mesh_info(self: HeadlessUSDSession, stage_id: str, prim_path: str) -> Any:
-            threads.append(threading.get_ident())
-            time.sleep(1.5)
-            return original(self, stage_id, prim_path)
-
-        monkeypatch.setattr(HeadlessUSDSession, "get_mesh_info", slow_mesh_info)
+        gate = StageGate(monkeypatch, hold_seconds=1.5)
 
         async def scenario() -> Dict[str, float]:
             async with Client(server.mcp) as client:
                 stage_id = (await _call(client, "load_usd_file", file_path=robot))["stage_id"]
                 started = time.monotonic()
+                gate.armed.set()
                 slow = asyncio.create_task(
-                    _call(client, "get_mesh_info", stage_id=stage_id, prim_path="/Robot/base")
+                    _call(client, "get_prim_info", stage_id=stage_id, prim_path="/Robot/base")
                 )
-                await asyncio.sleep(0.3)
+                await gate.wait_entered()
                 fast_started = time.monotonic()
                 report = await _call(client, "validate_usd_file", file_path=robot)
                 fast = time.monotonic() - fast_started
                 info = await _call(client, "get_prim_info", stage_id="other", prim_path="/Robot")
-                await slow
+                held = await slow
+                assert held["success"] is True
                 assert report["is_valid"] is True
                 assert info["error_type"] == "NotFoundError"
                 return {"fast": fast, "slow": time.monotonic() - started}
@@ -103,32 +129,25 @@ class TestOffTheEventLoop:
 
         assert timings["fast"] < 0.8, timings
         assert timings["slow"] >= 1.5
-        assert threads and threads[0] != threading.get_ident()
+        assert gate.threads and gate.threads[0] != threading.get_ident()
 
     def test_a_busy_stage_fails_fast_with_stage_busy(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         robot = str(fx.write_robot(root / "robot.usda"))
         server = _server(root, timeout=1)
-        release = threading.Event()
-        original = HeadlessUSDSession.get_prim_info
-
-        def stuck_prim_info(self: HeadlessUSDSession, stage_id: str, prim_path: str) -> Any:
-            if prim_path == "/Robot/base":
-                release.wait(5)
-            return original(self, stage_id, prim_path)
-
-        monkeypatch.setattr(HeadlessUSDSession, "get_prim_info", stuck_prim_info)
+        gate = StageGate(monkeypatch)
 
         async def scenario() -> Dict[str, Any]:
             async with Client(server.mcp) as client:
                 stage_id = (await _call(client, "load_usd_file", file_path=robot))["stage_id"]
+                gate.armed.set()
                 stuck = asyncio.create_task(
                     _call(client, "get_prim_info", stage_id=stage_id, prim_path="/Robot/base")
                 )
-                await asyncio.sleep(0.2)
+                await gate.wait_entered()
                 busy = await _call(client, "get_bounding_box", stage_id=stage_id)
-                release.set()
+                gate.release.set()
                 first = await stuck
                 after = await _call(client, "get_bounding_box", stage_id=stage_id)
                 return {"busy": busy, "first": first, "after": after}
