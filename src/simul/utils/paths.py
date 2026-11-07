@@ -270,6 +270,9 @@ class PathPolicy:
         # resolved root -> the path as configured. Another local user can create
         # or plant those, so each use re-checks them (see _root_problem).
         self._shared_roots: Dict[Path, Path] = {}
+        # Each root as resolved and as configured, for the lexical containment
+        # test a denial uses before it follows any symlink (see denial_details).
+        self._lexical_roots: List[Path] = []
         for allowed_path in allowed_paths:
             if self._project_root is None and not Path(os.path.expandvars(allowed_path)).expanduser().is_absolute():
                 _LOGGER.info(
@@ -281,6 +284,7 @@ class PathPolicy:
             root = self._normalise(allowed_path, self._project_root or Path.cwd())
             self._allowed_roots.append(root)
             lexical = self._lexical(allowed_path)
+            self._lexical_roots.extend((root, lexical))
             if _inside_world_writable_directory(lexical) or _inside_world_writable_directory(root):
                 self._shared_roots[root] = lexical
         self._allowed_url_schemes: Tuple[str, ...] = tuple(
@@ -474,6 +478,27 @@ class PathPolicy:
                 return problem
         return None
 
+    def _absolute_lexical(self, path_str: str) -> Optional[Path]:
+        """A local path or ``file://`` URL made absolute as ``resolve`` does, symlinks not followed.
+
+        Returns:
+            The normalised absolute path, or None for a URL that names no local path.
+        """
+        scheme = self.url_scheme(path_str)
+        if scheme == "file":
+            try:
+                expanded = self._file_url_to_path(path_str)
+            except ValueError:
+                return None
+        elif scheme is not None:
+            return None
+        else:
+            expanded = os.path.expandvars(path_str)
+        candidate = Path(expanded).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.relative_base / candidate
+        return Path(os.path.normpath(candidate))
+
     def _lexical(self, path_str: str) -> Path:
         """Return an ``allowed_paths`` entry made absolute, without following symlinks."""
         candidate = Path(os.path.expandvars(path_str)).expanduser()
@@ -565,9 +590,13 @@ class PathPolicy:
             write: Whether the refused access was a write.
 
         Returns:
-            The refused path as given and, for a local path, as resolved (with
-            the base a relative path resolved against), the allowed roots and
-            URL schemes, and a hint.
+            The refused path as given; for a local path, ``absolute_path`` (made
+            absolute without following symlinks), ``relative_to`` (the base a
+            relative path resolved against) and, only when the path sits inside
+            an allowed root, ``resolved_path`` (symlinks followed: where a link
+            inside the sandbox leads); the allowed roots and URL schemes, and a
+            hint. A path outside the sandbox is never followed, so a denial
+            cannot be used to read where symlinks elsewhere on disk point.
         """
         schemes = self._allowed_write_url_schemes if write else self._allowed_url_schemes
         access = "write" if write else "read"
@@ -584,11 +613,11 @@ class PathPolicy:
                 f"security.allowed_write_url_schemes."
             )
         details: Dict[str, Any] = {"file_path": path_str}
-        if path_str and self.url_scheme(path_str) in (None, "file"):
-            try:
+        absolute = self._absolute_lexical(path_str) if path_str else None
+        if absolute is not None:
+            details["absolute_path"] = str(absolute)
+            if any(self._is_relative_to(absolute, root) for root in self._lexical_roots):
                 details["resolved_path"] = str(self.resolve(path_str))
-            except ValueError:
-                pass
             expanded = os.path.expanduser(os.path.expandvars(path_str))
             if self.url_scheme(path_str) is None and not os.path.isabs(expanded):
                 details["relative_to"] = str(self.relative_base)

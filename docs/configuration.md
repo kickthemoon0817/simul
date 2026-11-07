@@ -233,8 +233,12 @@ in. Over stdio that is the directory the client launched it from, so
 checkout, which an editable install used to resolve against. Relative
 `allowed_paths` entries still resolve against the checkout, because they name
 its directories. A `SandboxError` reports the path as given (`file_path`),
-where it led (`resolved_path`, with symlinks followed) and, for a relative
-path, the base it resolved against (`relative_to`).
+made absolute without following symlinks (`absolute_path`), and for a
+relative path the base it resolved against (`relative_to`). When the path
+sits inside an allowed root, it also reports where it leads with symlinks
+followed (`resolved_path`), so a link inside the sandbox that points out of
+it is visible. A path outside the sandbox is never followed, so a refusal
+cannot reveal where symlinks elsewhere on disk point.
 
 An allowed root inside a world-writable directory, such as the default
 `/tmp/simul-work`, must belong to you. Any local user can create a directory

@@ -332,7 +332,7 @@ class TestRelativePaths:
 
         assert loaded["file_path"] == str(root / "robot.usda")
 
-    def test_sandbox_error_shows_the_resolved_path(
+    def test_sandbox_error_shows_where_a_relative_path_led(
         self, root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
@@ -343,8 +343,20 @@ class TestRelativePaths:
         assert payload["error_type"] == "SandboxError"
         details = payload["details"]
         assert details["file_path"] == "elsewhere/robot.usda"
-        assert details["resolved_path"] == str(tmp_path.resolve() / "elsewhere" / "robot.usda")
+        assert details["absolute_path"] == str(tmp_path.resolve() / "elsewhere" / "robot.usda")
         assert details["relative_to"] == str(tmp_path.resolve())
+        assert "resolved_path" not in details
+
+    def test_sandbox_error_shows_where_a_link_inside_leads(self, root: Path, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        fx.write_robot(outside / "robot.usda")
+        (root / "link.usda").symlink_to(outside / "robot.usda")
+
+        payload = _call_once(_server(root), "load_usd_file", file_path=str(root / "link.usda"))
+
+        assert payload["error_type"] == "SandboxError"
+        assert payload["details"]["resolved_path"] == str((outside / "robot.usda").resolve())
 
 
 class TestPerPrimQueriesAndTheRateLimit:
