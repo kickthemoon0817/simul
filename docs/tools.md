@@ -34,6 +34,7 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
 | Load and validate | `load_usd_file`, `validate_usd_file` |
 | Query | `get_prim_info`, `get_prim_subtree`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
 | Edit | `create_prim`, `delete_prim`, `update_prim_attributes` |
+| Stages | `list_usd_stages`, `save_usd_stage`, `export_usd_stage`, `reload_usd_stage`, `unload_usd_stage` |
 
 - **Bounds.** `get_bounding_box`, and the bounds in `get_prim_info` and
   `summarize_scene`, are USD's own `UsdGeom.BBoxCache` bounds: every
@@ -155,8 +156,11 @@ for its scheme, which usd-core does not ship, so `omniverse://` fails with
 Every successful response carries `success: true`, like the other backends.
 The pxr work of each call runs on a worker thread, so a slow call does not
 hold up the server. Reads run concurrently, one at a time per stage, and an
-edit (`create_prim`, `update_prim_attributes`, `delete_prim`) runs alone,
-because pxr does not allow a write alongside reads of the same layers. A
+edit (`create_prim`, `update_prim_attributes`, `delete_prim`), a
+`load_usd_file` and a `reload_usd_stage` run alone, because pxr does not
+allow a write alongside reads of the same layers (a load or reload may reread
+a shared file in place). `save_usd_stage`, `export_usd_stage` and
+`unload_usd_stage` hold their stage like a read. A
 call that cannot start within `server.timeout` seconds (default 30) fails
 with `StageBusy`; retry it. Python cannot stop pxr mid-call, so a call the
 client cancels or times out still finishes in the background and holds its
@@ -231,6 +235,63 @@ an edit USD cannot express is an `UnsupportedOperation`.
 - Prims inside an instanceable prim (instance proxies) cannot be authored;
   edits to them fail with `UnsupportedOperation`. Set `instanceable` to
   `false` on the instance first.
+
+### Stages, saving and sessions
+
+Edits live in memory until they are written; nothing is saved on its own,
+and unsaved edits are lost when the server exits.
+
+- **Each load is its own stage.** `load_usd_file` opens the file's root
+  layer as an instance no other stage shares, and every edit goes to that
+  root layer. Sublayers, references and payloads are shared, read-only
+  layers, so an unsaved edit in one stage never shows up in another stage
+  that loads or references the same file. Loading a file again returns the
+  same `stage_id` while that stage has no unsaved edits and none of its
+  files changed on disk. Otherwise the load opens a fresh stage from disk
+  (rereading changed sublayers and references first), and the older stage
+  keeps its id and its edits.
+- **Rereads stay in the sandbox.** A changed sublayer or referenced file is
+  shared, and rereading it updates every stage that composes it, including
+  other sessions' stages. So its new content is read into a throwaway layer
+  and held to the composition sandbox first. If it now reaches outside the
+  sandbox, nothing is reread, the stages keep the old content, and the load
+  or reload fails with `SandboxError` naming the file. A stage that reaches
+  outside after a reread anyway (a file swapped between the check and the
+  reread) is unloaded. A load or reload runs alone, after the running calls
+  finish, since rereading a shared file changes stages other calls may be
+  reading.
+- **Stages belong to the MCP session that loaded them.** Another session
+  gets `NotFoundError` for the id and cannot read or edit the stage. Stage
+  ids are random, not derived from the path. A stdio server has one
+  session. Over HTTP, each initialize-handshake connection is its own
+  session, and unauthenticated sessionless (2026-07-28) requests all share
+  one anonymous scope (see AGENTS.md, Runtime Notes). A session can hold
+  up to 32 stages; unload stages to load more.
+- **When a session ends, its stages are unloaded.** An initialize-handshake
+  connection that closes takes its stages with it, unsaved edits included
+  (the server logs a warning naming the stages that had unsaved edits).
+  Save or export before disconnecting. Stages of a session whose end the
+  server cannot observe (stdio's single session, the anonymous scope) stay
+  until they are unloaded or the server exits.
+- **`list_usd_stages`** shows the session's stages, whether each has
+  unsaved edits, and which of its files changed on disk since it read them.
+- **`save_usd_stage`** writes the root layer back to its own file, which
+  must be writable inside the sandbox. It refuses a `.usdz` root, which is a
+  read-only package; export it instead. It also refuses a file that changed
+  on disk after the stage read it, unless `overwrite_external_changes=true`.
+  `files_written` lists what was written; a stage with no unsaved edits
+  writes nothing.
+- **`export_usd_stage`** writes a new `.usda`, `.usdc`, `.usd` or `.usdz`
+  file (sandboxed, and refused if it exists unless `overwrite=true`). By
+  default it writes the root layer with its composition arcs, and
+  re-anchors relative asset paths (sublayers, references, textures) so they
+  resolve from the new location. `flatten=true` writes the composed stage
+  as one layer. A `.usdz` is packaged with the files it depends on. The
+  stage stays bound to its own file and keeps its unsaved state.
+- **`reload_usd_stage`** rereads the root file and any changed sublayer or
+  referenced file, each held to the sandbox first as above.
+  **`unload_usd_stage`** closes the stage. Both refuse a stage with unsaved
+  edits unless `discard_unsaved=true`.
 
 ## Isaac Sim
 
