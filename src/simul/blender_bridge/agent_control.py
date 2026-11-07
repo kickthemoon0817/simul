@@ -123,6 +123,13 @@ def _object_action(
         raise ValueError(
             "set_property requires an editable active object in Object Mode"
         )
+    if target == "rotation_euler":
+        # XYZ angles, written in the object's own rotation mode: Blender
+        # ignores rotation_euler on a QUATERNION or AXIS_ANGLE object.
+        from ..adapters.blender_runtime import local_rotation_euler, write_rotation
+
+        write_rotation(obj, rotation_euler=value)
+        return {"object_name": obj.name, "value": local_rotation_euler(obj)}
     setattr(obj, target, value)
     return {"object_name": obj.name, "value": list(getattr(obj, target))}
 

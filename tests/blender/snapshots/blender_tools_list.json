@@ -233,7 +233,7 @@
           "value": {
             "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "set_property only: three finite values for the active object; rotations in radians."
+            "description": "set_property only: three finite values for the active object; rotation_euler is XYZ radians, written in the object's rotation mode (quaternion, axis-angle, other order)."
           },
           "agent_id": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
@@ -300,7 +300,7 @@
     "get_blender_object_info": {
       "name": "get_blender_object_info",
       "title": "Get Blender Object Info",
-      "description": "Get detailed information about a single Blender object.",
+      "description": "Get detailed information about a single Blender object. location, rotation_euler (XYZ radians) and scale are its own transform, relative to its parent as Blender's Location, Rotation and Scale fields show them; world_location, world_rotation_euler, world_rotation_quaternion, world_scale and matrix_world give where it is in the scene. rotation_mode says how Blender stores the rotation (rotation_in_mode); rotation_quaternion gives it as a quaternion.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -642,7 +642,7 @@
     "set_blender_object_transform": {
       "name": "set_blender_object_transform",
       "title": "Set Blender Object Transform",
-      "description": "Set location, rotation, and/or scale on a Blender object.",
+      "description": "Set location, rotation, and/or scale of a Blender object's own transform, relative to its parent (Blender's Location, Rotation and Scale fields). rotation_euler is XYZ Euler radians, or pass rotation_quaternion [w, x, y, z] instead; either is converted to the object's rotation_mode (glTF imports store quaternions), which is kept. The reply reports the result, rotation_mode and world_location.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -651,17 +651,22 @@
           "location": {
             "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "New location [x, y, z] or None to keep current."
+            "description": "New location [x, y, z] relative to the parent, or None to keep current."
           },
           "rotation_euler": {
             "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "New rotation [rx, ry, rz] or None to keep current."
+            "description": "New rotation as XYZ Euler angles [rx, ry, rz] in radians, converted to the object's rotation_mode; None to keep current."
           },
           "scale": {
             "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
             "description": "New scale [sx, sy, sz] or None to keep current."
+          },
+          "rotation_quaternion": {
+            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "New rotation as a quaternion [w, x, y, z], normalized and converted to the object's rotation_mode; instead of rotation_euler."
           }
         },
         "required": ["object_name"]
@@ -672,13 +677,18 @@
     "set_blender_object_parent": {
       "name": "set_blender_object_parent",
       "title": "Set Blender Object Parent",
-      "description": "Parent one Blender object to another.",
+      "description": "Parent one Blender object to another. By default the child keeps its world transform, as Blender's Parent > Object (Keep Transform); keep_transform=false makes its own values relative to the parent, so it moves. A parent that is the child itself or one of its descendants is refused.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "child_name": {"description": "Object to parent.", "type": "string"},
-          "parent_name": {"description": "Object to be the parent.", "type": "string"}
+          "parent_name": {"description": "Object to be the parent.", "type": "string"},
+          "keep_transform": {
+            "default": true,
+            "description": "Keep the child's world transform (default); false clears the parent inverse, so the child's own values become relative to the parent and it moves.",
+            "type": "boolean"
+          }
         },
         "required": ["child_name", "parent_name"]
       },
@@ -808,11 +818,18 @@
     "open_blender_file": {
       "name": "open_blender_file",
       "title": "Open Blender File",
-      "description": "Open a .blend file, replacing the current scene.",
+      "description": "Open a .blend file, replacing the current scene. Refuses with UnsavedChangesError while the open file has unsaved changes (in attached mode every agent edit counts, as each is an undo step); save them first with save_blender_file, or pass discard_unsaved=true to discard them.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"file_path": {"description": "Absolute path to the .blend file.", "type": "string"}},
+        "properties": {
+          "file_path": {"description": "Absolute path to the .blend file.", "type": "string"},
+          "discard_unsaved": {
+            "default": false,
+            "description": "Open even though the current file has unsaved changes, which are then lost. To keep them, save first with save_blender_file.",
+            "type": "boolean"
+          }
+        },
         "required": ["file_path"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true},
@@ -821,7 +838,7 @@
     "save_blender_file": {
       "name": "save_blender_file",
       "title": "Save Blender File",
-      "description": "Save the current .blend file.",
+      "description": "Save the current .blend file, in place or under a new .blend path, which then becomes the open document. Other extensions are refused; use export_blender_file for other formats.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -829,7 +846,7 @@
           "file_path": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
-            "description": "Path to save to. None saves in place."
+            "description": "Path of the .blend file to save to. None saves in place."
           }
         }
       },
@@ -839,13 +856,18 @@
     "import_blender_file": {
       "name": "import_blender_file",
       "title": "Import Blender File",
-      "description": "Import a file into the Blender scene.",
+      "description": "Import an OBJ, FBX, glTF, USD, STL or PLY file into the Blender scene, optionally scaled about the world origin (scale).",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "file_path": {"description": "Absolute path to the file.", "type": "string"},
-          "file_format": {"description": "One of OBJ, FBX, GLTF, USD, STL, PLY.", "type": "string"}
+          "file_format": {"description": "One of OBJ, FBX, GLTF, USD, STL, PLY.", "type": "string"},
+          "scale": {
+            "default": 1.0,
+            "description": "Uniform scale applied to the imported objects about the world origin (1.0 keeps them as the file has them). OBJ, FBX, STL and PLY pass it to Blender's importer as global_scale. For glTF and USD the imported root objects' location and scale are multiplied by it: Blender's glTF importer has no such option, and Blender 5.0.1's USD importer ignored its own for a USD file Blender wrote. Keys or a Transform Cache constraint on such a root's transform take over again at the next frame change, and warning names those roots.",
+            "type": "number"
+          }
         },
         "required": ["file_path", "file_format"]
       },
@@ -855,16 +877,92 @@
     "export_blender_file": {
       "name": "export_blender_file",
       "title": "Export Blender File",
-      "description": "Export scene objects to a file.",
+      "description": "Export the scene, the selection (selected_only), a list of objects (object_names) or a collection (collection_name) to OBJ, FBX, glTF, USD, STL or PLY. file_path must end in the format's extension and is written exactly: for GLTF, .glb writes a GLB and .gltf a .gltf with its .bin and textures (gltf_format to choose GLTF_EMBEDDED). Modifiers are applied and animation included by default (apply_modifiers, export_animation, frame_start/frame_end; USD animation is on here although Blender's exporter leaves it off). FBX, OBJ, STL and PLY take axis_forward/axis_up and global_scale; USD takes usd_up_axis, meters_per_unit and root_prim_path. Missing folders are created, Edit Mode is entered again afterwards, an unrelated existing .bin/.mtl beside the file is not replaced unless overwrite_companion_files, and files_written lists every file written.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "file_path": {"description": "Absolute path to export to.", "type": "string"},
+          "file_path": {
+            "description": "Path to export to, ending in .obj, .fbx, .glb or .gltf, .usd/.usda/.usdc/.usdz, .stl or .ply for the format.",
+            "type": "string"
+          },
           "file_format": {"description": "One of OBJ, FBX, GLTF, USD, STL, PLY.", "type": "string"},
           "selected_only": {
             "default": false,
-            "description": "If True, export only selected objects.",
+            "description": "Export only the selected objects; an error when none is selected.",
+            "type": "boolean"
+          },
+          "object_names": {
+            "anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "Export exactly these objects (children are not added). They are selected for the export and the previous selection is restored afterwards. Not with selected_only or collection_name."
+          },
+          "collection_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Export the objects of this collection and its child collections that are in the view layer, the same way."
+          },
+          "apply_modifiers": {
+            "default": true,
+            "description": "Export the meshes with their modifiers applied (default, for every format). USD always applies them, except that Blender writes a last Subdivision Surface as a USD subdivision scheme, so false is an error for USD.",
+            "type": "boolean"
+          },
+          "export_animation": {
+            "default": true,
+            "description": "Include animation (default): glTF actions, FBX baked animation, USD time samples over the scene's frame range. Blender's USD exporter leaves animation out unless asked; this default includes it. OBJ, STL and PLY have no animation.",
+            "type": "boolean"
+          },
+          "frame_start": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "First frame of the exported animation (glTF, FBX, USD), with frame_end; the scene's frame range is restored afterwards. Without them FBX and USD use the scene's frame range and glTF each action's whole range."
+          },
+          "frame_end": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Last frame of the exported animation, with frame_start."
+          },
+          "gltf_format": {
+            "anyOf": [
+              {"enum": ["GLB", "GLTF_SEPARATE", "GLTF_EMBEDDED"], "type": "string"},
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "GLB (one binary .glb), GLTF_SEPARATE (.gltf plus .bin and textures beside it) or GLTF_EMBEDDED (one .gltf with its data inline). Default: GLB for .glb and GLTF_SEPARATE for .gltf; it must agree with the extension."
+          },
+          "axis_forward": {
+            "anyOf": [{"enum": ["X", "Y", "Z", "-X", "-Y", "-Z"], "type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "FBX, OBJ, STL and PLY: the axis written as forward, one of X, Y, Z, -X, -Y, -Z, together with axis_up on another axis. Default: the exporter's (FBX and OBJ -Z forward, Y up; STL and PLY Y forward, Z up)."
+          },
+          "axis_up": {
+            "anyOf": [{"enum": ["X", "Y", "Z", "-X", "-Y", "-Z"], "type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "The axis written as up, together with axis_forward."
+          },
+          "global_scale": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "FBX, OBJ, STL and PLY: scale factor applied to the exported data (default 1.0)."
+          },
+          "usd_up_axis": {
+            "anyOf": [{"enum": ["Y", "Z"], "type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "USD: the stage's up axis, Y (Blender rotates the scene from Z-up to Y-up) or Z (default, Blender's own)."
+          },
+          "meters_per_unit": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "USD: the stage's metersPerUnit (default 1.0); Blender scales the root so objects keep their size. Blender 4.4 and later."
+          },
+          "root_prim_path": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "USD: path of the prim everything is exported under (default /root); an empty string exports without one."
+          },
+          "overwrite_companion_files": {
+            "default": false,
+            "description": "Let the export replace an existing .bin (GLTF_SEPARATE) or .mtl (OBJ) beside file_path that the file at file_path does not refer to. file_path itself is always replaced.",
             "type": "boolean"
           }
         },
@@ -1154,7 +1252,7 @@
     "execute_blender_script": {
       "name": "execute_blender_script",
       "title": "Execute Blender Script",
-      "description": "Execute arbitrary Python code inside Blender with access to bpy. Assign to __result__ to return a value. Printed output comes back in output, cut to its first max_output_chars characters (default 32000, at most 100000), or earlier when they exceed 300000 bytes of JSON (heavily non-ASCII output); a cut sets output_truncated=true and output_total_chars to the full length. Write larger results to a file and return its path instead.",
+      "description": "Execute arbitrary Python code inside Blender with access to bpy. Assign to __result__ to return a value. Printed output comes back in output, cut to its first max_output_chars characters (default 32000, at most 100000), or earlier when they exceed 300000 bytes of JSON (heavily non-ASCII output); a cut sets output_truncated=true and output_total_chars to the full length. Write larger results to a file and return its path instead. Anything the script raises, including SystemExit from sys.exit(), is reported in error and never ends Blender. In attached mode each call is one undo step.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

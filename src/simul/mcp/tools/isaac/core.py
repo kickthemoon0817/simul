@@ -19,7 +19,10 @@ class CoreToolsMixin:
         description=(
             "Read one or more aspects of a prim in a single call. Aspects: info, transform, "
             "ancestors, relationships, variants, bounding_box, mesh, light, material, "
-            "rigid_body, collision, joint, mass, animation. Defaults to info."
+            "rigid_body, collision, joint, mass, animation. Defaults to info. transform "
+            "(and info's transform) reports the world pose with 'local' and 'world' "
+            "blocks: translation, rotation_quat [w, x, y, z], rotation_euler_xyz (degrees) "
+            "and scale, factored from the composed matrix."
         ),
         read_only=True,
         idempotent=True,
@@ -189,4 +192,3 @@ class CoreToolsMixin:
                 }
 
         return {"success": True, "output": result.output}
-

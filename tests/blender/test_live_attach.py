@@ -31,6 +31,46 @@ from simul.mcp.server import SimulMCPServer
 
 pytestmark = pytest.mark.blender_live
 
+# Acts for the user, outside the bridge: a timer of the disposable Blender runs
+# what a key press would (ed.undo for Ctrl+Z, wm.quit_blender for Cmd+Q) when
+# user.json appears, and answers in user.out.json. A script run through the
+# bridge could not: the bridge records each script as an undo step of its own.
+_USER_SIMULATOR = """
+import json, os
+def _act_for_user():
+    request = os.path.join({folder!r}, "user.json")
+    if os.path.exists(request):
+        with open(request) as stream:
+            operator = json.load(stream)["operator"]
+        os.unlink(request)
+        window = bpy.context.window_manager.windows[0]
+        with bpy.context.temp_override(window=window):
+            if operator == "quit":
+                status = bpy.ops.wm.quit_blender("INVOKE_DEFAULT")
+            else:
+                status = getattr(bpy.ops.ed, operator)()
+        answer = os.path.join({folder!r}, "user.out.json")
+        with open(answer + ".tmp", "w") as stream:
+            json.dump(sorted(status), stream)
+        os.replace(answer + ".tmp", answer)
+    return 0.1
+bpy.app.timers.register(_act_for_user, persistent=True)
+"""
+
+
+def _as_user(folder: Path, operator: str) -> list[str]:
+    """Run ``ed.undo``, ``ed.redo`` or ``quit`` in Blender as the user's keys would."""
+    answer = folder / "user.out.json"
+    answer.unlink(missing_ok=True)
+    (folder / "user.json").write_text(json.dumps({"operator": operator}))
+    deadline = time.monotonic() + 15
+    while not answer.exists():
+        if time.monotonic() > deadline:
+            pytest.fail(f"Blender did not run {operator} for the user")
+        time.sleep(0.05)
+    status: list[str] = json.loads(answer.read_text())
+    return status
+
 
 def test_attach_existing_gui_and_refuse_changed_targets(
     tmp_path: Path, fake_fastmcp: Any
@@ -55,6 +95,7 @@ def test_attach_existing_gui_and_refuse_changed_targets(
         "import simul_blender_bridge\n"
         "simul_blender_bridge.register()\n"
         "bpy.context.scene['attachment_sentinel'] = 'unsaved user work'\n"
+        + _USER_SIMULATOR.format(folder=str(tmp_path))
     )
     settings = Settings(
         blender={
@@ -126,6 +167,13 @@ def test_attach_existing_gui_and_refuse_changed_targets(
                 "import threading\n__result__ = threading.current_thread() is threading.main_thread()"
             )
             assert main_thread["return_value"] == "True"
+            # B1-10: sys.exit() in a script ends the script, not the user's Blender.
+            exited = client.execute_script("import sys\nprint('done')\nsys.exit(0)")
+            assert exited["error"].startswith("SystemExit: 0."), exited
+            assert exited["output"] == "done\n"
+            time.sleep(0.5)
+            assert process.poll() is None
+            assert client.get_runtime_info()["pid"] == process.pid
             # Issue #231: 6000 printed characters come back whole; a cut is explicit.
             printed = client.execute_script("print('x' * 6000)")
             assert printed["output"] == "x" * 6000 + "\n"
@@ -206,12 +254,122 @@ def test_attach_existing_gui_and_refuse_changed_targets(
                 found = next(t for t in server.mcp.tools if t.name == tool_name)
                 return json.loads(asyncio.run(found.func(**kwargs)).content[0].text)
 
+            # B1-02: each agent edit is one undo step and marks the file
+            # modified, so the user's Ctrl+Z takes back only the last one.
+            # Reads in between record no step.
+            assert client.get_runtime_info()["is_dirty"] is True
+            assert tool("get_blender_file_info")["is_dirty"] is True
+            tool("list_blender_scene_objects")
+            tool("get_blender_object_info", object_name="AttachmentProbe")
+            assert _as_user(tmp_path, "undo") == ["FINISHED"]
+            probe = tool("get_blender_object_info", object_name="AttachmentProbe")
+            assert probe["location"] == [0.0, 0.0, 0.0], probe
+            assert _as_user(tmp_path, "undo") == ["FINISHED"]
+            assert tool("get_blender_object_info", object_name="AttachmentProbe")[
+                "error_type"
+            ]
+            assert _as_user(tmp_path, "redo") == ["FINISHED"]
+            assert _as_user(tmp_path, "redo") == ["FINISHED"]
+            probe = tool("get_blender_object_info", object_name="AttachmentProbe")
+            assert probe["location"] == [1.0, 2.0, 3.0], probe
+
             # bound_box corners are bpy_prop_arrays, which mathutils' Matrix
             # does not multiply: world space used to raise TypeError.
             box = tool("get_blender_bounding_box", object_name="AttachmentProbe")
             assert box["success"] is True, box
             assert box["bbox_min"] == pytest.approx([0.0, 1.0, 2.0])
             assert box["bbox_max"] == pytest.approx([2.0, 3.0, 4.0])
+
+            def pose(name: str) -> dict[str, Any]:
+                """The object's rotation mode and world matrix, as Blender holds them."""
+                seen = client.execute_script(
+                    "bpy.context.view_layer.update()\n"
+                    f"obj = bpy.data.objects[{name!r}]\n"
+                    "__result__ = {'mode': obj.rotation_mode, "
+                    "'parent': obj.parent.name if obj.parent else None, "
+                    "'world': [v for row in obj.matrix_world for v in row]}"
+                )
+                assert seen.get("error") is None, seen
+                return ast.literal_eval(seen["return_value"])
+
+            # glTF nodes store quaternions: a rotation_euler write was ignored
+            # with success, and object info gave the parent-relative location
+            # as world space.
+            made = client.execute_script(
+                "scene = bpy.context.scene\n"
+                "for name, parent, location in (('ProbeRoot', None, (1, 2, 0)),"
+                " ('ProbeArm', 'ProbeRoot', (0.3, 0, 1))):\n"
+                "    obj = bpy.data.objects.new(name, None)\n"
+                "    scene.collection.objects.link(obj)\n"
+                "    obj.rotation_mode = 'QUATERNION'\n"
+                "    obj.parent = bpy.data.objects.get(parent or '')\n"
+                "    obj.location = location\n"
+                "bpy.data.objects['ProbeRoot'].rotation_quaternion = (0.9659258, 0, 0, 0.2588190)\n"
+                "bpy.data.objects['ProbeArm'].rotation_quaternion = (0.9238795, 0, 0, 0.3826834)\n"
+            )
+            assert made.get("error") is None, made
+            turned = tool(
+                "set_blender_object_transform",
+                object_name="ProbeRoot",
+                rotation_euler=[0.0, 0.0, 1.0],
+            )
+            assert turned["success"] is True, turned
+            assert turned["rotation_mode"] == "QUATERNION"
+            assert turned["rotation_euler"] == pytest.approx([0.0, 0.0, 1.0], abs=1e-6)
+            root = pose("ProbeRoot")
+            assert root["mode"] == "QUATERNION"
+            assert root["world"][:2] == pytest.approx(
+                [0.5403023, -0.8414710], abs=1e-6
+            )
+            arm_info = tool("get_blender_object_info", object_name="ProbeArm")
+            arm = pose("ProbeArm")
+            assert arm_info["location"] == pytest.approx([0.3, 0.0, 1.0])
+            assert arm_info["world_location"] == pytest.approx(
+                [arm["world"][3], arm["world"][7], arm["world"][11]], abs=1e-6
+            )
+            assert arm_info["world_location"] != pytest.approx(arm_info["location"])
+            assert arm_info["rotation_euler"] == pytest.approx([0, 0, 0.7853982], abs=1e-6)
+            assert arm_info["world_rotation_euler"] == pytest.approx(
+                [0, 0, 1.7853982], abs=1e-6
+            )
+            assert [v for row in arm_info["matrix_world"] for v in row] == pytest.approx(
+                arm["world"], abs=1e-6
+            )
+            # Parenting moved the child by the parent's transform, and accepted
+            # a loop that Blender then ignored.
+            child_before = pose("AttachmentProbe")["world"]
+            parented = tool(
+                "set_blender_object_parent",
+                child_name="AttachmentProbe",
+                parent_name="ProbeArm",
+            )
+            assert parented["success"] is True, parented
+            assert pose("AttachmentProbe")["world"] == pytest.approx(
+                child_before, abs=1e-5
+            )
+            looped = tool(
+                "set_blender_object_parent",
+                child_name="ProbeRoot",
+                parent_name="AttachmentProbe",
+            )
+            assert looped["success"] is False and "loop" in looped["error"], looped
+            cleared = tool("clear_blender_object_parent", object_name="AttachmentProbe")
+            assert cleared["success"] is True, cleared
+            assert pose("AttachmentProbe") == {
+                "mode": "XYZ",
+                "parent": None,
+                "world": pytest.approx(child_before, abs=1e-5),
+            }
+            client.delete_object("ProbeArm")
+            client.delete_object("ProbeRoot")
+            # Snap the probe back to its exact transform for the checks below.
+            tool(
+                "set_blender_object_transform",
+                object_name="AttachmentProbe",
+                location=[1, 2, 3],
+                rotation_euler=[0, 0, 0],
+                scale=[1, 1, 1],
+            )
 
             def framing(camera: str, target: str) -> dict[str, Any]:
                 """Where the target's world bounding box lands in the camera's view."""
@@ -761,6 +919,11 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             assert process.poll() is None
             with pytest.raises(RuntimeError, match="No Blender window attached"):
                 client.get_runtime_info()
+            # B1-02: the agent's edits count as unsaved, so the user's quit asks
+            # to save them instead of closing Blender at once.
+            assert _as_user(tmp_path, "quit") == ["FINISHED"]
+            time.sleep(2)
+            assert process.poll() is None, "Blender quit without asking to save"
         finally:
             process.terminate()
             try:
@@ -989,6 +1152,16 @@ def test_recover_from_file_loads_context_loss_and_exit(
             assert info["success"] is True
             assert info["document_id"] == opened["document_id"]
             assert info["blend_file_path"] == str(saved)
+            # B1-08: opening a file no longer discards unsaved agent work unasked.
+            assert info["is_dirty"] is False
+            assert call("create_blender_object", object_type="CUBE", name="Unsaved")["success"]
+            kept = call("open_blender_file", file_path=str(saved))
+            assert kept["error_type"] == "UnsavedChangesError", kept
+            assert "discard_unsaved=true" in kept["error"]
+            assert call("search_blender_objects", name_pattern="^Unsaved$")["count"] == 1
+            discarded = call("open_blender_file", file_path=str(saved), discard_unsaved=True)
+            assert discarded["success"] is True and discarded["reattached"] is True, discarded
+            assert call("search_blender_objects", name_pattern="^Unsaved$")["count"] == 0
 
             # #217: an exited process is named, typed and never a raw Errno 61.
             process.kill()

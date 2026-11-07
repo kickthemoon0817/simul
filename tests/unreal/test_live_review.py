@@ -109,6 +109,151 @@ print(json.dumps({{'mass': c.get_mass(), 'gravity': c.is_gravity_enabled(),
     asyncio.run(run())
 
 
+PHYSICS_STATE = """
+import unreal, json
+def read(path):
+    actor = unreal.find_object(None, path)
+    if actor is None:
+        return None
+    c = actor.root_component
+    body = c.get_editor_property('body_instance')
+    parent = c.get_attach_parent()
+    override = body.get_editor_property('override_mass')
+    return {'z': actor.get_actor_location().z, 'vz': c.get_physics_linear_velocity().z, 'mobility': c.mobility.name,
+            'simulate': body.get_editor_property('simulate_physics'), 'mass': c.get_mass(),
+            'override': body.get_editor_property('mass_in_kg_override') if override else None,
+            'gravity': body.get_editor_property('enable_gravity'), 'collision': c.get_collision_enabled().name,
+            'use_default_collision': c.get_editor_property('use_default_collision'),
+            'parent': parent.get_path_name() if parent else None}
+world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+print(json.dumps({'actors': {path: read(path) for path in args['paths']},
+                  'dirty': [p.get_name() for p in unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages()],
+                  'time': unreal.GameplayStatics.get_time_seconds(world) if world else None}))
+"""
+
+TRANSACTION = """
+import unreal, json
+world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+unreal.SystemLibrary.execute_console_command(world, 'TRANSACTION ' + args['command'])
+print(json.dumps({'done': True}))
+"""
+
+
+async def physics_state(client, *paths):
+    result = await client._execute_json_script(f"args = {{'paths': {list(paths)!r}}}\n" + PHYSICS_STATE)
+    assert not result.get("error"), result
+    return result
+
+
+async def transaction(client, command):
+    result = await client._execute_json_script(f"args = {{'command': {command!r}}}\n" + TRANSACTION)
+    assert not result.get("error"), result
+
+
+def simulation_path(path):
+    """The actor's path in the running simulation's world (UEDPIE_0_<map>)."""
+    package, _, rest = path.partition(".")
+    folder, _, name = package.rpartition("/")
+    return f"{folder}/UEDPIE_0_{name}.{rest}"
+
+
+def test_physics_edits_are_undoable_saved_and_simulate():
+    """The physics and collision tools wrote the runtime setters alone: an edit
+    was no undo step and left the map clean, so Save All found nothing and the
+    edit was gone after reload, and one Undo after spawn plus the three tools
+    removed the cube (U2-02). Collision turned off came back as BlockAll in the
+    simulation and after reload (U2-03). enable reported physics_enabled for a
+    Static cube that never moved, and for a query-only one that fell through
+    the floor (U2-04). This checks the engine, not the replies: the map's dirty
+    flag, Undo and Redo, a save and reload, and a free fall in Simulate."""
+
+    async def run():
+        client = session()
+        level = "/Game/SimulReview_Physics_" + uuid.uuid4().hex[:8]
+        try:
+            made = await client._execute_json_script(f"""
+import unreal, json
+les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+assert les.new_level({level!r})
+print(json.dumps({{'saved': bool(les.save_current_level())}}))
+""")
+            assert made == {"saved": True}, made
+            name = level.rsplit("/", 1)[1]
+            # A Static cube, as spawn_unreal_actor places a mesh, high above an empty level.
+            cube = (await client.spawn_actor("/Engine/BasicShapes/Cube.Cube", (0, 0, 20000)))["actor_path"]
+            ghost = (await client.spawn_actor("/Engine/BasicShapes/Cube.Cube", (300, 0, 20000)))["actor_path"]
+            sensor = (await client.spawn_actor("/Engine/BasicShapes/Cube.Cube", (600, 0, 20000)))["actor_path"]
+            saved = await client._execute_json_script(
+                "import unreal, json\nprint(json.dumps({'saved': bool(unreal.get_editor_subsystem("
+                "unreal.LevelEditorSubsystem).save_current_level())}))"
+            )
+            assert saved == {"saved": True}, saved
+            assert (await physics_state(client, cube))["dirty"] == []
+
+            enabled = await client.enable_physics(cube)
+            assert (enabled["physics_mode"], enabled["mobility_changed_from"]) == ("simulated", "Static"), enabled
+            state = await physics_state(client, cube)
+            assert state["dirty"] == [level], state  # the edit dirtied the map
+            assert (state["actors"][cube]["mobility"], state["actors"][cube]["simulate"]) == ("MOVABLE", True)
+            assert state["actors"][cube]["mass"] > 0, state
+
+            params = await client.set_physics_params(cube, mass=5, linear_damping=0, enable_gravity=True)
+            assert params["applied"]["mass"] == 5 and params["params_set"] == 3, params
+            assert (await physics_state(client, cube))["actors"][cube]["override"] == 5
+
+            # One Undo reverts the last call alone: the cube, its mobility and physics stay.
+            await transaction(client, "UNDO")
+            undone = (await physics_state(client, cube))["actors"][cube]
+            assert (undone["override"], undone["simulate"], undone["mobility"]) == (None, True, "MOVABLE"), undone
+            await transaction(client, "REDO")
+            assert (await physics_state(client, cube))["actors"][cube]["override"] == 5
+
+            # Collision turned off stays off; a query-only body is refused, its flag untouched.
+            off = await client.set_collision(ghost, collision_enabled=False)
+            assert (off["collision_mode"], off["use_default_collision"]) == ("NO_COLLISION", False), off
+            overlap = await client.set_collision(sensor, "OverlapAll")
+            assert overlap["collision_mode"] == "QUERY_ONLY", overlap
+            refused = await client.enable_physics(sensor)
+            assert refused["error_type"] == "IncompatibleBody", refused
+            assert [p["code"] for p in refused["details"]["problems"]] == ["NO_PHYSICS_COLLISION"], refused
+            assert (await physics_state(client, sensor))["actors"][sensor]["simulate"] is False
+
+            # Save All writes the edits, and they survive a reload.
+            reloaded = await client._execute_json_script(f"""
+import unreal, json
+ok = unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
+unreal.EditorLoadingAndSavingUtils.load_map({level!r})
+print(json.dumps({{'saved': bool(ok)}}))
+""")
+            assert reloaded == {"saved": True}, reloaded
+            state = await physics_state(client, cube, ghost)
+            assert state["dirty"] == [], state
+            kept = state["actors"][cube]
+            assert (kept["mobility"], kept["simulate"], kept["override"]) == ("MOVABLE", True, 5), kept
+            assert (state["actors"][ghost]["collision"], state["actors"][ghost]["use_default_collision"]) == (
+                "NO_COLLISION", False
+            ), state
+
+            # In Simulate the cube falls freely (no floor, no damping): it accelerates at g.
+            started = await client.control_simulation("start")
+            assert started.get("state") == "playing", started
+            copies = (simulation_path(cube), simulation_path(ghost))
+            assert copies[0].startswith(level.rsplit("/", 1)[0] + "/UEDPIE_0_" + name)
+            first = await physics_state(client, *copies)
+            await asyncio.sleep(0.5)
+            second = await physics_state(client, *copies)
+            dt = second["time"] - first["time"]
+            before, after = first["actors"][copies[0]], second["actors"][copies[0]]
+            assert (after["vz"] - before["vz"]) / dt == pytest.approx(-980, rel=0.05), (first, second)
+            assert after["z"] < before["z"] - 100, (first, second)
+            assert second["actors"][copies[1]]["collision"] == "NO_COLLISION", second
+        finally:
+            await client.control_simulation("stop")
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_transform_light_and_collision_keep_what_is_not_given():
     """A component or parameter left out keeps its value. The transform tool
     used to reset omitted axes to 0 / 1, a lone color channel forced the
