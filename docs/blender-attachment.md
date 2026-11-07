@@ -49,8 +49,12 @@ can omit both selectors. Ambiguous selections fail and require explicit IDs.
 Window IDs are session identities, not OS window titles or coordinates.
 From an MCP client, the `attach_blender_window` tool makes the same selection
 (`instance_id` / `window_id` arguments) and writes the same attachment file.
-An `instance_id` that no running Blender has is refused with the IDs and PIDs
-of the instances there are, and one whose Blender stopped answering says so.
+An `instance_id` that no running Blender has is refused with
+`error_type: "NotFoundError"` and the IDs and PIDs of the instances there are.
+One whose Blender took the connection but did not answer within 2 seconds is
+`InstanceBusy` (a long script, render or modal dialog holds its main thread;
+attach again once it is free), and one that refused the connection is
+`AttachmentStale`.
 
 The existing Blender and SimReady MCP tools use this connection. For example,
 `get_blender_info` reports the selected process/window and `create_blender_object`
@@ -359,7 +363,25 @@ for example several parallel tool calls next to a long script, wait their turn
 in arrival order instead of failing; one operation runs per timer tick, so
 Blender redraws and handles the user's input between them. A long render or
 script still makes the GUI unresponsive while it runs, and the calls behind it
-wait. The bridge holds up to 64 connections at once.
+wait.
+
+Every request starts with its protocol and the instance's token (bridge
+protocol 11), so the add-on refuses a connection that is not Simul's after a
+few dozen bytes, without reading or decoding the rest. A connection has 2
+seconds of the bridge's time to send them, and an authenticated one 60
+seconds to send its whole request; time Blender spends in an operation, a
+render or a modal dialog does not count, since the bridge could not read then.
+A connection that sends nothing for 10 seconds while Blender is free is
+dropped. The bridge holds up to 64 connections; when all are taken, a new one
+replaces a refused or unauthenticated one, so connections that never send a
+token cannot keep Simul's calls out. Waiting requests are held as their bytes
+and decoded one at a time, when their turn comes, and the bytes held across
+all connections are bounded at 64 MiB: a request that would go over is refused
+with `error_type: "BridgeBusy"` (`details.executed: false`), which Simul
+retries while its timeout allows. Refusals of a request the bridge did not
+read (`BridgeBusy`, `RequestTooLarge`, `RequestTimeout`, `InvalidRequest`, a
+protocol mismatch, a wrong token) carry `request_id: null` and
+`details.code`.
 
 The add-on acknowledges a call's start on its connection before running it, and
 runs nothing it has not acknowledged (its discovery record lists the
@@ -368,7 +390,7 @@ it ran, in `details.executed`:
 
 | `details.executed` | Meaning | Retry |
 |---|---|---|
-| `false` | Never started: still queued when the timeout (`BLENDER__CONNECTION_TIMEOUT`, or a script's own `timeout`) ran out, or the bridge dropped the connection first. Blender refuses a call once its deadline has passed and never runs one whose client left. | Safe once Blender is free |
+| `false` | Never started: still queued when the timeout (`BLENDER__CONNECTION_TIMEOUT`, or a script's own `timeout`) ran out, refused by Blender because its deadline passed while it waited, or the bridge dropped the connection first. Blender never runs a call once its deadline has passed or its client left. | Safe once Blender is free |
 | `true` | Started and still running, or the connection closed after it started; the outcome is unknown. An operation already started cannot safely be stopped. | Inspect Blender first |
 | `null` | An add-on built before the acknowledgement: it may or may not have run. | Inspect Blender first |
 
@@ -383,7 +405,9 @@ its timeout, the time an acknowledgement sent just before it may take to arrive.
 add-on, may have) but did not finish within its timeout as embedded mode does:
 `timed_out: true`, `success: false` and an `error` saying it keeps running on
 Blender's main thread, where it cannot be stopped and its output is lost, with
-`details.executed`. A script that never started gets the `TimeoutError` above.
+`details.executed`. Its `duration_seconds` is how long it had run, counted from
+Blender's start acknowledgement (the whole wait, queue included, with an older
+add-on). A script that never started gets the `TimeoutError` above.
 
 A request may be up to 32 MiB of JSON (a 500 000-face mesh from
 `create_blender_mesh_from_data` is about 27 MB). It is read as fast as it
@@ -429,8 +453,9 @@ constraint, left unmuted, held once the user mutes it, and no longer reported
 once its target is deleted), a Child Of camera
 whose scale placement no longer compounds, a camera disabled in viewports or in
 an excluded collection, whose override check is reported as skipped until it is
-enabled again, refusal of object-search patterns
-that can backtrack for seconds to hours, a force field without a location, JPEG capture
+enabled again, object-search patterns that `re` backtracks on for hours searched
+in linear time over 255-character names (and one it cannot take refused), a force
+field without a location, JPEG capture
 of the 3D View in Edit Mode without a camera, a render through a temporary camera,
 explicit script-output truncation, multiple windows, scene/file changes,
 and detachment. A second disposable process checks calls queued behind a long

@@ -1,38 +1,77 @@
-"""Refuse regular expressions whose search can backtrack for seconds to hours.
+"""Bound how long Python's ``re`` can search a name, and search in linear time when it cannot.
 
 Some read-only tools search names with a caller's regular expression inside
 an editor, where nothing can interrupt the search: Unreal actor tags on the
 editor's game thread, Blender object names on Blender's main thread. Python's
-``re`` backtracks, so one pattern can freeze the editor. The Blender add-on
-bundles this module, so it imports only the standard library.
+``re`` backtracks and holds the GIL while it does, so one pattern can freeze
+the editor and no timeout can stop it.
+
+``exponential_regex_construct`` bounds, for the longest name the caller
+accepts, how many steps a failing ``re`` search can take, and names the
+construct that makes that too many. ``name_searcher`` uses ``re`` when the
+bound allows it and otherwise searches with a Thompson-NFA simulation whose
+work grows linearly with the name, so it accepts such patterns too.
+
+The Blender add-on bundles this module, so it imports only the standard library.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional, Tuple
+import copy
+import re
+from itertools import accumulate
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+#: Blender 5's longest object name, in characters.
+BLENDER_NAME_LENGTH = 255
+#: The longest Unreal actor tag (an FName) the semantic-label search expects.
+UNREAL_TAG_LENGTH = 1023
+#: Seconds a failing ``re`` search of one name of the longest length may take.
+SEARCH_BUDGET_SECONDS = 0.02
+#: Seconds per backtracking step: about twice the most Python 3.11 took per
+#: counted step for ``.*.*\d``, ``\w*\w*\d``, ``[a-z]*[a-z]*\d`` and the like
+#: on 255- and 1023-character names (6.2 ns, and 9.7 ns with IGNORECASE). A
+#: literal after a quantifier lets ``re`` skip ahead, so ``.*.*x`` took 0.8 ns.
+_STEP_SECONDS = 12e-9
+_STEP_SECONDS_IGNORECASE = 20e-9
+#: Alternatives multiply the sequences a search tries; more are not bounded.
+_MAX_SEQUENCES = 256
+#: Instructions the linear-time search compiles a pattern to, at most.
+_MAX_PROGRAM = 5000
+#: Cached steps of the linear-time search before the cache starts over.
+_CACHE_LIMIT = 50_000
 #: Characters the overlap of two character classes is tested on, besides the
 #: pattern's own literals: Latin-1 and Latin Extended, plus a few letters,
 #: digits and spaces of other scripts.
 _SAMPLE = [chr(code) for code in range(0x250)] + list("αΩЖж中한٣  　")
-#: A quantifier whose count can vary by this much or more takes a stretch of a
-#: name in many ways; ``x{0,8}`` cannot take enough for it to matter.
-_WIDE = 16
-#: Quantifiers in a row (nothing they cannot match between them) that a search
-#: may have: two ``.*`` took 2 ms on a 255-character name (Blender 5's limit,
-#: Python 3.11), three took 140 ms, four 6 s, each more about 50 times as long.
-_ADJACENT = 2
-#: Quantifiers that can match the same characters, with characters they match
-#: too between them, as in ``.*a.*a.*x``: those characters pin the divisions,
-#: so a name has to be made of them for the search to be slow (110 ms with
-#: three on 255 a's), but four already take seconds.
-_SEPARATED = 3
 
 Predicate = Callable[[str], bool]
 
 
-def exponential_regex_construct(pattern: str) -> Optional[str]:
-    """Name a construct that can make a failing search for ``pattern`` take hours.
+class RegexRefused(ValueError):
+    """A pattern refused because its search could run too long; ``details`` name why.
+
+    Its ``error_type`` is what tool envelopes report.
+    """
+
+    error_type = "ValidationError"
+
+    def __init__(self, message: str, construct: str, estimate_seconds: Optional[float] = None) -> None:
+        super().__init__(message)
+        self.construct = construct
+        self.details: Dict[str, Any] = {"code": "regex_backtracking", "construct": construct}
+        if estimate_seconds is not None:
+            self.details["estimate_seconds"] = round(estimate_seconds, 3)
+
+
+class _Unbounded(Exception):
+    """The analysis cannot bound the pattern; the message names what it met."""
+
+
+def exponential_regex_construct(
+    pattern: str, flags: int = 0, max_length: int = BLENDER_NAME_LENGTH
+) -> Optional[str]:
+    """Name a construct that can make a failing ``re`` search for ``pattern`` too slow.
 
     A repeated group that can match the same text in more than one way, as
     ``(\\w+)+`` or ``(a|ab)*`` can, makes a failing search try every way of
@@ -42,18 +81,22 @@ def exponential_regex_construct(pattern: str) -> Optional[str]:
     (``(ab{2})+``) cannot split, and an optional group (``(_\\d+)?``) does not
     repeat, so both are allowed.
 
-    Several quantifiers in a row that can match the same characters, as in
-    ``.*.*.*x``, are refused too: a failing search tries every way of dividing
-    a stretch of the name among them, which grows with the name's length to the
-    power of their number, plus one for the starting position, unless ``^`` or
-    ``\\A`` anchors the pattern. Three such quantifiers are refused, or four with
-    characters between them that they also match (``.*a.*a.*a.*x``); anchored,
-    one more of either is allowed. Characters one of them cannot match
-    (``\\d+\\.\\d+``), a quantifier ending the pattern (``.*leg.*``) and a
-    possessive quantifier (``\\w*+``) do not count.
+    Otherwise the pattern is bounded: every quantifier, optional element and
+    alternative is a choice, and quantifiers that can divide the same
+    characters between them (``.*.*``, ``\\w+_\\w+``, ``[a-z]*[0-9]*[a-z]*``
+    through the empty ``[0-9]*``) multiply each other's choices, as in Weber and
+    Seidl's degree of ambiguity, as do further such pairs after them. An
+    unanchored search adds one more choice, where it starts. The steps are
+    counted for a name of ``max_length`` characters and refused above
+    SEARCH_BUDGET_SECONDS. A quantifier ending the pattern (``.*leg.*``) never
+    gives anything back and does not count; possessive quantifiers do not
+    either. Back-references count as a quantifier over any characters.
 
     Args:
         pattern: A valid regular expression.
+        flags: The flags the caller compiles it with; IGNORECASE makes more
+            classes overlap and each step slower.
+        max_length: The longest name the caller searches.
 
     Returns:
         A description of the first such construct, or None.
@@ -61,6 +104,73 @@ def exponential_regex_construct(pattern: str) -> Optional[str]:
     # The stdlib's own parser, private since 3.11 (formerly sre_parse).
     from re import _constants as sre, _parser  # type: ignore[attr-defined]
 
+    parsed = _parser.parse(pattern, flags)
+    found = _nested_repetition(parsed, sre)
+    if found:
+        return found
+    try:
+        seconds, factors = _bound(parsed, sre, max_length)
+    except _Unbounded as exc:
+        return str(exc)
+    if seconds <= SEARCH_BUDGET_SECONDS:
+        return None
+    return (
+        f"{factors} quantifiers that can divide the same characters between them, as in "
+        f".*.*.* (a failing search of a {max_length}-character name can take about "
+        f"{_readable(seconds)})"
+    )
+
+
+def name_searcher(
+    pattern: str,
+    flags: int = 0,
+    max_length: int = BLENDER_NAME_LENGTH,
+    subject: str = "The pattern",
+) -> Callable[[str], bool]:
+    """Return a function that says whether ``pattern`` is found in a name, as ``re.search``.
+
+    Python's ``re`` searches when ``exponential_regex_construct`` bounds it;
+    otherwise a Thompson-NFA simulation does, in time linear in the name.
+
+    Args:
+        pattern: A valid regular expression.
+        flags: Its flags.
+        max_length: The longest name searched, for the bound.
+        subject: How a refusal names the pattern, e.g. ``name_pattern``.
+
+    Returns:
+        ``search(name) -> bool``.
+
+    Raises:
+        re.error: The pattern is not valid.
+        RegexRefused: Neither way can search it in bounded time: a construct
+            that ``re`` backtracks on, together with one the linear-time
+            search does not support (a back-reference, an atomic group, a
+            possessive quantifier, a conditional, or a lookaround that cannot
+            be bounded itself).
+    """
+    compiled = re.compile(pattern, flags)
+    construct = exponential_regex_construct(pattern, flags, max_length)
+    if construct is None:
+        return lambda name: compiled.search(name) is not None
+    try:
+        return _LinearSearch(pattern, flags, max_length)
+    except _Unbounded as exc:
+        raise RegexRefused(
+            f"{subject} has {construct}, so Python's re could search for it for long, and "
+            f"{exc}, which the linear-time search used instead does not support. Rewrite it "
+            "without that, or with fewer quantifiers that can divide the same characters "
+            "(.* rather than .*.*)",
+            construct,
+        ) from None
+
+
+# ---------------------------------------------------------------------------
+# Bounding the backtracking
+# ---------------------------------------------------------------------------
+
+
+def _nested_repetition(parsed: Any, sre: Any) -> Optional[str]:
     repeats = (sre.MAX_REPEAT, sre.MIN_REPEAT, sre.POSSESSIVE_REPEAT)
 
     def walk(items: Any, repeated: bool) -> Optional[str]:
@@ -87,135 +197,253 @@ def exponential_regex_construct(pattern: str) -> Optional[str]:
                 return found
         return None
 
-    parsed = _parser.parse(pattern)
-    return walk(parsed, False) or _quantifier_run(parsed, sre)
+    return walk(parsed, False)
 
 
-def _quantifier_run(parsed: Any, sre: Any) -> Optional[str]:
-    """Describe the first too-long run of quantifiers that match the same characters."""
-    # The pattern's literals join the sample as they are met.
-    sample = list(_SAMPLE)
-    sequences: List[Tuple[Any, int, bool]] = [(parsed, parsed.state.flags, True)]
-    while sequences:
-        items, flags, top = sequences.pop(0)
-        elements: List[Tuple[str, Optional[Predicate]]] = []
-        _flatten(items, flags, elements, sequences, sample, sre)
-        anchored = top and bool(elements) and elements[0] == ("anchor", None)
-        if top and elements and elements[-1][0] == "run":
-            # Whatever division the search tries, nothing after it can fail.
-            elements.pop()
-        found = _longest_runs(elements, sample, int(anchored))
-        if found:
-            return found
-    return None
+class _Element:
+    """One position of a pattern laid out as a sequence.
 
-
-def _flatten(
-    items: Any,
-    flags: int,
-    out: List[Tuple[str, Optional[Predicate]]],
-    nested: List[Tuple[Any, int, bool]],
-    sample: List[str],
-    sre: Any,
-) -> None:
-    """List a sequence's elements: runs, characters, checks, anchors and barriers.
-
-    Groups that do not repeat are inlined. What a run, an alternative or a
-    lookaround holds is queued in ``nested`` to be checked on its own.
+    Kinds: ``loop`` (a choice of ``width + 1`` lengths of characters
+    ``predicate`` matches), ``char`` (one character, ``mandatory`` unless it
+    can be skipped), ``check`` (zero-width, may fail) and ``anchor`` (``^`` or
+    ``\\A`` at the start).
     """
+
+    __slots__ = ("kind", "predicate", "mandatory", "width", "group", "inside")
+
+    def __init__(
+        self, kind: str, predicate: Optional[Predicate] = None, mandatory: bool = False, width: int = 0
+    ) -> None:
+        self.kind = kind
+        self.predicate = predicate
+        self.mandatory = mandatory
+        self.width = width
+        #: The optional group whose taking or skipping this choice is.
+        self.group: Optional[int] = None
+        #: The optional groups this element is inside.
+        self.inside: Tuple[int, ...] = ()
+
+
+class _Context:
+    def __init__(self, sre: Any, max_length: int) -> None:
+        self.sre = sre
+        self.max_length = max_length
+        self.sample = list(_SAMPLE)
+        self.ignorecase = False
+        self.inside: Tuple[int, ...] = ()
+        self.groups = 0
+
+    def element(
+        self, kind: str, predicate: Optional[Predicate] = None, mandatory: bool = False, width: int = 0
+    ) -> _Element:
+        made = _Element(kind, predicate, mandatory, width)
+        made.inside = self.inside
+        return made
+
+    def literal(self, char: str) -> None:
+        if char not in self.sample:
+            self.sample.append(char)
+
+
+def _bound(parsed: Any, sre: Any, max_length: int, anchored: bool = False) -> Tuple[float, int]:
+    """Steps' worth of seconds a failing search may take, and the factors behind it.
+
+    ``anchored`` bounds one match attempt at one position instead of a search.
+    """
+    context = _Context(sre, max_length)
+    context.ignorecase = bool(parsed.state.flags & sre.SRE_FLAG_IGNORECASE)
+    sequences = _expand(parsed, parsed.state.flags, False, context)
+    steps = 0
+    factors = 0
+    for sequence in sequences:
+        count, width_factors = _sequence_steps(sequence, context, anchored)
+        steps += count
+        factors = max(factors, width_factors)
+    step = _STEP_SECONDS_IGNORECASE if context.ignorecase else _STEP_SECONDS
+    return steps * step, factors
+
+
+def _expand(items: Any, flags: int, optional: bool, context: _Context) -> List[List[_Element]]:
+    """Lay ``items`` out as the sequences their alternatives make."""
+    sequences: List[List[_Element]] = [[]]
     for op, av in items:
-        if op in (sre.LITERAL, sre.NOT_LITERAL, sre.ANY, sre.IN):
-            if op == sre.LITERAL and chr(av) not in sample:
-                sample.append(chr(av))
-            out.append(("char", _predicate(op, av, flags, sre)))
-        elif op in (sre.MAX_REPEAT, sre.MIN_REPEAT):
-            low, high, body = av
-            if high == sre.MAXREPEAT or high - low >= _WIDE:
-                out.append(("run", _union(body, flags, sample, sre)))
-                nested.append((body, flags, False))
-            elif low >= 1:
-                _flatten(body, flags, out, nested, sample, sre)
-            else:
-                nested.append((body, flags, False))
-        elif op == sre.SUBPATTERN:
-            _group, add_flags, del_flags, body = av
-            _flatten(body, (flags | add_flags) & ~del_flags, out, nested, sample, sre)
-        elif op == sre.AT:
-            # With re.MULTILINE, ^ also matches after every newline.
-            start = av == sre.AT_BEGINNING_STRING or (
-                av == sre.AT_BEGINNING and not flags & sre.SRE_FLAG_MULTILINE
+        alternatives = _expand_item(op, av, flags, optional, context)
+        sequences = [head + tail for head in sequences for tail in alternatives]
+        if len(sequences) > _MAX_SEQUENCES:
+            raise _Unbounded(f"more than {_MAX_SEQUENCES} combinations of alternatives")
+    return sequences
+
+
+def _expand_item(op: Any, av: Any, flags: int, optional: bool, context: _Context) -> List[List[_Element]]:
+    sre = context.sre
+    if flags & sre.SRE_FLAG_IGNORECASE:
+        context.ignorecase = True
+    if op in (sre.LITERAL, sre.NOT_LITERAL, sre.ANY, sre.IN):
+        if op == sre.LITERAL:
+            context.literal(chr(av))
+        return [[context.element("char", _predicate(op, av, flags, sre), not optional)]]
+    if op in (sre.MAX_REPEAT, sre.MIN_REPEAT):
+        low, high, body = av
+        width = context.max_length if high == sre.MAXREPEAT else min(high - low, context.max_length)
+        if width == 0:
+            return _expand(body, flags, optional or low == 0, context) if low else [[]]
+        if high == 1 and not _single_character(body, sre):
+            # An optional group: taking it or not is a choice, and what it holds counts.
+            choice = context.element("loop", _union(body, flags, context), False, 1)
+            context.groups += 1
+            choice.group = context.groups
+            context.inside += (choice.group,)
+            try:
+                inner = _expand(body, flags, True, context)
+            finally:
+                context.inside = context.inside[:-1]
+            return [[choice] + sequence for sequence in inner]
+        # The nested-repetition check left only bodies of fixed length here.
+        predicate = _union(body, flags, context)
+        elements = [context.element("char", predicate, not optional)] if low else []
+        return [elements + [context.element("loop", predicate, False, width)]]
+    if op == sre.POSSESSIVE_REPEAT:
+        low, _high, body = av
+        # It never gives back what it took, so no division is tried through it.
+        predicate = _union(body, flags, context)
+        elements = [context.element("char", predicate, not optional)] if low else []
+        return [elements + [context.element("check")]]
+    if op == sre.SUBPATTERN:
+        _group, add_flags, del_flags, body = av
+        return _expand(body, (flags | add_flags) & ~del_flags, optional, context)
+    if op == sre.ATOMIC_GROUP:
+        return _expand(av, flags, optional, context)
+    if op == sre.BRANCH:
+        sequences: List[List[_Element]] = []
+        for branch in av[1]:
+            sequences.extend(_expand(branch, flags, optional, context))
+            if len(sequences) > _MAX_SEQUENCES:
+                raise _Unbounded(f"more than {_MAX_SEQUENCES} combinations of alternatives")
+        return sequences
+    if op == sre.GROUPREF_EXISTS:
+        _group, yes, no = av
+        return _expand(yes, flags, optional, context) + _expand(no or [], flags, optional, context)
+    if op == sre.AT:
+        # With re.MULTILINE, ^ also matches after every newline.
+        start = av == sre.AT_BEGINNING_STRING or (
+            av == sre.AT_BEGINNING and not flags & sre.SRE_FLAG_MULTILINE
+        )
+        return [[context.element("anchor" if start else "check")]]
+    if op in (sre.ASSERT, sre.ASSERT_NOT):
+        # A lookaround searches at the positions it is reached from, so what it
+        # holds counts where it stands; none of it has to match there.
+        return [[context.element("check")] + sequence for sequence in _expand(av[1], flags, True, context)]
+    if op == sre.GROUPREF:
+        # It matches what its group took, so treat it as any number of any characters.
+        return [[context.element("loop", lambda char: True, False, context.max_length)]]
+    raise _Unbounded(f"the construct {op}")
+
+
+def _single_character(body: Any, sre: Any) -> bool:
+    items = list(body)
+    return len(items) == 1 and items[0][0] in (sre.LITERAL, sre.NOT_LITERAL, sre.ANY, sre.IN)
+
+
+def _sequence_steps(
+    sequence: List[_Element], context: _Context, anchored: bool = False
+) -> Tuple[int, int]:
+    """Bound a failing search's steps for one sequence; also return its loop factors."""
+    n = context.max_length
+    anchored = anchored or (bool(sequence) and sequence[0].kind == "anchor")
+    elements = list(sequence)
+    # Whatever the loops and optional characters at the end take, nothing after
+    # them can fail, so they never give anything back.
+    while elements and (
+        elements[-1].kind == "loop" or (elements[-1].kind == "char" and not elements[-1].mandatory)
+    ):
+        elements.pop()
+    loops = [index for index, element in enumerate(elements) if element.kind == "loop"]
+    sample = context.sample
+
+    def linked(first: int, second: int) -> bool:
+        """Both loops can take a stretch, and everything required between them, of one text."""
+        if elements[first].group in elements[second].inside:
+            # Skipping the group skips this loop too: no choice is made twice.
+            return False
+        a = elements[first].predicate
+        b = elements[second].predicate
+        assert a is not None and b is not None
+        shared = [char for char in sample if a(char) and b(char)]
+        if not shared:
+            return False
+        for element in elements[first + 1 : second]:
+            if element.kind == "char" and element.mandatory:
+                predicate = element.predicate
+                assert predicate is not None
+                if not any(predicate(char) for char in shared):
+                    return False
+        return True
+
+    # A path's factors are the first loop of a linked pair and each loop a pair
+    # leads to; pairs may follow each other along the sequence.
+    target: Dict[int, List[int]] = {}
+    best: List[int] = []
+    for index, second in enumerate(loops):
+        candidates: List[List[int]] = []
+        for first in loops[:index]:
+            if not linked(first, second):
+                continue
+            before = max(
+                [[elements[first].width]] + [target[t] for t in loops if t <= first and t in target],
+                key=_weight,
             )
-            out.append(("anchor" if start and not out else "check", None))
-        elif op in (sre.ASSERT, sre.ASSERT_NOT):
-            out.append(("check", None))
-            nested.append((av[1], flags, False))
-        elif op == sre.BRANCH:
-            out.append(("barrier", None))
-            nested.extend((branch, flags, False) for branch in av[1])
-        elif op == sre.ATOMIC_GROUP:
-            out.append(("barrier", None))
-            nested.append((av, flags, False))
-        elif op == sre.POSSESSIVE_REPEAT:
-            # Never gives back what it took, so no division is tried through it.
-            out.append(("barrier", None))
-            nested.append((av[2], flags, False))
-        else:
-            # Back-references and conditionals: no division is guessed through them.
-            out.append(("barrier", None))
+            candidates.append(before + [elements[second].width])
+        if candidates:
+            target[second] = max(candidates, key=_weight)
+            best = max(best, target[second], key=_weight)
+        best = max(best, [elements[second].width], key=_weight)
+    factors = list(best)
+    if not anchored:
+        factors = [n] + factors
+    return _compositions(factors, n), len(best)
 
 
-def _longest_runs(
-    elements: List[Tuple[str, Optional[Predicate]]], sample: List[str], extra: int
-) -> Optional[str]:
-    """Find a run longer than allowed; ``extra`` more are allowed when anchored."""
-    previous: Optional[Predicate] = None
-    adjacent = chained = most_adjacent = most_chained = 0
-    between = False
-    for kind, predicate in elements:
-        if kind == "run":
-            assert predicate is not None
-            if previous is not None and _overlap(previous, predicate, sample):
-                chained += 1
-                adjacent = 1 if between else adjacent + 1
-            else:
-                chained = adjacent = 1
-            previous, between = predicate, False
-            most_adjacent = max(most_adjacent, adjacent)
-            most_chained = max(most_chained, chained)
-        elif kind == "char":
-            assert predicate is not None
-            if previous is not None and not _overlap(previous, predicate, sample):
-                # The run before cannot take this character, so it pins the division.
-                previous, adjacent, chained = None, 0, 0
-            between = True
-        elif kind == "barrier":
-            previous, adjacent, chained = None, 0, 0
-    if most_adjacent > _ADJACENT + extra:
-        return (
-            f"{most_adjacent} quantifiers in a row that can match the same characters, "
-            "as in .*.*.*"
-        )
-    if most_chained > _SEPARATED + extra:
-        return (
-            f"{most_chained} quantifiers that can match the same characters, with only "
-            "characters they match too between them, as in .*a.*a.*a.*"
-        )
-    return None
+def _weight(widths: List[int]) -> float:
+    total = 1.0
+    for width in widths:
+        total *= width + 1
+    return total
 
 
-def _overlap(first: Predicate, second: Predicate, sample: List[str]) -> bool:
-    return any(first(char) and second(char) for char in sample)
+def _compositions(widths: List[int], n: int) -> int:
+    """Count the length tuples with each length at most its width and n in all."""
+    ways = [1] + [0] * n
+    for width in widths:
+        prefix = list(accumulate(ways))
+        ways = [prefix[s] - (prefix[s - width - 1] if s - width - 1 >= 0 else 0) for s in range(n + 1)]
+    return sum(ways)
 
 
-def _union(items: Any, flags: int, sample: List[str], sre: Any) -> Predicate:
+def _readable(seconds: float) -> str:
+    if seconds < 1:
+        return f"{seconds * 1000:.0f} ms"
+    if seconds < 3600:
+        return f"{seconds:.0f} s"
+    if seconds < 86400 * 365:
+        return f"{seconds / 3600:.0f} hours"
+    return "longer than a year"
+
+
+# ---------------------------------------------------------------------------
+# Character classes
+# ---------------------------------------------------------------------------
+
+
+def _union(items: Any, flags: int, context: _Context) -> Predicate:
     """Every character something in ``items`` can match; anything when unknown."""
+    sre = context.sre
     tests: List[Predicate] = []
 
     def collect(sequence: Any, scoped: int) -> bool:
         for op, av in sequence:
             if op in (sre.LITERAL, sre.NOT_LITERAL, sre.ANY, sre.IN):
-                if op == sre.LITERAL and chr(av) not in sample:
-                    sample.append(chr(av))
+                if op == sre.LITERAL:
+                    context.literal(chr(av))
                 tests.append(_predicate(op, av, scoped, sre))
             elif op in (sre.MAX_REPEAT, sre.MIN_REPEAT, sre.POSSESSIVE_REPEAT):
                 if not collect(av[2], scoped):
@@ -276,7 +504,7 @@ def _set_member(item: Any, value: Any, ignore: bool, ascii_only: bool, sre: Any)
 
         return in_range
     if item == sre.CATEGORY:
-        categories: dict[Any, Predicate] = {
+        categories: Dict[Any, Predicate] = {
             sre.CATEGORY_DIGIT: lambda c: c.isdecimal() and (c.isascii() or not ascii_only),
             sre.CATEGORY_SPACE: lambda c: c.isspace() and (c.isascii() or not ascii_only),
             sre.CATEGORY_WORD: lambda c: (c.isalnum() or c == "_") and (c.isascii() or not ascii_only),
@@ -295,3 +523,172 @@ def _set_member(item: Any, value: Any, ignore: bool, ascii_only: bool, sre: Any)
             return lambda char: not positive(char)
     # Anything else a class can hold: assume it matches every character.
     return lambda char: True
+
+
+# ---------------------------------------------------------------------------
+# The linear-time search
+# ---------------------------------------------------------------------------
+
+_CHAR, _SPLIT, _ASSERT, _MATCH = 0, 1, 2, 3
+
+
+class _LinearSearch:
+    """Search a name as ``re.search`` does, in time linear in its length.
+
+    The pattern compiles to a Thompson NFA whose threads advance together, one
+    character at a time, so no path is ever retried. Characters, anchors and
+    lookarounds are tested by ``re`` itself, compiled one item at a time, so
+    they mean exactly what they mean to ``re``; a lookaround is admitted only
+    when ``re`` searches it in bounded time at every position. The steps are
+    cached per state, character and position context.
+    """
+
+    def __init__(self, pattern: str, flags: int, max_length: int) -> None:
+        from re import _compiler, _constants as sre, _parser  # type: ignore[attr-defined]
+
+        self._sre = sre
+        self._compiler = _compiler
+        self._parser = _parser
+        self._max_length = max_length
+        parsed = _parser.parse(pattern, flags)
+        self._state = parsed.state
+        self._program: List[List[Any]] = []
+        self._atoms: List[Any] = []
+        self._atom_keys: Dict[Any, int] = {}
+        self._checks: List[Any] = []
+        self._match = self._add([_MATCH, 0, 0])
+        self._start = self._emit(parsed, parsed.state.flags, self._match)
+        self._atom_cache: Dict[Tuple[int, str], bool] = {}
+        self._steps: Dict[Any, frozenset] = {}
+
+    def __call__(self, name: str) -> bool:
+        checks = self._checks
+        contexts = (
+            [tuple(check.match(name, i) is not None for check in checks) for i in range(len(name) + 1)]
+            if checks
+            else None
+        )
+        state = self._closure((self._start,), contexts[0] if contexts else ())
+        if self._match in state:
+            return True
+        steps = self._steps
+        for index, char in enumerate(name):
+            context = contexts[index + 1] if contexts else ()
+            key = (state, char, context)
+            following = steps.get(key)
+            if following is None:
+                targets = [self._start]
+                for pc in state:
+                    instruction = self._program[pc]
+                    if instruction[0] == _CHAR and self._matches(instruction[1], char):
+                        targets.append(instruction[2])
+                following = self._closure(tuple(targets), context)
+                if len(steps) >= _CACHE_LIMIT:
+                    steps.clear()
+                steps[key] = following
+            if self._match in following:
+                return True
+            state = following
+        return False
+
+    def _closure(self, pcs: Tuple[int, ...], context: Tuple[bool, ...]) -> frozenset:
+        stack = list(pcs)
+        seen = set()
+        out = set()
+        program = self._program
+        while stack:
+            pc = stack.pop()
+            if pc in seen:
+                continue
+            seen.add(pc)
+            kind, first, second = program[pc]
+            if kind == _SPLIT:
+                stack.append(first)
+                stack.append(second)
+            elif kind == _ASSERT:
+                if context[first]:
+                    stack.append(second)
+            else:
+                out.add(pc)
+        return frozenset(out)
+
+    def _matches(self, atom: int, char: str) -> bool:
+        key = (atom, char)
+        found = self._atom_cache.get(key)
+        if found is None:
+            found = self._atoms[atom].match(char) is not None
+            if len(self._atom_cache) >= _CACHE_LIMIT:
+                self._atom_cache.clear()
+            self._atom_cache[key] = found
+        return found
+
+    def _add(self, instruction: List[Any]) -> int:
+        if len(self._program) >= _MAX_PROGRAM:
+            raise _Unbounded(f"more than {_MAX_PROGRAM} steps once its counted repeats are spelled out")
+        self._program.append(instruction)
+        return len(self._program) - 1
+
+    def _emit(self, items: Any, flags: int, follow: int) -> int:
+        for op, av in reversed(list(items)):
+            follow = self._emit_item(op, av, flags, follow)
+        return follow
+
+    def _emit_item(self, op: Any, av: Any, flags: int, follow: int) -> int:
+        sre = self._sre
+        if op in (sre.LITERAL, sre.NOT_LITERAL, sre.ANY, sre.IN):
+            return self._add([_CHAR, self._atom(op, av, flags), follow])
+        if op in (sre.MAX_REPEAT, sre.MIN_REPEAT):
+            low, high, body = av
+            if high == sre.MAXREPEAT:
+                loop = self._add([_SPLIT, None, follow])
+                self._program[loop][1] = self._emit(body, flags, loop)
+                entry = loop
+            else:
+                entry = follow
+                for _ in range(high - low):
+                    entry = self._add([_SPLIT, self._emit(body, flags, entry), follow])
+            for _ in range(low):
+                entry = self._emit(body, flags, entry)
+            return entry
+        if op == sre.SUBPATTERN:
+            _group, add_flags, del_flags, body = av
+            return self._emit(body, (flags | add_flags) & ~del_flags, follow)
+        if op == sre.BRANCH:
+            entries = [self._emit(branch, flags, follow) for branch in av[1]]
+            entry = entries[-1]
+            for other in reversed(entries[:-1]):
+                entry = self._add([_SPLIT, other, entry])
+            return entry
+        if op == sre.AT:
+            return self._add([_ASSERT, self._check(op, av, flags), follow])
+        if op in (sre.ASSERT, sre.ASSERT_NOT):
+            body = av[1]
+            seconds, _factors = _bound(body, sre, self._max_length, anchored=True)
+            # It runs at every position of the name.
+            if seconds * (self._max_length + 1) > SEARCH_BUDGET_SECONDS:
+                raise _Unbounded("a lookaround that can itself backtrack for long")
+            return self._add([_ASSERT, self._check(op, av, flags), follow])
+        names = {
+            sre.GROUPREF: "a back-reference",
+            sre.GROUPREF_EXISTS: "a conditional group",
+            sre.ATOMIC_GROUP: "an atomic group",
+            sre.POSSESSIVE_REPEAT: "a possessive quantifier",
+        }
+        raise _Unbounded(names.get(op, f"the construct {op}"))
+
+    def _compile_item(self, op: Any, av: Any, flags: int) -> Any:
+        state = copy.copy(self._state)
+        state.flags = flags
+        return self._compiler.compile(self._parser.SubPattern(state, [(op, av)]), flags)
+
+    def _atom(self, op: Any, av: Any, flags: int) -> int:
+        key = (op, repr(av), flags)
+        index = self._atom_keys.get(key)
+        if index is None:
+            self._atoms.append(self._compile_item(op, av, flags))
+            index = self._atom_keys[key] = len(self._atoms) - 1
+        return index
+
+    def _check(self, op: Any, av: Any, flags: int) -> int:
+        self._checks.append(self._compile_item(op, av, flags))
+        return len(self._checks) - 1

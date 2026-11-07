@@ -377,7 +377,7 @@
           "name_pattern": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
-            "description": "Python regular expression searched for in each object name. Refused because their search can run for seconds to hours: a repeated group that holds a quantifier or alternatives, as in (\\w+)+, and three quantifiers in a row that can match the same characters, as in .*.*.*x (four with only such characters between them)."
+            "description": "Python regular expression searched for in each object name. One that Python's re could search for long, such as (\\w+)+ or .*.*.*x, is searched in time linear in the name instead; it is refused only if it also needs a back-reference, an atomic group, a possessive quantifier or a conditional, which that search lacks."
           },
           "object_type": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
@@ -1646,7 +1646,7 @@
           "timeout": {
             "anyOf": [{"type": "number"}, {"type": "null"}],
             "default": null,
-            "description": "Maximum wall-clock seconds to wait for the script; ``None`` waits for it to finish. In attached mode the wait, time spent behind other calls included, is also capped by BLENDER__CONNECTION_TIMEOUT. Past it the call returns timed_out=true while the script keeps running."
+            "description": "Maximum wall-clock seconds to wait for the script; ``None`` waits for it to finish. In attached mode the wait, time spent behind other calls included, is also capped by BLENDER__CONNECTION_TIMEOUT. A script that started by then returns timed_out=true and keeps running; one still waiting behind other calls never runs and fails with TimeoutError (details.executed false)."
           },
           "max_output_chars": {
             "default": 32000,

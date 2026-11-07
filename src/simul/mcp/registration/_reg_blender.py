@@ -48,6 +48,7 @@ from pydantic import BaseModel
 
 from ...adapters.blender_runtime import BlenderRuntimeSession
 from ...tool_surfaces import THIN_BLENDER_TOOLS
+from ...utils.errors import exception_type_name
 from ..schemas.blender import (
     LISTING_JSON_BYTES_MAX,
     SCRIPT_OUTPUT_CHARS_DEFAULT,
@@ -558,12 +559,16 @@ def _attach(server: "SimulMCPServer", request: Any) -> Dict[str, Any]:
     try:
         return attachments.attach(request.instance_id, request.window_id)
     except (ValueError, RuntimeError) as exc:
-        # List the candidates so the agent can choose without a shell.
+        # List the candidates so the agent can choose without a shell; the
+        # refusal may have listed them already.
+        details = dict(getattr(exc, "details", None) or {})
+        if "instances" not in details:
+            details["instances"] = attachments.instances()
         return {
             "success": False,
             "error": str(exc),
-            "error_type": type(exc).__name__,
-            "details": {"instances": attachments.instances()},
+            "error_type": exception_type_name(exc),
+            "details": details,
         }
 
 

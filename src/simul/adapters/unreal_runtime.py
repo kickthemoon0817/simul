@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..utils.paths import PathPolicy
+from ..utils.regex_guard import UNREAL_TAG_LENGTH, RegexRefused
 from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
@@ -4383,10 +4384,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             label: Semantic label (actor tag) to search for.
             match_mode: exact (a tag equals label), contains (a tag contains
                 label) or regex (label is a Python regular expression searched
-                for in each tag; a repeated group that holds a quantifier or
-                alternatives, as in (\\w+)+, and three quantifiers in a row that
-                can match the same characters, as in .*.*.*x, are refused because
-                their search can run for seconds to hours); every mode ignores case.
+                for in each tag, ignoring case; a pattern whose failing search can
+                run for long on a 1023-character tag is refused, such as a repeated
+                group that holds a quantifier or alternatives, as in (\\w+)+, or two
+                quantifiers that can divide the same characters between them, as in
+                .*.*x or A*a*x); every mode ignores case.
             max_results: Maximum number of actors to return, 1 to 5000.
 
         Returns:
@@ -4399,9 +4401,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         Raises:
             ValueError: match_mode is not exact, contains or regex; in regex
-                mode, label is not a valid regular expression or its search
-                can backtrack for long (see ``simul.utils.regex_guard``); or
-                max_results is out of range.
+                mode, label is not a valid regular expression; or max_results
+                is out of range.
+            RegexRefused: In regex mode, the label's search can backtrack for
+                long (``error_type`` ValidationError; see
+                ``simul.utils.regex_guard``).
         """
         modes = ("exact", "contains", "regex")
         if match_mode not in modes:
@@ -4417,14 +4421,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 raise ValueError(
                     f"label is not a valid regular expression: {exc}"
                 ) from exc
-            construct = _exponential_regex_construct(label)
+            # The editor script compiles the label with re.IGNORECASE and
+            # searches every tag on the game thread, where nothing can stop it.
+            construct = _exponential_regex_construct(label, re.IGNORECASE, UNREAL_TAG_LENGTH)
             if construct is not None:
-                raise ValueError(
-                    f"label has {construct}: a failing search for it tries every "
-                    "way of dividing a tag among those quantifiers, which can freeze "
-                    "the editor for seconds to hours. Use one plain quantifier per "
-                    "stretch of the tag (\\w+ rather than (\\w+)+, .* rather than "
-                    ".*.*), anchor the pattern with ^, or use contains mode"
+                raise RegexRefused(
+                    f"label has {construct}. The editor searches each tag with Python's "
+                    "re on its game thread, where nothing can stop a search. Use one "
+                    "plain quantifier per stretch of the tag (\\w+ rather than (\\w+)+, "
+                    ".* rather than .*.*), anchor the pattern with ^, or use contains mode",
+                    construct,
                 )
         args = {"label": label, "match_mode": match_mode, "max_results": max_results}
         return await self._execute_json_script(

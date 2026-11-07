@@ -20,31 +20,42 @@ import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import bpy
 from bpy.app.handlers import persistent
 
 from ..adapters.blender_runtime import BlenderRuntimeSession
-from ..utils.errors import exception_message
+from ..utils.errors import exception_message, exception_type_name
 from ..utils.paths import PathPolicy, state_dir
 from .agent_control import reset_ui
 from .agent_cursor import cursors, hide_annotations, observations
 from .protocol import (
+    BRIDGE_BUSY,
     MAX_MESSAGE_BYTES,
     PROTOCOL_VERSION,
     START_ACK,
     BridgeFiles,
     BridgeWire,
     protocol_mismatch_message,
+    request_prefix,
 )
 
 logger = logging.getLogger(__name__)
 
-#: Connections held at once, waiting or being answered. A further one is closed
-#: unread, so its request certainly did not run, and a client of an add-on with
-#: START_ACK sends it again.
+#: Connections held at once, waiting or being answered. When all are taken, a
+#: new one replaces a refused or unauthenticated one; failing that it is closed
+#: unread, so its request certainly did not run, and the client sends it again.
 MAX_CONNECTIONS = 64
+#: Seconds (of the bridge's own polling) a connection has to send the protocol
+#: and token every request starts with; a client sends them in its first bytes.
+AUTH_SECONDS = 2.0
+#: Seconds (of polling) an authenticated client has to send its whole request.
+REQUEST_SECONDS = 60.0
+#: Request bytes held across all connections, read or waiting their turn. A
+#: request that would go over it is refused with BridgeBusy, which its client
+#: retries, unless no other connection holds any.
+BUFFER_BUDGET = 2 * MAX_MESSAGE_BYTES
 #: Seconds a connection may go without sending or reading a byte while the
 #: bridge polls. Time Blender's main thread spends elsewhere (an operation, a
 #: render, a modal dialog) does not count: the bridge could not read then.
@@ -178,6 +189,13 @@ class RequestAbandoned(ConnectionError):
     """The client disconnected before its request started, so it did not run."""
 
 
+def _expired() -> TimeoutError:
+    """The refusal of a request whose deadline passed before it could start."""
+    error = TimeoutError("Request expired before execution; no operation was performed")
+    error.details = {"executed": False}  # type: ignore[attr-defined]
+    return error
+
+
 @dataclass
 class PendingConnection:
     """One connection polled on Blender's main thread, from request to reply.
@@ -185,23 +203,33 @@ class PendingConnection:
     Attributes:
         socket: The accepted, nonblocking socket.
         expires: Monotonic time at which a connection that is still sending its
-            request, or reading its reply, is dropped; moved on by every byte
-            and by the time Blender's main thread was busy elsewhere.
+            request, or reading its reply, is dropped for idling; moved on by
+            every byte and by the time Blender's main thread was busy elsewhere.
+        deadline: Monotonic time by which the request must have arrived: the
+            protocol and token within AUTH_SECONDS, then the rest within
+            REQUEST_SECONDS; moved on like ``expires`` while Blender is busy.
         incoming: The request bytes read so far.
         outgoing: Reply bytes not yet sent.
-        request: The decoded request once its line is complete.
-        ready: Whether ``request`` waits for its turn.
+        line: The complete request, still undecoded, while it waits its turn.
+        request: The decoded request once it is answered.
+        ready: Whether ``line`` waits for its turn.
         order: Arrival order among waiting requests.
+        authenticated: Whether the request began with this bridge's token.
+        answered: Whether its reply is being sent.
         discarding: A refused request whose remaining bytes are read and dropped.
     """
 
     socket: socket.socket
     expires: float
+    deadline: float = float("inf")
     incoming: bytearray = field(default_factory=bytearray)
     outgoing: bytes = b""
+    line: Optional[bytes] = None
     request: Any = None
     ready: bool = False
     order: int = 0
+    authenticated: bool = False
+    answered: bool = False
     discarding: bool = False
 
 
@@ -219,6 +247,7 @@ class BlenderBridge:
         self.instance_id = uuid.uuid4().hex
         self.document_id = uuid.uuid4().hex
         self.token = secrets.token_urlsafe(32)
+        self._prefix = request_prefix(self.token)
         self.listener: socket.socket | None = None
         self.connections: list[PendingConnection] = []
         self._arrivals = itertools.count()
@@ -292,11 +321,10 @@ class BlenderBridge:
         if self._last_poll and stalled > STALL_SECONDS:
             for pending in self.connections:
                 pending.expires += stalled
+                pending.deadline += stalled
         if self.deferred_undo_step is not None:
             step, self.deferred_undo_step = self.deferred_undo_step, None
             self._push_undo_step(step, "")
-        cursors.prune()
-        observations.prune()
         self._accept()
         for pending in list(self.connections):
             try:
@@ -312,6 +340,12 @@ class BlenderBridge:
             waiting = [p for p in self.connections if p.ready]
             if not waiting or self._answer(min(waiting, key=lambda p: p.order)):
                 break
+        # Cosmetic, and last: a failure here must not keep requests from being served.
+        try:
+            cursors.prune()
+            observations.prune()
+        except Exception:
+            logger.exception("Blender bridge could not prune agent annotations")
 
     def _accept(self) -> None:
         assert self.listener is not None
@@ -324,14 +358,29 @@ class BlenderBridge:
                 logger.exception("Blender bridge could not accept a connection")
                 return
             if len(self.connections) >= MAX_CONNECTIONS:
-                # Unread, so it certainly did not run; an acknowledging client
-                # sends it again.
-                connection.close()
-                continue
+                victim = self._evictable()
+                if victim is None:
+                    # Unread, so it certainly did not run; an acknowledging
+                    # client sends it again.
+                    connection.close()
+                    continue
+                self._close(victim)
             connection.setblocking(False)
+            now = time.monotonic()
             self.connections.append(
-                PendingConnection(connection, time.monotonic() + IDLE_SECONDS)
+                PendingConnection(connection, now + IDLE_SECONDS, now + AUTH_SECONDS)
             )
+
+    def _evictable(self) -> Optional[PendingConnection]:
+        """The connection to give up for a new one: a refused one, else an unauthenticated one."""
+        for wanted in (
+            lambda p: p.discarding,
+            lambda p: not p.authenticated and not p.answered,
+        ):
+            candidates = [p for p in self.connections if wanted(p)]
+            if candidates:
+                return candidates[0]
+        return None
 
     def _progress(self, pending: PendingConnection) -> None:
         """Move one connection's bytes as far as its socket allows without blocking."""
@@ -345,15 +394,29 @@ class BlenderBridge:
                 # It gave up while the request waited: nothing ran or will.
                 self._close(pending)
             return
-        if pending.request is None:
-            self._read(pending)
-        else:
+        if pending.answered:
             self._send(pending)
-        if pending in self.connections and time.monotonic() > pending.expires:
+        else:
+            self._read(pending)
+        if pending not in self.connections or pending.discarding:
+            return
+        now = time.monotonic()
+        if not pending.answered and not pending.ready and now > pending.deadline:
+            if pending.authenticated:
+                self._refuse(
+                    pending,
+                    "RequestTimeout",
+                    f"Blender bridge request took longer than {REQUEST_SECONDS:g} s to "
+                    "arrive; it was not executed.",
+                    {"code": "request_timeout"},
+                )
+            else:
+                self._close(pending)
+        elif now > pending.expires:
             self._close(pending)
 
     def _read(self, pending: PendingConnection) -> None:
-        while pending.request is None and not pending.discarding and pending in self.connections:
+        while not pending.ready and not pending.discarding and pending in self.connections:
             try:
                 chunk = pending.socket.recv(READ_CHUNK)
             except BlockingIOError:
@@ -364,45 +427,109 @@ class BlenderBridge:
                 return
             pending.expires = time.monotonic() + IDLE_SECONDS
             pending.incoming.extend(chunk)
-            if b"\n" in chunk:
-                self._parse(pending)
+            complete = b"\n" in chunk
+            if not pending.authenticated:
+                verdict = self._authenticate(pending)
+                if verdict is None:
+                    continue
+                if verdict is not True:
+                    self._refuse(pending, *verdict)
+                    return
+                pending.authenticated = True
+                pending.deadline = time.monotonic() + REQUEST_SECONDS
+                complete = b"\n" in pending.incoming
+            held = self._buffered()
+            others = held - len(pending.incoming)
+            if held > BUFFER_BUDGET and others > 0:
+                self._refuse(
+                    pending,
+                    BRIDGE_BUSY,
+                    f"Blender bridge already holds {others / 2**20:.0f} MiB of other requests "
+                    "waiting to be read or run; this one was not executed. Try again shortly.",
+                    {"code": "bridge_busy"},
+                )
+                return
+            if complete:
+                self._complete(pending)
             elif len(pending.incoming) > MAX_MESSAGE_BYTES:
                 self._refuse_too_large(pending)
 
-    def _parse(self, pending: PendingConnection) -> None:
-        line, _, _ = bytes(pending.incoming).partition(b"\n")
-        pending.incoming = bytearray()
-        if len(line) + 1 > MAX_MESSAGE_BYTES:
+    def _buffered(self) -> int:
+        return sum(len(p.incoming) + len(p.line or b"") for p in self.connections)
+
+    def _authenticate(
+        self, pending: PendingConnection
+    ) -> Optional[Any]:
+        """Check the protocol and token a request starts with, before reading the rest.
+
+        Returns:
+            True when they are this bridge's, None while more bytes are needed,
+            or the refusal's (error type, message, details).
+        """
+        data = bytes(pending.incoming[: len(self._prefix)])
+        head = b'{"protocol": '
+        if not head.startswith(data[: len(head)]):
+            return (
+                "ValueError",
+                protocol_mismatch_message(PROTOCOL_VERSION, "older than 11, which sends the token last"),
+                {"code": "protocol_mismatch"},
+            )
+        if len(data) > len(head):
+            version = data[len(head):].split(b",", 1)
+            if len(version) == 2 or len(version[0]) > 6:
+                if version[0] != str(PROTOCOL_VERSION).encode():
+                    return (
+                        "ValueError",
+                        protocol_mismatch_message(PROTOCOL_VERSION, version[0].decode("ascii", "replace")),
+                        {"code": "protocol_mismatch"},
+                    )
+        if len(data) < len(self._prefix):
+            if b"\n" in pending.incoming:
+                return ("PermissionError", "Blender bridge authentication failed", {"code": "unauthenticated"})
+            return None
+        if not secrets.compare_digest(data, self._prefix):
+            return ("PermissionError", "Blender bridge authentication failed", {"code": "unauthenticated"})
+        return True
+
+    def _complete(self, pending: PendingConnection) -> None:
+        end = pending.incoming.find(b"\n")
+        if end + 1 > MAX_MESSAGE_BYTES:
             self._refuse_too_large(pending)
             return
-        try:
-            pending.request = json.loads(line)
-        except (ValueError, RecursionError):
-            self._refuse(
-                pending,
-                "InvalidRequest",
-                "Blender bridge request is not valid JSON; it was not executed.",
-                {},
-            )
-            return
+        # Kept undecoded until its turn: one request is decoded at a time.
+        pending.line = bytes(pending.incoming[:end])
+        pending.incoming = bytearray()
         pending.ready = True
         pending.order = next(self._arrivals)
 
     def _answer(self, pending: PendingConnection) -> bool:
-        """Dispatch a waiting request and start sending its reply.
+        """Decode and dispatch a waiting request, and start sending its reply.
 
         Returns:
             Whether it started an operation.
         """
         pending.ready = False
+        pending.answered = True
+        line, pending.line = pending.line or b"", None
         started = False
+        try:
+            pending.request = json.loads(line)
+        except (ValueError, RecursionError):
+            reply: dict[str, Any] = {
+                "request_id": None,
+                "success": False,
+                "error": "InvalidRequest: Blender bridge request is not valid JSON; it was not executed.",
+                "error_type": "InvalidRequest",
+                "details": {"code": "invalid_request", "executed": False},
+            }
+        else:
 
-        def start() -> None:
-            nonlocal started
-            self._acknowledge_start(pending)
-            started = True
+            def start() -> None:
+                nonlocal started
+                self._acknowledge_start(pending)
+                started = True
 
-        reply = self.dispatch(pending.request, start)
+            reply = self.dispatch(pending.request, start)
         pending.outgoing += self._encode_reply(pending.request, reply)
         pending.expires = time.monotonic() + IDLE_SECONDS
         try:
@@ -413,6 +540,10 @@ class BlenderBridge:
 
     def _acknowledge_start(self, pending: PendingConnection) -> None:
         """Confirm the client still waits, and acknowledge the start if it asked.
+
+        The whole acknowledgement is handed to the socket before the operation
+        runs, so a client that did not receive it can rely on the operation
+        not having run.
 
         Raises:
             RequestAbandoned: The client is gone or the acknowledgement could
@@ -428,13 +559,18 @@ class BlenderBridge:
         message = BridgeWire.encode({"request_id": request.get("request_id"), "started": True})
         try:
             sent = pending.socket.send(message)
+            if sent < len(message):
+                # A few dozen bytes into an empty send buffer go whole; should
+                # they not, wait briefly for the rest rather than run unannounced.
+                pending.socket.settimeout(1.0)
+                try:
+                    pending.socket.sendall(message[sent:])
+                finally:
+                    pending.socket.setblocking(False)
         except OSError as exc:
             raise RequestAbandoned(
                 "Blender could not acknowledge the request's start; it was not executed"
             ) from exc
-        # A few dozen bytes into an empty send buffer go whole; any rest goes
-        # out ahead of the reply.
-        pending.outgoing = message[sent:]
 
     @staticmethod
     def _client_gone(pending: PendingConnection) -> bool:
@@ -481,7 +617,7 @@ class BlenderBridge:
             f"Blender bridge request exceeds {limit} MiB, the most the bridge reads per "
             "call; it was not executed. Send less per call, for example a large mesh as "
             "several objects.",
-            {"limit_bytes": MAX_MESSAGE_BYTES},
+            {"code": "request_too_large", "limit_bytes": MAX_MESSAGE_BYTES},
         )
 
     def _refuse(
@@ -494,6 +630,7 @@ class BlenderBridge:
         for up to LINGER_SECONDS while the refusal goes out.
         """
         pending.incoming = bytearray()
+        pending.line = None
         pending.request = None
         pending.discarding = True
         pending.expires = time.monotonic() + LINGER_SECONDS
@@ -540,9 +677,7 @@ class BlenderBridge:
                     "Blender instance changed; run simul blender attach again"
                 )
             if time.time() > float(request["deadline"]):
-                raise TimeoutError(
-                    "Request expired before execution; no operation was performed"
-                )
+                raise _expired()
             if request["method"] == "hello":
                 result = self.describe()
             else:
@@ -560,8 +695,10 @@ class BlenderBridge:
                 "success": False,
                 # Notes carry context such as the object a bpy operator was
                 # adding a rigid body to; str(exc) alone would drop it.
-                "error": f"{type(exc).__name__}: {message}",
-                "error_type": type(exc).__name__,
+                "error": f"{exception_type_name(exc)}: {message}",
+                # A declared error_type (ValidationError for a refused pattern)
+                # is what envelopes report; any other exception is its class.
+                "error_type": exception_type_name(exc),
                 "details": getattr(exc, "details", {}),
             }
 
@@ -620,9 +757,7 @@ class BlenderBridge:
         def start() -> None:
             # Checked again: the request may have waited behind others.
             if time.time() > float(request["deadline"]):
-                raise TimeoutError(
-                    "Request expired before execution; no operation was performed"
-                )
+                raise _expired()
             if on_start is not None:
                 on_start()
 

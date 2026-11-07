@@ -668,14 +668,27 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             client.execute_script(
                 "bpy.data.collections.remove(bpy.data.collections['HiddenCameras'])"
             )
-            # A pattern that can backtrack for hours is refused before it
-            # runs on Blender's main thread; a plain one still searches.
-            refused = tool("search_blender_objects", name_pattern=r"^(\w+)+_x$")
-            assert refused["success"] is False, refused
-            assert "repeated group" in refused["error"]
-            # B1-17: froze Blender for 15.6 s over ten 63-character names.
-            refused = tool("search_blender_objects", name_pattern=".*.*.*.*.*.*x")
-            assert "6 quantifiers in a row" in refused["error"], refused
+            # Patterns Python's re backtracks on for hours on Blender's main
+            # thread are searched in linear time instead (B1-17: .*.*.*.*.*.*x
+            # froze Blender for 15.6 s over ten 63-character names).
+            client.execute_script(
+                "mesh = bpy.data.meshes.new('LongNames')\n"
+                "for i in range(10):\n"
+                "    o = bpy.data.objects.new(('LongAssetName_' + str(i)).ljust(255, 'a'), mesh)\n"
+                "    bpy.context.scene.collection.objects.link(o)\n"
+            )
+            for pattern in (r"^(\w+)+_x$", ".*.*.*.*.*.*x", r".*left.*front.*wheel.*joint"):
+                started = time.monotonic()
+                searched = tool("search_blender_objects", name_pattern=pattern)
+                assert searched["success"] is True and searched["total"] == 0, searched
+                assert time.monotonic() - started < 5, pattern
+            refused = tool("search_blender_objects", name_pattern=r"(.*).*.*.*\1x")
+            assert refused["error_type"] == "ValidationError", refused
+            assert refused["details"]["code"] == "regex_backtracking"
+            client.execute_script(
+                "for o in [o for o in bpy.data.objects if o.name.startswith('LongAssetName_')]:\n"
+                "    bpy.data.objects.remove(o)\n"
+            )
             found = tool("search_blender_objects", name_pattern=r"^Attachment\w+$")
             assert [o["name"] for o in found["objects"]] == ["AttachmentProbe"]
             # The tool lists location as optional; omitting it means the origin.

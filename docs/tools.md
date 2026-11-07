@@ -851,7 +851,9 @@ Behaviour worth knowing:
 - In attached mode calls sent together wait their turn on Blender's main thread
   instead of failing. When one gets no answer, its error (`TimeoutError` or
   `ConnectionError`) says in `details.executed` whether it ran: `false` is safe
-  to retry. A script past its own timeout reports `timed_out: true`, as in
+  to retry. A bridge holding 64 MiB of requests refuses another with
+  `BridgeBusy` before reading it, and Simul retries that while its timeout
+  allows. A script past its own timeout reports `timed_out: true`, as in
   embedded mode. Requests up to 32 MiB of JSON are read however long they take
   to arrive. Details:
   [blender-attachment.md](blender-attachment.md#concurrent-calls-timeouts-and-large-requests).
@@ -1341,18 +1343,23 @@ Behaviour worth knowing:
   the pose is the simulation's result for the frame, and `warning` explains
   when it is not. An add-on built before this report answers without these
   fields, and the server returns them as `null`.
-- `search_blender_objects` refuses a `name_pattern` whose failing search
-  backtracks for long on Blender's main thread, where nothing can stop it: a
-  group holding a quantifier or alternatives that repeats, such as `(\w+)+`
-  (hours on a 40-character name), and three quantifiers in a row that can match
-  the same characters, such as `.*.*.*x`, or four with only such characters
-  between them, such as `.*a.*a.*a.*x`. A failing search tries every way of
-  dividing the name among them: on a 255-character name, Blender 5's limit,
-  three `.*` took 0.1 s and four 6 s, each more about 50 times as long. A
-  pattern anchored with `^` or `\A` may have one more of either, and characters
-  one of them cannot match (`\d+\.\d+`), a quantifier ending the pattern
-  (`.*leg.*`) and possessive quantifiers do not count.
-  `get_unreal_actor_by_semantic_label` refuses the same patterns in regex mode.
+- `search_blender_objects` searches a `name_pattern` that Python's `re`
+  could backtrack on for long, such as `(\w+)+`, `.*.*.*x` or
+  `.*left.*front.*wheel.*joint`, with a Thompson-NFA simulation instead, whose
+  time grows linearly with the name, so Blender's main thread cannot freeze on
+  it. Which patterns `re` may search is bounded in `simul.utils.regex_guard`:
+  every quantifier, optional element and alternative is a choice, quantifiers
+  that can divide the same characters between them multiply each other's
+  choices (through quantifiers that can match nothing, optional groups and
+  lookarounds too), and an unanchored search adds one for where it starts; the
+  steps are counted for a 255-character name, Blender 5's limit. A pattern that
+  also needs a back-reference, an atomic group, a possessive quantifier or a
+  conditional, which the linear-time search lacks, is refused with
+  `error_type: "ValidationError"` and `details.code: "regex_backtracking"`.
+  `get_unreal_actor_by_semantic_label` searches tags in the editor with `re`
+  and `re.IGNORECASE`, so in regex mode it refuses the patterns that bound does
+  not allow for a 1023-character tag under IGNORECASE (`.*.*x`, `A*a*x`), with
+  the same error; contains mode takes any label.
 - `execute_blender_script` returns the first `max_output_chars` characters of
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a

@@ -54,6 +54,18 @@ class AttachmentTargetChanged(AttachmentError):
     error_type = "AttachmentTargetChanged"
 
 
+class InstanceNotFound(AttachmentError):
+    """No discovered Blender instance has the requested id."""
+
+    error_type = "NotFoundError"
+
+
+class InstanceBusy(AttachmentError):
+    """The Blender instance is running but did not answer in time: its main thread is busy."""
+
+    error_type = "InstanceBusy"
+
+
 class BlenderRequestTimeout(TimeoutError):
     """Blender did not reply in time; ``details["executed"]`` says whether the request ran.
 
@@ -111,14 +123,15 @@ def _timed_out(method: str, timeout: float, executed: Optional[bool]) -> Blender
 
 
 def _connection_lost(
-    method: str, cause: BaseException, executed: Optional[bool]
+    method: str, cause: BaseException, executed: Optional[bool], attempts: int = 1
 ) -> BlenderConnectionLost:
     """Say whether a request whose connection ended ran, and whether retrying is safe."""
     if executed is False:
+        tries = "" if attempts <= 1 else f" on each of {attempts} attempts until the timeout"
         message = (
-            f"The Blender bridge closed the connection before starting {method}, again on "
-            f"each retry until the timeout ({cause}). The request was not executed, so "
-            "retrying is safe; the add-on may be restarting or holding too many requests."
+            f"The Blender bridge closed the connection before starting {method}{tries} "
+            f"({cause}). The request was not executed, so retrying is safe; the add-on may "
+            "be restarting or holding too many requests."
         )
     elif executed is True:
         message = (
@@ -131,11 +144,20 @@ def _connection_lost(
             "may or may not have run. No retry was sent: inspect Blender before retrying. "
             f"{_OLD_ADDON}"
         )
-    return BlenderConnectionLost(message, {"executed": executed, "method": method})
+    return BlenderConnectionLost(
+        message, {"executed": executed, "method": method, "attempts": attempts}
+    )
 
 
-def _script_timed_out(timeout: float, executed: Optional[bool]) -> dict[str, Any]:
-    """execute_script's own timeout result, as embedded mode reports it (``timed_out``)."""
+def _script_timed_out(
+    timeout: float, executed: Optional[bool], running: Optional[float] = None
+) -> dict[str, Any]:
+    """execute_script's own timeout result, as embedded mode reports it (``timed_out``).
+
+    ``duration_seconds`` is how long the script had been running when the wait
+    ended, counted from Blender's start acknowledgement; without one (an older
+    add-on), the whole wait, time queued behind other calls included.
+    """
     if executed:
         state = "It is still running on Blender's main thread, which stays busy until it returns."
     else:
@@ -148,7 +170,7 @@ def _script_timed_out(timeout: float, executed: Optional[bool]) -> dict[str, Any
         "output_truncated": False,
         "output_total_chars": 0,
         "return_value": None,
-        "duration_seconds": round(float(timeout), 4),
+        "duration_seconds": round(float(timeout if running is None else running), 4),
         "timed_out": True,
         "error": (
             f"TimeoutError: script did not finish within {timeout:g}s. {state} It cannot be "
@@ -214,6 +236,9 @@ class BlenderConnection:
                 # certainly did not run and naming the stale target is safe.
                 raise self._stale(attachment, "its bridge refused the connection") from exc
             except BridgeRemoteError as exc:
+                if exc.remote_type == "TimeoutError" and exc.details.get("executed") is False:
+                    # Its deadline passed while it waited behind other calls.
+                    raise _timed_out(method, timeout, False) from exc
                 if exc.remote_type == "SandboxDenied":
                     raise SandboxDenied(
                         exc.details.get("file_path", ""), exc.details
@@ -227,10 +252,12 @@ class BlenderConnection:
                 executed = getattr(exc, "executed", None)
                 if method == "execute_script" and executed is not False:
                     # The script exceeded its timeout, as the schema's timed_out says.
-                    return _script_timed_out(timeout, executed)
+                    return _script_timed_out(timeout, executed, getattr(exc, "running_seconds", None))
                 raise _timed_out(method, timeout, executed) from exc
             except ConnectionError as exc:
-                raise _connection_lost(method, exc, getattr(exc, "executed", None)) from exc
+                raise _connection_lost(
+                    method, exc, getattr(exc, "executed", None), getattr(exc, "attempts", 1)
+                ) from exc
             if method == "execute_script" and result.get("error"):
                 # Also covers add-ons built before the session added the hint itself.
                 result = {**result, "error": add_context_hint(result["error"])}
@@ -351,6 +378,9 @@ class BlenderAttachments:
                     {
                         "instance_id": path.stem.removeprefix("instance-"),
                         "reachable": False,
+                        # A bridge that took the connection but did not answer in
+                        # time is running with its main thread busy.
+                        "busy": isinstance(exc, TimeoutError),
                         "error": str(exc),
                     }
                 )
@@ -367,9 +397,12 @@ class BlenderAttachments:
         if instance_id is not None:
             chosen = [entry for entry in live if entry["instance_id"] == instance_id]
             if not chosen:
-                raise RuntimeError(self._no_instance(instance_id, entries))
+                raise self._no_instance(instance_id, entries)
             live = chosen
         if not live:
+            busy = [entry for entry in entries if entry.get("busy")]
+            if busy:
+                raise self._busy(busy[0]["instance_id"], entries)
             raise RuntimeError(
                 "No matching GUI Blender bridge. Enable the Simul Blender Bridge add-on in the existing window."
             )
@@ -391,24 +424,44 @@ class BlenderAttachments:
         return self._publish(endpoint, info, windows[0])
 
     @staticmethod
-    def _no_instance(instance_id: str, entries: list[dict[str, Any]]) -> str:
+    def _known(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The instances as ``instances`` lists them, credentials already left out."""
+        return list(entries)
+
+    def _busy(self, instance_id: str, entries: list[dict[str, Any]]) -> InstanceBusy:
+        return InstanceBusy(
+            f"Blender instance {instance_id} is busy: it took the connection but did not "
+            "answer within 2 s, as when a long script, a render or a modal dialog holds its "
+            "main thread. It is running, not gone; attach again once it is free.",
+            {"instance_id": instance_id, "instances": self._known(entries)},
+        )
+
+    def _no_instance(self, instance_id: str, entries: list[dict[str, Any]]) -> AttachmentError:
         """Explain why ``instance_id`` cannot be attached, naming the instances there are."""
         entry = next((e for e in entries if e["instance_id"] == instance_id), None)
+        if entry is not None and entry.get("busy"):
+            return self._busy(instance_id, entries)
+        details = {"instance_id": instance_id, "instances": self._known(entries)}
         if entry is not None and not entry["reachable"]:
-            return (
+            return AttachmentStale(
                 f"Blender instance {instance_id} does not answer ({entry.get('error')}); it "
-                "exited or its Simul Blender Bridge add-on was disabled."
+                "exited or its Simul Blender Bridge add-on was disabled.",
+                details,
             )
         if entry is not None:
-            return f"Blender instance {instance_id} runs in background mode, with no window to attach."
+            return AttachmentError(
+                f"Blender instance {instance_id} runs in background mode, with no window to attach.",
+                details,
+            )
         known = [
             f"{e['instance_id']} (pid {e.get('pid')})" if e["reachable"] else f"{e['instance_id']} (not answering)"
             for e in entries
         ]
         listed = "; known instances: " + ", ".join(known) if known else "; none is running"
-        return (
+        return InstanceNotFound(
             f"No Blender instance has the id {instance_id!r}{listed}. Run `simul blender "
-            "instances`, or call attach_blender_window without instance_id."
+            "instances`, or call attach_blender_window without instance_id.",
+            details,
         )
 
     def reattach(self, previous: dict[str, Any]) -> dict[str, Any]:

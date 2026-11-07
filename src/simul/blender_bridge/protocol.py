@@ -30,7 +30,10 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # Version 10: setup_rigid_body, add_force_field and add_rigid_body_constraint take new settings
 # (kinematic, direction, axis, limits, springs, motors, ...) and check them up front;
 # bake_simulation takes allow_long_bake and refuses a bake over its work budget without it.
-PROTOCOL_VERSION = 10
+# Version 11: a request starts with its protocol and token (REQUEST_PREFIX), so the add-on
+# refuses an unauthenticated connection after a few dozen bytes instead of reading and
+# parsing up to 32 MiB of it; older clients send the token last.
+PROTOCOL_VERSION = 11
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 #: Capability an add-on lists under ``capabilities`` in its discovery record:
@@ -47,6 +50,17 @@ ACK_GRACE_SECONDS = 0.5
 # Pauses between attempts of a request the bridge provably did not run.
 _RETRY_FIRST_PAUSE = 0.05
 _RETRY_MAX_PAUSE = 0.5
+#: The refusal a bridge holding too much request data sends before reading a request.
+BRIDGE_BUSY = "BridgeBusy"
+
+
+def request_prefix(token: str) -> bytes:
+    """The bytes every request starts with: its protocol, then its token.
+
+    ``BridgeWire.encode`` writes a request this way when its first keys are
+    ``protocol`` and ``token``, as ``BridgeWire.request`` puts them.
+    """
+    return f'{{"protocol": {PROTOCOL_VERSION}, "token": "{token}"'.encode()
 
 
 def protocol_mismatch_message(addon: Any, server: Any) -> str:
@@ -82,6 +96,12 @@ class MessageTooLarge(ValueError):
             f"{MAX_MESSAGE_BYTES // 2**20} MiB per call{hint}"
         )
         self.size = size
+        self.details = {
+            "code": "request_too_large",
+            "executed": False,
+            "size_bytes": size,
+            "limit_bytes": MAX_MESSAGE_BYTES,
+        }
 
 
 class BridgeTimeout(TimeoutError):
@@ -91,19 +111,27 @@ class BridgeTimeout(TimeoutError):
         executed: False when the bridge provably did not run the request, True
             when it acknowledged starting it, None when neither is known (an
             add-on without START_ACK).
+        running_seconds: How long ago the bridge acknowledged starting it, when it did.
     """
 
-    def __init__(self, message: str, executed: Optional[bool]) -> None:
+    def __init__(
+        self, message: str, executed: Optional[bool], running_seconds: Optional[float] = None
+    ) -> None:
         super().__init__(message)
         self.executed = executed
+        self.running_seconds = running_seconds
 
 
 class BridgeConnectionLost(ConnectionError):
-    """The connection ended before the reply; ``executed`` as for BridgeTimeout."""
+    """The connection ended before the reply; ``executed`` as for BridgeTimeout.
 
-    def __init__(self, message: str, executed: Optional[bool]) -> None:
+    ``attempts`` counts the connections the request was sent on.
+    """
+
+    def __init__(self, message: str, executed: Optional[bool], attempts: int = 1) -> None:
         super().__init__(message)
         self.executed = executed
+        self.attempts = attempts
 
 
 class _Lines:
@@ -157,10 +185,11 @@ class BridgeWire:
 
         Against an add-on with START_ACK, a connection that ends before the
         start acknowledgement (the bridge was holding too many connections, or
-        restarted) is retried until ``timeout`` runs out. A request that was not
-        sent whole is retried against any add-on, since the bridge runs only
-        complete requests. Nothing else is retried: an operation whose outcome is
-        unknown must not run twice.
+        restarted) is retried until ``timeout`` runs out, and so is a BridgeBusy
+        refusal, which the bridge sends before reading a request. A request that
+        was not sent whole is retried against any add-on, since the bridge runs
+        only complete requests. Nothing else is retried: an operation whose
+        outcome is unknown must not run twice.
 
         Raises:
             BridgeTimeout: No reply within ``timeout``.
@@ -180,7 +209,8 @@ class BridgeWire:
         if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("Invalid Blender bridge port")
         acknowledged = START_ACK in (endpoint.get("capabilities") or ())
-        request = {**payload, "token": endpoint["token"], "protocol": PROTOCOL_VERSION}
+        # Protocol and token first: the add-on authenticates on those bytes alone.
+        request = {"protocol": PROTOCOL_VERSION, "token": endpoint["token"], **payload}
         if acknowledged:
             request["ack"] = True
         try:
@@ -193,13 +223,23 @@ class BridgeWire:
             ) from None
         deadline = time.monotonic() + timeout
         pause = _RETRY_FIRST_PAUSE
+        attempts = 0
         while True:
+            attempts += 1
             try:
                 response = BridgeWire._exchange(port, message, deadline, acknowledged)
-                break
             except BridgeConnectionLost as exc:
+                exc.attempts = attempts
                 if exc.executed is not False or deadline - time.monotonic() <= pause:
                     raise
+            else:
+                busy = (
+                    isinstance(response, dict)
+                    and response.get("request_id") is None
+                    and response.get("error_type") == BRIDGE_BUSY
+                )
+                if not busy or deadline - time.monotonic() <= pause:
+                    break
             time.sleep(pause)
             pause = min(pause * 2, _RETRY_MAX_PAUSE)
         if not isinstance(response, dict):
@@ -229,11 +269,16 @@ class BridgeWire:
             The decoded reply.
         """
         sent = started = False
+        started_at = 0.0
 
         def executed() -> Optional[bool]:
             if not sent:
                 return False
             return started if acknowledged else None
+
+        def timed_out(message: str) -> BridgeTimeout:
+            running = time.monotonic() - started_at if started else None
+            return BridgeTimeout(message, executed(), running)
 
         try:
             remaining = max(deadline - time.monotonic(), 0.001)
@@ -244,31 +289,30 @@ class BridgeWire:
                 connection.sendall(message)
                 sent = True
                 lines = _Lines(connection)
+                # An acknowledgement sent just before the deadline may still be in
+                # flight (the bridge starts nothing after it), and the reply may
+                # follow it at once.
+                grace = deadline + ACK_GRACE_SECONDS
                 while True:
                     line = lines.next(deadline)
                     if line is None and acknowledged and not started:
-                        # An acknowledgement sent just before the deadline may be
-                        # in flight; the bridge starts nothing after it.
-                        line = lines.next(time.monotonic() + ACK_GRACE_SECONDS)
+                        line = lines.next(grace)
                         if line is not None and _is_ack(json.loads(line)):
-                            started = True
-                            line = None
+                            started, started_at = True, time.monotonic()
+                            line = lines.next(grace)
                     if line is None:
-                        raise BridgeTimeout(
-                            "Blender bridge response deadline exceeded", executed()
-                        )
+                        raise timed_out("Blender bridge response deadline exceeded")
                     response = json.loads(line)
                     if not _is_ack(response):
                         return response
-                    started = True
+                    if not started:
+                        started, started_at = True, time.monotonic()
         except BridgeTimeout:
             raise
         except ConnectionRefusedError:
             raise
         except (TimeoutError, socket.timeout) as exc:
-            raise BridgeTimeout(
-                "Blender bridge did not accept the request before the deadline", executed()
-            ) from exc
+            raise timed_out("Blender bridge did not accept the request before the deadline") from exc
         except OSError as exc:
             raise BridgeConnectionLost(
                 f"Blender bridge connection ended before the reply ({exc})", executed()
