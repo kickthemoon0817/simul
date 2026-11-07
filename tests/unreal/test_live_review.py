@@ -218,10 +218,13 @@ print(json.dumps({{'saved': bool(les.save_current_level())}}))
             assert [p["code"] for p in refused["details"]["problems"]] == ["NO_PHYSICS_COLLISION"], refused
             assert (await physics_state(client, sensor))["actors"][sensor]["simulate"] is False
 
-            # Save All writes the edits, and they survive a reload.
+            # Saving the test's own map writes the edits, and they survive a reload.
+            # Never Save All here: an earlier import in the same editor can leave
+            # engine or plugin content dirty, and Save All writes it into the
+            # shared engine install.
             reloaded = await client._execute_json_script(f"""
 import unreal, json
-ok = unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
+ok = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).save_current_level()
 unreal.EditorLoadingAndSavingUtils.load_map({level!r})
 print(json.dumps({{'saved': bool(ok)}}))
 """)
