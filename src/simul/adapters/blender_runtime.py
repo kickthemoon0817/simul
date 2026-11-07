@@ -3540,12 +3540,16 @@ class BlenderRuntimeSession:
         """
         Set the animation start and end frames.
 
+        An unbaked rigid-body cache is fitted to the new range, since Blender
+        simulates nothing past the cache's end frame; a baked cache keeps its
+        range and the warning says what part of the scene range it leaves out.
+
         Args:
             frame_start: Start frame of the animation range.
             frame_end: End frame of the animation range.
 
         Returns:
-            Dict with the frame range that was set.
+            Dict with the frame range that was set, rigid_body_cache and warning.
         """
         if frame_start >= frame_end:
             raise ValueError(
@@ -3556,9 +3560,14 @@ class BlenderRuntimeSession:
         scene = blender_module.context.scene
         scene.frame_start = frame_start
         scene.frame_end = frame_end
+        # An unbaked rigid-body cache follows the scene range (bodies froze at
+        # its old end frame otherwise); a baked one is reported.
+        rigid_body_cache, warning = self._sync_rigid_body_cache(scene)
         return {
             "frame_start": scene.frame_start,
             "frame_end": scene.frame_end,
+            "rigid_body_cache": rigid_body_cache,
+            "warning": warning,
         }
 
     def play_animation(self, action: str = "play") -> Dict[str, Any]:
@@ -3762,8 +3771,7 @@ class BlenderRuntimeSession:
         obj = self._get_object_or_raise(object_name)
 
         scene = blender_module.context.scene
-        if scene.rigidbody_world is None:
-            blender_module.ops.rigidbody.world_add()
+        self._ensure_rigid_body_world(scene)
 
         blender_module.context.view_layer.objects.active = obj
         obj.select_set(True)
@@ -3874,8 +3882,7 @@ class BlenderRuntimeSession:
         obj2 = self._get_object_or_raise(object2_name)
 
         scene = blender_module.context.scene
-        if scene.rigidbody_world is None:
-            blender_module.ops.rigidbody.world_add()
+        self._ensure_rigid_body_world(scene)
 
         loc = tuple(location or [0.0, 0.0, 0.0])
         blender_module.ops.object.empty_add(location=loc)
@@ -3949,31 +3956,158 @@ class BlenderRuntimeSession:
             [float(v) for v in matrix.to_euler(order)],
         )
 
-    def get_physics_state(self, object_name: str) -> Dict[str, Any]:
+    def get_physics_state(
+        self, object_name: str, step_simulation: bool = True
+    ) -> Dict[str, Any]:
         """
-        Get current physics state of an object.
+        Get an object's world pose and rigid-body state at the current frame.
+
+        An unbaked rigid-body simulation advances one frame at a time from its
+        cache start, so after a jump to a frame Blender has not simulated, a
+        body still sits where the simulation last left it (its starting pose
+        on a fresh cache). With step_simulation the scene steps from the cache
+        start to the current frame first, as playback would; frames Blender
+        has cached are read, not simulated again. pose_source and
+        simulated_for_frame say whether the pose is the simulation's result
+        for this frame.
 
         Args:
             object_name: Name of the object.
+            step_simulation: Step an unbaked rigid-body simulation from its
+                cache start to the current frame before reading the pose, at
+                most frames x bodies = 400 000; false reads the pose as it is.
 
         Returns:
-            Dict with object_name, location, rotation_euler, is_active,
-            has_rigid_body, mass, collision_shape.
+            Dict with object_name, frame, location, rotation_euler, is_active,
+            has_rigid_body, mass, collision_shape, pose_source,
+            simulated_for_frame, stepped_frames, world_enabled,
+            rigid_body_cache and warning.
         """
+        blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
+        scene = blender_module.context.scene
         rb = getattr(obj, "rigid_body", None)
-        has_rb = rb is not None
+        world = getattr(scene, "rigidbody_world", None)
+        frame = int(scene.frame_current)
+        source, simulated, warning, stepped = self._simulated_pose(
+            scene, world, obj, rb, frame, step_simulation
+        )
 
         location, rotation = self._world_pose(obj)
         return {
             "object_name": object_name,
+            "frame": frame,
             "location": location,
             "rotation_euler": rotation,
             "is_active": rb is not None and rb.type == "ACTIVE",
-            "has_rigid_body": has_rb,
+            "has_rigid_body": rb is not None,
             "mass": float(rb.mass) if rb is not None else None,
             "collision_shape": rb.collision_shape if rb is not None else None,
+            "pose_source": source,
+            "simulated_for_frame": simulated,
+            "stepped_frames": stepped,
+            "world_enabled": bool(world.enabled) if world is not None else None,
+            "rigid_body_cache": (
+                self._cache_state(world.point_cache, scene)
+                if world is not None
+                else None
+            ),
+            "warning": warning,
         }
+
+    def _simulated_pose(
+        self,
+        scene: Any,
+        world: Any,
+        obj: Any,
+        rb: Any,
+        frame: int,
+        step_simulation: bool,
+    ) -> Tuple[str, Optional[bool], Optional[str], int]:
+        """Where the object's pose at ``frame`` comes from, stepping the simulation when asked.
+
+        Returns:
+            ``(pose_source, simulated_for_frame, warning, stepped_frames)``.
+        """
+        if rb is None:
+            return "evaluated", None, None, 0
+        if world is None or not self._in_rigid_body_world(world, obj):
+            return (
+                "evaluated",
+                None,
+                (
+                    f"'{obj.name}' has rigid-body settings but is not in the scene's "
+                    "rigid body world, so nothing simulates it"
+                ),
+                0,
+            )
+        if rb.type != "ACTIVE" or rb.kinematic or not rb.enabled:
+            # Passive, animated (kinematic) and disabled bodies follow their own
+            # transform and animation; the simulation only collides with them.
+            return "evaluated", None, None, 0
+        cache = world.point_cache
+        start, end = int(cache.frame_start), int(cache.frame_end)
+        if not world.enabled:
+            return (
+                "world_disabled",
+                False,
+                (
+                    "The rigid body world is disabled, so the body is at its own "
+                    "transform, not simulated; set_blender_rigid_body_world "
+                    "enabled=true turns the simulation on"
+                ),
+                0,
+            )
+        if frame < start:
+            return (
+                "before_cache",
+                False,
+                (
+                    f"Frame {frame} is before the rigid-body cache start {start}: "
+                    "the body is at its starting pose until the simulation begins"
+                ),
+                0,
+            )
+        stepped = 0
+        if not cache.is_baked and frame > start and step_simulation:
+            stepped = self._step_rigid_bodies(scene, world, frame)
+        if frame > end:
+            return (
+                "past_cache_end",
+                False,
+                (
+                    f"Frame {frame} is past the rigid-body cache end {end}: Blender "
+                    f"simulates nothing later and holds the bodies at their frame-{end} "
+                    "pose. Extend the cache with set_blender_rigid_body_world "
+                    "cache_frame_end (after free_blender_bake when it is baked), or "
+                    "with set_blender_frame_range while it is unbaked"
+                ),
+                stepped,
+            )
+        if cache.is_baked:
+            return "baked", True, None, 0
+        if frame == start or stepped:
+            return "simulation", True, None, stepped
+        if not step_simulation:
+            reason = "step_simulation is false"
+        else:
+            reason = (
+                f"stepping {frame - start + 1} frames of "
+                f"{self._rigid_body_count(world)} bodies exceeds "
+                f"{self._STEP_WORK_BUDGET} body-frames"
+            )
+        return (
+            "unknown",
+            None,
+            (
+                f"The rigid-body cache is not baked and the simulation was not "
+                f"stepped to frame {frame} ({reason}): the pose is the simulation's "
+                "only if Blender already simulated this frame, and otherwise where "
+                "the body was last simulated. Bake with bake_blender_simulation, or "
+                "sample with get_blender_object_trajectory"
+            ),
+            0,
+        )
 
     def get_object_trajectory(
         self,
@@ -4057,54 +4191,622 @@ class BlenderRuntimeSession:
         self,
         frame_start: int,
         frame_end: int,
+        scope: str = "rigid_body",
     ) -> Dict[str, Any]:
         """
-        Bake all physics simulations in the scene.
+        Bake the physics simulation over a frame range, replacing any earlier bake.
+
+        Blender skips a cache that is already baked, so a second bake used to
+        change only the reported range. The earlier bake is freed first and the
+        simulation restarts from frame_start with the bodies' current
+        transforms. The scene returns to its current frame afterwards.
 
         Args:
             frame_start: First frame to bake.
-            frame_end: Last frame to bake.
+            frame_end: Last frame to bake; after frame_start.
+            scope: rigid_body bakes the rigid-body world's cache only (stepping
+                each frame, then marking the cache baked), leaving cloth and
+                other caches as they are; all frees and bakes every point cache
+                in the scene, as Blender's Bake All Dynamics does: rigid bodies,
+                cloth, soft bodies and dynamic paint over frame_start-frame_end,
+                particle systems over the range their emission settings give.
 
         Returns:
-            Dict with frame_start, frame_end.
+            Dict with scope, frame_start, frame_end and frame_count of the
+            rigid-body cache (null without one), rigid_body_cache, caches (each
+            cache's owner, kind, range and bake state) and warnings.
         """
         blender_module: Any = bpy
+        scope = self._bake_scope(scope)
+        self._check_cache_range(int(frame_start), int(frame_end))
         scene = blender_module.context.scene
+        warnings: List[str] = []
+        original_frame = int(scene.frame_current)
+        if scope == "rigid_body":
+            world = self._simulating_world(scene, "bake")
+            try:
+                self._bake_rigid_body_cache(scene, world, frame_start, frame_end)
+            finally:
+                scene.frame_set(original_frame)
+        else:
+            caches = self._point_caches(scene)
+            if not caches:
+                raise ValueError(
+                    "Nothing to bake: the scene has no rigid body world, cloth, soft "
+                    "body, dynamic paint or particle cache"
+                )
+            try:
+                warnings.extend(
+                    self._bake_all_caches(scene, caches, frame_start, frame_end)
+                )
+            finally:
+                scene.frame_set(original_frame)
+        return self._bake_report(scene, scope, warnings)
 
-        if scene.rigidbody_world is None:
-            raise ValueError("No rigid body world to bake")
+    def free_bake(self, scope: str = "rigid_body") -> Dict[str, Any]:
+        """
+        Free baked physics simulation data, over the same scope bake_simulation takes.
 
-        pc = scene.rigidbody_world.point_cache
-        pc.frame_start = frame_start
-        pc.frame_end = frame_end
+        A freed cache gets the scene's frame range back (particle systems keep
+        the range Blender derives for them), so the simulation is not cut off
+        at the last bake's end frame; rigid-body frames cached from the same
+        start frame stay valid. Freeing an unbaked cache changes nothing else,
+        except that an unbaked rigid-body cache is fitted to the scene range.
 
-        # Blender 4.0 removed the positional context-override dict.
-        with blender_module.context.temp_override(scene=scene, point_cache=pc):
-            blender_module.ops.ptcache.bake(bake=True)
+        Args:
+            scope: rigid_body frees the rigid-body world's cache only; all frees
+                every point cache in the scene (rigid bodies, cloth, soft bodies,
+                dynamic paint, particles).
 
+        Returns:
+            Dict with scope, freed (the caches that were baked), caches,
+            rigid_body_cache and warnings.
+        """
+        blender_module: Any = bpy
+        scope = self._bake_scope(scope)
+        scene = blender_module.context.scene
+        world: Any = getattr(scene, "rigidbody_world", None)
+        caches = self._point_caches(scene)
+        if scope == "rigid_body":
+            if world is None:
+                raise ValueError(
+                    "No rigid body world to free; use scope 'all' for cloth, soft-body, "
+                    "particle or dynamic paint caches"
+                )
+            caches = caches[:1]
+        baked = [(entry, cache) for entry, cache in caches if cache.is_baked]
+        freed = [self._cache_entry(entry, cache) for entry, cache in baked]
+        if scope == "rigid_body":
+            self._free_cache(scene, world.point_cache)
+        elif caches:
+            with blender_module.context.temp_override(scene=scene):
+                blender_module.ops.ptcache.free_bake_all()
+            # A bake over part of the scene range would otherwise cut the
+            # simulation off at its end frame; particle ranges are derived.
+            for entry, cache in baked:
+                if entry["kind"] not in ("RIGID_BODY", "PARTICLES"):
+                    cache.frame_start = int(scene.frame_start)
+                    cache.frame_end = max(int(scene.frame_end), int(scene.frame_start) + 1)
+        state, warning = self._sync_rigid_body_cache(scene)
         return {
-            "frame_start": frame_start,
-            "frame_end": frame_end,
+            "scope": scope,
+            "freed": freed,
+            "caches": [self._cache_entry(entry, cache) for entry, cache in caches],
+            "rigid_body_cache": state,
+            "warnings": [warning] if warning else [],
         }
 
-    def free_bake(self) -> Dict[str, Any]:
+    def _bake_rigid_body_cache(
+        self, scene: Any, world: Any, frame_start: int, frame_end: int
+    ) -> None:
+        """Bake the rigid-body cache alone.
+
+        ``ptcache.bake`` given the rigid-body cache bakes every cache in the
+        scene on Blender 5.0.1 (a cloth came out baked over its own 250 frames)
+        while ``ptcache.free_bake`` frees only that one. Stepping each frame
+        fills the rigid-body cache as playback does, and ``bake_from_cache``
+        marks only that cache baked. Other simulations step along, as during
+        playback, without being baked.
         """
-        Free all baked physics simulation data.
+        blender_module: Any = bpy
+        cache = world.point_cache
+        if cache.is_baked:
+            self._free_cache(scene, cache)
+        cache.frame_start = frame_start
+        cache.frame_end = frame_end
+        self._invalidate_rigid_body_cache(world)
+        for frame in range(frame_start, frame_end + 1):
+            scene.frame_set(frame)
+        with blender_module.context.temp_override(scene=scene, point_cache=cache):
+            blender_module.ops.ptcache.bake_from_cache()
+        if not cache.is_baked:
+            raise RuntimeError(
+                "Blender did not mark the rigid-body cache baked after stepping "
+                f"frames {frame_start}-{frame_end}"
+            )
+
+    def _bake_all_caches(
+        self,
+        scene: Any,
+        caches: List[Tuple[Dict[str, Any], Any]],
+        frame_start: int,
+        frame_end: int,
+    ) -> List[str]:
+        """Free and bake every point cache, as Blender's Bake All Dynamics.
+
+        Bake All skips caches that are already baked, so all are freed first.
+        Particle systems keep the range Blender derives from their emission
+        settings and the scene range. A disabled rigid body world stores no
+        simulation, so its cache is left unbaked.
 
         Returns:
-            Empty dict (success indicated by caller).
+            Warnings for the reply.
+        """
+        blender_module: Any = bpy
+        warnings: List[str] = []
+        world = getattr(scene, "rigidbody_world", None)
+        with blender_module.context.temp_override(scene=scene):
+            blender_module.ops.ptcache.free_bake_all()
+        for entry, cache in caches:
+            if entry["kind"] != "PARTICLES":
+                cache.frame_start = frame_start
+                cache.frame_end = frame_end
+        if world is not None and world.enabled:
+            self._invalidate_rigid_body_cache(world)
+        scene.frame_set(frame_start)
+        with blender_module.context.temp_override(scene=scene):
+            blender_module.ops.ptcache.bake_all(bake=True)
+        if world is not None and not world.enabled:
+            self._free_cache(scene, world.point_cache)
+            warnings.append(
+                "The rigid body world is disabled, so its cache was left unbaked; "
+                "enable it with set_blender_rigid_body_world enabled=true and bake again"
+            )
+        return warnings
+
+    def _bake_report(self, scene: Any, scope: str, warnings: List[str]) -> Dict[str, Any]:
+        """The reply of bake_simulation: the range the caches actually hold."""
+        world = getattr(scene, "rigidbody_world", None)
+        state = (
+            self._cache_state(world.point_cache, scene) if world is not None else None
+        )
+        if state is not None and not state["covers_scene_range"]:
+            warnings.append(
+                f"The rigid-body bake covers frames {state['frame_start']}-"
+                f"{state['frame_end']} of the scene range {scene.frame_start}-"
+                f"{scene.frame_end}: bodies hold their pose outside it"
+            )
+        if scope == "all":
+            caches = self._point_caches(scene)
+        else:
+            caches = self._point_caches(scene)[:1]
+        return {
+            "scope": scope,
+            "frame_start": state["frame_start"] if state else None,
+            "frame_end": state["frame_end"] if state else None,
+            "frame_count": (
+                state["frame_end"] - state["frame_start"] + 1 if state else None
+            ),
+            "rigid_body_cache": state,
+            "caches": [self._cache_entry(entry, cache) for entry, cache in caches],
+            "warnings": warnings,
+        }
+
+    # -- Rigid-body world and point caches -----------------------------------
+
+    #: What bake_simulation and free_bake act on: the rigid-body world's cache
+    #: only, or every point cache in the scene, as Blender's Bake All Dynamics.
+    _BAKE_SCOPES = ("rigid_body", "all")
+
+    #: Modifier types whose ``point_cache`` Blender's Bake All Dynamics bakes.
+    _CACHED_MODIFIER_TYPES = frozenset({"CLOTH", "SOFT_BODY"})
+
+    #: The frame range a point cache accepts (PointCache RNA, Blender 4.2-5.0).
+    _CACHE_FRAME_MIN = -1048574
+    _CACHE_FRAME_MAX = 1048574
+
+    #: Most work get_physics_state steps an unbaked simulation through, in
+    #: body-frames (frames x rigid bodies): on Blender 5.0.1 a frame cost about
+    #: 0.3 ms plus 20-30 microseconds per body in contact with a ground, so this
+    #: stays near 10 s, a third of the attached-mode timeout.
+    _STEP_WORK_BUDGET = 400_000
+
+    @staticmethod
+    def _in_rigid_body_world(world: Any, obj: Any) -> bool:
+        """Whether the world's collection, which is what Blender simulates, holds ``obj``."""
+        collection = world.collection
+        return collection is not None and any(
+            member == obj for member in collection.all_objects
+        )
+
+    @staticmethod
+    def _rigid_body_count(world: Any) -> int:
+        collection = world.collection
+        return len(collection.all_objects) if collection is not None else 0
+
+    def _step_rigid_bodies(self, scene: Any, world: Any, frame: int) -> int:
+        """Step an unbaked rigid-body simulation from its cache start up to ``frame``.
+
+        Blender advances an unbaked simulation only from one frame to the next,
+        so this visits every frame from the cache start, as playback would.
+        Frames already cached are read, not simulated again. Past the cache
+        end nothing more is simulated; the walk stops there and ends on
+        ``frame``. Nothing is stepped when the walk would exceed
+        ``_STEP_WORK_BUDGET``.
+
+        Returns:
+            The number of frames visited, 0 when the walk was over budget.
+        """
+        cache = world.point_cache
+        start = int(cache.frame_start)
+        last = min(frame, int(cache.frame_end))
+        frames = last - start + 1
+        if frames * max(self._rigid_body_count(world), 1) > self._STEP_WORK_BUDGET:
+            return 0
+        for step in range(start, last + 1):
+            scene.frame_set(step)
+        if last != frame:
+            scene.frame_set(frame)
+        return frames
+
+    @staticmethod
+    def _cache_state(cache: Any, scene: Any) -> Dict[str, Any]:
+        """The range and bake state of a rigid-body point cache."""
+        start, end = int(cache.frame_start), int(cache.frame_end)
+        return {
+            "frame_start": start,
+            "frame_end": end,
+            "is_baked": bool(cache.is_baked),
+            "is_outdated": bool(cache.is_outdated),
+            "info": str(cache.info),
+            "covers_scene_range": start <= int(scene.frame_start)
+            and end >= int(scene.frame_end),
+        }
+
+    @staticmethod
+    def _invalidate_rigid_body_cache(world: Any) -> None:
+        """Mark an unbaked rigid-body cache outdated, so the simulation restarts at its start.
+
+        Writing a world setting runs Blender's rigid-body reset even when the
+        value stays the same, and Python has no other handle on it. Blender then
+        drops the cached frames and rebuilds the physics world from the bodies'
+        own transforms when the scene next steps from the cache start to the
+        frame after. Without it the frames of an earlier simulation stay
+        readable: on Blender 5.0.1, after a freed bake of frames 1-200, a bake
+        of 10-50 read the old frames simulated from frame 1.
+        """
+        world.time_scale = world.time_scale
+
+    def _set_cache_range(self, world: Any, frame_start: int, frame_end: int) -> None:
+        """Set the rigid-body cache range; a new start frame invalidates the cache.
+
+        Frames cached from the same start stay valid when only the end moves.
+        """
+        cache = world.point_cache
+        moved_start = int(cache.frame_start) != frame_start
+        cache.frame_start = frame_start
+        cache.frame_end = frame_end
+        if moved_start:
+            self._invalidate_rigid_body_cache(world)
+
+    def _sync_rigid_body_cache(
+        self, scene: Any
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Fit an unbaked rigid-body cache to the scene's frame range.
+
+        Blender simulates rigid bodies only inside the cache's range and holds
+        them at its last frame after it. ``rigidbody.world_add`` makes the range
+        1-250 whatever the scene's, and changing the scene range leaves it
+        alone, so bodies froze at frame 250 of a 1000-frame scene. Call this
+        wherever the scene range changes or the cache is created or freed
+        (set_frame_range, free_bake, world creation). A baked cache keeps its
+        range, since a new range would not change the bake; the warning says
+        what it leaves out.
+
+        Args:
+            scene: The scene whose rigid-body world to sync.
+
+        Returns:
+            The cache state (None without a rigid body world) and a warning,
+            or None.
+        """
+        world = getattr(scene, "rigidbody_world", None)
+        if world is None:
+            return None, None
+        cache = world.point_cache
+        start, end = int(scene.frame_start), int(scene.frame_end)
+        warning = None
+        if not cache.is_baked:
+            self._set_cache_range(world, start, max(end, start + 1))
+        elif int(cache.frame_start) > start or int(cache.frame_end) < end:
+            warning = (
+                f"The rigid-body cache is baked for frames {cache.frame_start}-"
+                f"{cache.frame_end}, which leaves out part of the scene range "
+                f"{start}-{end}: bodies hold their pose outside it. Bake again over "
+                "the new range with bake_blender_simulation"
+            )
+        return self._cache_state(cache, scene), warning
+
+    def _ensure_rigid_body_world(self, scene: Any) -> Tuple[Any, bool]:
+        """Return the scene's rigid body world, adding one fitted to the scene range.
+
+        Returns:
+            The world and whether it was added.
+        """
+        world = scene.rigidbody_world
+        if world is not None:
+            return world, False
+        blender_module: Any = bpy
+        _bpy_op(
+            "Failed to add a rigid body world",
+            blender_module.ops.rigidbody.world_add,
+        )
+        world = scene.rigidbody_world
+        self._sync_rigid_body_cache(scene)
+        return world, True
+
+    def _point_caches(self, scene: Any) -> List[Tuple[Dict[str, Any], Any]]:
+        """Every point cache Blender's Bake All Dynamics covers, with a description.
+
+        The rigid-body world's, then per object those of cloth and soft-body
+        modifiers, dynamic paint canvas surfaces and particle systems. Fluid
+        domains bake through their own cache, not a point cache.
+
+        Returns:
+            ``(entry, cache)`` pairs; ``entry`` names the owner and kind.
+        """
+        found: List[Tuple[Dict[str, Any], Any]] = []
+        world = getattr(scene, "rigidbody_world", None)
+        if world is not None:
+            found.append(
+                (
+                    {"owner": scene.name, "kind": "RIGID_BODY", "name": "RigidBodyWorld"},
+                    world.point_cache,
+                )
+            )
+        for obj in scene.objects:
+            for modifier in getattr(obj, "modifiers", ()):
+                if modifier.type in self._CACHED_MODIFIER_TYPES:
+                    found.append(
+                        (
+                            {"owner": obj.name, "kind": modifier.type, "name": modifier.name},
+                            modifier.point_cache,
+                        )
+                    )
+                elif modifier.type == "DYNAMIC_PAINT":
+                    canvas = getattr(modifier, "canvas_settings", None)
+                    for surface in getattr(canvas, "canvas_surfaces", ()) or ():
+                        found.append(
+                            (
+                                {"owner": obj.name, "kind": "DYNAMIC_PAINT", "name": surface.name},
+                                surface.point_cache,
+                            )
+                        )
+            for system in getattr(obj, "particle_systems", ()):
+                found.append(
+                    (
+                        {"owner": obj.name, "kind": "PARTICLES", "name": system.name},
+                        system.point_cache,
+                    )
+                )
+        return found
+
+    @staticmethod
+    def _cache_entry(entry: Dict[str, Any], cache: Any) -> Dict[str, Any]:
+        return {
+            **entry,
+            "frame_start": int(cache.frame_start),
+            "frame_end": int(cache.frame_end),
+            "is_baked": bool(cache.is_baked),
+        }
+
+    @staticmethod
+    def _free_cache(scene: Any, cache: Any) -> None:
+        """Free one point cache's bake (a no-op on an unbaked cache)."""
+        blender_module: Any = bpy
+        # Blender 4.0 removed the positional context-override dict.
+        with blender_module.context.temp_override(scene=scene, point_cache=cache):
+            blender_module.ops.ptcache.free_bake()
+
+    @classmethod
+    def _bake_scope(cls, scope: str) -> str:
+        if scope not in cls._BAKE_SCOPES:
+            raise ValueError(
+                f"Invalid scope '{scope}'. Must be one of {cls._BAKE_SCOPES}"
+            )
+        return scope
+
+    def _simulating_world(self, scene: Any, action: str) -> Any:
+        """The scene's rigid body world, refusing ``action`` without one or while it is disabled."""
+        world = getattr(scene, "rigidbody_world", None)
+        if world is None:
+            raise ValueError(
+                f"No rigid body world to {action}: setup_blender_rigid_body adds one "
+                "with its first body, set_blender_rigid_body_world adds an empty one. "
+                "Use scope 'all' for cloth, soft-body, particle or dynamic paint caches"
+            )
+        if not world.enabled:
+            raise ValueError(
+                f"The rigid body world is disabled, so a {action} would store no "
+                "simulation; enable it with set_blender_rigid_body_world enabled=true"
+            )
+        return world
+
+    def get_rigid_body_world(self) -> Dict[str, Any]:
+        """
+        Get the scene's rigid body world: its settings, bodies and cache.
+
+        Gravity is the scene's, which cloth, soft bodies and particles share.
+        The cache's range bounds what Blender simulates: past its end, bodies
+        hold their pose. ``warnings`` names what makes the simulation differ
+        from what playback suggests (a disabled world, a cache that leaves out
+        part of the scene range, a baked cache that settings no longer change).
+
+        Returns:
+            Dict with exists, enabled, gravity, use_gravity, substeps_per_frame,
+            solver_iterations, time_scale, use_split_impulse, collection,
+            body_count, constraint_count, rigid_body_cache, scene_frame_start,
+            scene_frame_end and warnings.
+        """
+        blender_module: Any = bpy
+        return self._world_report(blender_module.context.scene)
+
+    def set_rigid_body_world(
+        self,
+        enabled: Optional[bool] = None,
+        gravity: Optional[List[float]] = None,
+        use_gravity: Optional[bool] = None,
+        substeps_per_frame: Optional[int] = None,
+        solver_iterations: Optional[int] = None,
+        time_scale: Optional[float] = None,
+        use_split_impulse: Optional[bool] = None,
+        cache_frame_start: Optional[int] = None,
+        cache_frame_end: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Change the scene's rigid body world, adding one when there is none.
+
+        Only the given settings change. A new world's cache covers the scene's
+        frame range. An unbaked cache restarts from its start frame after a
+        change; a baked one keeps playing its bake, so changed settings apply
+        only after free_blender_bake and a new bake, and its range cannot
+        change until it is freed.
+
+        Args:
+            enabled: Run the simulation; a disabled world leaves bodies at their
+                own transforms.
+            gravity: Scene gravity [x, y, z] in m/s^2, shared with cloth, soft
+                bodies and particles; Blender's default is [0, 0, -9.81].
+            use_gravity: Apply the scene gravity.
+            substeps_per_frame: Simulation steps per frame, 1-32767.
+            solver_iterations: Constraint solver iterations per step, 1-1000.
+            time_scale: Simulation speed relative to the scene's frame rate, 0-100.
+            use_split_impulse: Reduce extra velocity from penetration recovery.
+            cache_frame_start: First simulated frame.
+            cache_frame_end: Last simulated frame; after cache_frame_start.
+
+        Returns:
+            The world as get_rigid_body_world reports it, with created.
         """
         blender_module: Any = bpy
         scene = blender_module.context.scene
+        world = getattr(scene, "rigidbody_world", None)
+        range_requested = cache_frame_start is not None or cache_frame_end is not None
+        if world is None:
+            current = (int(scene.frame_start), max(int(scene.frame_end), int(scene.frame_start) + 1))
+            baked = False
+        else:
+            current = (int(world.point_cache.frame_start), int(world.point_cache.frame_end))
+            baked = bool(world.point_cache.is_baked)
+        new_range = (
+            current[0] if cache_frame_start is None else int(cache_frame_start),
+            current[1] if cache_frame_end is None else int(cache_frame_end),
+        )
+        if range_requested:
+            self._check_cache_range(*new_range, label="cache_frame")
+            if baked and new_range != current:
+                raise ValueError(
+                    f"The rigid-body cache is baked for frames {current[0]}-{current[1]}; "
+                    "free it with free_blender_bake before changing its range"
+                )
+        if gravity is not None:
+            gravity = [float(v) for v in gravity]
+            if len(gravity) != 3 or not all(math.isfinite(v) for v in gravity):
+                raise ValueError("gravity must be three finite numbers")
 
-        if scene.rigidbody_world is None:
-            raise ValueError("No rigid body world to free")
+        world, created = self._ensure_rigid_body_world(scene)
+        try:
+            settings = {
+                "enabled": enabled,
+                "substeps_per_frame": substeps_per_frame,
+                "solver_iterations": solver_iterations,
+                "time_scale": time_scale,
+                "use_split_impulse": use_split_impulse,
+            }
+            changed = False
+            for name, value in settings.items():
+                if value is not None:
+                    setattr(world, name, value)
+                    changed = True
+            if gravity is not None:
+                scene.gravity = gravity
+                changed = True
+            if use_gravity is not None:
+                scene.use_gravity = use_gravity
+                changed = True
+            if range_requested and not baked:
+                self._set_cache_range(world, *new_range)
+            if changed and not world.point_cache.is_baked:
+                self._invalidate_rigid_body_cache(world)
+        except Exception:
+            if created:
+                blender_module.ops.rigidbody.world_remove()
+            raise
+        report = self._world_report(scene)
+        report["created"] = created
+        if changed and world.point_cache.is_baked:
+            report["warnings"].append(
+                "The rigid-body cache is baked, so playback still reads the bake: the "
+                "changed settings apply after free_blender_bake and a new bake"
+            )
+        return report
 
-        pc = scene.rigidbody_world.point_cache
-        with blender_module.context.temp_override(scene=scene, point_cache=pc):
-            blender_module.ops.ptcache.free_bake()
+    def _check_cache_range(self, frame_start: int, frame_end: int, label: str = "frame") -> None:
+        """Refuse a range a point cache cannot hold, or one that is empty or inverted."""
+        if frame_start >= frame_end:
+            raise ValueError(
+                f"{label}_start ({frame_start}) must be less than {label}_end ({frame_end})"
+            )
+        if frame_start < self._CACHE_FRAME_MIN or frame_end > self._CACHE_FRAME_MAX:
+            raise ValueError(
+                f"A point cache covers frames {self._CACHE_FRAME_MIN} to "
+                f"{self._CACHE_FRAME_MAX}; got {frame_start}-{frame_end}"
+            )
 
-        return {}
+    def _world_report(self, scene: Any) -> Dict[str, Any]:
+        world = getattr(scene, "rigidbody_world", None)
+        report: Dict[str, Any] = {
+            "exists": world is not None,
+            "gravity": [float(v) for v in scene.gravity],
+            "use_gravity": bool(scene.use_gravity),
+            "scene_frame_start": int(scene.frame_start),
+            "scene_frame_end": int(scene.frame_end),
+            "warnings": [],
+        }
+        if world is None:
+            report["warnings"].append(
+                "The scene has no rigid body world: setup_blender_rigid_body adds one "
+                "with its first body, set_blender_rigid_body_world adds an empty one"
+            )
+            return report
+        cache = world.point_cache
+        state = self._cache_state(cache, scene)
+        constraints = world.constraints
+        report.update(
+            enabled=bool(world.enabled),
+            substeps_per_frame=int(world.substeps_per_frame),
+            solver_iterations=int(world.solver_iterations),
+            time_scale=float(world.time_scale),
+            use_split_impulse=bool(world.use_split_impulse),
+            collection=world.collection.name if world.collection is not None else None,
+            body_count=self._rigid_body_count(world),
+            constraint_count=(
+                len(constraints.all_objects) if constraints is not None else 0
+            ),
+            rigid_body_cache=state,
+        )
+        if not world.enabled:
+            report["warnings"].append(
+                "The rigid body world is disabled: nothing simulates and bakes are refused"
+            )
+        if not state["covers_scene_range"]:
+            report["warnings"].append(
+                f"The rigid-body cache covers frames {state['frame_start']}-"
+                f"{state['frame_end']}, not the whole scene range "
+                f"{report['scene_frame_start']}-{report['scene_frame_end']}: bodies hold "
+                "their pose outside it"
+            )
+        return report
 
     # -- End Phase 6 methods -------------------------------------------------
 

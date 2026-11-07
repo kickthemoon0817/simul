@@ -1649,7 +1649,23 @@
     "get_blender_physics_state": {
       "minimal": {
         "arguments": {"object_name": "Cube"},
-        "session_calls": [{"method": "get_physics_state", "arguments": {"object_name": "'Cube'"}}],
+        "session_calls": [
+          {
+            "method": "get_physics_state",
+            "arguments": {"object_name": "'Cube'", "step_simulation": "True"}
+          }
+        ],
+        "response": {"checked_against": "BlenderGetPhysicsStateResponse"},
+        "usage": [{"tool": "get_blender_physics_state", "success": false}]
+      },
+      "full": {
+        "arguments": {"object_name": "Cube", "step_simulation": false},
+        "session_calls": [
+          {
+            "method": "get_physics_state",
+            "arguments": {"object_name": "'Cube'", "step_simulation": "False"}
+          }
+        ],
         "response": {"checked_against": "BlenderGetPhysicsStateResponse"},
         "usage": [{"tool": "get_blender_physics_state", "success": false}]
       },
@@ -1660,7 +1676,7 @@
           "success": false,
           "error": "1 validation error for BlenderGetPhysicsStateRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {"input": {"object_name": {"bogus": 1}, "step_simulation": true}}
         }
       }
     },
@@ -1701,7 +1717,23 @@
     "bake_blender_simulation": {
       "minimal": {
         "arguments": {"frame_start": 1, "frame_end": 50},
-        "session_calls": [{"method": "bake_simulation", "arguments": {"frame_start": "1", "frame_end": "50"}}],
+        "session_calls": [
+          {
+            "method": "bake_simulation",
+            "arguments": {"frame_start": "1", "frame_end": "50", "scope": "'rigid_body'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderBakeSimulationResponse"},
+        "usage": [{"tool": "bake_blender_simulation", "success": false}]
+      },
+      "full": {
+        "arguments": {"frame_start": 1, "frame_end": 50, "scope": "all"},
+        "session_calls": [
+          {
+            "method": "bake_simulation",
+            "arguments": {"frame_start": "1", "frame_end": "50", "scope": "'all'"}
+          }
+        ],
         "response": {"checked_against": "BlenderBakeSimulationResponse"},
         "usage": [{"tool": "bake_blender_simulation", "success": false}]
       },
@@ -1712,16 +1744,116 @@
           "success": false,
           "error": "1 validation error for BlenderBakeSimulationRequest\nframe_start\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
           "error_type": "ValidationError",
-          "details": {"input": {"frame_start": {"bogus": 1}, "frame_end": 50}}
+          "details": {"input": {"frame_start": {"bogus": 1}, "frame_end": 50, "scope": "rigid_body"}}
         }
       }
     },
     "free_blender_bake": {
       "minimal": {
         "arguments": {},
-        "session_calls": [{"method": "free_bake", "arguments": {}}],
-        "response": {"success": true, "error": null},
-        "usage": [{"tool": "free_blender_bake", "success": true}]
+        "session_calls": [{"method": "free_bake", "arguments": {"scope": "'rigid_body'"}}],
+        "response": {"checked_against": "BlenderFreeBakeResponse"},
+        "usage": [{"tool": "free_blender_bake", "success": false}]
+      },
+      "full": {
+        "arguments": {"scope": "all"},
+        "session_calls": [{"method": "free_bake", "arguments": {"scope": "'all'"}}],
+        "response": {"checked_against": "BlenderFreeBakeResponse"},
+        "usage": [{"tool": "free_blender_bake", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"scope": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderFreeBakeRequest\nscope\n  Input should be 'rigid_body' or 'all' [type=literal_error, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
+          "error_type": "ValidationError",
+          "details": {"input": {"scope": {"bogus": 1}}}
+        }
+      }
+    },
+    "get_blender_rigid_body_world": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "get_rigid_body_world", "arguments": {}}],
+        "response": {"checked_against": "BlenderRigidBodyWorldResponse"},
+        "usage": [{"tool": "get_blender_rigid_body_world", "success": false}]
+      }
+    },
+    "set_blender_rigid_body_world": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [
+          {
+            "method": "set_rigid_body_world",
+            "arguments": {
+              "enabled": "None",
+              "gravity": "None",
+              "use_gravity": "None",
+              "substeps_per_frame": "None",
+              "solver_iterations": "None",
+              "time_scale": "None",
+              "use_split_impulse": "None",
+              "cache_frame_start": "None",
+              "cache_frame_end": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderRigidBodyWorldResponse"},
+        "usage": [{"tool": "set_blender_rigid_body_world", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "enabled": false,
+          "gravity": [0, 0, -1.62],
+          "use_gravity": false,
+          "substeps_per_frame": 20,
+          "solver_iterations": 30,
+          "time_scale": 0.5,
+          "use_split_impulse": true,
+          "cache_frame_start": 10,
+          "cache_frame_end": 400
+        },
+        "session_calls": [
+          {
+            "method": "set_rigid_body_world",
+            "arguments": {
+              "enabled": "False",
+              "gravity": "[0.0, 0.0, -1.62]",
+              "use_gravity": "False",
+              "substeps_per_frame": "20",
+              "solver_iterations": "30",
+              "time_scale": "0.5",
+              "use_split_impulse": "True",
+              "cache_frame_start": "10",
+              "cache_frame_end": "400"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderRigidBodyWorldResponse"},
+        "usage": [{"tool": "set_blender_rigid_body_world", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"enabled": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetRigidBodyWorldRequest\nenabled\n  Input should be a valid boolean [type=bool_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/bool_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "enabled": {"bogus": 1},
+              "gravity": null,
+              "use_gravity": null,
+              "substeps_per_frame": null,
+              "solver_iterations": null,
+              "time_scale": null,
+              "use_split_impulse": null,
+              "cache_frame_start": null,
+              "cache_frame_end": null
+            }
+          }
+        }
       }
     },
     "execute_blender_script": {
