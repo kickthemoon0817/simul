@@ -351,20 +351,26 @@ def test_a_constraint_names_only_the_bound_that_failed(tmp_path: Path) -> None:
 
 def test_release_is_never_rate_limited(tmp_path: Path) -> None:
     """An agent that spent its budget must still be able to let its claim go."""
-    instance = _isaac_server(tmp_path, security={"burst_size": 1})
+    instance = _isaac_server(
+        tmp_path, security={"burst_size": 1, "global_requests_per_minute": 1}
+    )
 
-    claimed, refused, released = _run(
+    claimed, refused, released, again = _run(
         instance,
         [
             ("claim_isaac_instance", {"purpose": "probe"}),
-            ("claim_isaac_instance", {"purpose": "again"}),
+            ("ping_isaac", {}),
+            ("release_isaac_instance", {}),
             ("release_isaac_instance", {}),
         ],
     )
 
+    # The one token across every tool went to the claim.
     assert _json(claimed)["success"] is True
     assert _json(refused)["error_type"] == "RateLimitError"
+    assert _json(refused)["details"]["scope"] == "agent"
     assert _json(released)["success"] is True
+    assert _json(again)["error_type"] == "InvalidState"
 
 
 def test_a_schema_refusal_is_rate_limited_and_recorded(tmp_path: Path) -> None:

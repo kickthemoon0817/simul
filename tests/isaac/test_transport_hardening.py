@@ -391,10 +391,15 @@ def test_ping_reads_a_garbage_reply_as_unreachable(bridge: bool, reply: Any) -> 
 
     async def scenario() -> bool:
         async def _garbage(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            # Take the request first, so the reply is read rather than reset.
             if callable(reply):
                 size = int.from_bytes(await reader.readexactly(4), "big")
                 writer.write(reply(json.loads(await reader.readexactly(size))))
+            elif bridge:
+                await reader.readexactly(int.from_bytes(await reader.readexactly(4), "big"))
+                writer.write(reply)
             else:
+                await reader.read(65536)
                 writer.write(reply)
             await writer.drain()
             writer.close()
@@ -403,7 +408,12 @@ def test_ping_reads_a_garbage_reply_as_unreachable(bridge: bool, reply: Any) -> 
         port = server.sockets[0].getsockname()[1]
         options: Dict[str, Any] = {"timeout_seconds": 2.0, "socket_protocol": "vscode"}
         if bridge:
-            options.update(prefer_bridge=True, bridge_port=port, fallback_to_vscode=False)
+            options.update(
+                prefer_bridge=True,
+                bridge_host="127.0.0.1",
+                bridge_port=port,
+                fallback_to_vscode=False,
+            )
         else:
             options["port"] = port
         client = IsaacSocketClient(**options)
