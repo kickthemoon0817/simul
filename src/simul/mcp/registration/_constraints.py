@@ -71,8 +71,11 @@ ISAAC_MAX_CAPTURE_DIMENSION = 3840
 #: (``FOCUS_MAX_ASPECT_RATIO``); the narrowest field of view Unreal renders
 #: (``FOCUS_MIN_FOV_DEGREES``).
 UNREAL_MAX_CAPTURE_DIMENSION = 16384
-#: Longest array preview get_prim_info returns (``MAX_ARRAY_PREVIEW``).
+#: Longest array preview get_prim_info returns (``MAX_ARRAY_PREVIEW``), and the
+#: largest search and subtree pages (``MAX_SEARCH_LIMIT``, ``MAX_SUBTREE_LIMIT``).
 USD_MAX_ARRAY_PREVIEW = 10_000
+USD_MAX_SEARCH_LIMIT = 5000
+USD_MAX_SUBTREE_LIMIT = 1000
 UNREAL_MAX_ASPECT_RATIO = 16384.0
 UNREAL_MIN_FOV_DEGREES = 0.001
 
@@ -95,6 +98,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     "get_isaac_texture_dependencies": {"max_results": _PAGE},
     "get_isaac_selection": {"max_results": _PAGE},
     "find_isaac_prims_in_area": {"max_results": _PAGE},
+    "list_isaac_articulations": {"max_results": Bounds(ge=1, le=200)},
     "get_isaac_graph_nodes": {"max_results": _PAGE},
     "list_isaac_graph_node_types": {"max_results": Bounds(ge=1, le=2000)},
     "list_isaac_materials": {"max_results": _PAGE, "offset": _OFFSET},
@@ -134,9 +138,16 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     },
     "create_isaac_physics_scene": {"gravity_magnitude": Bounds(gt=0)},
     # -- Headless USD ----------------------------------------------------------
+    # The limits the USD request models validate (simul.mcp.schemas.usd); the
+    # choices (search_type, format) the tools advertise as Literal types.
     "get_prim_info": {"array_preview": Bounds(ge=0, le=USD_MAX_ARRAY_PREVIEW)},
-    "search_prims": {"search_type": Choices(("by_type", "by_name"))},
-    "summarize_scene": {"format": Choices(("json", "text"))},
+    "get_prim_subtree": {
+        "max_depth": Bounds(ge=0, le=64),
+        "max_results": Bounds(ge=1, le=USD_MAX_SUBTREE_LIMIT),
+        "offset": _OFFSET,
+        "array_preview": Bounds(ge=0, le=USD_MAX_ARRAY_PREVIEW),
+    },
+    "search_prims": {"limit": Bounds(ge=1, le=USD_MAX_SEARCH_LIMIT), "offset": _OFFSET},
     # -- Unreal ----------------------------------------------------------------
     "capture_unreal_viewport": {
         "resolution_x": Bounds(ge=1, le=UNREAL_MAX_CAPTURE_DIMENSION),

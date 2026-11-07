@@ -313,47 +313,6 @@ def test_summary_and_stats_agree_on_prim_counts() -> None:
     assert summary["type_counts"]["Mesh"] == stats["type_counts"]["Mesh"] == 3
 
 
-# ---------------------------------------------------------------------------
-# Physics scene: existing scenes take the requested gravity
-# ---------------------------------------------------------------------------
-
-
-def test_physics_scene_updates_gravity_on_an_existing_scene() -> None:
-    modules = usd_modules(FakeStage([]))
-    scene_kind = modules["pxr"].UsdPhysics.Scene
-    stage = FakeStage(
-        [
-            FakePrim("/World", "Xform"),
-            FakePrim("/World/PhysicsScene", "PhysicsScene", kinds=(scene_kind,)),
-        ]
-    )
-    modules = usd_modules(stage)
-
-    updated = run_script(
-        capture_script(
-            "create_isaac_physics_scene",
-            gravity_magnitude=3.7,
-            gravity_direction=[0, 0, -1],
-        ),
-        modules,
-    )
-    assert updated["already_existed"] is True
-    assert updated["updated"] is True
-    assert updated["created"] is False
-    assert updated["gravity_magnitude"] == 3.7
-    assert updated["gravity_direction"] == [0.0, 0.0, -1.0]
-
-    untouched = run_script(capture_script("create_isaac_physics_scene"), modules)
-    assert untouched["updated"] is False
-    assert untouched["gravity_magnitude"] == 3.7
-
-
-def test_physics_scene_creates_with_z_up_defaults() -> None:
-    stage = FakeStage([FakePrim("/World", "Xform")])
-    created = run_script(
-        capture_script("create_isaac_physics_scene"), usd_modules(stage)
-    )
-    assert created["created"] is True
-    assert created["updated"] is False
-    assert created["gravity_direction"] == [0.0, 0.0, -1.0]
-    assert created["gravity_magnitude"] == 9.81
+# create_isaac_physics_scene reads the stage's up axis and units now, so its
+# create and update paths are covered against real pxr in
+# tests/isaac/test_physics_correctness.py.

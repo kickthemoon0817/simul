@@ -456,8 +456,25 @@ class PrimDetailReader:
         }
 
     def joint(self, prim: Any) -> dict[str, Any]:
-        """Return bodies, flags and limits of a physics joint."""
+        """Return bodies, flags, limits and drives of a physics joint.
+
+        The same logic as the MCP side's ``READ_JOINT_CORE``
+        (``simul/mcp/tools/isaac/joints.py``). UsdPhysics spells "no limit"
+        and "unbreakable" as +-inf, which JSON cannot carry, so an infinite
+        value is null with a ``<key>_note``.
+        """
+        import math
+
         from pxr import UsdPhysics
+
+        def _bound(target: dict[str, Any], key: str, value: Any, meaning: str) -> None:
+            if value is None:
+                target[key] = None
+            elif math.isfinite(float(value)):
+                target[key] = float(value)
+            else:
+                target[key] = None
+                target[key + "_note"] = meaning + (" (-inf)" if float(value) < 0 else " (inf)")
 
         prim_path = str(prim.GetPath())
         if not prim.IsA(UsdPhysics.Joint):
@@ -466,36 +483,58 @@ class PrimDetailReader:
         body0 = joint.GetBody0Rel().GetTargets()
         body1 = joint.GetBody1Rel().GetTargets()
         enabled = joint.GetJointEnabledAttr().Get()
-
-        limits: dict[str, Any] = {}
-        if prim.IsA(UsdPhysics.RevoluteJoint):
-            revolute = UsdPhysics.RevoluteJoint(prim)
-            limits = {
-                "type": "revolute",
-                "axis": revolute.GetAxisAttr().Get(),
-                "lower": revolute.GetLowerLimitAttr().Get(),
-                "upper": revolute.GetUpperLimitAttr().Get(),
-            }
-        elif prim.IsA(UsdPhysics.PrismaticJoint):
-            prismatic = UsdPhysics.PrismaticJoint(prim)
-            limits = {
-                "type": "prismatic",
-                "axis": prismatic.GetAxisAttr().Get(),
-                "lower": prismatic.GetLowerLimitAttr().Get(),
-                "upper": prismatic.GetUpperLimitAttr().Get(),
-            }
-
-        return {
+        result: dict[str, Any] = {
             "prim_path": prim_path,
             "joint_type": prim.GetTypeName(),
             "enabled": enabled if enabled is not None else True,
             "body0": [str(b) for b in body0] if body0 else [],
             "body1": [str(b) for b in body1] if body1 else [],
             "exclude_from_articulation": joint.GetExcludeFromArticulationAttr().Get(),
-            "break_force": joint.GetBreakForceAttr().Get(),
-            "break_torque": joint.GetBreakTorqueAttr().Get(),
-            "limits": limits or None,
         }
+        _bound(result, "break_force", joint.GetBreakForceAttr().Get(), "unbreakable")
+        _bound(result, "break_torque", joint.GetBreakTorqueAttr().Get(), "unbreakable")
+
+        limits: dict[str, Any] = {}
+        typed: Any = None
+        if prim.IsA(UsdPhysics.RevoluteJoint):
+            typed = UsdPhysics.RevoluteJoint(prim)
+            limits["type"] = "revolute"
+        elif prim.IsA(UsdPhysics.PrismaticJoint):
+            typed = UsdPhysics.PrismaticJoint(prim)
+            limits["type"] = "prismatic"
+        if typed is not None:
+            limits["axis"] = typed.GetAxisAttr().Get()
+            _bound(limits, "lower", typed.GetLowerLimitAttr().Get(), "unlimited")
+            _bound(limits, "upper", typed.GetUpperLimitAttr().Get(), "unlimited")
+        result["limits"] = limits or None
+
+        limit_axes: dict[str, Any] = {}
+        drives: dict[str, Any] = {}
+        for schema in prim.GetAppliedSchemas():
+            schema_name, _, instance = str(schema).partition(":")
+            if schema_name == "PhysicsLimitAPI" and instance:
+                limit = UsdPhysics.LimitAPI(prim, instance)
+                low = limit.GetLowAttr().Get()
+                high = limit.GetHighAttr().Get()
+                entry: dict[str, Any] = {
+                    "locked": low is not None and high is not None and float(low) > float(high)
+                }
+                _bound(entry, "low", low, "unlimited")
+                _bound(entry, "high", high, "unlimited")
+                limit_axes[instance] = entry
+            elif schema_name == "PhysicsDriveAPI" and instance:
+                drive = UsdPhysics.DriveAPI(prim, instance)
+                drive_type = drive.GetTypeAttr().Get()
+                entry = {"type": str(drive_type) if drive_type is not None else "force"}
+                _bound(entry, "stiffness", drive.GetStiffnessAttr().Get(), "infinite")
+                _bound(entry, "damping", drive.GetDampingAttr().Get(), "infinite")
+                _bound(entry, "target_position", drive.GetTargetPositionAttr().Get(), "infinite")
+                _bound(entry, "target_velocity", drive.GetTargetVelocityAttr().Get(), "infinite")
+                _bound(entry, "max_force", drive.GetMaxForceAttr().Get(), "unlimited")
+                drives[instance] = entry
+        result["limit_axes"] = limit_axes
+        result["drives"] = drives
+        return result
 
     def mass(self, prim: Any) -> dict[str, Any]:
         """Return MassAPI properties."""

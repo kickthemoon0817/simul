@@ -92,10 +92,15 @@ def test_overwriting_tools_are_destructive_on_both_backends(monkeypatch: pytest.
     assert _hints(instance, "update_prim_attributes").get("destructiveHint") is True
 
 
-def test_creating_a_prim_is_not_destructive(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_creating_a_prim_is_destructive_only_where_it_can_replace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """create_isaac_prim only adds; the USD create_prim can re-type an existing
+    prim with redefine_existing=true, so it carries the destructive hint."""
     instance = _make_server(monkeypatch)
-    assert "destructiveHint" not in _hints(instance, "create_prim")
     assert "destructiveHint" not in _hints(instance, "create_isaac_prim")
+    assert _hints(instance, "create_prim").get("destructiveHint") is True
+    assert "redefine_existing" in _tool(instance, "create_prim").kwargs["description"]
 
 
 def _assert_actionable(payload: Dict[str, Any], path: str, access: str) -> None:

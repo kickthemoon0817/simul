@@ -81,6 +81,8 @@ def test_the_table_uses_the_usd_runtime_constants() -> None:
     from simul.usd import values
 
     assert _constraints.USD_MAX_ARRAY_PREVIEW == values.MAX_ARRAY_PREVIEW == usd_schemas.MAX_ARRAY_PREVIEW
+    assert _constraints.USD_MAX_SEARCH_LIMIT == usd_schemas.MAX_SEARCH_LIMIT
+    assert _constraints.USD_MAX_SUBTREE_LIMIT == usd_schemas.MAX_SUBTREE_LIMIT
 
 
 def test_the_table_uses_the_unreal_runtime_constants() -> None:

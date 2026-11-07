@@ -2,7 +2,7 @@
 
 A harness that auto-approves read-only tools trusts these hints, so they are
 pinned for all of them: every tool the server registers with the full Unreal
-and Blender surfaces and script execution on (203 tools) must be in the table,
+and Blender surfaces and script execution on (over 200 tools) must be in the table,
 and the table names no tool that is not registered. The rule is the same on
 every backend:
 
@@ -48,6 +48,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "assign_isaac_material": (DESTRUCTIVE, True, True),
     "capture_isaac_viewport": (DESTRUCTIVE, False, True),  # writes a new PNG and deletes the oldest captures
     "claim_isaac_instance": (RW, True, False),
+    "configure_isaac_physics_scene": (DESTRUCTIVE, True, True),
     "connect_isaac_graph_nodes": (RW, True, True),
     "create_isaac_graph_node": (RW, False, True),
     "create_isaac_light": (RW, False, True),
@@ -85,6 +86,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "import_isaac_asset": (RW, False, True),
     "interrupt_isaac_script": (RW, True, True),  # stops the running script
     "list_isaac_aovs": (RO, True, True),
+    "list_isaac_articulations": (RO, True, True),
     "list_isaac_cameras": (RO, True, True),
     "list_isaac_extensions": (RO, True, True),
     "list_isaac_graph_node_types": (RO, True, True),
@@ -111,6 +113,8 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "set_isaac_camera": (RW, True, True),
     "set_isaac_carb_settings": (DESTRUCTIVE, True, True),
     "set_isaac_graph_node_values": (DESTRUCTIVE, True, True),
+    "set_isaac_joint_drive": (DESTRUCTIVE, True, True),
+    "set_isaac_joint_limits": (DESTRUCTIVE, True, True),
     "set_isaac_log_level": (DESTRUCTIVE, True, True),
     "set_isaac_mass_properties": (DESTRUCTIVE, True, True),
     "set_isaac_material_property": (DESTRUCTIVE, True, True),
@@ -122,11 +126,12 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "step_isaac_simulation": (RW, False, True),
     "stop_isaac_simulation": (RW, True, True),
     # Headless USD
-    "create_prim": (RW, False, False),
+    "create_prim": (DESTRUCTIVE, False, False),  # redefine_existing re-types a prim
     "delete_prim": (DESTRUCTIVE, True, False),
     "get_bounding_box": (RO, True, False),
     "get_mesh_info": (RO, True, False),
     "get_prim_info": (RO, True, False),
+    "get_prim_subtree": (RO, True, False),
     "load_usd_file": (RO, True, False),
     "search_prims": (RO, True, False),
     "summarize_scene": (RO, True, False),

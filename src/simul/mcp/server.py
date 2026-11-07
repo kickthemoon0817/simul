@@ -82,12 +82,11 @@ logger = get_logger(__name__)
 # BSDs, 108 on Linux.
 _UNIX_SOCKET_PATH_MAX = 108 if sys.platform.startswith("linux") else 104
 
-try:
-    from importlib.metadata import version as _pkg_version
-
-    _PACKAGE_VERSION: str = _pkg_version("simul-toolkit")
-except Exception:
-    _PACKAGE_VERSION = _source_version
+# The version MCP clients see in serverInfo. simul.__version__ is the one
+# tests/test_version_lockstep.py ties to pyproject.toml; the installed
+# distribution's metadata is stale in an editable install (it said 0.1.6 while
+# `simul version` said 0.1.11).
+_PACKAGE_VERSION: str = _source_version
 
 
 def build_instructions(
@@ -2590,8 +2589,11 @@ class SimulMCPServer(LoggerMixin):
         try:
             self.logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
 
+            # No FastMCP banner: it checks PyPI for a newer FastMCP on every
+            # start (+2 s when PyPI is unreachable) and caches the answer in
+            # FastMCP's home. The CLI prints simul's own banner.
             if transport == "stdio":
-                await self.mcp.run_async(transport="stdio")
+                await self.mcp.run_async(transport="stdio", show_banner=False)
             elif transport in NETWORK_TRANSPORTS:
                 from .http_security import resolve_http_security
 
@@ -2605,6 +2607,7 @@ class SimulMCPServer(LoggerMixin):
                     self.mcp.auth = auth
                 await self.mcp.run_async(
                     transport=cast(Literal["http", "sse"], transport),
+                    show_banner=False,
                     host=self.settings.server.host,
                     port=self.settings.server.port,
                     **http_security.run_kwargs(),
