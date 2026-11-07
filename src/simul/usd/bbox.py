@@ -1,316 +1,180 @@
 """
-Bounding box utilities for USD data in Isaac Sim MCP Server.
+Bounding boxes for USD prims and stages.
 
-This module provides bounding box computation, caching, and utilities
-for USD prims and stages using the pxr library.
+Every bound comes from ``UsdGeom.BBoxCache``, so it is the bound USD itself
+computes: each transform between the prim and the root applies, instances are
+followed into their prototypes, and an extent that is not authored is computed
+from the geometry. Only prims whose computed purpose is in the included set
+contribute. The default set is ``default`` plus ``render``, the geometry a
+renderer or simulator sees; ``proxy`` and ``guide`` geometry (preview stand-ins,
+collision shapes authored as guides) is left out unless asked for.
+
+A prim with nothing boundable at or below it under those purposes has no
+bound: the functions here return ``None`` for it, never a guessed box.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Any, Tuple, Union
-import numpy as np
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from ._pxr import Gf, Usd, UsdGeom
+from ._pxr import Usd, UsdGeom
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import monitor_performance
-from ..utils.math import BBox, bbox_union, bbox_from_points
+from ..utils.math import BBox, bbox_center, bbox_size, bbox_volume
+from .timecode import resolve_time_code, time_code_value
 
 logger = get_logger(__name__)
+
+# UsdGeom.Imageable.GetOrderedPurposeTokens(), spelled out so the schema enum
+# and the validation below agree without importing pxr at schema build time.
+PURPOSES: Tuple[str, ...] = ("default", "render", "proxy", "guide")
+
+# What renderers and simulators see: everything not marked proxy or guide.
+DEFAULT_PURPOSES: Tuple[str, ...] = ("default", "render")
+
+
+def normalize_purposes(purposes: Optional[Iterable[str]] = None) -> Tuple[str, ...]:
+    """Validate a purpose selection and return it without duplicates.
+
+    Args:
+        purposes: Purpose tokens to include, or None for ``DEFAULT_PURPOSES``.
+
+    Returns:
+        The purposes in the order given, each once.
+
+    Raises:
+        ValueError: For an unknown token or an empty selection.
+    """
+    if purposes is None:
+        return DEFAULT_PURPOSES
+    selected: List[str] = []
+    for purpose in purposes:
+        if purpose not in PURPOSES:
+            raise ValueError(f"Unknown purpose {purpose!r}; expected one of {list(PURPOSES)}")
+        if purpose not in selected:
+            selected.append(purpose)
+    if not selected:
+        raise ValueError(f"include_purposes must name at least one of {list(PURPOSES)}")
+    return tuple(selected)
+
+
+def _aligned_range_to_bbox(usd_bbox: Any) -> Optional[BBox]:
+    """Convert a ``Gf.BBox3d`` to a ``(min, max)`` pair, or None when empty.
+
+    ``Gf.BBox3d`` has no ``IsEmpty``/``GetMin``/``GetMax``; the axis-aligned
+    range (with the box's matrix applied) carries them.
+    """
+    aligned = usd_bbox.ComputeAlignedRange()
+    if aligned.IsEmpty():
+        return None
+    min_point = aligned.GetMin()
+    max_point = aligned.GetMax()
+    return (
+        [float(min_point[0]), float(min_point[1]), float(min_point[2])],
+        [float(max_point[0]), float(max_point[1]), float(max_point[2])],
+    )
 
 
 class BBoxCache(LoggerMixin):
     """
-    Bounding box cache for USD prims.
-    
-    Provides efficient bounding box computation and caching for USD prims
-    with support for world and local coordinate spaces.
+    Bounding boxes of one stage at one time, for one set of purposes.
+
+    Wraps ``UsdGeom.BBoxCache``, which memoises the bounds it computes. The
+    cache does not watch the stage: call ``clear_cache`` after an edit.
     """
-    
-    def __init__(self, stage: Usd.Stage, time_code: Optional[Any] = None):
+
+    def __init__(
+        self,
+        stage: Usd.Stage,
+        time_code: Optional[Any] = None,
+        *,
+        purposes: Optional[Iterable[str]] = None,
+    ):
         """
-        Initialize bounding box cache.
-        
+        Initialize the cache.
+
         Args:
             stage: USD Stage
-            time_code: Time code for animated data
+            time_code: Time code to evaluate at; None (or ``Usd.TimeCode.Default()``)
+                for the default time
+            purposes: Purposes whose geometry counts; None for default and render
         """
         self.stage = stage
-        self.time_code = self._default_time_code() if time_code is None else time_code
-        self._world_bbox_cache: Dict[str, BBox] = {}
-        self._local_bbox_cache: Dict[str, BBox] = {}
-        self._usd_bbox_cache: Optional[UsdGeom.BBoxCache] = None
-        
-        # Initialize USD's built-in bbox cache
-        try:
-            self._usd_bbox_cache = UsdGeom.BBoxCache(
-                self.time_code,
-                includedPurposes=[UsdGeom.Tokens.default_],
-            )
-        except Exception as e:
-            self.logger.warning(f"Could not initialize USD BBoxCache: {e}")
-        
-        self.logger.info(f"BBox cache initialized for stage at time {time_code}")
+        self.time_code = resolve_time_code(time_code)
+        self.purposes = normalize_purposes(purposes)
+        self._usd_bbox_cache = self._new_usd_cache()
+        self.logger.debug(
+            f"BBox cache initialized at time {self.time_code} for purposes {list(self.purposes)}"
+        )
+
+    def _new_usd_cache(self) -> UsdGeom.BBoxCache:
+        return UsdGeom.BBoxCache(self.time_code, includedPurposes=list(self.purposes))
 
     @staticmethod
     def _default_time_code() -> Any:
         """Return the USD default time code."""
         return Usd.TimeCode.Default()
-    
-    @staticmethod
-    def _aligned_range_to_bbox(usd_bbox: Any) -> Optional[BBox]:
-        """Convert a ``Gf.BBox3d`` to a ``(min, max)`` pair, or None when empty.
-
-        ``Gf.BBox3d`` has no ``IsEmpty``/``GetMin``/``GetMax``; the axis-aligned
-        range (with the box's matrix applied) carries them.
-        """
-        aligned = usd_bbox.ComputeAlignedRange()
-        if aligned.IsEmpty():
-            return None
-        min_point = aligned.GetMin()
-        max_point = aligned.GetMax()
-        return (
-            [float(min_point[0]), float(min_point[1]), float(min_point[2])],
-            [float(max_point[0]), float(max_point[1]), float(max_point[2])],
-        )
 
     def clear_cache(self) -> None:
-        """Clear all cached bounding boxes."""
-        self._world_bbox_cache.clear()
-        self._local_bbox_cache.clear()
-        if self._usd_bbox_cache:
-            self._usd_bbox_cache.Clear()
+        """Forget every computed bound; the next query recomputes from the stage."""
+        self._usd_bbox_cache.Clear()
         self.logger.debug("Cleared bounding box cache")
-    
+
+    def _cache_for(self, use_cache: bool) -> UsdGeom.BBoxCache:
+        return self._usd_bbox_cache if use_cache else self._new_usd_cache()
+
     @monitor_performance("bbox_cache.compute_world_bbox")
     def compute_world_bbox(self, prim: Usd.Prim, use_cache: bool = True) -> Optional[BBox]:
         """
-        Compute world-space bounding box for a prim.
-        
+        Compute the world-space bound of a prim and its descendants.
+
         Args:
-            prim: USD Prim
-            use_cache: Use cached result if available
-            
+            prim: USD Prim (the pseudo-root bounds the whole stage)
+            use_cache: Reuse bounds computed earlier; False computes afresh
+
         Returns:
-            Bounding box in world coordinates or None if computation failed
+            ``(min, max)`` in world coordinates, or None when nothing with an
+            included purpose is boundable at or below the prim
         """
-        prim_path = str(prim.GetPath())
-        
-        # Check cache first
-        if use_cache and prim_path in self._world_bbox_cache:
-            return self._world_bbox_cache[prim_path]
-        
-        try:
-            bbox = None
-            
-            # Try using USD's built-in bbox cache first
-            if self._usd_bbox_cache:
-                try:
-                    bbox = self._aligned_range_to_bbox(self._usd_bbox_cache.ComputeWorldBound(prim))
-                except Exception as e:
-                    self.logger.debug(f"USD BBoxCache failed for {prim_path}: {e}")
-            
-            # Fallback to manual computation
-            if bbox is None:
-                bbox = self._compute_world_bbox_manual(prim)
-            
-            # Cache the result
-            if bbox and use_cache:
-                self._world_bbox_cache[prim_path] = bbox
-            
-            return bbox
-            
-        except Exception as e:
-            self.logger.error(f"Error computing world bbox for {prim_path}: {e}")
-            return None
-    
+        return _aligned_range_to_bbox(self._cache_for(use_cache).ComputeWorldBound(prim))
+
     @monitor_performance("bbox_cache.compute_local_bbox")
     def compute_local_bbox(self, prim: Usd.Prim, use_cache: bool = True) -> Optional[BBox]:
         """
-        Compute local-space bounding box for a prim.
-        
+        Compute the bound of a prim and its descendants in the prim's own space.
+
+        The descendants' transforms apply; the prim's own transform and its
+        ancestors' do not.
+
         Args:
             prim: USD Prim
-            use_cache: Use cached result if available
-            
+            use_cache: Reuse bounds computed earlier; False computes afresh
+
         Returns:
-            Bounding box in local coordinates or None if computation failed
+            ``(min, max)`` in the prim's object space, or None when nothing
+            with an included purpose is boundable at or below the prim
         """
-        prim_path = str(prim.GetPath())
-        
-        # Check cache first
-        if use_cache and prim_path in self._local_bbox_cache:
-            return self._local_bbox_cache[prim_path]
-        
-        try:
-            bbox = None
-            
-            # Try using USD's built-in bbox cache first
-            if self._usd_bbox_cache:
-                try:
-                    # Object space: children's transforms apply, the prim's own does not.
-                    bbox = self._aligned_range_to_bbox(self._usd_bbox_cache.ComputeUntransformedBound(prim))
-                except Exception as e:
-                    self.logger.debug(f"USD BBoxCache failed for {prim_path}: {e}")
-            
-            # Fallback to manual computation
-            if bbox is None:
-                bbox = self._compute_local_bbox_manual(prim)
-            
-            # Cache the result
-            if bbox and use_cache:
-                self._local_bbox_cache[prim_path] = bbox
-            
-            return bbox
-            
-        except Exception as e:
-            self.logger.error(f"Error computing local bbox for {prim_path}: {e}")
-            return None
-    
-    def _compute_world_bbox_manual(self, prim: Usd.Prim) -> Optional[BBox]:
-        """Manually compute world bounding box."""
-        try:
-            # Get local bbox first
-            local_bbox = self._compute_local_bbox_manual(prim)
-            if not local_bbox:
-                return None
-            
-            # Get world transform
-            if prim.IsA(UsdGeom.Imageable):
-                imageable = UsdGeom.Imageable(prim)
-                world_transform = imageable.ComputeLocalToWorldTransform(self.time_code)
-                
-                # Transform bbox corners
-                min_point, max_point = local_bbox
-                corners = [
-                    [min_point[0], min_point[1], min_point[2]],
-                    [max_point[0], min_point[1], min_point[2]],
-                    [min_point[0], max_point[1], min_point[2]],
-                    [max_point[0], max_point[1], min_point[2]],
-                    [min_point[0], min_point[1], max_point[2]],
-                    [max_point[0], min_point[1], max_point[2]],
-                    [min_point[0], max_point[1], max_point[2]],
-                    [max_point[0], max_point[1], max_point[2]],
-                ]
-                
-                # Transform all corners
-                transformed_corners = []
-                for corner in corners:
-                    point = Gf.Vec3f(corner[0], corner[1], corner[2])
-                    transformed = world_transform.Transform(point)
-                    transformed_corners.append([transformed[0], transformed[1], transformed[2]])
-                
-                # Compute bbox from transformed corners
-                return bbox_from_points(transformed_corners)
-            else:
-                # For non-imageable prims, world bbox is same as local
-                return local_bbox
-                
-        except Exception as e:
-            self.logger.debug(f"Manual world bbox computation failed: {e}")
-            return None
-    
-    def _compute_local_bbox_manual(self, prim: Usd.Prim) -> Optional[BBox]:
-        """Manually compute local bounding box."""
-        try:
-            if prim.IsA(UsdGeom.Mesh):
-                # For mesh prims, compute from vertices
-                mesh = UsdGeom.Mesh(prim)
-                points_attr = mesh.GetPointsAttr()
-                if points_attr:
-                    points = points_attr.Get(self.time_code)
-                    if points:
-                        points_list = [[p[0], p[1], p[2]] for p in points]
-                        return bbox_from_points(points_list)
-            
-            elif prim.IsA(UsdGeom.Cube):
-                # For cube prims, use size attribute
-                cube = UsdGeom.Cube(prim)
-                size_attr = cube.GetSizeAttr()
-                size = size_attr.Get(self.time_code) if size_attr else 2.0
-                half_size = size / 2.0
-                return ([-half_size, -half_size, -half_size], [half_size, half_size, half_size])
-            
-            elif prim.IsA(UsdGeom.Sphere):
-                # For sphere prims, use radius attribute
-                sphere = UsdGeom.Sphere(prim)
-                radius_attr = sphere.GetRadiusAttr()
-                radius = radius_attr.Get(self.time_code) if radius_attr else 1.0
-                return ([-radius, -radius, -radius], [radius, radius, radius])
-            
-            elif prim.IsA(UsdGeom.Cylinder):
-                # For cylinder prims, use radius and height attributes
-                cylinder = UsdGeom.Cylinder(prim)
-                radius_attr = cylinder.GetRadiusAttr()
-                height_attr = cylinder.GetHeightAttr()
-                axis_attr = cylinder.GetAxisAttr()
-                radius = radius_attr.Get(self.time_code) if radius_attr else 1.0
-                height = height_attr.Get(self.time_code) if height_attr else 2.0
-                # USD's schema default for Cylinder.axis is "Z".
-                axis = (axis_attr.Get(self.time_code) if axis_attr else None) or "Z"
-                half_extent = [radius, radius, radius]
-                half_extent["XYZ".index(axis) if axis in ("X", "Y", "Z") else 2] = height / 2.0
-                return ([-e for e in half_extent], list(half_extent))
-            
-            elif prim.IsA(UsdGeom.Xform):
-                # For Xform prims, compute union of children bboxes
-                child_bboxes = []
-                for child in prim.GetChildren():
-                    child_bbox = self.compute_local_bbox(child, use_cache=False)
-                    if child_bbox:
-                        child_bboxes.append(child_bbox)
-                
-                if child_bboxes:
-                    # Compute union of all child bboxes
-                    union_bbox = child_bboxes[0]
-                    for bbox in child_bboxes[1:]:
-                        union_bbox = bbox_union(union_bbox, bbox)
-                    return union_bbox
-            
-            # No geometry to bound (Camera, Scope, Light, empty Xform, ...).
-            # Report "no bound" rather than fabricating a unit cube.
-            return None
-            
-        except Exception as e:
-            self.logger.debug(f"Manual local bbox computation failed: {e}")
-            return None
-    
+        return _aligned_range_to_bbox(self._cache_for(use_cache).ComputeUntransformedBound(prim))
+
     def get_stage_bbox(self) -> Optional[BBox]:
         """
-        Compute bounding box for the entire stage.
-        
+        Compute the world-space bound of the whole stage.
+
         Returns:
-            Stage bounding box or None if computation failed
+            ``(min, max)``, or None when the stage has no boundable geometry
+            with an included purpose
         """
-        try:
-            root_prims = [prim for prim in self.stage.GetPseudoRoot().GetChildren()]
-            if not root_prims:
-                return None
-            
-            # Compute union of all root prim bboxes
-            stage_bbox = None
-            for prim in root_prims:
-                prim_bbox = self.compute_world_bbox(prim)
-                if prim_bbox:
-                    if stage_bbox is None:
-                        stage_bbox = prim_bbox
-                    else:
-                        stage_bbox = bbox_union(stage_bbox, prim_bbox)
-            
-            return stage_bbox
-            
-        except Exception as e:
-            self.logger.error(f"Error computing stage bbox: {e}")
-            return None
+        return self.compute_world_bbox(self.stage.GetPseudoRoot())
 
 
 def bbox_to_dict(bbox: BBox) -> Dict[str, List[float]]:
     """
     Convert bounding box to dictionary format.
-    
+
     Args:
         bbox: Bounding box tuple
-        
+
     Returns:
         Dictionary with min and max points
     """
@@ -324,30 +188,87 @@ def bbox_to_dict(bbox: BBox) -> Dict[str, List[float]]:
 def dict_to_bbox(bbox_dict: Dict[str, List[float]]) -> BBox:
     """
     Convert dictionary to bounding box format.
-    
+
     Args:
         bbox_dict: Dictionary with min and max points
-        
+
     Returns:
         Bounding box tuple
     """
     return (bbox_dict['min'], bbox_dict['max'])
 
 
+def describe_bounds(
+    stage: Usd.Stage,
+    prim: Optional[Usd.Prim] = None,
+    *,
+    world_space: bool = True,
+    purposes: Optional[Iterable[str]] = None,
+    time_code: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """
+    Bound a prim (or the stage) and say what the bound covers.
+
+    Args:
+        stage: USD Stage
+        prim: Prim to bound; None (or the pseudo-root) bounds the whole stage
+        world_space: World coordinates when True, else the prim's object space
+        purposes: Purposes whose geometry counts; None for default and render
+        time_code: Time code to evaluate at; None for the default time
+
+    Returns:
+        ``bbox`` (``min``/``max``/``center``/``size``/``volume``, or None),
+        ``has_geometry``, ``included_purposes`` and ``time_code``. With no
+        bound, ``excluded_purposes_with_geometry`` names the purposes left out
+        that do hold geometry there, so the caller knows whether widening the
+        selection would help.
+    """
+    cache = BBoxCache(stage, time_code, purposes=purposes)
+    target = stage.GetPseudoRoot() if prim is None else prim
+    bbox = cache.compute_world_bbox(target) if world_space else cache.compute_local_bbox(target)
+    result: Dict[str, Any] = {
+        "bbox": None,
+        "has_geometry": bbox is not None,
+        "included_purposes": list(cache.purposes),
+        "time_code": time_code_value(cache.time_code),
+    }
+    if bbox is not None:
+        result["bbox"] = {
+            **bbox_to_dict(bbox),
+            "center": bbox_center(bbox),
+            "size": bbox_size(bbox),
+            "volume": bbox_volume(bbox),
+        }
+        return result
+    excluded = [purpose for purpose in PURPOSES if purpose not in cache.purposes]
+    result["excluded_purposes_with_geometry"] = [
+        purpose
+        for purpose in excluded
+        if BBoxCache(stage, cache.time_code, purposes=[purpose]).compute_world_bbox(target) is not None
+    ]
+    return result
+
+
 # Convenience functions
 def compute_world_bbox(
-    prim: Usd.Prim, time_code: Optional[Any] = None
+    prim: Usd.Prim,
+    time_code: Optional[Any] = None,
+    *,
+    purposes: Optional[Iterable[str]] = None,
 ) -> Optional[BBox]:
     """Compute world bounding box for a prim."""
-    cache = BBoxCache(prim.GetStage(), time_code)
+    cache = BBoxCache(prim.GetStage(), time_code, purposes=purposes)
     return cache.compute_world_bbox(prim)
 
 
 def compute_local_bbox(
-    prim: Usd.Prim, time_code: Optional[Any] = None
+    prim: Usd.Prim,
+    time_code: Optional[Any] = None,
+    *,
+    purposes: Optional[Iterable[str]] = None,
 ) -> Optional[BBox]:
     """Compute local bounding box for a prim."""
-    cache = BBoxCache(prim.GetStage(), time_code)
+    cache = BBoxCache(prim.GetStage(), time_code, purposes=purposes)
     return cache.compute_local_bbox(prim)
 
 
@@ -355,9 +276,11 @@ def get_prim_bbox(
     prim: Usd.Prim,
     world_space: bool = True,
     time_code: Optional[Any] = None,
+    *,
+    purposes: Optional[Iterable[str]] = None,
 ) -> Optional[BBox]:
     """Get bounding box for a prim in world or local space."""
-    cache = BBoxCache(prim.GetStage(), time_code)
+    cache = BBoxCache(prim.GetStage(), time_code, purposes=purposes)
     if world_space:
         return cache.compute_world_bbox(prim)
     else:
@@ -365,8 +288,11 @@ def get_prim_bbox(
 
 
 def get_stage_bbox(
-    stage: Usd.Stage, time_code: Optional[Any] = None
+    stage: Usd.Stage,
+    time_code: Optional[Any] = None,
+    *,
+    purposes: Optional[Iterable[str]] = None,
 ) -> Optional[BBox]:
     """Get bounding box for an entire stage."""
-    cache = BBoxCache(stage, time_code)
+    cache = BBoxCache(stage, time_code, purposes=purposes)
     return cache.get_stage_bbox()

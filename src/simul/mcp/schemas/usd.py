@@ -1,6 +1,6 @@
 """USD and generic scene schemas exposed through MCP."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -256,6 +256,11 @@ class PrimSearchResponse(BaseModel):
     error: Optional[str] = Field(None, description="Error message if failed")
 
 
+Purpose = Literal["default", "render", "proxy", "guide"]
+
+DEFAULT_BBOX_PURPOSES: List[Purpose] = ["default", "render"]
+
+
 class BBoxRequest(BaseModel):
     """Request for bounding box computation."""
 
@@ -264,7 +269,24 @@ class BBoxRequest(BaseModel):
         None, description="Prim path (None for stage bbox)"
     )
     world_space: bool = Field(True, description="Compute in world space")
-    time_code: Optional[float] = Field(None, description="Time code for animated data")
+    time_code: Optional[float] = Field(
+        None, description="Time code to evaluate at; None for the default time"
+    )
+    include_purposes: Optional[List[Purpose]] = Field(
+        None,
+        description="Purposes whose geometry counts; None for default and render",
+    )
+
+    @field_validator("include_purposes")
+    @classmethod
+    def validate_include_purposes(
+        cls, v: Optional[List[Purpose]]
+    ) -> Optional[List[Purpose]]:
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("include_purposes must name at least one purpose")
+        return list(dict.fromkeys(v))
 
 
 class BBoxResponse(BaseModel):
@@ -273,8 +295,32 @@ class BBoxResponse(BaseModel):
     success: bool = Field(..., description="Whether computation was successful")
     stage_id: str = Field(..., description="Stage identifier")
     prim_path: Optional[str] = Field(None, description="Prim path")
-    bbox: Optional[BoundingBox] = Field(None, description="Computed bounding box")
+    bbox: Optional[BoundingBox] = Field(
+        None, description="Computed bounding box; None when has_geometry is False"
+    )
     world_space: bool = Field(..., description="Whether bbox is in world space")
+    has_geometry: bool = Field(
+        True,
+        description=(
+            "False when nothing boundable with an included purpose lies at or "
+            "below the prim"
+        ),
+    )
+    included_purposes: List[Purpose] = Field(
+        default_factory=lambda: list(DEFAULT_BBOX_PURPOSES),
+        description="Purposes whose geometry the bound covers",
+    )
+    time_code: Optional[float] = Field(
+        None, description="Time code evaluated; None for the default time"
+    )
+    excluded_purposes_with_geometry: Optional[List[Purpose]] = Field(
+        None,
+        description=(
+            "With no bound: the purposes left out that do hold geometry here; "
+            "add them to include_purposes to bound it"
+        ),
+    )
+    message: Optional[str] = Field(None, description="What an empty result means")
     error: Optional[str] = Field(None, description="Error message if failed")
 
 
