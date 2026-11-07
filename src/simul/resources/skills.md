@@ -24,7 +24,10 @@ container-internal ports are directly reachable.
 - `stdout` is captured and returned — use `print()` for output
 - For structured results, **always** `print(json.dumps({...}))` as the last line
 - Top-level `await` is supported (the executor detects coroutines)
-- Each execution is independent — use `import` at the top of every script
+- Executions are not isolated: every transport runs scripts in one shared
+  namespace, so globals persist into later calls (other agents' included).
+  `import` what you use at the top of every script, keep helpers inside
+  functions, and never depend on a global from an earlier call
 - Avoid long-running loops that block the Kit main thread
 
 ---

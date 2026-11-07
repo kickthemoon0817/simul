@@ -37,7 +37,9 @@ def test_execute_prefers_bridge_when_configured() -> None:
     result = asyncio.run(client.execute("print('hi')"))
 
     assert result.transport == "bridge"
-    client._execute_bridge_script.assert_awaited_once_with("print('hi')")  # type: ignore[attr-defined]
+    client._execute_bridge_script.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "print('hi')", client.script_timeout_seconds
+    )
     client._execute_vscode_unlocked.assert_not_called()  # type: ignore[attr-defined]
 
 
@@ -61,8 +63,12 @@ def test_execute_falls_back_to_vscode_when_bridge_is_unavailable() -> None:
     result = asyncio.run(client.execute("print('hi')"))
 
     assert result.transport == "vscode"
-    client._execute_bridge_script.assert_awaited_once_with("print('hi')")  # type: ignore[attr-defined]
-    client._execute_vscode_unlocked.assert_awaited_once_with("print('hi')")  # type: ignore[attr-defined]
+    client._execute_bridge_script.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "print('hi')", client.script_timeout_seconds
+    )
+    client._execute_vscode_unlocked.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "print('hi')", client.script_timeout_seconds
+    )
 
 
 def test_ping_prefers_bridge_when_available() -> None:

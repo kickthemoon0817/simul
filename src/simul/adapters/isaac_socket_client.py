@@ -27,12 +27,22 @@ Bridge protocol:
 Python socket protocol (5.x VS Code ext and 6.0+ python_server ext):
     1. Open TCP connection to host:port
     2. Send the script. 5.x takes raw UTF-8 source; python_server takes the
-       JSON envelope {"code", "timeout", "auth_token"} so it enforces a
-       per-request execution timeout instead of running a runaway script
-       until the process dies.
+       JSON envelope {"code", "timeout", "auth_token"}. The timeout only
+       bounds the *reply*: python_server answers with a TimeoutError once it
+       expires, but the script keeps running inside Kit and its effects may
+       still land (v6.0.1 ``python_server/extension.py`` ``_timeout_watchdog``
+       only queues a reply). Only the bridge can stop a script.
     3. python_server only: half-close the socket so the server executes
     4. Receive JSON response: {"status":"ok"|"error","output":"..."}
     5. Connection closes after each execution
+
+The 5.x VS Code extension has no framing at all: its ``data_received`` runs
+every chunk of bytes that arrives as a separate script, replies to the first
+and closes (v5.1.0 ``vscode/extension.py``). A script that arrives in two
+reads therefore executes as two fragments, the second possibly with nobody
+listening. The client sends that socket at most ``MAX_VSCODE_SCRIPT_BYTES``,
+a size one loopback read carries, and refuses larger scripts with a pointer
+to the bridge, which reads a length-prefixed frame.
 
 Bridge circuit breaker: a bridge port that is filtered or half-open costs
 the full bridge timeout on every call, not the ~1 ms a refused port does.
@@ -47,7 +57,17 @@ Fallback is only safe before the bridge has the request: once the
 ``execute_script`` frame is written the script may already be running in
 Kit, and re-sending it to the stock socket would run it twice. Failures
 after delivery raise a :class:`BridgeRequestDeliveredError` subclass and are
-surfaced to the caller instead of falling back.
+surfaced to the caller instead of falling back. A reply timeout after
+delivery does not count toward the circuit breaker either: the bridge
+accepted the request and may still be running it, so routing the next calls
+to the stock socket would run new scripts beside the old one. The one reply
+that does fall back is a refusal the bridge sends *instead of* running the
+script (``UnsafeExecutionDisabled``), since nothing ran.
+
+Authentication: when the client has a token (``ISAAC_SIM__SOCKET_AUTH_TOKEN``
+or the file ``simul isaac launch --generate-auth-token`` stores) it sends it
+to both transports: in the python_server envelope and in every bridge frame.
+A bridge that does not require a token ignores the field.
 """
 
 import asyncio
@@ -56,7 +76,7 @@ import logging
 import struct
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Literal, Optional
 
 from .isaac_install import PYTHON_SERVER_EXTENSION, VSCODE_EXTENSION
@@ -84,6 +104,26 @@ MIN_SCRIPT_TIMEOUT_SECONDS: float = 1.0
 #: script budget it sent, so the bridge's own ``ScriptInterrupted`` report
 #: arrives before the client gives up on the response.
 BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS: float = 5.0
+#: Extra time the client waits for a stock-socket reply beyond the script
+#: budget, so python_server's own TimeoutError reply arrives first.
+SOCKET_SCRIPT_REPLY_MARGIN_SECONDS: float = 1.0
+#: Largest payload sent to Isaac Sim 5.x's VS Code socket, in UTF-8 bytes.
+#: That extension executes each read separately (see the module docstring), so
+#: a script must arrive in one read. Half of loopback's 64 KiB segment, which
+#: leaves room for the kernel and asyncio to deliver it whole; links with a
+#: smaller MTU (container bridges, SSH tunnels) can still split less, which is
+#: why the bridge is the transport to use there.
+MAX_VSCODE_SCRIPT_BYTES: int = 32 * 1024
+#: Bridge errors sent instead of running the script. Nothing ran, so the
+#: client may send the script to the stock socket instead.
+BRIDGE_REFUSAL_ERRORS: frozenset = frozenset({"UnsafeExecutionDisabled"})
+#: Appended to every report of a script that ran out of time: the Kit-side
+#: work a script starts (a stage load, an extension enable, a first render)
+#: is not undone by abandoning the script.
+TIMEOUT_MAY_STILL_COMPLETE = (
+    "Work the script had already started in Kit (a stage load, an extension "
+    "enable, a render) may still complete; check the state before retrying."
+)
 
 
 class BridgeCircuitOpenError(ConnectionRefusedError):
@@ -172,6 +212,7 @@ class IsaacSocketClient:
         bridge_failure_threshold: int = DEFAULT_BRIDGE_FAILURE_THRESHOLD,
         bridge_cooldown_seconds: float = DEFAULT_BRIDGE_COOLDOWN_SECONDS,
         bridge_circuit_breaker: bool = True,
+        max_vscode_script_bytes: int = MAX_VSCODE_SCRIPT_BYTES,
     ) -> None:
         """
         Initialize the socket client.
@@ -195,15 +236,21 @@ class IsaacSocketClient:
                 probes the server once; "python_server" (Isaac Sim 6.0+)
                 half-closes after sending; "vscode" (Isaac Sim 5.x) does not.
             auth_token: Token for a python_server configured with
-                ``require_auth``. Sent in the JSON envelope on python_server
-                and as a raw-source header on the probe; ignored by 5.x.
-            script_timeout_seconds: Execution budget the server is asked to
-                enforce on each script (python_server ``timeout`` field and
-                bridge ``execute_script`` payload). Defaults to one second
-                less than ``timeout_seconds`` so the server reports the
-                overrun before this client's own read deadline expires;
-                never below one second. The 5.x VS Code socket has no such
-                field and ignores it.
+                ``require_auth``. Sent in the JSON envelope on python_server,
+                as a raw-source header on the probe (ignored by 5.x), and in
+                every bridge frame, which a bridge requiring auth checks.
+            script_timeout_seconds: Budget sent with each script (python_server
+                ``timeout`` field and bridge ``execute_script`` payload).
+                Defaults to one second less than ``timeout_seconds`` so the
+                server reports the overrun before this client's own read
+                deadline expires; never below one second. The bridge
+                interrupts a script that overruns it; python_server only
+                replies with a TimeoutError and lets the script run on; the
+                5.x VS Code socket has no such field. Callers pass a longer
+                per-call budget for known-heavy operations.
+            max_vscode_script_bytes: Largest payload sent to the 5.x VS Code
+                socket, which executes each read separately; larger scripts
+                are refused with a pointer to the bridge.
             bridge_failure_threshold: Consecutive bridge transport failures
                 that open the circuit.
             bridge_cooldown_seconds: How long an open circuit skips the
@@ -251,6 +298,7 @@ class IsaacSocketClient:
             )
         self._socket_protocol: SocketProtocol = socket_protocol
         self._auth_token = auth_token or None
+        self._max_vscode_script_bytes = max_vscode_script_bytes
         # Resolved flavour once "auto" has probed; reset when the server goes away
         # so an Isaac Sim restarted on a different version is re-detected.
         self._detected_socket_protocol: Optional[str] = (
@@ -349,7 +397,15 @@ class IsaacSocketClient:
         """Return how many bridge transport calls in a row have failed."""
         return self._bridge_consecutive_failures
 
-    async def execute(self, code: str) -> ScriptResult:
+    def _resolve_script_timeout(self, timeout_seconds: Optional[float]) -> float:
+        """Return the script budget for one call: its override, else the default."""
+        if timeout_seconds is None:
+            return self._script_timeout_seconds
+        return max(MIN_SCRIPT_TIMEOUT_SECONDS, float(timeout_seconds))
+
+    async def execute(
+        self, code: str, *, timeout_seconds: Optional[float] = None
+    ) -> ScriptResult:
         """
         Execute Python code inside the running Isaac Sim process.
 
@@ -358,10 +414,15 @@ class IsaacSocketClient:
         timeout, open circuit, or the request frame could not be written) and
         fallback is enabled, the client retries through the VS Code socket.
         A failure after the frame was delivered is raised instead: the script
-        may already be running in Kit and must not be sent a second time.
+        may already be running in Kit and must not be sent a second time. A
+        bridge that refuses raw scripts (``allow_unsafe_execution=false``)
+        says so without running anything, so that refusal falls back too.
 
         Args:
             code: Python source code to execute in Isaac Sim's Python scope.
+            timeout_seconds: Script budget for this call, for operations known
+                to outlast the default (opening a stage, a first render).
+                Defaults to ``script_timeout_seconds``.
 
         Returns:
             ScriptResult with stdout capture and error details if any.
@@ -373,10 +434,11 @@ class IsaacSocketClient:
             BridgeRequestDeliveredError: The bridge received the script but
                 the reply failed; never retried on the stock socket.
         """
+        script_timeout = self._resolve_script_timeout(timeout_seconds)
         async with self._lock:
             if self._prefer_bridge:
                 try:
-                    return await self._execute_bridge_script(code)
+                    result = await self._execute_bridge_script(code, script_timeout)
                 except BridgeRequestDeliveredError:
                     raise
                 except (
@@ -386,44 +448,67 @@ class IsaacSocketClient:
                     TimeoutError,
                     ValueError,
                 ) as exc:
-                    # Log the first failure per (bridge, vscode) pair at WARNING.
-                    # Subsequent failures with the same destinations drop to DEBUG
-                    # so a long-lived process running without the bridge does not
-                    # spam the log on every tool call.
-                    fallback_key = f"{self.bridge_endpoint}->{self.vscode_address}"
-                    level = (
-                        logging.WARNING
-                        if fallback_key not in self._logged_bridge_failures
-                        else logging.DEBUG
-                    )
-                    self._logged_bridge_failures.add(fallback_key)
-                    logger.log(
-                        level,
-                        "Bridge transport failed at %s, falling back to VS Code socket %s: %s",
-                        self.bridge_endpoint,
-                        self.vscode_address,
-                        exc,
-                    )
+                    self._log_bridge_fallback(f"Bridge transport failed: {exc}")
                     if not self._fallback_to_vscode:
                         raise
-            return await self._execute_vscode_unlocked(code)
+                else:
+                    if not (
+                        self._fallback_to_vscode
+                        and result.error_name in BRIDGE_REFUSAL_ERRORS
+                    ):
+                        return result
+                    self._log_bridge_fallback(
+                        f"Bridge refused the script without running it ({result.error_name})"
+                    )
+            return await self._execute_vscode_unlocked(code, script_timeout)
 
-    async def execute_bridge_script_only(self, code: str) -> ScriptResult:
+    def _log_bridge_fallback(self, reason: str) -> None:
+        """Log a fall back to the stock socket, at WARNING once per destination pair.
+
+        Subsequent fallbacks with the same destinations drop to DEBUG so a
+        long-lived process running without the bridge does not spam the log
+        on every tool call.
+        """
+        fallback_key = f"{self.bridge_endpoint}->{self.vscode_address}"
+        level = (
+            logging.WARNING
+            if fallback_key not in self._logged_bridge_failures
+            else logging.DEBUG
+        )
+        self._logged_bridge_failures.add(fallback_key)
+        logger.log(
+            level,
+            "%s; falling back from the bridge at %s to the VS Code socket %s",
+            reason,
+            self.bridge_endpoint,
+            self.vscode_address,
+        )
+
+    async def execute_bridge_script_only(
+        self, code: str, *, timeout_seconds: Optional[float] = None
+    ) -> ScriptResult:
         """Execute raw Python only through the bridge transport."""
+        script_timeout = self._resolve_script_timeout(timeout_seconds)
         async with self._lock:
-            return await self._execute_bridge_script(code)
+            return await self._execute_bridge_script(code, script_timeout)
 
-    async def execute_vscode_only(self, code: str) -> ScriptResult:
+    async def execute_vscode_only(
+        self, code: str, *, timeout_seconds: Optional[float] = None
+    ) -> ScriptResult:
         """Execute raw Python only through the VS Code socket transport."""
+        script_timeout = self._resolve_script_timeout(timeout_seconds)
         async with self._lock:
-            return await self._execute_vscode_unlocked(code)
+            return await self._execute_vscode_unlocked(code, script_timeout)
 
-    async def _execute_vscode_unlocked(self, code: str) -> ScriptResult:
+    async def _execute_vscode_unlocked(
+        self, code: str, script_timeout: Optional[float] = None
+    ) -> ScriptResult:
         """
         Execute Python code through the stock Isaac Sim Python socket.
 
         Args:
             code: Python source code to execute.
+            script_timeout: Budget for this script; the default when None.
 
         Returns:
             ScriptResult with execution output.
@@ -432,17 +517,19 @@ class IsaacSocketClient:
             ConnectionRefusedError: Cannot reach Isaac Sim.
             TimeoutError: Connection or read timed out.
         """
+        budget = self._script_timeout_seconds if script_timeout is None else script_timeout
         if self._detected_socket_protocol is None:
             self._detected_socket_protocol = await self._detect_socket_protocol()
         is_python_server = self._detected_socket_protocol == "python_server"
         if is_python_server:
-            # The envelope is what carries the per-request timeout; raw source
-            # would run until the process is killed. A stale flavour is
-            # harmless: the 5.x extension evaluates the envelope as a dict
-            # literal and then closes on EOF, which re-probes below.
+            # The envelope carries the per-request timeout, which makes
+            # python_server reply in time; it does not stop the script. A
+            # stale flavour is harmless: the 5.x extension evaluates the
+            # envelope as a dict literal and then closes on EOF, which
+            # re-probes below.
             envelope: Dict[str, Any] = {
                 "code": code,
-                "timeout": self._script_timeout_seconds,
+                "timeout": budget,
             }
             if self._auth_token:
                 envelope["auth_token"] = self._auth_token
@@ -451,10 +538,31 @@ class IsaacSocketClient:
             payload = code
             if self._auth_token:
                 payload = f"{PYTHON_SERVER_TOKEN_HEADER} {self._auth_token}\n{code}"
+        payload_bytes = payload.encode("utf-8")
+        if not is_python_server and len(payload_bytes) > self._max_vscode_script_bytes:
+            # Refused before anything is sent: past one read, the 5.x
+            # extension would execute the script as separate fragments.
+            return ScriptResult(
+                success=False,
+                output="",
+                error_name="ScriptTooLargeForSocket",
+                error_value=(
+                    f"Script is {len(payload_bytes)} bytes; Isaac Sim 5.x's "
+                    f"{VSCODE_EXTENSION} socket at {self.vscode_address} executes each "
+                    "read it receives as a separate script, so simul sends it at most "
+                    f"{self._max_vscode_script_bytes} bytes. Enable the khemoo.simul "
+                    "bridge (`simul isaac bridge-up`), which reads the whole script "
+                    "before running it, or send a smaller script."
+                ),
+                transport="vscode",
+            )
         try:
             raw_response = await self._socket_round_trip(
-                payload.encode("utf-8"),
+                payload_bytes,
                 half_close=is_python_server,
+                read_timeout=max(
+                    self._timeout_seconds, budget + SOCKET_SCRIPT_REPLY_MARGIN_SECONDS
+                ),
             )
         except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
             self._forget_detected_protocol()
@@ -464,6 +572,16 @@ class IsaacSocketClient:
             # A 5.x server that received EOF closes without replying. That is
             # what a stale "python_server" flavour looks like, so re-probe.
             self._forget_detected_protocol()
+        elif is_python_server and result.error_name == "TimeoutError":
+            # python_server's watchdog only sends this reply; the script runs on.
+            result = replace(
+                result,
+                error_value=(
+                    f"{result.error_value}. Isaac Sim 6.0's python_server stops "
+                    "waiting but does not stop the script, which keeps running "
+                    f"inside Kit. {TIMEOUT_MAY_STILL_COMPLETE}"
+                ),
+            )
         return result
 
     def _forget_detected_protocol(self) -> None:
@@ -509,7 +627,13 @@ class IsaacSocketClient:
         )
         return flavor
 
-    async def _socket_round_trip(self, payload: bytes, *, half_close: bool) -> str:
+    async def _socket_round_trip(
+        self,
+        payload: bytes,
+        *,
+        half_close: bool,
+        read_timeout: Optional[float] = None,
+    ) -> str:
         """Send one request on the stock socket and read the reply until close.
 
         Args:
@@ -517,10 +641,15 @@ class IsaacSocketClient:
             half_close: Send TCP EOF after the payload. Required by the 6.0
                 python_server, which buffers until EOF; fatal on the 5.x VS Code
                 extension for scripts that await across frames.
+            read_timeout: Deadline for the whole reply; ``timeout_seconds``
+                when None.
 
         Returns:
             The raw UTF-8 reply.
         """
+        read_deadline_seconds = (
+            self._timeout_seconds if read_timeout is None else read_timeout
+        )
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(self._host, self._port),
@@ -546,18 +675,28 @@ class IsaacSocketClient:
 
             chunks: list[bytes] = []
             total_bytes: int = 0
-            deadline: float = time.monotonic() + self._timeout_seconds
+            deadline: float = time.monotonic() + read_deadline_seconds
             while True:
                 remaining: float = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(
                         f"Overall read from Isaac Sim at {self.vscode_address} timed out "
-                        f"after {self._timeout_seconds}s."
+                        f"after {read_deadline_seconds}s. The stock socket cannot stop "
+                        "a script, so it may still be running inside Isaac Sim. "
+                        f"{TIMEOUT_MAY_STILL_COMPLETE}"
                     )
-                chunk = await asyncio.wait_for(
-                    reader.read(self._read_buffer_size),
-                    timeout=remaining,
-                )
+                try:
+                    chunk = await asyncio.wait_for(
+                        reader.read(self._read_buffer_size),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    raise TimeoutError(
+                        f"Overall read from Isaac Sim at {self.vscode_address} timed out "
+                        f"after {read_deadline_seconds}s. The stock socket cannot stop "
+                        "a script, so it may still be running inside Isaac Sim. "
+                        f"{TIMEOUT_MAY_STILL_COMPLETE}"
+                    ) from None
                 if not chunk:
                     break
                 total_bytes += len(chunk)
@@ -578,20 +717,24 @@ class IsaacSocketClient:
             except (OSError, RuntimeError) as exc:
                 logger.warning("Failed to close socket cleanly: %s", exc)
 
-    async def _execute_bridge_script(self, code: str) -> ScriptResult:
+    async def _execute_bridge_script(
+        self, code: str, script_timeout: Optional[float] = None
+    ) -> ScriptResult:
         """Execute Python code through the custom bridge extension.
 
         The bridge enforces ``timeout`` itself: a script still running when it
         expires is interrupted inside Kit, so the failure comes back as a
         ``ScriptInterrupted`` error rather than a client-side read timeout
-        with the script still wedging the editor.
+        with the script still wedging the editor. Interrupting the script
+        does not undo Kit work it already started, which the error says.
         """
+        budget = self._script_timeout_seconds if script_timeout is None else script_timeout
         response = await self._bridge_request(
             "execute_script",
-            {"code": code, "timeout": self._script_timeout_seconds},
+            {"code": code, "timeout": budget},
             read_timeout=max(
                 self._bridge_timeout_seconds,
-                self._script_timeout_seconds + BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS,
+                budget + BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS,
             ),
         )
         if response.get("status") == "ok":
@@ -603,11 +746,18 @@ class IsaacSocketClient:
             )
 
         error = response.get("error", {})
+        error_name = str(error.get("name", "BridgeError"))
+        error_value = str(error.get("message", "Bridge request failed"))
+        if error_name == "ScriptInterrupted" and error_value.startswith("timed out"):
+            error_value = (
+                f"Script {error_value} and was interrupted by the bridge. "
+                f"{TIMEOUT_MAY_STILL_COMPLETE}"
+            )
         return ScriptResult(
             success=False,
             output=str(response.get("payload", {}).get("output", "")),
-            error_name=str(error.get("name", "BridgeError")),
-            error_value=str(error.get("message", "Bridge request failed")),
+            error_name=error_name,
+            error_value=error_value,
             traceback=str(error.get("traceback", "")),
             transport="bridge",
         )
@@ -635,11 +785,25 @@ class IsaacSocketClient:
                 return False
 
     async def bridge_request(
-        self, action: str, payload: Optional[Dict[str, Any]] = None
+        self,
+        action: str,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        read_timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Send a typed request to the bridge transport without fallback."""
+        """Send a typed request to the bridge transport without fallback.
+
+        Args:
+            action: Bridge action name.
+            payload: Action payload.
+            read_timeout: How long to wait for the reply once the request is
+                sent, for actions whose duration scales with their input
+                (``simulation_control`` step); the bridge timeout when None.
+        """
         async with self._lock:
-            return await self._bridge_request(action, payload or {})
+            return await self._bridge_request(
+                action, payload or {}, read_timeout=read_timeout
+            )
 
     async def interrupt_bridge_script(self) -> Dict[str, Any]:
         """Ask the bridge to stop the script it is running.
@@ -688,6 +852,14 @@ class IsaacSocketClient:
             )
         try:
             response = await self._dial_bridge(action, payload, read_timeout=read_timeout)
+        except BridgeResponseTimeoutError:
+            # The bridge accepted the connection and holds the request; it is
+            # slow, not unreachable. Counting this would open the circuit
+            # after a few slow calls and send new scripts to the stock socket
+            # while the bridge still runs the old one. A connection the peer
+            # drops without replying (a port proxy with nothing behind it)
+            # still counts below.
+            raise
         except (ConnectionRefusedError, ConnectionError, TimeoutError, OSError):
             self._record_bridge_failure()
             raise
@@ -747,6 +919,10 @@ class IsaacSocketClient:
             "action": action,
             "payload": payload,
         }
+        if self._auth_token:
+            # Beside the payload, never in it: no action handler sees it, and
+            # a bridge without authentication ignores the field.
+            request["auth_token"] = self._auth_token
         request_bytes = json.dumps(request, separators=(",", ":")).encode("utf-8")
         if len(request_bytes) > self._max_request_bytes:
             raise ValueError(
