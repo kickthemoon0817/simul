@@ -12,6 +12,16 @@ Every tool returns a JSON object. Failures carry `success: false` and an
 error type such as `NotRunning`, `RefusedOperation` or
 `UnsupportedOperation`.
 
+Results are strict JSON: a non-finite float is sent as the string
+`"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token. Each result
+is held to a 40 KB budget by trimming its largest top-level list, with
+`truncated` and a `truncation` notice. When that list is a page, its
+`next_offset` (and a `count` or `returned` that counted the page) are
+rewritten to match the items kept, so following `next_offset` skips
+nothing. Above a 400 KB hard limit the field carrying the excess is cut at
+any depth: a string becomes a `truncated_field` marker, and a list or
+mapping keeps its prefix and is named in `truncated_fields`.
+
 ## Headless USD
 
 No running application needed. File arguments must be inside the sandbox
@@ -34,6 +44,17 @@ No running application needed. File arguments must be inside the sandbox
   names the purposes left out that do hold geometry. `world_space: false`
   bounds the prim in its own space (its descendants' transforms apply, its
   own does not), and `time_code` evaluates animated transforms.
+- **Prim info.** `get_prim_info` returns each attribute as
+  `{type, value, authored}` (`authored: false` is a schema fallback), each
+  relationship as `{targets, authored}`, applied API schemas, and metadata:
+  specifier, instanceable, composition arcs with `resolved`, variant sets
+  and selections, the layers holding opinions, and other authored metadata.
+  An array attribute carries its `length` and first `array_preview`
+  elements (default 16, up to 10000), so a million-point mesh costs a few
+  KB; `attribute_filter` takes glob patterns, `time_code` reads animated
+  values.
+- **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
+  lists of rows, asset paths their authored string.
 - **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
   is a `NotFoundError`; a relative, malformed or property path is a
   `ValidationError`.
