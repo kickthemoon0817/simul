@@ -630,10 +630,18 @@ names live in `simul.mcp.error_types`.
 | `UnsupportedOperation` | The backend or mode cannot do this | |
 | `InvalidState` | Not possible in the current state (nothing claimed to release) | |
 
-Arguments that do not fit the input schema are refused by the MCP layer
-before the tool runs, so they spend no rate-limit token and leave no usage
-record (the audit log records them). Every other failure, a request model's
-or a tool's own check included, is rate limited and recorded.
+Each entry of a `ValidationError`'s `details.errors` has the `field` (a dotted
+path for a nested model's field, `metadata.physics.mass`), the `message` and
+pydantic's `type`, and when they apply the `constraint` that failed
+(`{"le": 3840}`, `{"expected": "'DomeLight', ... or 'CylinderLight'"}`), the
+`input` given and a `suggestion`: the closest valid choice, or the closest
+argument name for an unexpected one. A value whose argument name looks like a
+secret (`token`, `password`, `passphrase`, `secret`, `api_key`, `auth`) is
+echoed as `***`, and a long string by its size.
+
+Arguments that do not fit the input schema are refused before the tool runs,
+but through the same envelope as every other failure: the call spends a
+rate-limit token and is recorded in the usage log and the audit log.
 
 ## Annotations
 

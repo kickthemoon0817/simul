@@ -330,6 +330,8 @@ def test_request_model_validates_inside_the_envelope(
                 "field": "name",
                 "message": "String should have at least 1 character",
                 "type": "string_too_short",
+                "constraint": {"min_length": 1},
+                "input": "",
             }
         ],
         "input": {"name": ""},

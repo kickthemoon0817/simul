@@ -4323,7 +4323,11 @@
        {
         "field": "fov",
         "message": "Input should be less than 180",
-        "type": "less_than"
+        "type": "less_than",
+        "constraint": {
+         "lt": 180.0
+        },
+        "input": 180.0
        }
       ],
       "input": {
@@ -4333,7 +4337,12 @@
      }
     }
    },
-   "usage": []
+   "usage": [
+    {
+     "success": false,
+     "error": "fov: Input should be less than 180"
+    }
+   ]
   },
   {
    "tool": "control_unreal_ui",
@@ -4354,7 +4363,11 @@
        {
         "field": "agent_control",
         "message": "Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor'",
-        "type": "literal_error"
+        "type": "literal_error",
+        "constraint": {
+         "expected": "'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor'"
+        },
+        "input": "bogus"
        }
       ],
       "input": {
@@ -4363,7 +4376,12 @@
      }
     }
    },
-   "usage": []
+   "usage": [
+    {
+     "success": false,
+     "error": "agent_control: Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor'"
+    }
+   ]
   },
   {
    "tool": "control_unreal_ui",
@@ -4390,7 +4408,11 @@
        {
         "field": "property_name",
         "message": "Input should be 'location', 'rotation' or 'scale'",
-        "type": "literal_error"
+        "type": "literal_error",
+        "constraint": {
+         "expected": "'location', 'rotation' or 'scale'"
+        },
+        "input": "color"
        }
       ],
       "input": {
@@ -4405,7 +4427,12 @@
      }
     }
    },
-   "usage": []
+   "usage": [
+    {
+     "success": false,
+     "error": "property_name: Input should be 'location', 'rotation' or 'scale'"
+    }
+   ]
   },
   {
    "tool": "set_unreal_material_params",

@@ -575,6 +575,8 @@ def test_blender_validation_error(
                     "field": "max_items",
                     "message": "Input should be greater than or equal to 1",
                     "type": "greater_than_equal",
+                    "constraint": {"ge": 1},
+                    "input": 0,
                 }
             ],
             "input": arguments,

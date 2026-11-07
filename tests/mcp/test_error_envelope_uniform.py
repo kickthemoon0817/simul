@@ -25,6 +25,7 @@ from typing import Any, Dict, List
 
 import pytest
 from fastmcp import Client
+from pydantic import BaseModel, Field
 
 from simul.config import Settings
 from simul.mcp import error_types
@@ -160,7 +161,9 @@ def test_schema_and_model_refusals_have_the_same_shape(tmp_path: Path) -> None:
         assert set(payload) == {"success", "error", "error_type", "details"}
         assert payload["error_type"] == "ValidationError"
         assert set(payload["details"]) == {"errors", "input"}
-        assert all(set(e) == {"field", "message", "type"} for e in payload["details"]["errors"])
+        keys = {"field", "message", "type"}
+        optional = {"constraint", "input", "suggestion"}
+        assert all(keys <= set(e) <= keys | optional for e in payload["details"]["errors"])
 
 
 def test_an_unknown_tool_is_a_json_not_found_error(tmp_path: Path) -> None:
@@ -179,6 +182,90 @@ def test_a_long_argument_is_echoed_by_size_at_the_schema_layer(tmp_path: Path) -
     (result,) = _run(_usd_server(tmp_path), [("load_usd_file", {"file_path": 1, "x": "y" * 5000})])
 
     assert _json(result)["details"]["input"] == {"file_path": 1, "x": "<5000 characters>"}
+
+
+def test_a_schema_refusal_names_the_constraint_and_the_value(tmp_path: Path) -> None:
+    """A bounded int: the field, the bound and the value given, in the envelope."""
+    instance = _isaac_server(tmp_path)
+
+    (result,) = _run(instance, [("capture_isaac_viewport", {"width": 5000})])
+
+    (error,) = _json(result)["details"]["errors"]
+    assert error == {
+        "field": "width",
+        "message": "Input should be less than or equal to 3840",
+        "type": "less_than_equal",
+        "constraint": {"le": 3840},
+        "input": 5000,
+    }
+
+
+def test_a_misspelt_choice_or_argument_gets_a_suggestion(tmp_path: Path) -> None:
+    light, extra = _run(
+        _isaac_server(tmp_path),
+        [
+            ("create_isaac_light", {"prim_path": "/World/L", "light_type": "DomeLigth"}),
+            ("create_isaac_prim", {"prim_path": "/World/X", "prim_typ": "Xform"}),
+        ],
+    )
+
+    (choice,) = _json(light)["details"]["errors"]
+    assert choice["field"] == "light_type" and choice["input"] == "DomeLigth"
+    assert "DomeLight" in choice["constraint"]["expected"]
+    assert choice["suggestion"] == "DomeLight"
+    (argument,) = _json(extra)["details"]["errors"]
+    assert argument["field"] == "prim_typ" and argument["suggestion"] == "prim_type"
+
+
+class _Physics(BaseModel):
+    mass: float = Field(gt=0)
+
+
+class _Metadata(BaseModel):
+    physics: _Physics
+
+
+def test_a_nested_model_field_and_a_secret_argument(tmp_path: Path) -> None:
+    """The dotted path of a nested model's field; a secret's value is never echoed."""
+    instance = _usd_server(tmp_path)
+
+    @instance.mcp.tool(name="probe_nested_tool")
+    async def probe_nested_tool(metadata: _Metadata, auth_token: int = 0) -> str:
+        return "ran"
+
+    (result,) = _run(
+        instance,
+        [("probe_nested_tool", {"metadata": {"physics": {"mass": -1}}, "auth_token": "hunter2"})],
+    )
+
+    payload = _json(result)
+    errors = {error["field"]: error for error in payload["details"]["errors"]}
+    assert errors["metadata.physics.mass"]["constraint"] == {"gt": 0}
+    assert errors["metadata.physics.mass"]["input"] == -1
+    assert errors["auth_token"]["input"] == "***"
+    assert payload["details"]["input"]["auth_token"] == "***"
+    assert "hunter2" not in result.content[-1].text
+
+
+def test_a_schema_refusal_is_rate_limited_and_recorded(tmp_path: Path) -> None:
+    """It used to leave no usage record and spend no token."""
+    instance = _isaac_server(tmp_path, security={"burst_size": 1})
+
+    invalid, valid = _run(
+        instance,
+        [
+            ("capture_isaac_viewport", {"width": 0}),
+            ("capture_isaac_viewport", {"width": 640}),
+        ],
+    )
+
+    assert _json(invalid)["error_type"] == "ValidationError"
+    assert _json(valid)["error_type"] == "RateLimitError"
+    records = list(reversed(instance.usage_tracker.get_recent(tool_name="capture_isaac_viewport")))
+    assert [(r["success"], r["error"]) for r in records] == [
+        (False, "width: Input should be greater than or equal to 1"),
+        (False, "rate_limited"),
+    ]
 
 
 # ---------------------------------------------------------------------------

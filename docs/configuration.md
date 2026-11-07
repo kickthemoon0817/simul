@@ -190,14 +190,14 @@ per-agent cap across all tools. An Unreal tool's own argument checks (such as
 all-or-none camera groups of `set_unreal_camera_view` and `control_unreal_ui`'s
 control and property names) run inside the shared envelope, so a call they
 refuse spends a token and is recorded in the usage log like any other failed
-call. Arguments that do not match a tool's input schema (a wrong type, a
-missing required argument, a value outside the schema's `minimum`/`maximum`
-or `enum`) are refused by the MCP layer before the call reaches the envelope:
-no token is spent and nothing is recorded in the usage log. They get the same
-`ValidationError` envelope, with `isError: true`, as every other refusal
-([tools.md](tools.md#errors)). The server's own tools (the Isaac instance and
-claim tools, `get_tool_usage_stats`) and an Isaac path the sandbox refuses go
-through the envelope too.
+call. So do arguments that do not match a tool's input schema (a wrong type,
+a missing or unexpected argument, a value outside the schema's
+`minimum`/`maximum` or `enum`): FastMCP refuses them before the tool runs, and
+the server answers with the same `ValidationError` envelope, sent with
+`isError: true`, as every other refusal ([tools.md](tools.md#errors)), after
+spending a token and recording the call. The server's own tools (the Isaac
+instance and claim tools, `get_tool_usage_stats`) and an Isaac path the
+sandbox refuses go through the envelope too.
 
 ### Multi-agent claims
 

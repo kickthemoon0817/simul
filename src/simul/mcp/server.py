@@ -8,10 +8,12 @@ connection management, and 3D simulation/DCC integration based on FastMCP.
 import asyncio
 import base64
 import binascii
+import difflib
 import hashlib
 import inspect
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -247,23 +249,93 @@ def _sniff_image_format(image_base64: str) -> Optional[str]:
 _ECHO_MAX_CHARS: int = 256
 
 
-def _validation_errors(exc: PydanticValidationError) -> List[Dict[str, Any]]:
-    """Describe each failed field of a pydantic error: ``field``, ``message``, ``type``."""
+# Argument names whose values a ValidationError never echoes.
+_SECRET_NAME = re.compile(r"token|password|passphrase|secret|api_?key|auth|credential", re.I)
+_MASKED = "***"
+# A quoted choice in pydantic's "Input should be 'a', 'b' or 'c'".
+_QUOTED = re.compile(r"'((?:[^'\\]|\\.)*)'")
+
+
+def _jsonable(value: Any) -> Any:
+    """Return ``value`` if JSON can carry it, else its text."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    return str(value)
+
+
+def _echo_value(field: Optional[str], value: Any, *, shorten: bool = True) -> Any:
+    """The value a ValidationError shows for ``field``: masked when secret, shortened when long."""
+    if field is not None and _SECRET_NAME.search(field):
+        return _MASKED
+    if shorten and isinstance(value, str) and len(value) > _ECHO_MAX_CHARS:
+        return f"<{len(value)} characters>"
+    return _jsonable(value)
+
+
+def _suggestion(
+    error_type: str, given: Any, constraint: Mapping[str, Any], known_fields: Iterable[str]
+) -> Optional[str]:
+    """Return the closest valid choice or argument name for a misspelt one, or None."""
+    if error_type in ("literal_error", "enum") and isinstance(given, str):
+        choices = _QUOTED.findall(str(constraint.get("expected", "")))
+    elif error_type in ("unexpected_keyword_argument", "extra_forbidden") and isinstance(given, str):
+        choices = list(known_fields)
+    else:
+        return None
+    matches = difflib.get_close_matches(given, choices, n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+
+def _validation_errors(
+    exc: PydanticValidationError, known_fields: Iterable[str] = ()
+) -> List[Dict[str, Any]]:
+    """Describe each failed field of a pydantic error.
+
+    Each entry has ``field`` (the dotted path, a nested model's field
+    included), ``message`` and ``type``, plus when pydantic reports them the
+    ``constraint`` that failed (``{"ge": 1}``, ``{"expected": "'a' or 'b'"}``),
+    the ``input`` given (masked for a secret argument, a long string by its
+    size) and a ``suggestion``: the closest valid choice, or the closest
+    argument name for an unexpected one.
+
+    Args:
+        exc: The pydantic error.
+        known_fields: The tool's argument names, for suggesting a misspelt one.
+    """
+    known = list(known_fields)
     errors: List[Dict[str, Any]] = []
     for error in exc.errors(include_url=False):
         location = [str(part) for part in error.get("loc", ())]
+        field = ".".join(location) or None
+        error_type = str(error.get("type", "value_error"))
         message = str(error.get("msg", ""))
         # pydantic prefixes a validator's own message with "Value error, ".
         for prefix in ("Value error, ", "Assertion failed, "):
             if message.startswith(prefix):
                 message = message[len(prefix):]
-        errors.append(
-            {
-                "field": ".".join(location) or None,
-                "message": message,
-                "type": str(error.get("type", "value_error")),
-            }
-        )
+        entry: Dict[str, Any] = {"field": field, "message": message, "type": error_type}
+        context = error.get("ctx") or {}
+        constraint = {
+            key: _jsonable(value) for key, value in context.items() if key != "error"
+        }
+        if constraint:
+            entry["constraint"] = constraint
+        if "input" in error and error_type not in ("missing", "missing_argument"):
+            given = error["input"]
+            if error_type in ("unexpected_keyword_argument", "extra_forbidden"):
+                # The name is what was wrong; its value is echoed in details.input.
+                given_name = location[-1] if location else None
+                suggestion = _suggestion(error_type, given_name, constraint, known)
+            else:
+                entry["input"] = _echo_value(field, given)
+                suggestion = _suggestion(error_type, given, constraint, known)
+            if suggestion is not None:
+                entry["suggestion"] = suggestion
+        errors.append(entry)
     return errors
 
 
@@ -275,19 +347,19 @@ def _summarize_validation_errors(errors: List[Dict[str, Any]]) -> str:
     )
 
 
-def _echo_arguments(arguments: Mapping[str, Any]) -> Dict[str, Any]:
-    """Return the arguments a ValidationError echoes, long strings replaced by their size."""
-    echoed: Dict[str, Any] = {}
-    for key, value in arguments.items():
-        if isinstance(value, str) and len(value) > _ECHO_MAX_CHARS:
-            echoed[key] = f"<{len(value)} characters>"
-        else:
-            echoed[key] = value
-    return echoed
+def _echo_arguments(arguments: Mapping[str, Any], *, shorten: bool = True) -> Dict[str, Any]:
+    """Return the arguments a ValidationError echoes: secrets masked, long strings by their size."""
+    return {
+        str(key): _echo_value(str(key), value, shorten=shorten) for key, value in arguments.items()
+    }
 
 
 def validation_error_payload(
-    exc: BaseException, arguments: Mapping[str, Any], *, shorten: bool = False
+    exc: BaseException,
+    arguments: Mapping[str, Any],
+    *,
+    shorten: bool = False,
+    known_fields: Iterable[str] = (),
 ) -> Dict[str, Any]:
     """Build the one ValidationError envelope every layer returns for invalid input.
 
@@ -301,14 +373,16 @@ def validation_error_payload(
         exc: A pydantic ValidationError, or the exception an argument check
             raised with its message as written.
         arguments: The arguments the call received.
-        shorten: Replace argument strings longer than ``_ECHO_MAX_CHARS`` by
-            their size, for a layer with no ``input_echo`` hook of its own.
+        shorten: Echo the arguments with secrets masked and strings longer
+            than ``_ECHO_MAX_CHARS`` by their size, for a layer with no
+            ``input_echo`` hook of its own.
+        known_fields: The tool's argument names, for suggesting a misspelt one.
 
     Returns:
         The error envelope.
     """
     if isinstance(exc, PydanticValidationError):
-        errors = _validation_errors(exc)
+        errors = _validation_errors(exc, known_fields)
     else:
         errors = [{"field": None, "message": exception_message(exc), "type": "value_error"}]
     return ErrorResponse(
@@ -316,23 +390,30 @@ def validation_error_payload(
         error_type=error_types.VALIDATION_ERROR,
         details={
             "errors": errors,
-            "input": _echo_arguments(arguments) if shorten else dict(arguments),
+            "input": _echo_arguments(arguments, shorten=shorten),
         },
     ).model_dump()
 
 
-def build_error_envelope_middleware() -> Any:
-    """Build the middleware that turns FastMCP's own call refusals into tool error envelopes.
+def build_error_envelope_middleware(server: "SimulMCPServer") -> Any:
+    """Build the middleware that runs FastMCP's own call refusals through the shared envelope.
 
     FastMCP checks a call against the tool's input schema before the tool
     runs, and answered a mismatch (a wrong type, a missing or unexpected
-    argument, a value out of bounds) with pydantic's raw text, and an unknown
-    tool with plain text, while every other failure is a JSON envelope. This
-    returns the same JSON envelope for both, sent with ``isError: true``:
-    ``ValidationError`` with the failing fields in ``details.errors``, and
-    ``NotFoundError`` for a tool that is not registered. Such a call never
-    reaches the tool, so it spends no rate-limit token and leaves no usage
-    record; the audit log still records it.
+    argument, a value out of bounds or not among the choices, a nested
+    model's field) with pydantic's raw text, and an unknown tool with plain
+    text, while every other failure is a JSON envelope. This catches both
+    where FastMCP raises them (``FunctionTool._run``, inside the middleware
+    chain) and answers with the envelope every other failure gets, sent with
+    ``isError: true``: ``ValidationError`` with each failing field's path,
+    constraint, given value (secrets masked) and closest valid choice in
+    ``details.errors``, and ``NotFoundError`` for a tool that is not
+    registered. A refused call to a registered tool goes through the
+    envelope (``_exec_payload``), so it spends a rate-limit token and is
+    recorded in the usage log like any other failed call.
+
+    Args:
+        server: The server whose envelope the refusals go through.
     """
     from fastmcp.exceptions import NotFoundError as FastMCPNotFoundError
     from fastmcp.exceptions import ValidationError as FastMCPValidationError
@@ -343,6 +424,7 @@ def build_error_envelope_middleware() -> Any:
 
         async def on_call_tool(self, context: Any, call_next: Any) -> Any:
             message = context.message
+            name = str(getattr(message, "name", ""))
             arguments = dict(getattr(message, "arguments", None) or {})
             try:
                 return await call_next(context)
@@ -352,12 +434,14 @@ def build_error_envelope_middleware() -> Any:
                     cause if isinstance(cause, PydanticValidationError) else exc,
                     arguments,
                     shorten=True,
+                    known_fields=await server._tool_parameters(name),
                 )
+                return await server._exec_payload(name, payload)
             except FastMCPNotFoundError as exc:
                 payload = ErrorResponse(
                     error=exception_message(exc),
                     error_type=error_types.NOT_FOUND_ERROR,
-                    details={"tool": getattr(message, "name", None)},
+                    details={"tool": name or None},
                 ).model_dump()
             return ToolResult(
                 content=[TextContent(type="text", text=encode_result_budget(payload))],
@@ -560,7 +644,7 @@ class SimulMCPServer(LoggerMixin):
 
         self.mcp.add_middleware(build_request_context_middleware())
         # Inside the audit middleware, so the audit row sees the envelope.
-        self.mcp.add_middleware(build_error_envelope_middleware())
+        self.mcp.add_middleware(build_error_envelope_middleware(self))
 
         self._register_tools()
 
@@ -1312,6 +1396,21 @@ class SimulMCPServer(LoggerMixin):
                 ),
             },
         ).model_dump()
+
+    async def _tool_parameters(self, tool_name: str) -> List[str]:
+        """Return the argument names a registered tool's input schema lists (empty if unknown)."""
+        get_tool = getattr(self.mcp, "get_tool", None)
+        if not callable(get_tool):
+            return []
+        try:
+            tool = get_tool(tool_name)
+            if inspect.isawaitable(tool):
+                tool = await tool
+        except Exception:
+            return []
+        schema = getattr(tool, "parameters", None)
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        return [str(name) for name in properties]
 
     async def _tool_is_read_only(self, tool_name: str) -> bool:
         """Report whether the registered tool carries ``readOnlyHint``; unknown tools count as mutating."""
