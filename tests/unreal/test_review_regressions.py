@@ -217,7 +217,6 @@ class Vector:
 class PrimitiveComponent:
     def __init__(self):
         self.mobility = SimpleNamespace(name="MOVABLE")
-        self.physics = False
         self.events = []
 
     def get_name(self):
@@ -225,15 +224,6 @@ class PrimitiveComponent:
 
     def get_class(self):
         return SimpleNamespace(get_name=lambda: "StaticMeshComponent")
-
-    def set_simulate_physics(self, value):
-        self.physics = value
-
-    def is_simulating_physics(self):
-        return self.physics
-
-    def add_impulse_at_location(self, force, location):
-        self.events.append(("impulse", force.z, location.x))
 
 
 class MeshComponent(PrimitiveComponent):
@@ -395,19 +385,14 @@ async def test_missing_actor_is_error_and_cannot_focus_origin(script_session, mo
 
 @pytest.mark.asyncio
 async def test_component_operations_and_missing_component(script_session):
-    """The physics and collision tools themselves are covered against a fuller
-    fake editor in tests/unreal/test_physics_tools.py."""
+    """The physics, collision and force tools themselves are covered against a
+    fuller fake editor in tests/unreal/test_physics_tools.py and
+    tests/unreal/test_simulation_tools.py."""
     session, actor, _ = script_session
     component = actor.root_component
-    component.physics = True
-    result = await session.apply_force(
-        actor.path, force_z=7, is_impulse=True, location_x=4, location_y=5, location_z=6
-    )
-    assert result["force_applied"] is True
     assert not (await session.assign_material(actor.path, "/Game/Material")).get(
         "error"
     )
-    assert ("impulse", 7, 4) in component.events
     assert any(event[0] == "material" for event in component.events)
     actor.root_component = None
     for result in (

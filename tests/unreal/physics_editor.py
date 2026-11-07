@@ -19,7 +19,12 @@ did in a live editor (observed through Remote Control):
 * ``StaticMeshEditorSubsystem`` reports -1 for every mesh while Play In
   Editor runs;
 * a running simulation has its own world, ``/Game/Maps/UEDPIE_0_Lab``, with
-  a copy of each actor at the same path in that package.
+  a copy of each actor at the same path in that package, keeping its label
+  and ActorGuid. Only that world steps (``Editor.frame``): an editor body
+  takes forces and impulses but never moves. A force acts for the one step
+  after it is added; an impulse changes the velocity by impulse / mass.
+  Ticker callbacks run once per frame, before the step, and a callback that
+  returns False is removed.
 
 Every write is logged in ``Editor.writes`` with whether the object had been
 modified in the open transaction, so a test can tell an undoable edit from a
@@ -29,6 +34,7 @@ silent one.
 from __future__ import annotations
 
 import io
+import itertools
 import struct
 import sys
 import traceback
@@ -47,6 +53,7 @@ LEVEL = MAP + ".Lab:PersistentLevel."
 PIE_LEVEL = PIE_MAP + ".Lab:PersistentLevel."
 CUBE = "/Engine/BasicShapes/Cube.Cube"
 CUBE_MASS = 177.8279266357422
+GRAVITY = 980.0
 
 
 def f32(value: float) -> float:
@@ -88,6 +95,43 @@ PRESETS: Dict[str, Optional[str]] = {
     "NoCollision": "NO_COLLISION",
     "Custom": None,
 }
+
+
+class Vector:
+    def __init__(self, x: float = 0.0, y: float = 0.0, z: float = 0.0) -> None:
+        self.x, self.y, self.z = float(x), float(y), float(z)
+
+    def as_list(self) -> List[float]:
+        return [self.x, self.y, self.z]
+
+
+class Rotator:
+    def __init__(self, pitch: float = 0.0, yaw: float = 0.0, roll: float = 0.0) -> None:
+        self.pitch, self.yaw, self.roll = pitch, yaw, roll
+
+
+class Guid:
+    def __init__(self, value: int) -> None:
+        self.value = value
+
+
+class Class:
+    """What ``get_class()`` returns: compared by name."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def get_name(self) -> str:
+        return self.name
+
+    def get_path_name(self) -> str:
+        return "/Script/Engine." + self.name
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Class) and other.name == self.name
+
+    def __hash__(self) -> int:
+        return hash(self.name)
 
 
 class Mesh:
@@ -166,6 +210,12 @@ class PrimitiveComponent(SceneComponent):
         # A body whose simulate flag never takes (the fake's stand-in for an
         # engine refusal the checks do not foresee).
         self.refuses_simulation = False
+        # Motion: velocity in cm/s, the force pending for the next step, and
+        # every force and impulse call, as (kind, vector, location).
+        self.velocity = Vector()
+        self.angular = Vector()
+        self.pending_force = Vector()
+        self.pushes: List[Tuple[str, List[float], Optional[List[float]]]] = []
 
     # -- identity -----------------------------------------------------------
     def get_path_name(self) -> str:
@@ -178,8 +228,8 @@ class PrimitiveComponent(SceneComponent):
     def get_owner(self) -> Optional["Actor"]:
         return self.owner
 
-    def get_class(self) -> SimpleNamespace:
-        return SimpleNamespace(get_name=lambda: type(self).__name__)
+    def get_class(self) -> Class:
+        return Class(type(self).__name__)
 
     def in_simulation(self) -> bool:
         return self.owner is not None and self.owner.simulation
@@ -228,6 +278,14 @@ class PrimitiveComponent(SceneComponent):
     def is_simulating_physics(self) -> bool:
         return bool(self.body["simulate_physics"]) and self.has_body()
 
+    def moves(self) -> bool:
+        """Whether the body really steps: simulating, Movable, with physics collision."""
+        return (
+            self.is_simulating_physics()
+            and self._mobility.name == "MOVABLE"
+            and self.collision in ("QUERY_AND_PHYSICS", "PHYSICS_ONLY")
+        )
+
     def get_mass(self) -> float:
         if not self.has_body() or self._mobility.name != "MOVABLE":
             return 0.0
@@ -255,6 +313,82 @@ class PrimitiveComponent(SceneComponent):
     def set_enable_gravity(self, value: bool) -> None:
         self._write("enable_gravity")
         self.body["enable_gravity"] = bool(value)
+
+    def is_gravity_enabled(self) -> bool:
+        return bool(self.body["enable_gravity"])
+
+    # -- forces and motion ---------------------------------------------------------
+    def add_force(
+        self, force: Vector, bone: str = "None", accel_change: bool = False
+    ) -> None:
+        self.pushes.append(("force", force.as_list(), None))
+        self.pending_force = Vector(
+            self.pending_force.x + force.x,
+            self.pending_force.y + force.y,
+            self.pending_force.z + force.z,
+        )
+
+    def add_force_at_location(
+        self, force: Vector, location: Vector, bone: str = "None"
+    ) -> None:
+        self.pushes.append(("force", force.as_list(), location.as_list()))
+        self.pending_force = Vector(
+            self.pending_force.x + force.x,
+            self.pending_force.y + force.y,
+            self.pending_force.z + force.z,
+        )
+
+    def add_impulse(
+        self, impulse: Vector, bone: str = "None", vel_change: bool = False
+    ) -> None:
+        self.pushes.append(("impulse", impulse.as_list(), None))
+        self._kick(impulse)
+
+    def add_impulse_at_location(
+        self, impulse: Vector, location: Vector, bone: str = "None"
+    ) -> None:
+        self.pushes.append(("impulse", impulse.as_list(), location.as_list()))
+        self._kick(impulse)
+
+    def _kick(self, impulse: Vector) -> None:
+        if self.moves():
+            mass = self.get_mass()
+            self.velocity = Vector(
+                self.velocity.x + impulse.x / mass,
+                self.velocity.y + impulse.y / mass,
+                self.velocity.z + impulse.z / mass,
+            )
+
+    def step(self, dt: float) -> None:
+        """One physics step of the play world: the pending force acts, then is cleared."""
+        if self.moves():
+            mass = self.get_mass()
+            gravity = GRAVITY if self.body["enable_gravity"] else 0.0
+            self.velocity = Vector(
+                self.velocity.x + self.pending_force.x / mass * dt,
+                self.velocity.y + self.pending_force.y / mass * dt,
+                self.velocity.z + (self.pending_force.z / mass - gravity) * dt,
+            )
+            assert self.owner is not None
+            self.owner.location = Vector(
+                self.owner.location.x + self.velocity.x * dt,
+                self.owner.location.y + self.velocity.y * dt,
+                self.owner.location.z + self.velocity.z * dt,
+            )
+        self.pending_force = Vector()
+
+    def get_physics_linear_velocity(self, bone: str = "None") -> Vector:
+        return self.velocity
+
+    def get_physics_angular_velocity_in_degrees(self, bone: str = "None") -> Vector:
+        return self.angular
+
+    def is_any_rigid_body_awake(self) -> bool:
+        return self.moves()
+
+    def get_center_of_mass(self, bone: str = "None") -> Vector:
+        assert self.owner is not None
+        return self.owner.location
 
     # -- collision ----------------------------------------------------------------
     def get_collision_enabled(self) -> Enum:
@@ -330,14 +464,19 @@ class CapsuleComponent(PrimitiveComponent):
     pass
 
 
+_guids = itertools.count(1)
+
+
 class Actor:
     def __init__(
         self,
         editor: "Editor",
         name: str,
         label: str,
-        root: PrimitiveComponent,
+        root: Optional[PrimitiveComponent],
         simulation: bool = False,
+        class_name: str = "StaticMeshActor",
+        guid: Optional[int] = None,
     ):
         self.editor, self.name, self.label, self.root_component = (
             editor,
@@ -346,10 +485,19 @@ class Actor:
             root,
         )
         self.simulation = simulation
-        self.components: List[Any] = [root]
-        root.owner = self
+        self.components: List[Any] = [root] if root is not None else []
+        self.class_name = class_name
+        self.guid = Guid(next(_guids) if guid is None else guid)
+        self.tags: List[str] = []
+        self.location = Vector(0.0, 0.0, 300.0)
+        # The path's level, for an actor World Partition streamed into a cell.
+        self.level: Optional[str] = None
+        if root is not None:
+            root.owner = self
 
     def get_path_name(self) -> str:
+        if self.level is not None:
+            return self.level + self.name
         return (PIE_LEVEL if self.simulation else LEVEL) + self.name
 
     def get_name(self) -> str:
@@ -366,8 +514,25 @@ class Actor:
             component for component in self.components if isinstance(component, cls)
         ]
 
-    def get_class(self) -> SimpleNamespace:
-        return SimpleNamespace(get_name=lambda: "StaticMeshActor")
+    def get_class(self) -> Class:
+        return Class(self.class_name)
+
+    def get_actor_location(self) -> Vector:
+        return self.location
+
+    def get_actor_rotation(self) -> Rotator:
+        return Rotator()
+
+    def actor_has_tag(self, tag: str) -> bool:
+        return tag in self.tags
+
+    def is_editable(self) -> bool:
+        return True
+
+    def get_editor_property(self, name: str) -> Any:
+        if name == "actor_guid":
+            return self.guid
+        raise AttributeError(name)
 
 
 class Transaction:
@@ -397,7 +562,7 @@ class Transaction:
 
 
 class Editor:
-    """The level: actors by path, the transaction log and the map's dirty flag."""
+    """The level: actors by path, the transaction log, the map's dirty flag and the play world."""
 
     def __init__(self) -> None:
         self.actors: Dict[str, Actor] = {}
@@ -406,9 +571,15 @@ class Editor:
         self.dirty = False
         self.writes: List[Tuple[str, str, bool]] = []
         self.pie = False
+        self.paused = False
+        self.sim_time = 0.0
+        self.frame_seconds = 1.0 / 120.0
         self.editor_world = World(MAP)
         self.pie_world = World(PIE_MAP)
         self.scripts: List[str] = []
+        self.tickers: Dict[int, Callable[[float], Any]] = {}
+        self.ticker_ids = itertools.count(1)
+        self.started_modes: List[str] = []
 
     # -- building the level ---------------------------------------------------------
     def cube(
@@ -435,25 +606,95 @@ class Editor:
     def capsule_actor(self, label: str, preset: str = "NoCollision") -> Actor:
         name = f"PlayerStart_{len(self.actors)}"
         actor = Actor(
-            self, name, label, CapsuleComponent(self, "CollisionCapsule", preset=preset)
+            self,
+            name,
+            label,
+            CapsuleComponent(self, "CollisionCapsule", preset=preset),
+            class_name="PlayerStart",
         )
         self.actors[actor.get_path_name()] = actor
         return actor
 
-    def simulation_copy(self, actor: Actor) -> Actor:
-        """The running simulation's copy of ``actor``, at its path in the play world."""
+    def simulation_copy(self, actor: Actor, level: Optional[str] = None) -> Actor:
+        """The running simulation's copy of ``actor``, at its path in the play world (or ``level``)."""
         source = actor.root_component
+        assert isinstance(source, StaticMeshComponent)
         component = StaticMeshComponent(
             self,
             source.name,
-            getattr(source, "mesh", None),
+            source.mesh,
             mobility=source.mobility.name,
             preset=source.preset,
         )
+        component.collision = source.collision
         component.body = dict(source.body)
-        copy = Actor(self, actor.name, actor.label, component, simulation=True)
+        copy = Actor(
+            self,
+            actor.name,
+            actor.label,
+            component,
+            simulation=True,
+            class_name=actor.class_name,
+            guid=actor.guid.value,
+        )
+        copy.tags = list(actor.tags)
+        copy.location = Vector(*actor.location.as_list())
+        copy.level = level
         self.actors[copy.get_path_name()] = copy
         return copy
+
+    def spawned_in_simulation(
+        self, label: str, class_name: str = "DefaultPawn"
+    ) -> Actor:
+        """An actor the simulation spawned: no editor counterpart, no valid ActorGuid."""
+        actor = Actor(
+            self,
+            label + "_0",
+            label,
+            None,
+            simulation=True,
+            class_name=class_name,
+            guid=0,
+        )
+        self.actors[actor.get_path_name()] = actor
+        return actor
+
+    def start(self) -> None:
+        """Start the simulation: a play copy of every editor actor."""
+        self.pie = True
+        self.sim_time = 0.0
+        for actor in [a for a in self.actors.values() if not a.simulation]:
+            self.simulation_copy(actor)
+
+    def begin(self, mode: str) -> None:
+        """What LevelEditorSubsystem's play calls do: start, and note which was called."""
+        self.started_modes.append(mode)
+        self.start()
+
+    def stop(self) -> None:
+        self.pie = False
+        self.paused = False
+        for path in [p for p, a in self.actors.items() if a.simulation]:
+            del self.actors[path]
+
+    def frame(self, count: int = 1) -> None:
+        """Advance the editor ``count`` frames: tickers run, then the play world steps."""
+        for _ in range(count):
+            for handle, callback in list(self.tickers.items()):
+                if not callback(self.frame_seconds):
+                    self.tickers.pop(handle, None)
+            if not self.pie or self.paused:
+                continue
+            self.sim_time += self.frame_seconds
+            for actor in self.actors.values():
+                if actor.simulation and actor.root_component is not None:
+                    actor.root_component.step(self.frame_seconds)
+
+    def world_actors(self, world: World) -> List[Actor]:
+        simulation = world is self.pie_world
+        return [
+            actor for actor in self.actors.values() if actor.simulation == simulation
+        ]
 
     # -- the record ------------------------------------------------------------------
     def modified(self, component: PrimitiveComponent) -> None:
@@ -482,7 +723,12 @@ class Editor:
         editor = self
 
         def load_object(outer: Any, path: str) -> Any:
-            return editor.actors.get(path)
+            if path in editor.actors:
+                return editor.actors[path]
+            owner, _, name = path.rpartition(".")
+            actor = editor.actors.get(owner)
+            components = actor.components if actor is not None else []
+            return next((c for c in components if c.get_name() == name), None)
 
         def mesh_count(kind: str) -> Callable[[Mesh], int]:
             return lambda mesh: -1 if editor.pie else getattr(mesh, kind)
@@ -496,11 +742,21 @@ class Editor:
                 ),
             ),
             "LevelEditorSubsystem": SimpleNamespace(
-                is_in_play_in_editor=lambda: editor.pie
+                is_in_play_in_editor=lambda: editor.pie,
+                editor_play_simulate=lambda: editor.begin("simulate"),
+                editor_request_begin_play=lambda: editor.begin("play"),
+                editor_request_end_play=editor.stop,
             ),
             "UnrealEditorSubsystem": SimpleNamespace(
                 get_editor_world=lambda: None if editor.pie else editor.editor_world,
                 get_game_world=lambda: editor.pie_world if editor.pie else None,
+            ),
+            # GWorld: the editor world wherever Remote Control runs a script.
+            "LayersSubsystem": SimpleNamespace(get_world=lambda: editor.editor_world),
+            "EditorActorSubsystem": SimpleNamespace(
+                get_all_level_actors=lambda: (
+                    [] if editor.pie else editor.world_actors(editor.editor_world)
+                )
             ),
         }
 
@@ -511,8 +767,41 @@ class Editor:
             probe._write = lambda what: None  # type: ignore[method-assign]
             return probe
 
+        def all_actors_of_class(world: World, cls: Any) -> List[Actor]:
+            return [
+                actor
+                for actor in editor.world_actors(world)
+                if cls is Actor or actor.get_class() == cls
+            ]
+
+        def register_ticker_callback(
+            callback: Callable[[float], Any], delay: float = 0.0
+        ) -> int:
+            handle = next(editor.ticker_ids)
+            editor.tickers[handle] = callback
+            return handle
+
+        def unregister_ticker_callback(handle: int) -> None:
+            editor.tickers.pop(handle, None)
+
+        def set_game_paused(world: World, paused: bool) -> bool:
+            editor.paused = paused
+            return True
+
+        gameplay = SimpleNamespace(
+            get_all_actors_of_class=all_actors_of_class,
+            set_game_paused=set_game_paused,
+            is_game_paused=lambda world: editor.paused,
+            get_time_seconds=lambda world: editor.sim_time,
+            get_world_delta_seconds=lambda world: editor.frame_seconds,
+        )
+        guids = SimpleNamespace(
+            is_valid_guid=lambda guid: guid.value != 0,
+            equal_equal_guid_guid=lambda a, b: a.value == b.value,
+        )
         return SimpleNamespace(
             Actor=Actor,
+            WorldSettings=type("WorldSettings", (Actor,), {}),
             ActorComponent=ActorComponent,
             SceneComponent=SceneComponent,
             PrimitiveComponent=PrimitiveComponent,
@@ -526,10 +815,17 @@ class Editor:
             StaticMeshEditorSubsystem="StaticMeshEditorSubsystem",
             LevelEditorSubsystem="LevelEditorSubsystem",
             UnrealEditorSubsystem="UnrealEditorSubsystem",
+            LayersSubsystem="LayersSubsystem",
+            EditorActorSubsystem="EditorActorSubsystem",
+            GameplayStatics=gameplay,
+            GuidLibrary=guids,
+            Vector=Vector,
             get_editor_subsystem=subsystems.__getitem__,
             load_object=load_object,
             find_object=load_object,
             new_object=new_object,
+            register_ticker_callback=register_ticker_callback,
+            unregister_ticker_callback=unregister_ticker_callback,
         )
 
     def run_python(self, code: str) -> Dict[str, Any]:
@@ -559,6 +855,10 @@ def physics_session(
 ) -> unreal_runtime.UnrealRuntimeSession:
     """A session whose editor Python runs here against ``editor``."""
     monkeypatch.setitem(sys.modules, "unreal", editor.module())
+    # The editor-side modules a script keeps (the force ticker) live in this editor.
+    from simul.adapters._unreal_scripts import FORCE_MODULE
+
+    monkeypatch.delitem(sys.modules, FORCE_MODULE, raising=False)
     monkeypatch.setattr(unreal_runtime, "UNREAL_AVAILABLE", True)
     monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
     session = unreal_runtime.UnrealRuntimeSession(Settings())

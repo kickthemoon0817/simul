@@ -87,8 +87,12 @@ def test_actor_reads_and_component_operations():
                 path, mass=5, linear_damping=1, angular_damping=2, enable_gravity=False
             )
             assert result["params_set"] == 4, result
+            # Outside the simulation a force is refused: the editor's bodies never step,
+            # so the force_applied reply this used to assert was a force lost.
             result = await client.apply_force(path, force_z=100, is_impulse=True)
-            assert result["force_applied"] is True, result
+            assert result["error_type"] == "SimulationNotRunning", result
+            resting = await client.get_physics_state([path])
+            assert resting["world"] == "editor" and resting["bodies"][0]["speed"] == 0, resting
             result = await client.assign_material(
                 path, "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"
             )
@@ -247,6 +251,74 @@ print(json.dumps({{'saved': bool(ok)}}))
             assert (after["vz"] - before["vz"]) / dt == pytest.approx(-980, rel=0.05), (first, second)
             assert after["z"] < before["z"] - 100, (first, second)
             assert second["actors"][copies[1]]["collision"] == "NO_COLLISION", second
+        finally:
+            await client.control_simulation("stop")
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_forces_act_on_the_running_simulation_and_the_reads_follow_it():
+    """An impulse on the editor path returned force_applied while the simulated
+    body stayed put, the reads returned the editor world (z 300 for a body at
+    49.5), and a "continuous" force acted for one frame (U2-01, U2-07). This
+    measures the body in the simulation: impulse / mass, force x time / mass."""
+
+    async def run():
+        client = session()
+        level = "/Game/SimulReview_Forces_" + uuid.uuid4().hex[:8]
+        try:
+            made = await client._execute_json_script(f"""
+import unreal, json
+print(json.dumps({{'new': bool(unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).new_level({level!r}))}}))
+""")
+            assert made == {"new": True}, made
+            # Gravity and damping off: only the forces move the cube, high above an empty level.
+            cube = (await client.spawn_actor("/Engine/BasicShapes/Cube.Cube", (0, 0, 20000)))["actor_path"]
+            assert (await client.enable_physics(cube))["physics_mode"] == "simulated"
+            params = await client.set_physics_params(cube, mass=10, linear_damping=0, angular_damping=0,
+                                                     enable_gravity=False)
+            assert params["params_set"] == 4, params
+
+            started = await client.control_simulation("start")
+            assert (started["state"], started["mode"]) == ("playing", "simulate"), started
+
+            async def velocity():
+                state = await client.get_physics_state([cube])
+                assert state["world"] == "simulation", state
+                return state["bodies"][0]["linear_velocity"]
+
+            await asyncio.sleep(0.3)
+            assert await velocity() == pytest.approx([0, 0, 0], abs=1e-3)
+
+            impulse = await client.apply_force(cube, force_x=5000, is_impulse=True)
+            assert impulse["simulation_actor_path"] == simulation_path(cube), impulse
+            assert impulse["expected_delta_v"] == pytest.approx([500, 0, 0]), impulse
+            await asyncio.sleep(0.2)
+            assert (await velocity())[0] == pytest.approx(500, rel=0.02)
+
+            si = await client.apply_force(cube, force_y=20, is_impulse=True, units="si")
+            assert si["force_vector_unreal"] == [0, 2000, 0], si
+            await asyncio.sleep(0.2)
+            assert (await velocity())[1] == pytest.approx(200, rel=0.02)
+
+            pushed = await client.apply_force(cube, force_z=2000, duration=0.5)
+            assert (pushed["application"], pushed["expected_delta_v"]) == ("continuous", [0, 0, 100]), pushed
+            await asyncio.sleep(1.2)
+            assert (await velocity())[2] == pytest.approx(100, rel=0.05)
+
+            listed = await client.list_simulation_actors(simulating_only=True)
+            entry = [a for a in listed["actors"] if a["simulation_path"] == simulation_path(cube)]
+            assert entry and entry[0]["editor_path"] == cube, listed
+            placed = await client.get_physics_state([cube], world="editor")
+            assert placed["bodies"][0]["location"][2] == pytest.approx(20000), placed
+
+            stopped = await client.control_simulation("stop")
+            assert stopped["state"] == "stopped", stopped
+            played = await client.control_simulation("start", mode="play")
+            assert (played["state"], played["mode"]) == ("playing", "play"), played
+            pawns = await client.list_simulation_actors(class_filter="DefaultPawn")
+            assert pawns["count"] == 1 and pawns["actors"][0]["editor_path"] is None, pawns
         finally:
             await client.control_simulation("stop")
             await client.close()

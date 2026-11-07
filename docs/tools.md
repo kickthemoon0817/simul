@@ -109,7 +109,7 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 | Assets | `search_unreal_assets` |
 | Camera, lights, rendering | `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
 | Materials | `get_unreal_material_info`, `assign_unreal_material`, `create_unreal_material_instance`, `set_unreal_material_params` |
-| Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `apply_unreal_force`, `control_unreal_simulation`, `get_unreal_simulation_status` |
+| Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `apply_unreal_force`, `get_unreal_physics_state`, `list_unreal_simulation_actors`, `control_unreal_simulation`, `get_unreal_simulation_status` |
 | Mesh operations | `generate_unreal_mesh_primitive`, `generate_unreal_procedural_scene`, `validate_unreal_mesh`, `simplify_unreal_mesh`, `remesh_unreal_mesh`, `subdivide_unreal_mesh`, `edit_unreal_mesh_topology`, `apply_unreal_mesh_boolean`, `cut_unreal_mesh_plane`, `compute_unreal_convex_hull`, `decompose_unreal_convex_hull`, `compute_unreal_mesh_uv`, `convert_unreal_mesh_format` |
 | USD interchange | `get_unreal_interchange_info`, `import_unreal_usd`, `export_unreal_usd` |
 | SimReady | `validate_simready_asset`, `convert_to_simready` |
@@ -117,10 +117,50 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 
 Behaviour worth knowing:
 
-- Actor inspection, physics, materials and PIE start/stop/pause/resume use
-  editor Python APIs. Single-frame stepping is not supported by the editor and
-  returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
-  engine cannot report a simulation-specific count.
+- Actor inspection, physics, materials and simulation start/stop/pause/resume
+  use editor Python APIs. `control_unreal_simulation` `start` begins Simulate
+  In Editor by default (`mode: "simulate"`: the level runs and its physics
+  steps with no player, and the level viewport keeps the editor camera) or,
+  with `mode: "play"`, a Play session in the level viewport, where the game
+  mode spawns and possesses the player's pawn. Both are Play In Editor
+  sessions, and everything below about PIE holds for either. Starting while a
+  session runs resumes it if paused and otherwise leaves it as it is, whichever
+  mode it runs in (the reply's `mode` is then `null`). Single-frame stepping is
+  not supported by the editor and returns `UnsupportedOperation`; simulation
+  `frame_count` is `null` when the engine cannot report a simulation-specific
+  count.
+- The running simulation is a copy of the editor world, `UEDPIE_<n>_<map>`, in
+  which Unreal duplicates each actor at the same path, label and ActorGuid.
+  Only that copy steps: the editor world's bodies read as simulating but never
+  move.
+  - `apply_unreal_force` acts on the actor's copy in the running simulation,
+    given its editor path or its simulation path, and replies with
+    `simulation_actor_path`, `world: "simulation"`, the body's `mass_kg` and
+    `expected_delta_v`. With no simulation running it returns
+    `error_type: "SimulationNotRunning"`; an actor without a copy (spawned
+    after the simulation started, or not loaded in it) returns
+    `NotInSimulation`, and a copy that does not simulate physics returns
+    `IncompatibleBody`.
+  - Its units are Unreal's: a force in kg·cm/s² and an impulse in kg·cm/s
+    (1 N or 1 N·s is 100), or newtons and newton-seconds with `units: "si"`;
+    the application point is a world location in cm. An impulse changes the
+    velocity at once by impulse / mass. A force with `duration` 0 acts for one
+    frame only, since Unreal clears a force after each physics step (the reply
+    says so). A positive `duration`, up to 600 s of simulation time, keeps the
+    force on: every frame the body gets the force's momentum over the elapsed
+    game time, so it gets force × duration in all even when slow frames
+    shorten Unreal's physics steps. Paused time adds nothing, the force stops
+    with the simulation, and forces add up.
+  - `get_unreal_physics_state` reads bodies (by path, or every actor with a
+    tag) in the running simulation while one runs and in the editor world
+    otherwise (`world` picks one): location, rotation, linear velocity (cm/s),
+    angular velocity (degrees/s), whether the body is awake, mass, center of
+    mass, gravity and the physics mode. Each body lists both its
+    `editor_path` and `simulation_path`. Unreal reports contacts only to
+    hit-event handlers, so none are listed.
+  - `list_unreal_simulation_actors` lists the running simulation's actors
+    with their simulation and editor paths; an actor the simulation spawned,
+    such as the player's pawn, has a `null` editor path.
 - `set_unreal_material_params` writes a Material Instance Constant through
   Unreal's MaterialEditingLibrary in one undoable transaction, in or out of
   Play In Editor, and reads every value back, so `success` alone tells
@@ -298,7 +338,9 @@ Behaviour worth knowing:
     level's builder brush and engine helper actors the Outliner hides; the
     robotics analysis reports its static mesh collision counts, and the list
     of actors missing simple collision, as `null`, since Unreal does not
-    report mesh collision during PIE.
+    report mesh collision during PIE. To read the running game, use
+    `get_unreal_physics_state` and `list_unreal_simulation_actors` (above).
+  - `apply_unreal_force` acts on the running game's copy of the actor.
   - Editing actors already in the level by path (transform, lights, collision,
     physics settings, visibility, materials) keeps working and changes the
     editor world, which the running simulation does not see: it takes effect
@@ -313,9 +355,9 @@ Behaviour worth knowing:
     nothing, since Unreal reads back no selection during PIE and clears it
     when PIE stops: the reply has `selected: false`, `pie_active: true` and a
     `warning`. After Simulate In Editor (what `control_unreal_simulation`
-    starts) the camera stays where it was put; when a Play session in the
-    level viewport stops, Unreal replaces the editor camera, by default with
-    the game camera's last view.
+    starts by default) the camera stays where it was put; when a Play session
+    in the level viewport stops (`mode: "play"`), Unreal replaces the editor
+    camera, by default with the game camera's last view.
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.

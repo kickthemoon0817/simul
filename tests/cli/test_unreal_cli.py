@@ -1254,3 +1254,39 @@ def test_setup_closes_its_polling_session(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["--json", "unreal", "setup", str(uproject), "--no-launch", "--yes"])
 
     assert stub.closed is True
+
+
+# ---------------------------------------------------------------------------
+# sim
+# ---------------------------------------------------------------------------
+
+
+def test_sim_start_passes_the_mode(monkeypatch) -> None:
+    """`simul unreal sim start --mode play` starts a Play session; simulate is the default."""
+    calls = []
+
+    class _SimStub(_ClosingStub):
+        async def control_simulation(self, action, mode="simulate"):
+            calls.append((action, mode))
+            return {"action": action, "state": "playing", "mode": mode}
+
+    stub = _SimStub()
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: stub)
+
+    played = runner.invoke(app, ["--json", "unreal", "sim", "start", "--mode", "play"])
+    simulated = runner.invoke(app, ["--json", "unreal", "sim", "start"])
+
+    assert played.exit_code == 0 and simulated.exit_code == 0, (played.output, simulated.output)
+    assert calls == [("start", "play"), ("start", "simulate")]
+    assert json.loads(played.stdout)["mode"] == "play"
+    assert stub.closed
+
+
+@pytest.mark.parametrize("arguments", [["sim", "jump"], ["sim", "start", "--mode", "game"]])
+def test_sim_bad_action_or_mode_is_a_bad_invocation(monkeypatch, arguments) -> None:
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: pytest.fail("sim reached the editor"))
+
+    result = runner.invoke(app, ["--json", "unreal", *arguments])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout)["error_type"] == "InvalidArgument"

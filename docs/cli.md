@@ -159,7 +159,7 @@ mode.
 | `health`, `info`, `scene`, `map` | Inspection |
 | `list-actors [--class] [--tag] [-n]`, `actor-info`, `search`, `scene-graph` | Scene queries |
 | `spawn PATH [--location x,y,z] [--rotation p,y,r] [--label]` (an Actor class path or an asset path), `delete`, `set-transform ACTOR [--location x,y,z] [--rotation p,y,r] [--scale x,y,z]` (an option left out keeps its value), `set-property`, `set-visibility` | Edit actors |
-| `sim ACTION`, `sim-status` | Play-In-Editor: `start`, `stop`, `pause`, `resume`, `step` |
+| `sim ACTION [--mode simulate\|play]`, `sim-status` | Play In Editor: `start`, `stop`, `pause`, `resume`, `step` (refused). `start` begins Simulate In Editor, or with `--mode play` a Play session with the player's pawn; an unknown action or mode exits 2 with `InvalidArgument` |
 | `capture [OUTPUT] [--width] [--height] [--format png\|jpeg]` | Viewport screenshot |
 | `materials MATERIAL_PATH` | Parameters (with values and, for an instance, overrides), parent, domain and blend mode of a material or material instance |
 | `exec CODE_OR_FILE [--mode] [--raw]` | Run Python inside the editor; the script arrives as for [`simul isaac exec`](#simul-isaac). `--mode` is `ExecuteFile` (the default), `ExecuteStatement` or `EvaluateStatement`; any other value exits 2 with `InvalidArgument` |
