@@ -22,6 +22,7 @@ import struct
 import tempfile
 import time
 import uuid
+from array import array
 from contextlib import contextmanager
 from pathlib import Path
 from typing import (
@@ -32,6 +33,7 @@ from typing import (
     Iterator,
     List,
     Literal,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -41,6 +43,7 @@ from typing import (
 # The Blender add-on bundles these modules next to this one; simready_usd
 # imports pxr only when it is called.
 from ..utils.regex_guard import exponential_regex_construct
+from .simready_usd import COLLIDER_TYPES as SIMREADY_COLLIDER_TYPES
 from .simready_usd import author_simready_layer, usd_identifier
 
 try:
@@ -362,12 +365,76 @@ _ID_COLLECTIONS: Dict[str, str] = {
     "VectorFont": "fonts",
 }
 
+# The Principled BSDF input each assign_material texture drives.
+_TEXTURE_SOCKETS: Dict[str, str] = {
+    "base_color": "Base Color",
+    "metallic": "Metallic",
+    "roughness": "Roughness",
+    "normal": "Normal",
+}
+
+# The settings each light type has besides energy, color and use_shadow, as
+# set_light_params takes them. A sun's softness is its angle and an area
+# light's its size; shadow_soft_size is the radius of point and spot lights.
+_LIGHT_TYPE_SETTINGS: Dict[str, Tuple[str, ...]] = {
+    "POINT": ("shadow_soft_size",),
+    "SPOT": ("shadow_soft_size", "spot_size", "spot_blend"),
+    "SUN": ("angle",),
+    "AREA": ("shape", "size", "size_y"),
+}
+
+# Limits of the light settings: Blender 5.0.1's hard limits, which it clamps
+# to silently, except that energy may not be negative here (Blender allows
+# it). None leaves that side open. The angles are 1 degree and pi as Blender
+# stores them, in single precision, so a value read back passes again; the
+# MCP schemas repeat them as LIGHT_ANGLE_MIN and LIGHT_ANGLE_MAX.
+_LIGHT_ANGLE_MIN = 0.01745329238474369
+_LIGHT_ANGLE_MAX = 3.1415927410125732
+_LIGHT_LIMITS: Dict[str, Tuple[float, Optional[float]]] = {
+    "energy": (0.0, None),
+    "shadow_soft_size": (0.0, None),
+    "spot_size": (_LIGHT_ANGLE_MIN, _LIGHT_ANGLE_MAX),
+    "spot_blend": (0.0, 1.0),
+    "angle": (0.0, _LIGHT_ANGLE_MAX),
+    "size": (0.0, None),
+    "size_y": (0.0, None),
+}
+
+_AREA_LIGHT_SHAPES = ("SQUARE", "RECTANGLE", "DISK", "ELLIPSE")
+
+# uv_unwrap_mesh methods and the uv operator each runs.
+_UV_UNWRAP_METHODS: Dict[str, str] = {
+    "SMART_PROJECT": "smart_project",
+    "CUBE_PROJECT": "cube_project",
+}
+
 # Modifier types whose viewport and render results can differ through a
 # second level setting: (viewport setting, render setting).
 _RENDER_LEVEL_SETTINGS: Dict[str, Tuple[str, str]] = {
     "MULTIRES": ("levels", "render_levels"),
     "SUBSURF": ("levels", "render_levels"),
 }
+
+
+class ValidationError(ValueError):
+    """Arguments a Blender tool refuses, with a stable reason in ``details.code``.
+
+    The class name is the envelope's ``error_type`` in both modes: the server
+    names an exception by its class, and so does the add-on's bridge. It
+    subclasses ValueError, which these refusals raised before they had a type.
+    """
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = {"code": code, **details}
+
+
+class NotFoundError(ValueError):
+    """Something an argument names does not exist; ``details.code`` names what."""
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = {"code": code, **details}
 
 
 class UnsavedChangesError(RuntimeError):
@@ -390,6 +457,119 @@ class UnsavedChangesError(RuntimeError):
             "call open_blender_file with discard_unsaved=true to discard them."
         )
         self.details = {"blend_file_path": open_file, "is_dirty": True}
+
+
+# 4x4 matrices as row lists of floats. The SimReady tools compose and invert
+# world matrices themselves: Blender stores no fresh matrix_world for an object
+# its depsgraph leaves out, and mathutils is not importable outside Blender.
+_Matrix4 = List[List[float]]
+_IDENTITY4: _Matrix4 = [[1.0 if i == j else 0.0 for j in range(4)] for i in range(4)]
+
+
+def _m4(matrix: Any) -> _Matrix4:
+    """A mathutils Matrix, a stand-in or nested sequences as four rows of four floats."""
+    return [[float(matrix[i][j]) for j in range(4)] for i in range(4)]
+
+
+def _m4_mul(a: _Matrix4, b: _Matrix4) -> _Matrix4:
+    return [[sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+
+def _m4_inverse(m: _Matrix4) -> Optional[_Matrix4]:
+    """The inverse by Gauss-Jordan elimination, or None for a matrix with no inverse."""
+    rows = [list(row) + [1.0 if i == j else 0.0 for j in range(4)] for i, row in enumerate(m)]
+    for col in range(4):
+        pivot = max(range(col, 4), key=lambda r: abs(rows[r][col]))
+        if abs(rows[pivot][col]) < 1e-12:
+            return None
+        rows[col], rows[pivot] = rows[pivot], rows[col]
+        lead = rows[col][col]
+        rows[col] = [v / lead for v in rows[col]]
+        for r in range(4):
+            factor = rows[r][col]
+            if r != col and factor:
+                rows[r] = [v - factor * w for v, w in zip(rows[r], rows[col])]
+    return [row[4:] for row in rows]
+
+
+def _m4_shape(m: _Matrix4) -> Tuple[List[float], List[float], float, bool]:
+    """Translation, axis lengths, shear and mirroring of a transform matrix.
+
+    Shear is the largest cosine between two of its axes: 0 for a matrix that
+    location, rotation and scale can express, as Blender's loc/rot/scale and
+    USD's translate/rotate/scale ops can.
+    """
+    axes = [[m[r][c] for r in range(3)] for c in range(3)]
+    lengths = [math.sqrt(sum(v * v for v in axis)) for axis in axes]
+    units = [[v / n for v in axis] if n > 0 else axis for axis, n in zip(axes, lengths)]
+    shear = max(
+        abs(sum(a * b for a, b in zip(units[i], units[j])))
+        for i, j in ((0, 1), (0, 2), (1, 2))
+    )
+    a, b, c = axes
+    det = (
+        a[0] * (b[1] * c[2] - b[2] * c[1])
+        - b[0] * (a[1] * c[2] - a[2] * c[1])
+        + c[0] * (a[1] * b[2] - a[2] * b[1])
+    )
+    return [m[0][3], m[1][3], m[2][3]], lengths, shear, det < 0
+
+
+def _m4_is_identity(m: _Matrix4, tolerance: float = 1e-5) -> bool:
+    return all(abs(m[i][j] - _IDENTITY4[i][j]) <= tolerance for i in range(4) for j in range(4))
+
+
+class _WorldResolver:
+    """Where Blender places objects, as its USD exporter writes them.
+
+    An object the depsgraph evaluates has a fresh ``matrix_world``. One it
+    leaves out (in an excluded collection, a collection or object disabled in
+    viewports) keeps the matrix of its last evaluation, which is stale once its
+    parent moved; its world is composed from its parent as Blender composes it:
+    parent world @ matrix_parent_inverse @ matrix_basis. Without a depsgraph
+    (a stand-in bpy) every ``matrix_world`` is taken as fresh.
+    """
+
+    def __init__(self, depsgraph: Any) -> None:
+        self._depsgraph = depsgraph
+        self._worlds: Dict[str, _Matrix4] = {}
+        self._evaluated: Dict[str, bool] = {}
+
+    def _copy(self, obj: Any) -> Any:
+        if self._depsgraph is None or not hasattr(obj, "evaluated_get"):
+            return obj
+        return obj.evaluated_get(self._depsgraph)
+
+    def evaluated(self, obj: Any) -> bool:
+        """Whether Blender evaluates the object, so that its matrix_world is current."""
+        if obj.name not in self._evaluated:
+            if self._depsgraph is None or not hasattr(obj, "evaluated_get"):
+                fresh = True
+            else:
+                # The original comes back for an object the depsgraph left out.
+                fresh = bool(getattr(self._copy(obj), "is_evaluated", False))
+            self._evaluated[obj.name] = fresh
+        return self._evaluated[obj.name]
+
+    def world(self, obj: Any) -> _Matrix4:
+        """The object's world matrix: evaluated, or composed from its parent."""
+        if obj.name in self._worlds:
+            return self._worlds[obj.name]
+        if self.evaluated(obj):
+            world = _m4(self._copy(obj).matrix_world)
+        else:
+            local = _m4_mul(_m4(obj.matrix_parent_inverse), _m4(obj.matrix_basis))
+            parent = obj.parent
+            if parent is None:
+                world = local
+            elif getattr(obj, "parent_type", "OBJECT") == "OBJECT":
+                world = _m4_mul(self.world(parent), local)
+            else:
+                # A bone or vertex parent of an object Blender does not evaluate:
+                # its last stored matrix is all there is.
+                world = _m4(obj.matrix_world)
+        self._worlds[obj.name] = world
+        return world
 
 
 def add_context_hint(error: Optional[str]) -> Optional[str]:
@@ -1260,6 +1440,92 @@ def _finite_triple(value: Any, what: str) -> Tuple[float, float, float]:
     return (triple[0], triple[1], triple[2])
 
 
+def _finite_number(value: Any, what: str) -> float:
+    """A finite real number as a float (not a bool), or a ValidationError naming ``what``."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise ValidationError(f"{what} must be a number, got {value!r}", "invalid_value", field=what)
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValidationError(f"{what} must be finite, got {value!r}", "invalid_value", field=what)
+    return number
+
+
+def _unit_value(value: Any, what: str) -> float:
+    """A finite number in [0, 1], or a ValidationError naming ``what``."""
+    number = _finite_number(value, what)
+    if not 0.0 <= number <= 1.0:
+        raise ValidationError(
+            f"{what} must lie between 0 and 1, got {value!r}", "out_of_range", field=what
+        )
+    return number
+
+
+def _unit_color(value: Any, what: str) -> Tuple[float, float, float, Optional[float]]:
+    """An RGB or RGBA colour in [0, 1] as (r, g, b, alpha), alpha None for RGB.
+
+    Blender's Base Color socket takes four numbers and refused three with
+    "sequences of dimension 0 should contain 4 items, not 3".
+    """
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__len__") or len(value) not in (3, 4):
+        raise ValidationError(
+            f"{what} must be [r, g, b] or [r, g, b, a], got {value!r}", "invalid_value", field=what
+        )
+    channels = [_unit_value(channel, what) for channel in value]
+    return (channels[0], channels[1], channels[2], channels[3] if len(channels) == 4 else None)
+
+
+def _real_path(path: str) -> str:
+    """A file path in one spelling: absolute, symlinks resolved, case-folded where the OS folds."""
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _image_file(image: Any) -> Optional[str]:
+    """The file an image datablock reads, as ``_real_path`` spells it; None when it reads none."""
+    path = getattr(image, "filepath", "") or ""
+    if not path:
+        return None
+    resolve = getattr(getattr(bpy, "path", None), "abspath", None)
+    if resolve is not None:
+        # Blender-relative paths (//textures/a.png) are relative to the .blend
+        # file, or to the library the image is linked from.
+        path = resolve(path, library=getattr(image, "library", None))
+    return _real_path(path)
+
+
+def _name_list(names: Sequence[str], limit: int = 5) -> str:
+    """``'a', 'b' and 3 more`` for the first ``limit`` names."""
+    shown = ", ".join(f"'{name}'" for name in names[:limit])
+    rest = len(names) - limit
+    return shown + (f" and {rest} more" if rest > 0 else "")
+
+
+def _live_links(socket: Any) -> List[Any]:
+    """The links into a socket that Blender evaluates: neither muted nor invalid."""
+    return [
+        link
+        for link in socket.links
+        if not getattr(link, "is_muted", False) and getattr(link, "is_valid", True)
+    ]
+
+
+def _link_source(link: Any) -> Tuple[Any, Any]:
+    """The node and output socket a link really comes from, through any Reroute nodes.
+
+    Returns:
+        That node and socket, or the last Reroute's when one has nothing
+        plugged in.
+    """
+    source, output = link.from_node, link.from_socket
+    for _hop in range(1000):
+        if source.type != "REROUTE":
+            break
+        feeding = [live for socket in source.inputs for live in _live_links(socket)]
+        if not feeding:
+            break
+        source, output = feeding[0].from_node, feeding[0].from_socket
+    return source, output
+
+
 def _mesh_index(value: Any, what: str, vertex_count: int) -> int:
     """A vertex index of an edge or face, checked to be an integer within the vertex list."""
     if isinstance(value, bool) or not isinstance(value, numbers.Integral):
@@ -1880,46 +2146,124 @@ class BlenderRuntimeSession:
             "frame_end": scene.frame_end,
         }
 
-    def get_material_info(self, material_name: str) -> Dict[str, Any]:
+    def get_material_info(self, material_name: str, max_nodes: int = 50) -> Dict[str, Any]:
         """
-        Get material information with bounded node tree traversal.
+        Get a material's shading: its Principled BSDF values and what drives them.
 
-        Traverses at most ``_MAX_MATERIAL_NODE_DEPTH`` levels from the
-        output node to keep context small.
+        ``principled_params`` holds the values of the Principled BSDF that
+        feeds the active Material Output; an input driven by a link has None
+        there, as its own value is unused, and ``linked_inputs`` names the
+        node, socket and, for an image texture (also behind a Normal Map
+        node), the image's file, colour space and whether it is packed.
+        ``nodes`` lists at most ``max_nodes`` nodes, those feeding the output
+        first; ``node_count`` counts them all.
 
         Args:
             material_name: Name of the Blender material.
+            max_nodes: Most nodes to list.
 
         Returns:
-            Dictionary with node summary and Principled BSDF parameters.
+            Dictionary with the node list and count, Principled BSDF values,
+            linked inputs, the render method and the user count.
         """
+        if isinstance(max_nodes, bool) or not isinstance(max_nodes, int) or max_nodes < 1:
+            raise ValidationError(
+                f"max_nodes must be a whole number of at least 1, got {max_nodes!r}",
+                "out_of_range",
+                field="max_nodes",
+            )
         blender_module: Any = bpy
         mat = blender_module.data.materials.get(material_name)
         if mat is None:
-            raise ValueError(f"Material not found: {material_name}")
+            raise NotFoundError(f"Material not found: {material_name}", "material_not_found")
 
-        use_nodes = bool(getattr(mat, "use_nodes", False))
-        nodes: List[Dict[str, str]] = []
-        principled_params: Optional[Dict[str, Any]] = None
-
-        if use_nodes and mat.node_tree:
-            for node in mat.node_tree.nodes:
-                nodes.append(
-                    {
-                        "name": node.name,
-                        "node_type": node.bl_idname,
-                        "label": getattr(node, "label", ""),
-                    }
-                )
-                if node.bl_idname == "ShaderNodeBsdfPrincipled":
-                    principled_params = self._extract_principled_params(node)
+        tree = self._material_tree(mat)
+        listed: List[Any] = []
+        principled = None
+        if tree is not None:
+            listed = self._nodes_feeding_output(tree, max_nodes)
+            principled = self._principled_node(mat)
 
         return {
             "material_name": material_name,
-            "use_nodes": use_nodes,
-            "nodes": nodes,
-            "principled_params": principled_params,
+            "use_nodes": tree is not None,
+            "nodes": [
+                {"name": node.name, "node_type": node.bl_idname, "label": getattr(node, "label", "")}
+                for node in listed
+            ],
+            "node_count": 0 if tree is None else len(tree.nodes),
+            "principled_params": (
+                None if principled is None else self._extract_principled_params(principled)
+            ),
+            "linked_inputs": {} if principled is None else self._linked_inputs(principled),
+            "surface_render_method": self._render_method(mat),
+            "users": int(getattr(mat, "users", 0)),
         }
+
+    def _nodes_feeding_output(self, tree: Any, limit: int) -> List[Any]:
+        """Up to ``limit`` nodes: those the active output reads, nearest first, then the rest."""
+        output = self._material_output(tree)
+        ordered: List[Any] = []
+        # Node names are unique within a tree; bpy may wrap one node in a new
+        # Python object at each access, so identity cannot tell them apart.
+        seen: set = set()
+        pending = [] if output is None else [output]
+        while pending and len(ordered) < limit:
+            node = pending.pop(0)
+            if node.name in seen:
+                continue
+            seen.add(node.name)
+            ordered.append(node)
+            pending.extend(link.from_node for socket in node.inputs for link in socket.links)
+        for node in tree.nodes:
+            if len(ordered) >= limit:
+                break
+            if node.name not in seen:
+                seen.add(node.name)
+                ordered.append(node)
+        return ordered
+
+    @staticmethod
+    def _linked_inputs(bsdf: Any) -> Dict[str, Dict[str, Any]]:
+        """What drives each linked input of a Principled BSDF, images included.
+
+        A muted link drives nothing, so its input is not listed; a source
+        behind Reroute nodes, and an image behind a Normal Map node, are
+        followed to the node that provides them.
+        """
+        blender_module: Any = bpy
+        linked: Dict[str, Dict[str, Any]] = {}
+        for socket in bsdf.inputs:
+            live = _live_links(socket)
+            if not live:
+                continue
+            source, output = _link_source(live[0])
+            entry: Dict[str, Any] = {
+                "from_node": source.name,
+                "from_node_type": source.bl_idname,
+                "from_socket": output.name,
+            }
+            texture = source
+            if source.type == "NORMAL_MAP":
+                color = source.inputs.get("Color")
+                feeding = [] if color is None else _live_links(color)
+                texture = _link_source(feeding[0])[0] if feeding else None
+            image = (
+                getattr(texture, "image", None)
+                if texture is not None and texture.type == "TEX_IMAGE"
+                else None
+            )
+            if image is not None:
+                path = getattr(image, "filepath", "") or ""
+                resolve = getattr(getattr(blender_module, "path", None), "abspath", None)
+                entry.update(
+                    image_name=image.name,
+                    image_path=(resolve(path) if resolve and path else path) or None,
+                    image_colorspace=image.colorspace_settings.name,
+                    image_packed=getattr(image, "packed_file", None) is not None,
+                )
+            linked[socket.name] = entry
+        return linked
 
     def get_distance_between(
         self, object_name_a: str, object_name_b: str
@@ -3018,52 +3362,609 @@ class BlenderRuntimeSession:
         object_name: str,
         material_name: Optional[str] = None,
         base_color: Optional[List[float]] = None,
-        metallic: float = 0.0,
-        roughness: float = 0.5,
+        metallic: Optional[float] = None,
+        roughness: Optional[float] = None,
+        slot_index: Optional[int] = None,
+        face_indices: Optional[List[int]] = None,
+        link: str = "DATA",
+        single_user: bool = False,
+        reuse_existing: bool = True,
+        base_color_texture: Optional[str] = None,
+        metallic_texture: Optional[str] = None,
+        roughness_texture: Optional[str] = None,
+        normal_texture: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Create a Principled BSDF material and assign it to an object.
+        Assign a Principled BSDF material to an object, reusing it when it exists.
+
+        The material named ``material_name`` is reused when it exists (so a
+        repeated call changes nothing more), and created otherwise; pass
+        ``reuse_existing=False`` to always create a new one. Shading arguments
+        left out keep the material's own values (Blender's defaults for a new
+        one), so an existing material can be assigned as it is.
+
+        By default the material replaces the object's: it goes into slot 0
+        and every face uses slot 0. ``slot_index`` puts it into that slot
+        instead (the slot count appends one) and leaves the faces alone;
+        ``face_indices`` assigns it to those faces only, through its existing
+        slot or a new one. ``link="OBJECT"`` puts it in this object's slot
+        instead of the mesh's, but faces and the slot count belong to the
+        mesh: with link OBJECT, changing either on mesh data that other
+        objects share is refused unless ``single_user`` gives this object its
+        own copy of the mesh first.
+
+        An image already loaded in the file keeps its colour space: an input
+        that reads it differently gets its own image datablock. Everything is
+        checked before the scene changes, and a failure later removes what
+        the call created.
 
         Args:
-            object_name: Object to assign material to.
-            material_name: Material name (auto-generated if omitted).
-            base_color: Base color RGBA [r, g, b, a].
+            object_name: Object to assign the material to (mesh, curve, text,
+                or another type with material slots).
+            material_name: Material name; Material_<object> when omitted.
+            base_color: RGB or RGBA in [0, 1]; the alpha becomes the
+                Principled Alpha, and below 1 the material renders blended.
             metallic: Metallic value 0-1.
             roughness: Roughness value 0-1.
+            slot_index: Slot to put the material in; the slot count adds one.
+            face_indices: Mesh faces to assign the material to.
+            link: DATA (the mesh's slot, shared by linked duplicates) or
+                OBJECT (this object's slot).
+            single_user: Give this object its own copy of shared data first,
+                so the change leaves the objects sharing it alone.
+            reuse_existing: Reuse a material of that name when one exists.
+            base_color_texture: Image file driving Base Color (in the colour
+                space Blender loads it in: sRGB, or linear for float images).
+            metallic_texture: Image file driving Metallic (Non-Color).
+            roughness_texture: Image file driving Roughness (Non-Color).
+            normal_texture: Tangent-space normal map image (Non-Color),
+                through a Normal Map node.
 
         Returns:
-            Dictionary with object_name and material_name.
+            Dictionary with the material, whether it was created, the slot,
+            the link, the faces assigned, the object's slots, the Principled
+            values, its render method, the textures and warnings.
         """
         blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
-        if obj.data is None:
-            raise ValueError(f"Object '{object_name}' has no data to receive materials")
+        data = obj.data
+        if data is None or not hasattr(data, "materials"):
+            raise ValidationError(
+                f"Object '{object_name}' is a {obj.type} object, which takes no materials",
+                "no_material_slots",
+                object_type=obj.type,
+            )
+        if getattr(obj, "library", None) is not None:
+            raise ValidationError(
+                f"Object '{object_name}' is linked from library '{obj.library.name}' and "
+                "cannot be changed; make it local first",
+                "linked_from_library",
+            )
+        link = link.upper() if isinstance(link, str) else link
+        if link not in ("DATA", "OBJECT"):
+            raise ValidationError(
+                f"link must be DATA or OBJECT, got {link!r}", "invalid_value", field="link"
+            )
+        color = None if base_color is None else _unit_color(base_color, "base_color")
+        for label, value in (("metallic", metallic), ("roughness", roughness)):
+            if value is not None:
+                _unit_value(value, label)
+        slot_count = len(obj.material_slots)
+        requested_slot: Any = slot_index
+        if requested_slot is not None and (
+            isinstance(requested_slot, bool)
+            or not isinstance(requested_slot, numbers.Integral)
+            or not 0 <= int(requested_slot) <= slot_count
+        ):
+            raise ValidationError(
+                f"slot_index must lie between 0 and {slot_count} (the slot count, which "
+                f"adds a slot), got {slot_index!r}",
+                "out_of_range",
+                field="slot_index",
+            )
+        faces = None
+        if face_indices is not None:
+            if obj.type != "MESH":
+                raise ValidationError(
+                    f"face_indices applies to mesh objects; '{object_name}' is a {obj.type} object",
+                    "invalid_value",
+                    field="face_indices",
+                )
+            faces = self._checked_face_indices(data, face_indices)
+        writes_faces = obj.type == "MESH" and (faces is not None or slot_index is None)
+        if writes_faces:
+            self._require_object_mode(obj, "assign materials to its faces")
+        textures = self._texture_files(
+            {
+                "base_color": base_color_texture,
+                "metallic": metallic_texture,
+                "roughness": roughness_texture,
+                "normal": normal_texture,
+            }
+        )
+        name = material_name or f"Material_{object_name}"
+        material = blender_module.data.materials.get(name) if reuse_existing else None
+        shading = bool(
+            color is not None or metallic is not None or roughness is not None or textures
+        )
+        if material is not None and shading:
+            if getattr(material, "library", None) is not None:
+                raise ValidationError(
+                    f"Material '{name}' is linked from a library and cannot be changed; assign "
+                    "it without shading arguments, or pass reuse_existing=false for a local one",
+                    "linked_from_library",
+                )
+            if self._principled_node(material) is None:
+                raise ValidationError(
+                    f"Material '{name}' has no Principled BSDF to take base_color, metallic, "
+                    "roughness or textures; assign it without them, or pass "
+                    "reuse_existing=false for a new material",
+                    "no_principled_bsdf",
+                )
 
-        mat_name = material_name or f"Material_{object_name}"
-        mat = blender_module.data.materials.new(name=mat_name)
-        mat.use_nodes = True
-        tree = mat.node_tree
-        bsdf = None
-        for node in tree.nodes:
-            if node.type == "BSDF_PRINCIPLED":
-                bsdf = node
-                break
-
-        if bsdf is not None:
-            color = base_color or [0.8, 0.8, 0.8, 1.0]
-            bsdf.inputs["Base Color"].default_value = tuple(color)
-            bsdf.inputs["Metallic"].default_value = metallic
-            bsdf.inputs["Roughness"].default_value = roughness
-
-        if hasattr(obj.data, "materials"):
-            obj.data.materials.append(mat)
+        # Where the material goes and what that does to the data, worked out
+        # before anything changes.
+        if faces is not None and slot_index is None:
+            index = next(
+                (i for i, slot in enumerate(obj.material_slots) if slot.material == material),
+                slot_count,
+            )
         else:
-            raise ValueError(f"Object '{object_name}' does not support materials")
+            index = 0 if slot_index is None else int(slot_index)
+        appends = index == slot_count
+        previous_faces: Optional[List[int]] = None
+        new_faces: Optional[List[int]] = None
+        if writes_faces:
+            previous_faces = self._face_materials(data)
+            new_faces = list(previous_faces)
+            for face in range(len(new_faces)) if faces is None else faces:
+                new_faces[face] = index
+        face_change = new_faces is not None and new_faces != previous_faces
+        changes_data = link == "DATA" or appends or face_change
+        sharers = self._other_users(obj)
+        linked_data = getattr(data, "library", None) is not None
+        # single_user also makes library data local, as Blender's Make Single User does.
+        copy_data = bool(single_user and (sharers or linked_data))
+        kind = obj.type.title() if obj.type != "MESH" else "Mesh"
+        if sharers and link == "OBJECT" and (appends or face_change) and not copy_data:
+            what = "assigning faces" if face_change else "adding a slot"
+            raise ValidationError(
+                f"{kind} data '{data.name}' is shared with {_name_list(sharers)}; with "
+                f"link='OBJECT' the slot's material is this object's, but {what} changes the "
+                f"shared data for all of them. Pass single_user=true to give '{object_name}' "
+                "its own copy first, or slot_index to an existing slot to change only the "
+                "material",
+                "shared_data",
+                shared_with=sharers,
+            )
+        if linked_data and changes_data and not copy_data:
+            raise ValidationError(
+                f"{kind} data '{data.name}' is linked from a library and cannot be changed; "
+                "pass single_user=true for a local copy, or link='OBJECT' with slot_index "
+                "to an existing slot",
+                "linked_from_library",
+            )
+        if copy_data:
+            # Blender 5.0.1 ignores obj.data = copy, without an error, while
+            # the object is in Edit Mode.
+            self._require_object_mode(obj, "give it its own copy of its data")
+        warnings = self._material_warnings(obj, link, textures, sharers, copy_data)
+        replaced = None if appends else obj.material_slots[index].material
 
+        created = material is None
+        new_images: List[Any] = []
+        appended = False
+        made_copy: Any = None
+        # Set once the copy really is the object's data.
+        original_data: Any = None
+        previous_slot: Optional[Tuple[int, str, Any]] = None
+        faces_written = False
+        try:
+            images = self._load_texture_images(textures, new_images)
+            if copy_data:
+                made_copy = data.copy()
+                obj.data = made_copy
+                if obj.data != made_copy:
+                    raise RuntimeError(
+                        f"Blender kept '{data.name}' on '{object_name}' instead of its copy; "
+                        "nothing was changed"
+                    )
+                original_data, data = data, made_copy
+            if material is None:
+                material = blender_module.data.materials.new(name=name)
+                if material.node_tree is None:
+                    # Before Blender 5.0 a new material has no node tree until
+                    # use_nodes is set; 5.0 always has one and deprecates the flag.
+                    material.use_nodes = True
+            if shading:
+                self._shade_principled(material, color, metallic, roughness, images)
+            if appends:
+                data.materials.append(material if link == "DATA" else None)
+                appended = True
+            slot = obj.material_slots[index]
+            previous_slot = (index, slot.link, slot.material)
+            slot.link = link
+            slot.material = material
+            if face_change and new_faces is not None:
+                faces_written = True
+                self._set_face_materials(data, new_faces)
+        except Exception:
+            # Each step is undone on its own, so one that fails does not keep
+            # the others from running.
+            def undo(step: Callable[[], Any]) -> None:
+                try:
+                    step()
+                except Exception:
+                    self.logger.exception("Could not undo part of a failed material assignment")
+
+            def restore_faces() -> None:
+                if faces_written and previous_faces is not None and original_data is None:
+                    self._set_face_materials(data, previous_faces)
+
+            def restore_data() -> None:
+                # Only the copy this call made is removed, its faces and slots
+                # with it, and only once no object uses it: removing data an
+                # object still uses deletes that object.
+                if made_copy is None:
+                    return
+                if original_data is not None and obj.data == made_copy:
+                    obj.data = original_data
+                if obj.data == made_copy:
+                    self.logger.error(
+                        "Left the copy '%s' on '%s': Blender did not take the original back",
+                        made_copy.name,
+                        object_name,
+                    )
+                    return
+                self._data_collection(obj).remove(made_copy)
+
+            def restore_slot() -> None:
+                # The slot's link and an OBJECT-linked material are the
+                # object's, so they are restored also after a copy is dropped.
+                if appended:
+                    if original_data is None:
+                        data.materials.pop(index=-1)
+                elif previous_slot is not None:
+                    restored = obj.material_slots[previous_slot[0]]
+                    restored.link = previous_slot[1]
+                    restored.material = previous_slot[2]
+
+            def remove_material() -> None:
+                if created and material is not None:
+                    blender_module.data.materials.remove(material)
+
+            def remove_images() -> None:
+                for image in new_images:
+                    blender_module.data.images.remove(image)
+
+            for step in (restore_faces, restore_data, restore_slot, remove_material, remove_images):
+                undo(step)
+            raise
+
+        if original_data is not None:
+            library = getattr(original_data, "library", None)
+            if library is not None:
+                # A local copy of library data keeps its name.
+                kept = f"; {_name_list(sharers)} keep the linked one" if sharers else ""
+                warnings.append(
+                    f"'{object_name}' now has a local copy of {kind.lower()} data "
+                    f"'{original_data.name}' from library '{library.name}'{kept}"
+                )
+            else:
+                kept = f", which {_name_list(sharers)} keep" if sharers else ""
+                warnings.append(
+                    f"'{object_name}' now has its own copy '{data.name}' of {kind.lower()} data "
+                    f"'{original_data.name}'{kept}"
+                )
+        if not created and shading and material.users > 1:
+            warnings.append(
+                f"Material '{material.name}' has {material.users} users; the changed shading "
+                "shows wherever it is used"
+            )
+        if replaced is not None and replaced != material and not replaced.users:
+            warnings.append(
+                f"Material '{replaced.name}' has no users now; Blender discards it when the "
+                "file is saved and reopened (set its use_fake_user to keep it)"
+            )
+        bsdf = self._principled_node(material)
         return {
             "object_name": object_name,
-            "material_name": mat.name,
+            "material_name": material.name,
+            "created": created,
+            "slot_index": index,
+            "link": link,
+            "faces_assigned": (
+                None if new_faces is None else len(new_faces) if faces is None else len(faces)
+            ),
+            "material_slots": [
+                slot.material.name if slot.material else None for slot in obj.material_slots
+            ],
+            "principled_params": None if bsdf is None else self._extract_principled_params(bsdf),
+            "surface_render_method": self._render_method(material),
+            "textures": textures,
+            "warnings": warnings,
         }
+
+    @staticmethod
+    def _other_users(obj: Any) -> List[str]:
+        """The other objects whose data is ``obj``'s, by name.
+
+        Counted from the objects rather than ``data.users``, which a fake
+        user or another datablock's reference raises too.
+        """
+        blender_module: Any = bpy
+        data = obj.data
+        return sorted(
+            other.name
+            for other in blender_module.data.objects
+            if other.name != obj.name and getattr(other, "data", None) == data
+        )
+
+    @staticmethod
+    def _data_collection(obj: Any) -> Any:
+        """The bpy.data collection that holds an object's data."""
+        blender_module: Any = bpy
+        name = {
+            "MESH": "meshes",
+            "CURVE": "curves",
+            "SURFACE": "curves",
+            "FONT": "curves",
+            "META": "metaballs",
+            "CURVES": "hair_curves",
+            "POINTCLOUD": "pointclouds",
+            "VOLUME": "volumes",
+            "GREASEPENCIL": "grease_pencils",
+        }.get(obj.type, "meshes")
+        return getattr(blender_module.data, name)
+
+    @staticmethod
+    def _checked_face_indices(mesh: Any, face_indices: Sequence[Any]) -> List[int]:
+        """Face indices in range, each once, at least one, in the order given."""
+        if not face_indices:
+            raise ValidationError(
+                "face_indices must name at least one face", "invalid_value", field="face_indices"
+            )
+        count = len(mesh.polygons)
+        checked: List[int] = []
+        seen: set = set()
+        for value in face_indices:
+            if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+                raise ValidationError(
+                    f"face_indices index {value!r} is not an integer",
+                    "invalid_value",
+                    field="face_indices",
+                )
+            index = int(value)
+            if index < 0 or index >= count:
+                raise ValidationError(
+                    f"face_indices index {index} out of range [0, {count})",
+                    "out_of_range",
+                    field="face_indices",
+                )
+            if index in seen:
+                raise ValidationError(
+                    f"face_indices lists face {index} twice", "invalid_value", field="face_indices"
+                )
+            seen.add(index)
+            checked.append(index)
+        return checked
+
+    def _texture_files(self, textures: Dict[str, Optional[str]]) -> Dict[str, str]:
+        """The texture paths given, each allowed by the sandbox and an existing file."""
+        files: Dict[str, str] = {}
+        for key, path in textures.items():
+            if path is None:
+                continue
+            resolved = self._deny_outside_sandbox(path)
+            if not os.path.isfile(resolved):
+                raise NotFoundError(
+                    f"{key}_texture '{path}' is not a file",
+                    "texture_not_found",
+                    field=f"{key}_texture",
+                    path=path,
+                )
+            files[key] = resolved
+        return files
+
+    @staticmethod
+    def _load_texture_images(textures: Dict[str, str], new_images: List[Any]) -> Dict[str, Any]:
+        """Find or load each texture image, in the colour space its socket reads it in.
+
+        A data map (metallic, roughness, normal) is read Non-Color; a base
+        colour reads the colour space Blender loads the file in: sRGB for an
+        8-bit image, linear for a float one such as an EXR. An image of the same
+        file already read that way is reused, so a repeated call adds no
+        datablock. An image already in the file is never changed, since other
+        materials may read it: when every one of the file reads the other way,
+        this input gets a datablock of its own. Images the call loads are added
+        to ``new_images``, for the caller to remove on failure.
+        bpy.data.images.load accepts a file that is no image and only fails to
+        read it later, so an image that reads as 0 x 0 pixels is refused.
+        """
+        blender_module: Any = bpy
+        images: Dict[str, Any] = {}
+        for key, path in textures.items():
+            data_map = key != "base_color"
+            same_file = [
+                image
+                for image in blender_module.data.images
+                if _image_file(image) == _real_path(path)
+            ]
+            image = next(
+                (
+                    candidate
+                    for candidate in same_file
+                    if bool(candidate.colorspace_settings.is_data) == data_map
+                ),
+                None,
+            )
+            fresh = image is None
+            if image is None:
+                image = blender_module.data.images.load(path, check_existing=False)
+                new_images.append(image)
+            if not image.size[0]:
+                raise ValidationError(
+                    f"{key}_texture '{path}' is not an image Blender can read",
+                    "not_an_image",
+                    field=f"{key}_texture",
+                    path=path,
+                )
+            if fresh and data_map:
+                image.colorspace_settings.name = "Non-Color"
+            images[key] = image
+        return images
+
+    def _material_warnings(
+        self,
+        obj: Any,
+        link: str,
+        textures: Dict[str, str],
+        sharers: List[str],
+        copy_data: bool,
+    ) -> List[str]:
+        """Warnings about where an assignment shows: shared data, missing UVs."""
+        warnings: List[str] = []
+        data = obj.data
+        if link == "DATA" and sharers and not copy_data:
+            kind = "Mesh" if obj.type == "MESH" else obj.type.title()
+            warnings.append(
+                f"{kind} data '{data.name}' is shared with {_name_list(sharers)}; its slots "
+                "and face assignments change on all of them (single_user=true changes only "
+                "this object)"
+            )
+        if textures and obj.type == "MESH" and not len(data.uv_layers):
+            warnings.append(
+                f"Mesh '{data.name}' has no UV map, which image textures need; run "
+                "uv_unwrap_blender_mesh on the object"
+            )
+        return warnings
+
+    def _shade_principled(
+        self,
+        material: Any,
+        color: Optional[Tuple[float, float, float, Optional[float]]],
+        metallic: Optional[float],
+        roughness: Optional[float],
+        images: Dict[str, Any],
+    ) -> None:
+        """Set the given values and textures on the material's Principled BSDF."""
+        bsdf = self._principled_node(material)
+        if color is not None:
+            red, green, blue, alpha = color
+            bsdf.inputs["Base Color"].default_value = (red, green, blue, 1.0)
+            material.diffuse_color = (red, green, blue, 1.0 if alpha is None else alpha)
+            if alpha is not None:
+                bsdf.inputs["Alpha"].default_value = alpha
+                self._set_render_method(material, transparent=alpha < 1.0)
+        if metallic is not None:
+            bsdf.inputs["Metallic"].default_value = metallic
+        if roughness is not None:
+            bsdf.inputs["Roughness"].default_value = roughness
+        for row, (key, image) in enumerate(images.items()):
+            self._link_texture(material.node_tree, bsdf, key, image, row)
+
+    @staticmethod
+    def _set_render_method(material: Any, transparent: bool) -> None:
+        """Blend the material when it is transparent, as alpha alone does not.
+
+        Blender 4.2+ (EEVEE Next) sets this as surface_render_method; earlier
+        versions as blend_method.
+        """
+        if hasattr(material, "surface_render_method"):
+            material.surface_render_method = "BLENDED" if transparent else "DITHERED"
+        else:
+            material.blend_method = "BLEND" if transparent else "OPAQUE"
+
+    @staticmethod
+    def _render_method(material: Any) -> Optional[str]:
+        """The material's render method (surface_render_method, else blend_method)."""
+        for name in ("surface_render_method", "blend_method"):
+            value = getattr(material, name, None)
+            if value is not None:
+                return str(value)
+        return None
+
+    def _link_texture(self, tree: Any, bsdf: Any, key: str, image: Any, row: int) -> None:
+        """Drive one Principled input with an image texture, replacing what drove it."""
+        socket = bsdf.inputs[_TEXTURE_SOCKETS[key]]
+        for old in list(socket.links):
+            source = old.from_node
+            tree.links.remove(old)
+            self._drop_unused_texture_node(tree, source)
+        x, y = bsdf.location[0], bsdf.location[1]
+        texture = tree.nodes.new("ShaderNodeTexImage")
+        texture.image = image
+        texture.label = f"{_TEXTURE_SOCKETS[key]} Texture"
+        texture.location = (x - 700, y - 300 * row)
+        if key == "normal":
+            normal_map = tree.nodes.new("ShaderNodeNormalMap")
+            normal_map.location = (x - 250, y - 300 * row)
+            tree.links.new(texture.outputs["Color"], normal_map.inputs["Color"])
+            tree.links.new(normal_map.outputs["Normal"], socket)
+        else:
+            tree.links.new(texture.outputs["Color"], socket)
+
+    def _drop_unused_texture_node(self, tree: Any, node: Any) -> None:
+        """Remove an Image Texture, Normal Map or Reroute node that no longer feeds anything.
+
+        The nodes upstream of it go too when nothing else uses them, so a
+        replaced texture behind Reroutes leaves no stray nodes.
+        """
+        if node.type not in ("TEX_IMAGE", "NORMAL_MAP", "REROUTE") or any(
+            output.is_linked for output in node.outputs
+        ):
+            return
+        upstream = [link.from_node for socket in node.inputs for link in socket.links]
+        tree.nodes.remove(node)
+        for source in upstream:
+            self._drop_unused_texture_node(tree, source)
+
+    @staticmethod
+    def _material_output(tree: Any) -> Any:
+        """The node tree's active Material Output, else its first one, else None."""
+        outputs = [node for node in tree.nodes if node.type == "OUTPUT_MATERIAL"]
+        return next((node for node in outputs if node.is_active_output), None) or next(
+            iter(outputs), None
+        )
+
+    def _material_tree(self, material: Any) -> Any:
+        """The material's node tree when it renders with nodes, else None.
+
+        Blender 5.0 materials always use nodes and deprecate Material.use_nodes
+        (removed in 6.0), so it is read only before 5.0.
+        """
+        tree = getattr(material, "node_tree", None)
+        if tree is None:
+            return None
+        if self._is_blender_5_plus:
+            return tree
+        return tree if material.use_nodes else None
+
+    def _principled_node(self, material: Any) -> Any:
+        """The Principled BSDF feeding the active output's Surface, else the first one."""
+        tree = self._material_tree(material)
+        if tree is None:
+            return None
+        output = self._material_output(tree)
+        surface = None if output is None else output.inputs.get("Surface")
+        for link in [] if surface is None else _live_links(surface):
+            source = _link_source(link)[0]
+            if source.type == "BSDF_PRINCIPLED":
+                return source
+        return next((node for node in tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
+
+    @staticmethod
+    def _face_materials(mesh: Any) -> List[int]:
+        """Every face's material index, in face order."""
+        values = [0] * len(mesh.polygons)
+        mesh.polygons.foreach_get("material_index", values)
+        return values
+
+    @staticmethod
+    def _set_face_materials(mesh: Any, values: List[int]) -> None:
+        """Write every face's material index."""
+        mesh.polygons.foreach_set("material_index", values)
+        mesh.update()
 
     def add_modifier(
         self,
@@ -3240,12 +4141,27 @@ class BlenderRuntimeSession:
 
     @staticmethod
     def _require_object_mode(obj: Any, action: str) -> None:
-        """Refuse to change an object's mesh data while it is edited in another mode."""
+        """Refuse to change an object's data while it, or its data, is edited in another mode.
+
+        Edit Mode keeps its own copy of the data and writes it back on leaving,
+        over what was changed meanwhile, also when the data is edited through
+        another object that shares it.
+        """
         mode = getattr(obj, "mode", "OBJECT")
         if mode != "OBJECT":
-            raise ValueError(
+            raise ValidationError(
                 f"Object '{obj.name}' is in {mode.replace('_', ' ').title()} Mode; "
-                f"switch it to Object Mode to {action}"
+                f"switch it to Object Mode to {action}",
+                "wrong_mode",
+                mode=mode,
+            )
+        data: Any = getattr(obj, "data", None)
+        if getattr(data, "is_editmode", False):
+            raise ValidationError(
+                f"The data '{data.name}' of '{obj.name}' is in Edit Mode through another "
+                f"object that shares it; switch that object to Object Mode to {action}",
+                "wrong_mode",
+                mode="EDIT",
             )
 
     @staticmethod
@@ -3422,45 +4338,359 @@ class BlenderRuntimeSession:
         spot_size: Optional[float] = None,
         spot_blend: Optional[float] = None,
         shadow_soft_size: Optional[float] = None,
+        light_type: Optional[str] = None,
+        angle: Optional[float] = None,
+        size: Optional[float] = None,
+        size_y: Optional[float] = None,
+        shape: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Set properties on a light object.
+        Set properties on a light object, checked for its type and range.
+
+        Each setting must belong to the light's type (after ``light_type``,
+        when given): shadow_soft_size is the radius of POINT and SPOT lights,
+        spot_size and spot_blend are SPOT's, angle is a SUN's softness, and
+        shape, size and size_y are an AREA light's (size_y for RECTANGLE and
+        ELLIPSE). A value outside its range is refused rather than clamped,
+        and energy may not be negative. Nothing changes unless every value is
+        valid. The reply reports every setting of the light's type as stored.
 
         Args:
             light_name: Light object name.
-            energy: Light energy/power.
-            color: Light color RGB [r, g, b].
+            energy: Light power in watts (irradiance in W/m² for SUN), >= 0.
+            color: Light color RGB [r, g, b], each >= 0.
             use_shadow: Enable shadow casting.
-            spot_size: Spot cone angle in radians (SPOT only).
-            spot_blend: Spot edge blend factor (SPOT only).
-            shadow_soft_size: Shadow softness / radius.
+            spot_size: Spot cone angle in radians, 1 degree to pi (SPOT).
+            spot_blend: Spot edge softness 0-1 (SPOT).
+            shadow_soft_size: Light radius for soft shadows, >= 0 (POINT, SPOT).
+            light_type: Change the light to POINT, SUN, SPOT or AREA first.
+            angle: Sun's angular diameter in radians, 0 to pi (SUN).
+            size: Area light size, >= 0 (AREA; its width for RECTANGLE and ELLIPSE).
+            size_y: Area light height, >= 0 (AREA with shape RECTANGLE or ELLIPSE).
+            shape: Area light shape: SQUARE, RECTANGLE, DISK or ELLIPSE (AREA).
 
         Returns:
-            Dictionary with light_name, light_type, energy, color.
+            Dictionary with light_name, light_type, energy, color, use_shadow,
+            the settings of its type and warnings.
         """
         obj = self._get_object_or_raise(light_name)
         if obj.type != "LIGHT":
-            raise ValueError(f"Object '{light_name}' is type '{obj.type}', not LIGHT")
+            raise ValidationError(
+                f"Object '{light_name}' is type '{obj.type}', not LIGHT",
+                "not_a_light",
+                object_type=obj.type,
+            )
         light = obj.data
+        target = light.type if light_type is None else str(light_type).upper()
+        if target not in _LIGHT_TYPE_SETTINGS:
+            raise ValidationError(
+                f"light_type must be one of {', '.join(_LIGHT_TYPE_SETTINGS)}, got {light_type!r}",
+                "invalid_value",
+                field="light_type",
+            )
+        typed: Dict[str, Any] = {
+            name: value
+            for name, value in (
+                ("shadow_soft_size", shadow_soft_size),
+                ("spot_size", spot_size),
+                ("spot_blend", spot_blend),
+                ("angle", angle),
+                ("shape", shape),
+                ("size", size),
+                ("size_y", size_y),
+            )
+            if value is not None
+        }
+        for name in typed:
+            if name not in _LIGHT_TYPE_SETTINGS[target]:
+                raise ValidationError(
+                    self._light_setting_error(name, light_name, target),
+                    "setting_not_for_light_type",
+                    field=name,
+                    light_type=target,
+                )
+        numbers_given: Dict[str, Any] = {
+            name: value for name, value in typed.items() if name != "shape"
+        }
+        if energy is not None:
+            numbers_given["energy"] = energy
+        for name, value in numbers_given.items():
+            low, high = _LIGHT_LIMITS[name]
+            number = _finite_number(value, name)
+            if number < low or (high is not None and number > high):
+                bound = f"at least {low:g}" if high is None else f"between {low:g} and {high:g}"
+                raise ValidationError(f"{name} must be {bound}, got {value!r}", "out_of_range", field=name)
+        rgb: Any = color
+        if rgb is not None:
+            if isinstance(rgb, (str, bytes)) or not hasattr(rgb, "__len__") or len(rgb) != 3:
+                raise ValidationError(f"color must be [r, g, b], got {rgb!r}", "invalid_value", field="color")
+            if any(_finite_number(channel, "color") < 0 for channel in rgb):
+                raise ValidationError(
+                    f"color channels must be at least 0, got {rgb!r}", "out_of_range", field="color"
+                )
+        shadows: Any = use_shadow
+        if shadows is not None and not isinstance(shadows, bool):
+            raise ValidationError(
+                f"use_shadow must be true or false, got {shadows!r}", "invalid_value", field="use_shadow"
+            )
+        if shape is not None:
+            shape = str(shape).upper()
+            if shape not in _AREA_LIGHT_SHAPES:
+                raise ValidationError(
+                    f"shape must be one of {', '.join(_AREA_LIGHT_SHAPES)}, got {shape!r}",
+                    "invalid_value",
+                    field="shape",
+                )
+        if size_y is not None:
+            effective = shape or (light.shape if light.type == "AREA" else "SQUARE")
+            if effective not in ("RECTANGLE", "ELLIPSE"):
+                raise ValidationError(
+                    f"size_y applies to RECTANGLE and ELLIPSE area lights, and '{light_name}' "
+                    f"would be {effective}; pass shape as well",
+                    "setting_not_for_light_type",
+                    field="size_y",
+                    shape=effective,
+                )
+
+        if light.type != target:
+            light.type = target
+            # The light datablock's Python struct keeps its old type's
+            # settings until it is fetched again.
+            light = obj.data
         if energy is not None:
             light.energy = energy
         if color is not None:
-            light.color = tuple(color[:3])
+            light.color = tuple(color)
         if use_shadow is not None:
             light.use_shadow = use_shadow
-        if spot_size is not None and light.type == "SPOT":
-            light.spot_size = spot_size
-        if spot_blend is not None and light.type == "SPOT":
-            light.spot_blend = spot_blend
-        if shadow_soft_size is not None:
-            light.shadow_soft_size = shadow_soft_size
+        if shape is not None:
+            light.shape = shape
+        for name, value in typed.items():
+            if name != "shape":
+                setattr(light, name, value)
 
-        return {
+        result: Dict[str, Any] = {
             "light_name": light_name,
             "light_type": light.type,
             "energy": light.energy,
             "color": list(light.color),
+            "use_shadow": bool(light.use_shadow),
         }
+        for name in _LIGHT_TYPE_SETTINGS[light.type]:
+            result[name] = getattr(light, name)
+        users = int(getattr(light, "users", 1))
+        result["warnings"] = (
+            [f"Light data '{light.name}' is shared by {users} objects; all of them changed"]
+            if users > 1
+            else []
+        )
+        return result
+
+    @staticmethod
+    def _light_setting_error(name: str, light_name: str, light_type: str) -> str:
+        """Why a setting does not apply to a light type, and what does instead."""
+        owners = [kind for kind, settings in _LIGHT_TYPE_SETTINGS.items() if name in settings]
+        message = (
+            f"{name} applies to {' and '.join(owners)} lights, and '{light_name}' is a "
+            f"{light_type} light"
+        )
+        if name == "shadow_soft_size" and light_type == "SUN":
+            return f"{message}; a sun's softness is its angle"
+        if name == "shadow_soft_size" and light_type == "AREA":
+            return f"{message}; an area light's softness is its size"
+        return f"{message}; pass light_type to change its type"
+
+    def uv_unwrap_mesh(
+        self,
+        object_name: str,
+        method: str = "SMART_PROJECT",
+        uv_map_name: Optional[str] = None,
+        angle_limit: float = math.radians(66.0),
+        island_margin: float = 0.0,
+        cube_size: float = 1.0,
+    ) -> Dict[str, Any]:
+        """
+        Generate UV coordinates for every face of a mesh object, hidden ones included.
+
+        SMART_PROJECT splits the mesh into islands where faces meet at more
+        than ``angle_limit`` and packs them (Blender's Smart UV Project);
+        CUBE_PROJECT projects each face onto the cube side it faces, at
+        ``cube_size``. The result goes into ``uv_map_name`` (created when
+        missing), else the active UV map, else a new "UVMap". The active UV
+        map stays what it was (a mesh's first UV map becomes active and the
+        render UV map, as Blender makes it); the reply names the active and
+        render UV maps, the one image textures read. The operators need Edit
+        Mode, so the object briefly becomes the active, only selected object
+        and its hidden faces are shown; its mesh selection and hidden faces,
+        the object selection and the active object are restored afterwards.
+        The object, and Blender, must be in Object Mode.
+
+        Args:
+            object_name: Mesh object to unwrap.
+            method: SMART_PROJECT or CUBE_PROJECT.
+            uv_map_name: UV map to write; the active one (or a new UVMap) if omitted.
+            angle_limit: SMART_PROJECT: island angle in radians, above 0 to pi/2.
+            island_margin: SMART_PROJECT: space between islands, 0-1.
+            cube_size: CUBE_PROJECT: size of the projection cube, above 0.
+
+        Returns:
+            Dictionary with the UV map written, whether it was created, the
+            method, the mesh's UV map names, the active and render UV maps, the
+            face count and warnings.
+        """
+        blender_module: Any = bpy
+        obj = self._get_object_or_raise(object_name)
+        if obj.type != "MESH":
+            raise ValidationError(
+                f"Object '{object_name}' is not a MESH (type={obj.type})",
+                "not_a_mesh",
+                object_type=obj.type,
+            )
+        self._require_object_mode(obj, "unwrap it")
+        context_mode = getattr(blender_module.context, "mode", "OBJECT")
+        if context_mode != "OBJECT":
+            raise ValidationError(
+                f"Blender is in {context_mode.replace('_', ' ').title()} mode; switch to Object Mode "
+                "to unwrap a mesh",
+                "wrong_mode",
+                mode=context_mode,
+            )
+        operator = _UV_UNWRAP_METHODS.get(str(method).upper())
+        if operator is None:
+            raise ValidationError(
+                f"method must be one of {', '.join(_UV_UNWRAP_METHODS)}, got {method!r}",
+                "invalid_value",
+                field="method",
+            )
+        limits: List[Tuple[str, Any, float, Optional[float], bool]] = [
+            ("angle_limit", angle_limit, 0.0, math.pi / 2, True),
+            ("island_margin", island_margin, 0.0, 1.0, False),
+            ("cube_size", cube_size, 0.0, None, True),
+        ]
+        for label, value, low, high, open_low in limits:
+            number = _finite_number(value, label)
+            if (number <= low if open_low else number < low) or (high is not None and number > high):
+                raise ValidationError(
+                    f"{label} must be {'above' if open_low else 'at least'} {low:g}"
+                    + (f" and at most {high:g}" if high is not None else "")
+                    + f", got {value!r}",
+                    "out_of_range",
+                    field=label,
+                )
+        mesh = obj.data
+        for owner, what in ((obj, "Object"), (mesh, "Mesh")):
+            library = getattr(owner, "library", None)
+            if library is not None:
+                raise ValidationError(
+                    f"{what} '{owner.name}' is linked from library '{library.name}' and cannot "
+                    "be changed; make it local first",
+                    "linked_from_library",
+                )
+        if not obj.visible_get():
+            raise ValidationError(
+                f"Object '{object_name}' is hidden in the view layer and cannot enter Edit Mode; "
+                "unhide it first",
+                "hidden_object",
+            )
+
+        layer = mesh.uv_layers.get(uv_map_name) if uv_map_name else mesh.uv_layers.active
+        previous_uv = mesh.uv_layers.active
+        previous_uv_name = None if previous_uv is None else previous_uv.name
+        created = layer is None
+        if created:
+            layer = mesh.uv_layers.new(name=uv_map_name or "UVMap")
+            if layer is None:
+                raise ValidationError(
+                    f"Mesh '{mesh.name}' has the most UV maps Blender allows", "too_many_uv_maps"
+                )
+        mesh.uv_layers.active = layer
+        # Leaving Edit Mode rebuilds the mesh's layers, so a UV layer struct
+        # fetched before it points at freed memory afterwards (on Blender 5.0.1
+        # its name read back as ""): layers are looked up again by name.
+        uv_name = layer.name
+
+        view_layer = blender_module.context.view_layer
+        previous_active = view_layer.objects.active
+        previous_selected = [other for other in view_layer.objects if other.select_get()]
+        domains = ("vertices", "edges", "polygons")
+        flags = {
+            (domain, flag): self._element_flags(getattr(mesh, domain), flag)
+            for domain in domains
+            for flag in ("select", "hide")
+        }
+        try:
+            for other in previous_selected:
+                other.select_set(False)
+            obj.select_set(True)
+            view_layer.objects.active = obj
+            _bpy_op(
+                f"Failed to enter Edit Mode on '{object_name}'",
+                blender_module.ops.object.mode_set,
+                mode="EDIT",
+            )
+            try:
+                # The operators skip hidden faces: show them for the unwrap.
+                blender_module.ops.mesh.reveal(select=True)
+                blender_module.ops.mesh.select_all(action="SELECT")
+                options = (
+                    {"angle_limit": angle_limit, "island_margin": island_margin}
+                    if operator == "smart_project"
+                    else {"cube_size": cube_size}
+                )
+                _bpy_op(
+                    f"Failed to unwrap '{object_name}'",
+                    getattr(blender_module.ops.uv, operator),
+                    **options,
+                )
+            finally:
+                blender_module.ops.object.mode_set(mode="OBJECT")
+        except Exception:
+            stale = mesh.uv_layers.get(uv_name)
+            if created and stale is not None:
+                mesh.uv_layers.remove(stale)
+            raise
+        finally:
+            for (domain, flag), values in flags.items():
+                getattr(mesh, domain).foreach_set(flag, values)
+            restored_uv = None if previous_uv_name is None else mesh.uv_layers.get(previous_uv_name)
+            if restored_uv is not None:
+                mesh.uv_layers.active = restored_uv
+            mesh.update()
+            obj.select_set(False)
+            for other in previous_selected:
+                other.select_set(True)
+            view_layer.objects.active = previous_active
+
+        warnings: List[str] = []
+        sharers = self._other_users(obj)
+        if sharers:
+            warnings.append(
+                f"Mesh '{mesh.name}' is shared with {_name_list(sharers)}; their UVs changed too"
+            )
+        active = mesh.uv_layers.active
+        render = next((uv for uv in mesh.uv_layers if getattr(uv, "active_render", False)), None)
+        if render is not None and render.name != uv_name:
+            warnings.append(
+                f"Image textures read the render UV map '{render.name}', not '{uv_name}'"
+            )
+        return {
+            "object_name": object_name,
+            "uv_map": uv_name,
+            "created_uv_map": created,
+            "method": str(method).upper(),
+            "uv_layer_names": [uv.name for uv in mesh.uv_layers],
+            "active_uv_map": None if active is None else active.name,
+            "render_uv_map": None if render is None else render.name,
+            "face_count": len(mesh.polygons),
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _element_flags(elements: Any, flag: str) -> List[bool]:
+        """One flag (select or hide) of every vertex, edge or face, in order."""
+        values = [False] * len(elements)
+        elements.foreach_get(flag, values)
+        return values
 
     # -- End Phase 3 methods -------------------------------------------------
 
@@ -4335,7 +5565,9 @@ class BlenderRuntimeSession:
             return
         blender_module: Any = bpy
         view_layer = blender_module.context.view_layer
-        previous = [o for o in view_layer.objects if o.select_get()]
+        # Right after bpy.data.objects.remove, Blender 5.0.1 yields None for the
+        # removed object here until the view layer syncs again.
+        previous = [o for o in view_layer.objects if o is not None and o.select_get()]
         active = view_layer.objects.active
         try:
             for obj in previous:
@@ -6965,171 +8197,474 @@ class BlenderRuntimeSession:
 
     # Custom property prefix for all SimReady metadata stored on Blender objects
     _SIMREADY_PREFIX: str = "simready_"
+    # Additional semantic labels are stored as simready_label_<key>.
+    _SIMREADY_LABEL_PREFIX: str = "simready_label_"
 
-    # Valid SimReady naming pattern: lowercase letters, digits, underscores only
-    _SIMREADY_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+    # A name that is a USD identifier becomes the prim name as it is; SimReady
+    # accepts camelCase as well as lowercase_underscore. Any other name is
+    # rewritten by the exporter, which validation reports as a warning.
+    _SIMREADY_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    _SIMREADY_QCODE_RE = re.compile(r"^Q[1-9][0-9]*$")
+    # A label key names a USD semantics taxonomy, so it must be an identifier.
+    _SIMREADY_LABEL_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    # The taxonomies the semantic fields are written under, by field; an
+    # additional label may not reuse them, nor qcode, the Q-code taxonomy an
+    # earlier export wrote.
+    _SIMREADY_RESERVED_LABELS = {
+        "class": "semantic_class",
+        "hierarchy": "semantic_hierarchy",
+        "wikidata_qcode": "semantic_qcode",
+        "qcode": "semantic_qcode",
+    }
+
+    # The metadata fields by group, with the rule a value must meet. The MCP
+    # request models (mcp/schemas/simready.py) state the same rules for the
+    # tool's input schema; this module ships inside the Blender add-on and
+    # cannot import them, so tests/blender/test_simready_metadata.py keeps the
+    # two in step.
+    _SIMREADY_FIELDS: Dict[str, Dict[str, Tuple[Any, ...]]] = {
+        "semantic": {
+            "semantic_class": ("text",),
+            "semantic_hierarchy": ("text",),
+            "semantic_qcode": ("qcode",),
+        },
+        "physics": {
+            "mass_kg": ("number", 0.0, None),
+            "collider_type": ("token", SIMREADY_COLLIDER_TYPES),
+            "static_friction": ("number", 0.0, None),
+            "dynamic_friction": ("number", 0.0, None),
+            "restitution": ("number", 0.0, 1.0),
+            "density": ("number", 0.0, None),
+            "is_rigid_body": ("flag",),
+        },
+        "material": {
+            "substrate_type": ("text",),
+            "material_naming": ("text",),
+            "shader_type": ("text",),
+            "texel_density": ("positive",),
+        },
+    }
+    _SIMREADY_CLEAR_ALL = "all"
+    _SIMREADY_LABELS = "additional_labels"
+
+    @classmethod
+    def _simready_field_names(cls) -> List[str]:
+        return [name for fields in cls._SIMREADY_FIELDS.values() for name in fields]
+
+    @staticmethod
+    def _unknown_name(kind: str, name: Any, choices: Sequence[str]) -> str:
+        """``unknown <kind> 'x' (did you mean 'y'?); valid: ...``."""
+        close = difflib.get_close_matches(str(name), list(choices), n=1, cutoff=0.5)
+        hint = f" (did you mean '{close[0]}'?)" if close else ""
+        return f"unknown {kind} '{name}'{hint}; valid: {', '.join(choices)}"
+
+    @classmethod
+    def _simready_value_problem(cls, rule: Tuple[Any, ...], value: Any) -> Optional[str]:
+        """Why ``value`` breaks ``rule``, or None when it meets it."""
+        kind = rule[0]
+        if kind == "flag":
+            if isinstance(value, bool) or (isinstance(value, int) and value in (0, 1)):
+                return None
+            return "must be true or false"
+        if kind in ("number", "positive"):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                return "must be a number"
+            if kind == "positive":
+                return None if value > 0 else "must be greater than 0"
+            low, high = rule[1], rule[2]
+            if value < low:
+                return f"must be at least {low:g}"
+            if high is not None and value > high:
+                return f"must be at most {high:g}"
+            return None
+        if not isinstance(value, str) or not value.strip():
+            return "must be a non-empty string"
+        if kind == "token" and value not in rule[1]:
+            return f"must be one of {', '.join(rule[1])}"
+        if kind == "qcode" and not cls._SIMREADY_QCODE_RE.match(value):
+            return "must be a Wikidata Q-code such as Q1420"
+        return None
+
+    def _simready_writes(self, metadata: Any) -> List[Tuple[str, Any]]:
+        """The custom properties ``metadata`` sets, or ValueError naming every problem."""
+        if not isinstance(metadata, Mapping):
+            raise ValidationError(
+                "metadata must be an object with semantic, physics or material",
+                "InvalidMetadata",
+            )
+        problems: List[str] = []
+        writes: List[Tuple[str, Any]] = []
+        for group, fields in metadata.items():
+            spec = self._SIMREADY_FIELDS.get(group)
+            if spec is None:
+                problems.append(self._unknown_name("group", group, list(self._SIMREADY_FIELDS)))
+                continue
+            if fields is None:
+                continue
+            if not isinstance(fields, Mapping):
+                problems.append(f"{group} must be an object")
+                continue
+            choices = list(spec) + ([self._SIMREADY_LABELS] if group == "semantic" else [])
+            for name, value in fields.items():
+                if group == "semantic" and name == self._SIMREADY_LABELS:
+                    if value is None:
+                        continue
+                    if not isinstance(value, Mapping):
+                        problems.append("semantic.additional_labels must be an object")
+                        continue
+                    for key, label in value.items():
+                        if not self._SIMREADY_LABEL_KEY_RE.match(str(key)):
+                            problems.append(
+                                f"label key '{key}' must be a USD identifier "
+                                "(letters, digits, underscores, not starting with a digit)"
+                            )
+                        elif key in self._SIMREADY_RESERVED_LABELS:
+                            # A label named after a field's taxonomy sets that field,
+                            # so it cannot overwrite the field's label in the USD.
+                            target = self._SIMREADY_RESERVED_LABELS[key]
+                            given = fields.get(target)
+                            problem = self._simready_value_problem(spec[target], label)
+                            if given is not None and given != label:
+                                problems.append(
+                                    f"label '{key}'={label!r} sets semantic.{target}, which is "
+                                    f"also given as {given!r}; give one of them"
+                                )
+                            elif problem is not None:
+                                problems.append(f"label '{key}'={label!r} {problem}")
+                            elif given is None:
+                                writes.append((f"{self._SIMREADY_PREFIX}{target}", label))
+                        elif not isinstance(label, str) or not label.strip():
+                            problems.append(f"label '{key}' must be a non-empty string")
+                        else:
+                            writes.append((f"{self._SIMREADY_LABEL_PREFIX}{key}", label))
+                    continue
+                rule = spec.get(name)
+                if rule is None:
+                    problems.append(self._unknown_name(f"{group} field", name, choices))
+                    continue
+                if value is None:
+                    continue  # null keeps the stored value; clear removes it
+                problem = self._simready_value_problem(rule, value)
+                if problem is not None:
+                    problems.append(f"{group}.{name}={value!r} {problem}")
+                    continue
+                if rule[0] == "flag":
+                    value = 1 if value else 0
+                writes.append((f"{self._SIMREADY_PREFIX}{name}", value))
+        if problems:
+            raise ValidationError(
+                "Invalid SimReady metadata: " + "; ".join(problems),
+                "InvalidMetadata",
+                problems=problems,
+            )
+        return writes
+
+    def _simready_clear_keys(self, obj: Any, clear: Sequence[str]) -> List[str]:
+        """The stored custom properties ``clear`` names, or ValueError for an unknown name."""
+        prefix = self._SIMREADY_PREFIX
+        stored = [key for key in obj.keys() if key.startswith(prefix)]
+        choices = (
+            self._simready_field_names()
+            + list(self._SIMREADY_FIELDS)
+            + [self._SIMREADY_LABELS, self._SIMREADY_CLEAR_ALL]
+        )
+        keys: List[str] = []
+        problems: List[str] = []
+        for name in clear:
+            if name == self._SIMREADY_CLEAR_ALL:
+                keys.extend(stored)
+            elif name == self._SIMREADY_LABELS:
+                keys.extend(k for k in stored if k.startswith(self._SIMREADY_LABEL_PREFIX))
+            elif name in self._SIMREADY_FIELDS:
+                keys.extend(f"{prefix}{field}" for field in self._SIMREADY_FIELDS[name])
+                if name == "semantic":
+                    keys.extend(k for k in stored if k.startswith(self._SIMREADY_LABEL_PREFIX))
+            elif name in self._simready_field_names():
+                keys.append(f"{prefix}{name}")
+            else:
+                problems.append(self._unknown_name("clear name", name, choices))
+        if problems:
+            raise ValidationError(
+                "Invalid clear: " + "; ".join(problems), "InvalidClear", problems=problems
+            )
+        return list(dict.fromkeys(keys))
+
+    def _simready_editable(self, objects: Sequence[Any], tool: str) -> None:
+        """Refuse outside Object Mode and for linked data, before anything changes.
+
+        In Edit Mode Blender records the bridge's undo step on the mesh undo
+        stack, which does not hold object changes: the first Ctrl+Z did
+        nothing and the second also left Edit Mode. A linked object's parent
+        and custom properties are reset when the file is reopened.
+        """
+        blender_module: Any = bpy
+        mode = getattr(blender_module.context, "mode", "OBJECT")
+        if mode != "OBJECT":
+            raise ValidationError(
+                f"{tool} needs Object Mode, as Edit Mode's undo cannot step back over it; "
+                f"the window is in {mode}",
+                "ObjectModeRequired",
+                mode=mode,
+            )
+        linked = sorted(
+            obj.name
+            for obj in objects
+            if getattr(obj, "library", None) is not None
+            or getattr(obj, "is_editable", True) is False
+        )
+        if linked:
+            raise ValidationError(
+                f"{', '.join(linked)} is linked from a library: changes to it are lost when "
+                "the file is reopened; make it local (Object > Relations > Make Local) first",
+                "LinkedData",
+                objects=linked,
+            )
 
     def apply_simready_metadata(
         self,
         object_name: str,
-        metadata: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+        clear: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Apply SimReady metadata as custom properties on a Blender object.
+        Store SimReady metadata on a Blender object, for export_simready_usd.
 
-        Properties are stored with a ``simready_`` prefix so they survive
-        USD export as custom attributes.
+        Each value is a ``simready_<field>`` custom property (an additional
+        label ``simready_label_<key>``); export_simready_usd writes them as
+        UsdPhysics and UsdSemantics schemas. A field left out, or null, keeps
+        its stored value; ``clear`` removes stored values before the new ones
+        are written. Unknown groups and fields and invalid values are refused,
+        with the valid names, before anything changes.
 
         Args:
             object_name: Target Blender object.
-            metadata: Dict with optional keys ``semantic``, ``physics``,
-                ``material``, each containing relevant sub-fields.
+            metadata: The ``semantic``, ``physics`` and ``material`` groups to store.
+            clear: Stored values to remove: field names such as mass_kg, a group
+                (semantic, physics, material), additional_labels, or all.
 
         Returns:
-            Dict with object_name and list of applied_properties.
+            Dict with object_name, applied_properties and cleared_properties.
+
+        Raises:
+            NotFoundError: For an unknown object (``details.code`` object_not_found).
+            ValidationError: For an unknown group, field or clear name, an
+                invalid value, an additional label named after a semantic
+                field's taxonomy (class, hierarchy, wikidata_qcode, qcode) that
+                disagrees with that field (otherwise it sets the field), a call
+                that neither stores nor clears anything, Edit Mode, or a linked
+                object; ``details.code`` names which.
         """
         obj = self._get_object_or_raise(object_name)
-        applied: List[str] = []
+        self._simready_editable([obj], "apply_simready_metadata")
+        writes = self._simready_writes(metadata or {})
+        removals = self._simready_clear_keys(obj, clear or [])
+        if not writes and not clear:
+            raise ValidationError(
+                "Nothing to apply: pass metadata values, or clear", "NothingToApply"
+            )
+        present = set(obj.keys())
+        cleared = [key for key in removals if key in present]
+        for key in cleared:
+            del obj[key]
+        for key, value in writes:
+            obj[key] = value
+        return {
+            "object_name": object_name,
+            "applied_properties": [key for key, _ in writes],
+            "cleared_properties": cleared,
+        }
 
-        semantic = metadata.get("semantic")
-        if semantic:
-            for key in ("semantic_class", "semantic_hierarchy", "semantic_qcode"):
-                val = semantic.get(key)
-                if val is not None:
-                    prop_key = f"{self._SIMREADY_PREFIX}{key}"
-                    obj[prop_key] = val
-                    applied.append(prop_key)
-            extra = semantic.get("additional_labels")
-            if extra and isinstance(extra, dict):
-                for label_key, label_val in extra.items():
-                    prop_key = f"{self._SIMREADY_PREFIX}label_{label_key}"
-                    obj[prop_key] = label_val
-                    applied.append(prop_key)
+    @staticmethod
+    def _plain_value(value: Any) -> Any:
+        """A stored custom property as JSON: IDProperty arrays and groups as lists and dicts."""
+        if hasattr(value, "to_list"):
+            return value.to_list()
+        if hasattr(value, "to_dict"):
+            return value.to_dict()
+        if value is None or isinstance(value, (str, int, float, bool, list, dict)):
+            return value
+        return str(value)
 
-        physics = metadata.get("physics")
-        if physics:
-            for key in (
-                "mass_kg",
-                "collider_type",
-                "static_friction",
-                "dynamic_friction",
-                "restitution",
-                "density",
-            ):
-                val = physics.get(key)
-                if val is not None:
-                    prop_key = f"{self._SIMREADY_PREFIX}{key}"
-                    obj[prop_key] = val
-                    applied.append(prop_key)
-            if physics.get("is_rigid_body"):
-                prop_key = f"{self._SIMREADY_PREFIX}is_rigid_body"
-                obj[prop_key] = 1
-                applied.append(prop_key)
+    def _read_simready_properties(self, obj: Any) -> Dict[str, Dict[str, Any]]:
+        """The object's ``simready_*`` custom properties as stored, grouped like the metadata.
 
-        mat = metadata.get("material")
-        if mat:
-            for key in (
-                "substrate_type",
-                "material_naming",
-                "shader_type",
-                "texel_density",
-            ):
-                val = mat.get(key)
-                if val is not None:
-                    prop_key = f"{self._SIMREADY_PREFIX}{key}"
-                    obj[prop_key] = val
-                    applied.append(prop_key)
+        Additional labels (``simready_label_<key>``) are gathered under
+        ``semantic["additional_labels"]``; other ``simready_`` keys that are
+        no metadata field go under ``unknown``, by property name.
+        """
+        groups: Dict[str, Dict[str, Any]] = {name: {} for name in self._SIMREADY_FIELDS}
+        unknown: Dict[str, Any] = {}
+        labels: Dict[str, Any] = {}
+        owner = {
+            field: group for group, fields in self._SIMREADY_FIELDS.items() for field in fields
+        }
+        for key in obj.keys():
+            if not key.startswith(self._SIMREADY_PREFIX):
+                continue
+            value = self._plain_value(obj[key])
+            if key.startswith(self._SIMREADY_LABEL_PREFIX):
+                labels[key[len(self._SIMREADY_LABEL_PREFIX) :]] = value
+                continue
+            field = key[len(self._SIMREADY_PREFIX) :]
+            if field in owner:
+                groups[owner[field]][field] = value
+            else:
+                unknown[key] = value
+        if labels:
+            groups["semantic"][self._SIMREADY_LABELS] = labels
+        groups["unknown"] = unknown
+        return groups
 
-        return {"object_name": object_name, "applied_properties": applied}
+    def _simready_checked(
+        self, stored: Mapping[str, Mapping[str, Any]]
+    ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+        """Split stored metadata into the values that meet the rules and the ones that do not."""
+        valid: Dict[str, Dict[str, Any]] = {}
+        invalid: List[Dict[str, Any]] = []
+        for group, spec in self._SIMREADY_FIELDS.items():
+            for name, value in (stored.get(group) or {}).items():
+                if group == "semantic" and name == self._SIMREADY_LABELS:
+                    good: Dict[str, str] = {}
+                    for key, label in value.items():
+                        if not self._SIMREADY_LABEL_KEY_RE.match(str(key)):
+                            problem = "label key must be a USD identifier"
+                        elif key in self._SIMREADY_RESERVED_LABELS:
+                            problem = (
+                                "label key is the taxonomy "
+                                f"{self._SIMREADY_RESERVED_LABELS[key]} is written under"
+                            )
+                        elif not isinstance(label, str) or not label.strip():
+                            problem = "must be a non-empty string"
+                        else:
+                            good[key] = label
+                            continue
+                        invalid.append(
+                            {
+                                "property": f"{self._SIMREADY_LABEL_PREFIX}{key}",
+                                "value": label,
+                                "problem": problem,
+                            }
+                        )
+                    if good:
+                        valid.setdefault(group, {})[name] = good
+                    continue
+                broken = self._simready_value_problem(spec[name], value)
+                if broken is None:
+                    if spec[name][0] == "flag":
+                        value = bool(value)
+                    valid.setdefault(group, {})[name] = value
+                else:
+                    invalid.append(
+                        {"property": f"{self._SIMREADY_PREFIX}{name}", "value": value, "problem": broken}
+                    )
+        for key, value in (stored.get("unknown") or {}).items():
+            invalid.append(
+                {
+                    "property": key,
+                    "value": value,
+                    "problem": self._unknown_name(
+                        "SimReady field",
+                        key[len(self._SIMREADY_PREFIX) :],
+                        self._simready_field_names(),
+                    ),
+                }
+            )
+        return valid, invalid
 
     def get_simready_metadata(
         self,
         object_name: str,
     ) -> Dict[str, Any]:
         """
-        Read SimReady metadata stored as custom properties on a Blender object.
+        Read the SimReady metadata stored on a Blender object.
+
+        Stored values that break the metadata rules (set by a script, an
+        import or an older Simul) are not returned as metadata; they are
+        listed in ``invalid_values`` with the problem, so one bad value does
+        not hide the rest.
 
         Args:
             object_name: Blender object to inspect.
 
         Returns:
-            Dict with object_name, metadata (or None), and has_simready_data.
+            Dict with object_name, metadata (null when nothing valid is
+            stored), has_simready_data and invalid_values.
+
+        Raises:
+            NotFoundError: For an unknown object (``details.code`` object_not_found).
         """
         obj = self._get_object_or_raise(object_name)
         stored = self._read_simready_properties(obj)
-        semantic = stored["semantic"]
-        physics = stored["physics"]
-        material = stored["material"]
-
-        has_data = bool(semantic or physics or material)
-        result_metadata: Optional[Dict[str, Any]] = None
-        if has_data:
-            result_metadata = {}
-            if semantic:
-                result_metadata["semantic"] = semantic
-            if physics:
-                if "is_rigid_body" in physics:
-                    physics["is_rigid_body"] = bool(physics["is_rigid_body"])
-                result_metadata["physics"] = physics
-            if material:
-                result_metadata["material"] = material
-
+        valid, invalid = self._simready_checked(stored)
         return {
             "object_name": object_name,
-            "metadata": result_metadata,
-            "has_simready_data": has_data,
+            "metadata": valid or None,
+            "has_simready_data": bool(valid or invalid),
+            "invalid_values": invalid,
         }
 
-    _SIMREADY_SEMANTIC_KEYS = ("semantic_class", "semantic_hierarchy", "semantic_qcode")
-    _SIMREADY_PHYSICS_KEYS = (
-        "mass_kg",
-        "collider_type",
-        "static_friction",
-        "dynamic_friction",
-        "restitution",
-        "density",
-        "is_rigid_body",
+    # Checks validate_simready_compliance runs, by its check_<name> parameter.
+    _SIMREADY_CHECKS = (
+        "naming",
+        "scale",
+        "transforms",
+        "materials",
+        "hierarchy",
+        "metadata",
+        "physics",
+        "geometry",
     )
-    _SIMREADY_MATERIAL_KEYS = (
-        "substrate_type",
-        "material_naming",
-        "shader_type",
-        "texel_density",
+    _SIMREADY_SEVERITIES = ("all", "error", "warning")
+    # validate_simready_compliance returns at most this many issues per page,
+    # and keeps a page under this many bytes of JSON, inside the server's
+    # result budget.
+    _SIMREADY_PAGE_MAX = 500
+    _SIMREADY_PAGE_BYTES = 30_000
+    # A face this small (in square Blender units) has collapsed to a line or point.
+    _SIMREADY_DEGENERATE_AREA = 1e-12
+    # Axes whose cosine exceeds this are skewed: no location, rotation and scale
+    # express the transform.
+    _SIMREADY_SHEAR = 1e-5
+    _SIMREADY_TRIANGLE_MESH = frozenset({"none", "mesh"})
+    #: Rigid body constraint type -> the UsdPhysics joint the export writes for it.
+    #: MOTOR has none: Blender's motor is a free joint whose drive is capped by an
+    #: impulse per simulation step, which no UsdPhysics drive expresses.
+    _SIMREADY_JOINT_TYPES = {
+        "FIXED": "fixed",
+        "POINT": "spherical",
+        "HINGE": "revolute",
+        "SLIDER": "prismatic",
+        "PISTON": "d6",
+        "GENERIC": "d6",
+        "GENERIC_SPRING": "d6",
+    }
+    #: A Blender limit axis -> the UsdPhysics D6 degree of freedom (LimitAPI instance).
+    _SIMREADY_D6_AXES = {
+        "lin_x": "transX",
+        "lin_y": "transY",
+        "lin_z": "transZ",
+        "ang_x": "rotX",
+        "ang_y": "rotY",
+        "ang_z": "rotZ",
+    }
+    #: The degrees of freedom a PISTON frees: it slides along and turns about local X.
+    _SIMREADY_PISTON_AXES = frozenset({"lin_x", "ang_x"})
+    #: The limits Blender measures as object1 relative to object2, the reverse of
+    #: UsdPhysics (body1 relative to body0, body0 being object1), so their range is
+    #: negated. Measured on Blender 5.0.1, gravity against a one-sided limit: a
+    #: HINGE's ang_z and a GENERIC's ang_x/y/z; linear limits and a PISTON's
+    #: ang_x read object2 relative to object1.
+    _SIMREADY_REVERSED_LIMITS = frozenset({("HINGE", "ang_z")}) | frozenset(
+        (kind, axis)
+        for kind in ("GENERIC", "GENERIC_SPRING")
+        for axis in ("ang_x", "ang_y", "ang_z")
     )
-
-    def _read_simready_properties(self, obj: Any) -> Dict[str, Dict[str, Any]]:
-        """The object's ``simready_*`` custom properties as stored, grouped like the metadata.
-
-        Additional labels (``simready_label_<key>``) are gathered under
-        ``semantic["additional_labels"]``; unknown ``simready_`` keys are left out.
-        """
-        semantic: Dict[str, Any] = {}
-        physics: Dict[str, Any] = {}
-        material: Dict[str, Any] = {}
-        additional_labels: Dict[str, str] = {}
-        prefix = self._SIMREADY_PREFIX
-        for key in obj.keys():
-            if not key.startswith(prefix):
-                continue
-            stripped = key[len(prefix) :]
-            val = obj[key]
-            # Convert IDPropertyArray / other exotic types to Python
-            if hasattr(val, "to_list"):
-                val = val.to_list()
-            elif hasattr(val, "to_dict"):
-                val = val.to_dict()
-
-            if stripped.startswith("label_"):
-                additional_labels[stripped[6:]] = str(val)
-            elif stripped in self._SIMREADY_SEMANTIC_KEYS:
-                semantic[stripped] = val
-            elif stripped in self._SIMREADY_PHYSICS_KEYS:
-                physics[stripped] = val
-            elif stripped in self._SIMREADY_MATERIAL_KEYS:
-                material[stripped] = val
-        if additional_labels:
-            semantic["additional_labels"] = additional_labels
-        return {"semantic": semantic, "physics": physics, "material": material}
+    #: A D6 degree of freedom with its low limit above its high one is locked.
+    _SIMREADY_LOCKED = [1.0, -1.0]
 
     def validate_simready_compliance(
         self,
@@ -7139,138 +8674,710 @@ class BlenderRuntimeSession:
         check_transforms: bool = True,
         check_materials: bool = True,
         check_hierarchy: bool = True,
+        check_metadata: bool = True,
+        check_physics: bool = True,
+        check_geometry: bool = True,
+        include_children: bool = True,
+        severity: str = "all",
+        offset: int = 0,
+        limit: int = 50,
     ) -> Dict[str, Any]:
         """
-        Validate objects against NVIDIA SimReady conventions.
+        Validate objects against SimReady conventions; any error makes them non-compliant.
 
-        Checks naming (lowercase_underscore), scale (meter-range dimensions),
-        clean transforms (no stacked rotation/scale), material segmentation,
-        and hierarchy structure.
+        It checks what export_simready_usd would export: the listed objects
+        with their descendants, or the scene's objects that are visible in
+        renders, without lights and cameras. The rules follow the SimReady
+        Robotics-Prop profile and Isaac Sim's asset validation (the codes in
+        brackets):
+
+        - errors: the asset root (the prim that becomes the default prim) not
+          at the origin, unrotated and unscaled [VG.025]; a rigid body whose
+          world transform is skewed [RB.009]; no material; no semantic label
+          on a mesh or an exported object above it [SL.001]; a stored value
+          that breaks the metadata rules; a rigid body without mass or density
+          [RB.007], without a collider, or nested in another rigid body with
+          no joint the export writes between them [RB.012]; a rigid body
+          constraint between exported objects the export cannot write as a
+          joint (MOTOR, or both objects parts of one rigid body); degenerate
+          faces [VG.014];
+        - warnings: names that are not USD identifiers (camelCase is fine),
+          mesh data names likewise; sizes over 100 m or under 1 mm in the
+          scene's units and a Unit Scale other than 1 [UN.007]; scaled or
+          mirrored parts, and a part skewed relative to its parent; a
+          material slot faces use left empty; no collider on a mesh; a
+          triangle-mesh collider on a dynamic body; no rigid body at all
+          [RB.001]; a constraint to an object the export leaves out or between
+          two static objects (not exported), and what a joint cannot carry
+          (springs, a breaking threshold, several rotation axes limited to
+          ranges); no UV map; n-gons.
+
+        Transforms are read from the world matrices, as the exporter writes
+        them (also for objects Blender does not evaluate, such as ones in an
+        excluded collection), and meshes in Edit Mode are read with their edits.
 
         Args:
-            object_names: Objects to check.  ``None`` checks all mesh objects.
-            check_naming: Validate naming convention.
-            check_scale: Validate real-world meter scale.
-            check_transforms: Validate clean transforms.
-            check_materials: Validate material segmentation.
+            object_names: Objects to check, each with its descendants unless
+                include_children is false. Null checks the scene's objects that
+                are visible in renders. An empty list is refused.
+            check_naming: Validate object, material and mesh-data names.
+            check_scale: Validate real-world size in the scene's units.
+            check_transforms: Validate the asset root's and the parts' transforms.
+            check_materials: Validate material slots.
             check_hierarchy: Validate hierarchy structure.
+            check_metadata: Validate semantic labels, colliders and stored values.
+            check_physics: Validate rigid bodies (mass, colliders, nesting) and
+                the joints their constraints become.
+            check_geometry: Validate UVs, n-gons and degenerate faces.
+            include_children: Also check the descendants of the listed objects.
+            severity: Return all issues, or only error or warning issues.
+            offset: Index of the first issue returned.
+            limit: Most issues returned (1 to 500); next_offset gives the
+                next page.
 
         Returns:
-            Dict with compliant flag, object_count, issue_count, issues list.
+            Dict with compliant (no errors at all), object_count, issue_count,
+            error_count, warning_count, issues (the page), offset,
+            next_offset (null on the last page), skipped_objects (left out as
+            the export leaves them out) and meters_per_unit.
+
+        Raises:
+            NotFoundError: For an unknown object (``details.code`` object_not_found).
+            ValidationError: For an empty object list, a listed object outside
+                the view layer, or a bad severity, offset or limit.
         """
-        issues: List[Dict[str, Any]] = []
+        if object_names is not None and not object_names:
+            raise ValidationError(
+                "object_names is empty; list the objects to check, or pass null for the scene",
+                "EmptyObjectList",
+            )
+        if severity not in self._SIMREADY_SEVERITIES:
+            raise ValidationError(
+                f"severity must be one of {', '.join(self._SIMREADY_SEVERITIES)}",
+                "InvalidPaging",
+            )
+        if offset < 0 or not 1 <= limit <= self._SIMREADY_PAGE_MAX:
+            raise ValidationError(
+                f"offset must be >= 0 and limit 1 to {self._SIMREADY_PAGE_MAX}", "InvalidPaging"
+            )
+        targets, _, skipped = self._simready_export_targets(
+            object_names, include_children, include_lights_and_cameras=False
+        )
+        checks = {
+            "naming": check_naming,
+            "scale": check_scale,
+            "transforms": check_transforms,
+            "materials": check_materials,
+            "hierarchy": check_hierarchy,
+            "metadata": check_metadata,
+            "physics": check_physics,
+            "geometry": check_geometry,
+        }
         unit_scale = self._scene_unit_scale()
-
-        if object_names is None:
-            targets = [o for o in self._resolve_object_source(None) if o.type == "MESH"]
-        else:
-            targets = [self._get_object_or_raise(n) for n in object_names]
-
-        for obj in targets:
-            name: str = obj.name
-
-            if check_naming and not self._SIMREADY_NAME_RE.match(name):
-                issues.append(
-                    {
-                        "object_name": name,
-                        "check": "naming",
-                        "severity": "error",
-                        "message": (
-                            f"Name '{name}' violates SimReady convention "
-                            "(lowercase letters, digits, underscores only)"
-                        ),
-                        "suggestion": (
-                            "Rename to: "
-                            + re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")
-                        ),
-                    }
-                )
-
-            if check_scale:
-                issues.extend(self._simready_size_issues(obj, unit_scale))
-
-            if check_transforms:
-                rot = tuple(obj.rotation_euler)
-                scl = tuple(obj.scale)
-                has_rotation = any(abs(r) > 1e-6 for r in rot)
-                has_non_unit_scale = any(abs(s - 1.0) > 1e-6 for s in scl)
-                if has_rotation:
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "transforms",
-                            "severity": "warning",
-                            "message": (
-                                f"Non-zero rotation {rot} — SimReady requires "
-                                "applied (zero) transforms"
-                            ),
-                            "suggestion": "Apply rotation: Ctrl+A → Rotation",
-                        }
-                    )
-                if has_non_unit_scale:
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "transforms",
-                            "severity": "warning",
-                            "message": (
-                                f"Non-unit scale {scl} — SimReady requires "
-                                "applied (1,1,1) scale"
-                            ),
-                            "suggestion": "Apply scale: Ctrl+A → Scale",
-                        }
-                    )
-
-            if check_materials and hasattr(getattr(obj, "data", None), "materials"):
-                # Cameras, lights and empties carry no material slots.
-                mat_count = len(obj.data.materials)
-                if mat_count == 0:
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "materials",
-                            "severity": "error",
-                            "message": "No material assigned",
-                            "suggestion": (
-                                "Assign at least one material per mesh prim"
-                            ),
-                        }
-                    )
-
-            if check_hierarchy and obj.parent is None:
-                has_children = len(obj.children) > 0
-                if not has_children and obj.type == "MESH":
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "hierarchy",
-                            "severity": "warning",
-                            "message": (
-                                "Mesh has no parent empty — SimReady assets "
-                                "should be under a root XForm"
-                            ),
-                            "suggestion": (
-                                "Use setup_simready_hierarchy to create a root"
-                            ),
-                        }
-                    )
-
-        error_count = sum(1 for i in issues if i["severity"] == "error")
+        issues = self._simready_issues(targets, checks, unit_scale)
+        errors = sum(1 for issue in issues if issue["severity"] == "error")
+        selected = [i for i in issues if severity == "all" or i["severity"] == severity]
+        page: List[Dict[str, Any]] = []
+        size = 0
+        for issue in selected[offset : offset + limit]:
+            size += len(json.dumps(issue)) + 2
+            if page and size > self._SIMREADY_PAGE_BYTES:
+                break
+            page.append(issue)
+        end = offset + len(page)
         return {
-            "compliant": error_count == 0,
+            "compliant": errors == 0,
             "object_count": len(targets),
             "issue_count": len(issues),
-            "issues": issues,
+            "error_count": errors,
+            "warning_count": len(issues) - errors,
+            "issues": page,
+            "offset": offset,
+            "next_offset": end if end < len(selected) else None,
+            "skipped_objects": skipped[: self._SIMREADY_RESULT_ITEMS],
             "meters_per_unit": unit_scale,
         }
 
+    def _simready_world_resolver(self) -> "_WorldResolver":
+        """World matrices as the exporter writes them, for the objects of one call."""
+        blender_module: Any = bpy
+        graph_get = getattr(blender_module.context, "evaluated_depsgraph_get", None)
+        return _WorldResolver(graph_get() if graph_get is not None else None)
+
+    @staticmethod
+    def _simready_flush_edit_mode(targets: Sequence[Any]) -> None:
+        """Write Edit Mode's mesh edits back to the mesh, so the checks see them."""
+        for obj in targets:
+            if getattr(obj, "mode", "OBJECT") == "EDIT" and hasattr(obj, "update_from_editmode"):
+                obj.update_from_editmode()
+
+    def _simready_default_prim(self, targets: Sequence[Any]) -> Optional[Any]:
+        """The object that becomes the default prim, or None when a new root wraps several.
+
+        Blender writes the unexported ancestors of exported objects too, so it
+        is the top-most ancestor when every target has the same one.
+        """
+        tops: Dict[str, Any] = {}
+        for obj in targets:
+            top = obj
+            for ancestor in self._ancestors(obj):
+                top = ancestor
+            tops.setdefault(top.name, top)
+        return next(iter(tops.values())) if len(tops) == 1 else None
+
+    def _simready_issues(
+        self, targets: Sequence[Any], checks: Mapping[str, bool], unit_scale: float
+    ) -> List[Dict[str, Any]]:
+        """Every issue of ``targets``, in object order, then the asset-wide ones."""
+        self._simready_flush_edit_mode(targets)
+        issues: List[Dict[str, Any]] = []
+        exported = {obj.name: obj for obj in targets}
+        values = {
+            obj.name: self._simready_checked(self._read_simready_properties(obj))
+            for obj in targets
+        }
+        worlds = self._simready_world_resolver()
+        root = self._simready_default_prim(targets)
+        named: set = set()
+
+        def add(obj: Any, check: str, severity: str, message: str, suggestion: Optional[str]) -> None:
+            issues.append(
+                {
+                    "object_name": getattr(obj, "name", str(obj)),
+                    "check": check,
+                    "severity": severity,
+                    "message": message,
+                    "suggestion": suggestion,
+                }
+            )
+
+        def chain(obj: Any) -> Iterator[Any]:
+            """The object and its exported ancestors: what its metadata inherits from."""
+            yield obj
+            for ancestor in self._ancestors(obj):
+                if ancestor.name in exported:
+                    yield ancestor
+
+        def field(obj: Any, group: str, name: str) -> Any:
+            return values[obj.name][0].get(group, {}).get(name)
+
+        def nearest(obj: Any, group: str, name: str) -> Optional[Any]:
+            return next((o for o in chain(obj) if field(o, group, name) is not None), None)
+
+        def rigid(obj: Any) -> bool:
+            return field(obj, "physics", "is_rigid_body") is True
+
+        def body_of(obj: Any) -> Optional[Any]:
+            return next((o for o in chain(obj) if rigid(o)), None)
+
+        # The rigid bodies that some mesh of theirs collides for.
+        collided = {
+            body.name
+            for body in (
+                body_of(o)
+                for o in targets
+                if o.type == "MESH" and nearest(o, "physics", "collider_type") is not None
+            )
+            if body is not None
+        }
+        joints, joint_issues = (
+            self._simready_joint_plan(targets, worlds) if checks["physics"] else ([], [])
+        )
+        jointed = {frozenset((j["body0"], j["body1"])) for j in joints}
+        if checks["transforms"] and root is not None:
+            self._simready_root_transform_issues(root, worlds, add)
+        for obj in targets:
+            is_mesh = obj.type == "MESH"
+            if checks["naming"]:
+                self._simready_naming_issues(obj, add, named)
+            if checks["scale"]:
+                issues.extend(self._simready_size_issues(obj, unit_scale, worlds.world(obj)))
+            if checks["transforms"] and obj is not root:
+                self._simready_part_transform_issues(obj, rigid(obj), worlds, add)
+            stats = self._simready_mesh_stats(obj) if is_mesh else None
+            if checks["materials"] and is_mesh:
+                self._simready_material_issues(obj, stats, add)
+            if checks["hierarchy"]:
+                if is_mesh and obj.parent is None and not obj.children:
+                    add(obj, "hierarchy", "warning",
+                        "Mesh has no parent empty — SimReady assets should be under a root XForm",
+                        "Use setup_simready_hierarchy to create a root")
+                elif root is not None and obj.name == root.name and obj.type != "EMPTY":
+                    add(obj, "hierarchy", "warning",
+                        f"The asset root is a {obj.type.lower()}, not an empty (Xform)",
+                        "Use setup_simready_hierarchy to put it under a root empty")
+            if checks["metadata"]:
+                for entry in values[obj.name][1]:
+                    add(obj, "metadata", "error",
+                        f"Stored {entry['property']}={entry['value']!r} {entry['problem']}",
+                        "Set a valid value with apply_simready_metadata, or clear it")
+                if is_mesh and not any(self._simready_has_label(values[o.name][0]) for o in chain(obj)):
+                    add(obj, "metadata", "error",
+                        "No semantic label on the mesh or an exported object above it",
+                        "Set semantic.semantic_class (or another label) on the asset root or the "
+                        "mesh with apply_simready_metadata")
+                if is_mesh and nearest(obj, "physics", "collider_type") is None:
+                    add(obj, "metadata", "warning",
+                        "No collider_type on the mesh or an exported object above it; it will "
+                        "not collide in a simulator",
+                        "Set physics.collider_type (e.g. convexHull) with apply_simready_metadata")
+            if checks["physics"]:
+                self._simready_body_issues(
+                    obj, add, field, nearest, rigid, body_of, chain, collided, jointed
+                )
+            if checks["geometry"] and is_mesh:
+                self._simready_geometry_issues(obj, stats, add)
+        for name, severity, message, suggestion in joint_issues:
+            add(name, "physics", severity, message, suggestion)
+        if checks["physics"] and targets and not any(rigid(o) for o in targets):
+            add(root or targets[0], "physics", "warning",
+                "No rigid body: the asset is static in a simulator",
+                "Set physics.is_rigid_body on the asset root if it should move")
+        if checks["scale"] and targets and abs(unit_scale - 1.0) > 1e-9:
+            add(root or targets[0], "scale", "warning",
+                f"The scene's Unit Scale is {unit_scale:g}, so the asset's metersPerUnit is "
+                f"{unit_scale:g}; SimReady assets use metres (1.0)",
+                "Scale the asset to metres and set Scene > Units > Unit Scale to 1, or keep it: "
+                "Isaac Sim converts the units when it references the asset")
+        return issues
+
+    @staticmethod
+    def _simready_has_label(valid: Mapping[str, Mapping[str, Any]]) -> bool:
+        """Whether the object carries a semantic label of any taxonomy."""
+        semantic = valid.get("semantic") or {}
+        return any(semantic.get(key) for key in semantic)
+
+    def _simready_body_issues(
+        self,
+        obj: Any,
+        add: Callable[..., None],
+        field: Callable[[Any, str, str], Any],
+        nearest: Callable[[Any, str, str], Optional[Any]],
+        rigid: Callable[[Any], bool],
+        body_of: Callable[[Any], Optional[Any]],
+        chain: Callable[[Any], Iterator[Any]],
+        collided: set,
+        jointed: set,
+    ) -> None:
+        """A rigid body's mass, colliders and nesting; a triangle-mesh collider on a body.
+
+        ``jointed`` holds the body pairs (frozensets of names) an exported joint
+        joins: a rigid body nested in another is valid with one [RB.012].
+        """
+        if obj.type == "MESH":
+            source = nearest(obj, "physics", "collider_type")
+            body = body_of(obj)
+            if (
+                source is not None
+                and body is not None
+                and field(source, "physics", "collider_type") in self._SIMREADY_TRIANGLE_MESH
+            ):
+                add(obj, "physics", "warning",
+                    f"A triangle-mesh collider on the dynamic body {body.name}; PhysX does not "
+                    "simulate it",
+                    "Use collider_type convexHull or convexDecomposition")
+        if not rigid(obj):
+            return
+        if field(obj, "physics", "mass_kg") is None and field(obj, "physics", "density") is None:
+            add(obj, "physics", "error",
+                "Rigid body without mass_kg or density",
+                "Set physics.mass_kg (or density) with apply_simready_metadata")
+        parent = next((a for a in chain(obj) if a is not obj and rigid(a)), None)
+        if parent is not None and frozenset((obj.name, parent.name)) not in jointed:
+            add(obj, "physics", "error",
+                f"Rigid body nested in the rigid body {parent.name} with no joint between them "
+                "that the export writes, so a simulator cannot tell how they move together",
+                f"Join {obj.name} to {parent.name} with add_blender_rigid_body_constraint (the "
+                "export writes it as a UsdPhysics joint), or keep one rigid body")
+        if obj.name not in collided:
+            add(obj, "physics", "error",
+                "Rigid body without a collider: no mesh of it has a collider_type",
+                "Set physics.collider_type on the body or its meshes")
+
+    @staticmethod
+    def _simready_constraint_empty(obj: Any) -> bool:
+        """An empty that only carries a rigid body constraint: a joint, not a part."""
+        return (
+            getattr(obj, "type", None) == "EMPTY"
+            and getattr(obj, "rigid_body_constraint", None) is not None
+            and not getattr(obj, "children", None)
+        )
+
+    def _simready_joint_plan(
+        self, targets: Sequence[Any], worlds: "_WorldResolver"
+    ) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str, str, str]]]:
+        """The UsdPhysics joints for the rigid body constraints between exported objects.
+
+        A constraint joins the rigid bodies of its two objects: each object's
+        own, else the nearest exported rigid body above it, else the object
+        itself as a static body. Its frame is the constraint object's world
+        matrix without scale, as Blender's rigid body world reads it; body0 is
+        object1 and body1 object2.
+
+        Returns:
+            The joints export_simready_usd writes (simready_usd's plan entries),
+            and issues ``(constraint name, severity, message, suggestion)`` for
+            the constraints it cannot write, or writes without some setting.
+        """
+        blender_module: Any = bpy
+        exported = {obj.name: obj for obj in targets}
+        rigid_names = {
+            name
+            for name, obj in exported.items()
+            if self._simready_checked(self._read_simready_properties(obj))[0]
+            .get("physics", {})
+            .get("is_rigid_body")
+            is True
+        }
+
+        def body_of(obj: Any) -> Optional[Any]:
+            if obj.name in rigid_names:
+                return obj
+            return next((a for a in self._ancestors(obj) if a.name in rigid_names), None)
+
+        joints: List[Dict[str, Any]] = []
+        issues: List[Tuple[str, str, str, str]] = []
+        carriers = sorted(
+            (
+                o
+                for o in blender_module.context.scene.objects
+                if o is not None and getattr(o, "rigid_body_constraint", None) is not None
+            ),
+            key=lambda o: o.name,
+        )
+        for carrier in carriers:
+            rbc = carrier.rigid_body_constraint
+            first, second = rbc.object1, rbc.object2
+            if first is None or second is None or first.name == second.name:
+                continue  # Blender simulates nothing for it either
+            kind, name = str(rbc.type), carrier.name
+            inside = [o for o in (first, second) if o.name in exported]
+            if not inside:
+                continue
+            if len(inside) == 1:
+                outside = second if inside[0] is first else first
+                issues.append((
+                    name, "warning",
+                    f"The {kind} constraint {name} joins {inside[0].name} to {outside.name}, "
+                    "which the export leaves out, so the joint is not exported",
+                    "Export both objects, or remove the constraint",
+                ))
+                continue
+            joint_type = self._SIMREADY_JOINT_TYPES.get(kind)
+            if joint_type is None:
+                issues.append((
+                    name, "error",
+                    f"The {kind} constraint {name} between {first.name} and {second.name} has "
+                    "no UsdPhysics joint: Blender's motor is a free joint whose drive is capped "
+                    "by an impulse per simulation step, which no UsdPhysics drive expresses, so "
+                    "the export would drop it",
+                    "Join them with a HINGE or SLIDER constraint and set up its drive in the "
+                    "simulator, or remove the constraint",
+                ))
+                continue
+            body0, body1 = body_of(first), body_of(second)
+            if body0 is None and body1 is None:
+                issues.append((
+                    name, "warning",
+                    f"The {kind} constraint {name} joins {first.name} and {second.name}, neither "
+                    "of which is a rigid body or part of one, so it does nothing in a simulator "
+                    "and is not exported",
+                    "Set physics.is_rigid_body on the part that moves",
+                ))
+                continue
+            if body0 is not None and body1 is not None and body0.name == body1.name:
+                issues.append((
+                    name, "error",
+                    f"The {kind} constraint {name} joins {first.name} and {second.name}, which "
+                    f"are parts of the same rigid body {body0.name}; a joint needs two bodies, "
+                    "so the export would drop it",
+                    f"Make {first.name} and {second.name} rigid bodies of their own",
+                ))
+                continue
+            body0, body1 = body0 or first, body1 or second
+            joints.append({
+                "name": name,
+                "constraint_type": kind,
+                "type": joint_type,
+                "body0": body0.name,
+                "body1": body1.name,
+                "frame": worlds.world(carrier),
+                "body0_world": worlds.world(body0),
+                "body1_world": worlds.world(body1),
+                "enabled": bool(getattr(rbc, "enabled", True)),
+                "collision_enabled": not bool(getattr(rbc, "disable_collisions", True)),
+                **self._simready_joint_limits(rbc, kind, joint_type),
+            })
+            issues.extend(
+                (name, "warning", message, suggestion)
+                for message, suggestion in self._simready_joint_losses(rbc, kind, name)
+            )
+        return joints, issues
+
+    def _simready_joint_limits(self, rbc: Any, kind: str, joint_type: str) -> Dict[str, Any]:
+        """A joint's axis and limits as UsdPhysics reads them: degrees, body1 relative to body0."""
+
+        def bounds(axis: str) -> Optional[List[float]]:
+            if not getattr(rbc, f"use_limit_{axis}", False):
+                return None  # Blender leaves an unlimited axis free
+            lower = float(getattr(rbc, f"limit_{axis}_lower"))
+            upper = float(getattr(rbc, f"limit_{axis}_upper"))
+            if axis.startswith("ang_"):
+                lower, upper = math.degrees(lower), math.degrees(upper)
+            if (kind, axis) in self._SIMREADY_REVERSED_LIMITS:
+                lower, upper = -upper, -lower
+            return [lower + 0.0, upper + 0.0]
+
+        if joint_type == "revolute":
+            return {"axis": "Z", "limit": bounds("ang_z")}
+        if joint_type == "prismatic":
+            return {"axis": "X", "limit": bounds("lin_x")}
+        if joint_type != "d6":
+            return {}
+        limits: Dict[str, List[float]] = {}
+        for axis, dof in self._SIMREADY_D6_AXES.items():
+            if kind == "PISTON" and axis not in self._SIMREADY_PISTON_AXES:
+                limits[dof] = list(self._SIMREADY_LOCKED)
+                continue
+            value = bounds(axis)
+            if value is None:
+                continue
+            if abs(value[0]) < 1e-9 and abs(value[1]) < 1e-9:
+                value = list(self._SIMREADY_LOCKED)
+            limits[dof] = value
+        return {"limits": limits}
+
+    def _simready_joint_losses(self, rbc: Any, kind: str, name: str) -> List[Tuple[str, str]]:
+        """What of a constraint its UsdPhysics joint leaves out: (message, suggestion) pairs."""
+        losses: List[Tuple[str, str]] = []
+        if kind == "GENERIC_SPRING" and any(
+            getattr(rbc, f"use_spring_{axis}", False) for axis in self._SPRING_AXES
+        ):
+            losses.append((
+                f"The springs of the GENERIC_SPRING constraint {name} are not exported: "
+                "Blender's spring damping has no exact UsdPhysics drive equivalent, so the "
+                "joint is exported with its limits only",
+                "Add drives with stiffness and damping to the joint in the simulator",
+            ))
+        if getattr(rbc, "use_breaking", False):
+            losses.append((
+                f"The breaking threshold of the {kind} constraint {name} is not exported: "
+                "Blender's threshold is an impulse per simulation step, which UsdPhysics' "
+                "break force and torque do not express, so the joint does not break",
+                "Set physics:breakForce and physics:breakTorque on the joint in the simulator",
+            ))
+        if kind in ("GENERIC", "GENERIC_SPRING"):
+            ranged = [
+                axis
+                for axis in ("ang_x", "ang_y", "ang_z")
+                if getattr(rbc, f"use_limit_{axis}", False)
+                and abs(
+                    float(getattr(rbc, f"limit_{axis}_upper"))
+                    - float(getattr(rbc, f"limit_{axis}_lower"))
+                )
+                > 1e-9
+            ]
+            if len(ranged) > 1:
+                losses.append((
+                    f"The {kind} constraint {name} limits {', '.join(ranged)} to ranges: "
+                    "Blender reads them as Euler angles, PhysX as twist and swing, so away "
+                    "from the rest pose the limits differ",
+                    "Limit one rotation axis per joint, or check the limits in the simulator",
+                ))
+        return losses
+
+    def _simready_root_transform_issues(
+        self, root: Any, worlds: "_WorldResolver", add: Callable[..., None]
+    ) -> None:
+        """The default prim's transform must be the identity [VG.025]."""
+        world = worlds.world(root)
+        if _m4_is_identity(world):
+            return
+        translation, lengths, shear, mirrored = _m4_shape(world)
+        rotated = any(
+            abs(world[r][c] / (lengths[c] or 1.0) - _IDENTITY4[r][c]) > 1e-5
+            for r in range(3)
+            for c in range(3)
+        )
+        what = []
+        if any(abs(v) > 1e-6 for v in translation):
+            what.append(f"at {tuple(round(v, 6) for v in translation)}")
+        if rotated:
+            what.append("rotated")
+        if any(abs(n - 1.0) > 1e-6 for n in lengths) or mirrored or shear > self._SIMREADY_SHEAR:
+            what.append(f"scaled {tuple(round(n, 6) for n in lengths)}")
+        add(root, "transforms", "error",
+            f"The asset root {root.name} becomes the default prim but is "
+            f"{', '.join(what) or 'transformed'}; SimReady requires an identity root transform",
+            "Clear the root's transform (Alt+G, Alt+R, Alt+S) and apply it to its children, "
+            "or put the asset under setup_simready_hierarchy's root")
+
+    def _simready_part_transform_issues(
+        self, obj: Any, is_rigid: bool, worlds: "_WorldResolver", add: Callable[..., None]
+    ) -> None:
+        """A part's transform: a rigid body's in the world [RB.009], any part's relative to its parent."""
+        world = worlds.world(obj)
+        fix = (
+            "Apply the parent's non-uniform scale (Ctrl+A > Scale on the parent) before "
+            "rotating its children"
+        )
+        world_shear = _m4_shape(world)[2]
+        if is_rigid and world_shear > self._SIMREADY_SHEAR:
+            # A simulator moves the body rigidly: a skew its parents' scale and its
+            # rotation build up is not a shape it can keep.
+            add(obj, "transforms", "error",
+                f"The rigid body's world transform is skewed (two of its axes meet "
+                f"{math.degrees(math.acos(min(1.0, world_shear))):.1f} degrees apart, not 90); "
+                "a rigid body's transform must not skew", fix)
+        if obj.parent is None:
+            local = world
+        else:
+            inverse = _m4_inverse(worlds.world(obj.parent))
+            if inverse is None:
+                add(obj, "transforms", "warning",
+                    f"Its parent {obj.parent.name} has zero scale, so its transform cannot be "
+                    "written", "Give the parent a scale")
+                return
+            local = _m4_mul(inverse, world)
+        _, lengths, shear, mirrored = _m4_shape(local)
+        if shear > self._SIMREADY_SHEAR and not (is_rigid and world_shear > self._SIMREADY_SHEAR):
+            add(obj, "transforms", "warning",
+                "The transform relative to its parent is skewed (its axes are not "
+                "perpendicular)", fix)
+        if any(abs(n - 1.0) > 1e-6 for n in lengths) or mirrored:
+            add(obj, "transforms", "warning",
+                f"The object is scaled {tuple(round(n, 6) for n in lengths)}"
+                + (" and mirrored" if mirrored else ""),
+                "Apply scale: Ctrl+A > Scale (and clear delta transforms)")
+
+    def _simready_naming_issues(self, obj: Any, add: Callable[..., None], named: set) -> None:
+        """Names that are not USD identifiers, which the exporter rewrites (warnings)."""
+
+        def suggestion(name: str) -> str:
+            return "Rename to: " + usd_identifier(name.strip(), "part")
+
+        name = obj.name
+        if not self._SIMREADY_NAME_RE.match(name):
+            add(obj, "naming", "warning",
+                f"Name '{name}' is not a USD identifier; the export writes the prim as "
+                f"'{usd_identifier(name)}'", suggestion(name))
+        sibling = (getattr(obj.parent, "name", None), usd_identifier(name))
+        if sibling in named:
+            add(obj, "naming", "warning",
+                f"Another object under the same parent also becomes the prim name "
+                f"'{sibling[1]}'; the export renames one of them", suggestion(name))
+        named.add(sibling)
+        if obj.type != "MESH":
+            return
+        for material in self._material_slots(obj):
+            material_name = getattr(material, "name", material)
+            if material is None or ("material", material_name) in named:
+                continue
+            named.add(("material", material_name))
+            if not self._SIMREADY_NAME_RE.match(str(material_name)):
+                add(obj, "naming", "warning",
+                    f"Material name '{material_name}' is not a USD identifier; the export "
+                    f"writes the material as '{usd_identifier(str(material_name))}'",
+                    suggestion(str(material_name)))
+        data_name = getattr(getattr(obj, "data", None), "name", None)
+        if data_name and ("mesh", data_name) not in named:
+            named.add(("mesh", data_name))
+            if not self._SIMREADY_NAME_RE.match(data_name):
+                add(obj, "naming", "warning",
+                    f"Mesh data name '{data_name}' is not a USD identifier; it becomes the "
+                    f"mesh prim's name as '{usd_identifier(data_name)}'", suggestion(data_name))
+
+    @staticmethod
+    def _material_slots(obj: Any) -> List[Any]:
+        """The material in each of the object's slots, None for an empty slot."""
+        slots = getattr(obj, "material_slots", None)
+        if slots is not None:
+            return [getattr(slot, "material", None) for slot in slots]
+        data = getattr(obj, "data", None)
+        return list(getattr(data, "materials", None) or [])
+
+    def _simready_material_issues(
+        self, obj: Any, stats: Optional[Dict[str, Any]], add: Callable[..., None]
+    ) -> None:
+        """No material at all is an error; an empty slot is a warning when faces use it."""
+        slots = self._material_slots(obj)
+        if not slots:
+            add(obj, "materials", "error", "No material assigned",
+                "Assign at least one material per mesh prim")
+            return
+        used = set((stats or {}).get("material_indices") or ())
+        empty = [str(i) for i, material in enumerate(slots) if material is None and i in used]
+        if empty:
+            add(obj, "materials", "warning",
+                f"Faces use the empty material slot(s) {', '.join(empty)}",
+                "Assign a material to the slot, or move its faces to another slot")
+
+    def _simready_mesh_stats(self, obj: Any) -> Optional[Dict[str, Any]]:
+        """Face counts, corners, areas, material indices and UV maps of the mesh the export writes."""
+        mesh, release = self._simready_export_mesh(obj)
+        try:
+            polygons = getattr(mesh, "polygons", None)
+            if polygons is None:
+                return None
+            count = len(polygons)
+            if hasattr(polygons, "foreach_get"):
+                corners = array("i", [0]) * count
+                areas = array("f", [0.0]) * count
+                indices = array("i", [0]) * count
+                polygons.foreach_get("loop_total", corners)
+                polygons.foreach_get("area", areas)
+                polygons.foreach_get("material_index", indices)
+            else:
+                corners = array("i", [len(p.vertices) for p in polygons])
+                areas = array("f", [float(p.area) for p in polygons])
+                indices = array("i", [int(getattr(p, "material_index", 0)) for p in polygons])
+            return {
+                "count": count,
+                "corners": corners,
+                "areas": areas,
+                "material_indices": set(indices),
+                "uv_maps": len(getattr(mesh, "uv_layers", ())),
+            }
+        finally:
+            release()
+
+    def _simready_geometry_issues(
+        self, obj: Any, stats: Optional[Dict[str, Any]], add: Callable[..., None]
+    ) -> None:
+        """UV maps (warning), n-gons (warning) and degenerate faces (error) [VG.014]."""
+        if not stats:
+            return
+        count = stats["count"]
+        ngons = sum(1 for c in stats["corners"] if c > 4)
+        degenerate = sum(1 for a in stats["areas"] if a <= self._SIMREADY_DEGENERATE_AREA)
+        if count and not stats["uv_maps"]:
+            add(obj, "geometry", "warning", "Mesh has no UV map; textures cannot be mapped",
+                "Unwrap the mesh (U > Smart UV Project)")
+        if ngons:
+            add(obj, "geometry", "warning",
+                f"{ngons} of {count} faces are n-gons (more than 4 corners)",
+                "Triangulate or quad-fill them (Ctrl+T, or a Triangulate modifier)")
+        if degenerate:
+            add(obj, "geometry", "error",
+                f"{degenerate} of {count} faces are degenerate (zero area)",
+                "Remove them: Mesh > Clean Up > Degenerate Dissolve, or Merge by Distance")
+
+    def _simready_export_mesh(self, obj: Any) -> Tuple[Any, Callable[[], None]]:
+        """The mesh the USD export writes (with modifiers evaluated), and how to release it."""
+        blender_module: Any = bpy
+        modifiers = getattr(obj, "modifiers", None)
+        graph_get = getattr(blender_module.context, "evaluated_depsgraph_get", None)
+        if modifiers and len(modifiers) and graph_get is not None:
+            evaluated = obj.evaluated_get(graph_get())
+            mesh = evaluated.to_mesh()
+            return mesh, evaluated.to_mesh_clear
+        return getattr(obj, "data", None), lambda: None
+
     # A part's largest real-world dimension (Blender units times the scene's
-    # Unit Scale) outside these bounds means the scene's units are not the ones
-    # it was modelled in: a 0.5 m part modelled in millimetres in a metre scene
-    # measures 500 m. Above the warning size an asset is plausible (a vehicle,
-    # a rack) but worth a second look.
+    # Unit Scale) outside these bounds suggests the scene's units are not the
+    # ones it was modelled in: a 0.5 m part modelled in millimetres in a metre
+    # scene measures 500 m. Large assets exist (a warehouse), so it is a warning.
     _SIMREADY_MAX_SIZE_M = 100.0
-    _SIMREADY_WARN_SIZE_M = 20.0
     _SIMREADY_MIN_SIZE_M = 0.001
 
     def _scene_unit_scale(self) -> float:
@@ -7288,14 +9395,15 @@ class BlenderRuntimeSession:
         return float(f"{scale:.7g}")
 
     @staticmethod
-    def _world_dimensions(obj: Any) -> List[float]:
+    def _world_dimensions(obj: Any, world: Optional[_Matrix4] = None) -> List[float]:
         """The object's world-space bounding-box size in Blender units.
 
-        Read from the bounding box corners and the world matrix, so a parent's
-        scale counts; ``dimensions`` (object scale only) when either is missing.
+        Read from the bounding box corners and the world matrix (``world``, or
+        the object's matrix_world), so a parent's scale counts; ``dimensions``
+        (object scale only) when either is missing.
         """
         corners = getattr(obj, "bound_box", None)
-        matrix = getattr(obj, "matrix_world", None)
+        matrix = world if world is not None else getattr(obj, "matrix_world", None)
         if corners is not None and matrix is not None:
             try:
                 rows = [[float(matrix[i][j]) for j in range(4)] for i in range(3)]
@@ -7312,11 +9420,13 @@ class BlenderRuntimeSession:
                 pass
         return [abs(float(d)) for d in getattr(obj, "dimensions", ())]
 
-    def _simready_size_issues(self, obj: Any, unit_scale: float) -> List[Dict[str, Any]]:
-        """A scale issue when a mesh's real-world size is implausible in the declared units."""
+    def _simready_size_issues(
+        self, obj: Any, unit_scale: float, world: Optional[_Matrix4] = None
+    ) -> List[Dict[str, Any]]:
+        """A warning when a mesh's real-world size is implausible in the declared units."""
         if getattr(obj, "type", "MESH") != "MESH":
             return []
-        dimensions = self._world_dimensions(obj)
+        dimensions = self._world_dimensions(obj, world)
         largest_units = max(dimensions) if dimensions else 0.0
         largest = largest_units * unit_scale
         if largest <= 0:
@@ -7326,33 +9436,27 @@ class BlenderRuntimeSession:
             f"{unit_scale:g} m)"
         )
         if largest > self._SIMREADY_MAX_SIZE_M:
-            severity = "error"
             message = (
-                f"Largest dimension {declared} is implausibly large for a SimReady "
-                f"asset (over {self._SIMREADY_MAX_SIZE_M:g} m)"
+                f"Largest dimension {declared} is large for a SimReady asset "
+                f"(over {self._SIMREADY_MAX_SIZE_M:g} m); verify the units"
             )
         elif largest < self._SIMREADY_MIN_SIZE_M:
-            severity = "error"
             message = (
-                f"Largest dimension {declared} is implausibly small for a SimReady "
-                f"asset (under {self._SIMREADY_MIN_SIZE_M * 1000:g} mm)"
+                f"Largest dimension {declared} is small for a SimReady asset "
+                f"(under {self._SIMREADY_MIN_SIZE_M * 1000:g} mm); verify the units"
             )
-        elif largest > self._SIMREADY_WARN_SIZE_M:
-            severity = "warning"
-            message = f"Largest dimension {declared} is large for a SimReady asset"
         else:
             return []
         return [
             {
                 "object_name": obj.name,
                 "check": "scale",
-                "severity": severity,
+                "severity": "warning",
                 "message": message,
                 "suggestion": (
                     "If it was modelled in other units, set Scene > Units > Unit Scale "
                     "to the modelling unit (0.001 for millimetres, 0.01 for centimetres) "
-                    "or scale the mesh to its real size; pass check_scale=false for an "
-                    "asset this size"
+                    "or scale the mesh to its real size"
                 ),
             }
         ]
@@ -7372,6 +9476,7 @@ class BlenderRuntimeSession:
         include_children: bool = True,
         include_lights_and_cameras: bool = False,
         force: bool = False,
+        skip_checks: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Export a SimReady asset as USD that a simulator reads as physics and semantics.
@@ -7382,9 +9487,19 @@ class BlenderRuntimeSession:
         with a MeshCollisionAPI approximation on the meshes, a physics material
         bound with the physics purpose, and UsdSemantics LabelsAPI labels (Isaac
         Sim's SemanticsAPI convention where Blender's USD has no UsdSemantics).
-        The asset root is the default prim and holds the materials (Looks,
-        PhysicsMaterials); metersPerUnit is the scene's Unit Scale. The file is
-        written only when everything succeeded. As export_file does, the export
+        Each rigid body constraint between two exported objects becomes a
+        UsdPhysics joint under <asset root>/Joints: FIXED a FixedJoint, POINT a
+        SphericalJoint, HINGE a RevoluteJoint (about the constraint's local Z),
+        SLIDER a PrismaticJoint (along local X), PISTON, GENERIC and
+        GENERIC_SPRING a D6 joint with a LimitAPI per locked or limited axis;
+        body0 is object1's rigid body, body1 object2's, the limits are in
+        degrees and read as UsdPhysics reads them (body1 relative to body0),
+        and the constraint empty is not written as a prim. A MOTOR has no
+        UsdPhysics joint; springs and breaking thresholds are not exported
+        (each is reported). The asset root is the default prim and holds the
+        materials (Looks, PhysicsMaterials) and the joints; metersPerUnit is
+        the scene's Unit Scale. The file is written only when everything
+        succeeded. As export_file does, the export
         applies modifiers, leaves Edit, Pose and paint modes for the export (so
         unsaved mesh edits are included) and enters them again, and restores the
         selection; a SimReady asset is static, so animation is left out.
@@ -7398,67 +9513,100 @@ class BlenderRuntimeSession:
             embed_metadata: Also keep the simready_ custom properties (and
                 Blender's names) as userProperties attributes, which Blender's
                 USD import reads back as custom properties.
-            validate_before_export: Validate the meshes first.
+            validate_before_export: First run every validate_simready_compliance
+                check on the exported objects, the asset root included, after
+                writing Edit Mode's edits back to the mesh.
             include_children: Export the descendants of the listed objects.
             include_lights_and_cameras: Also export lights, cameras and the
                 World's dome light, which are left out of an asset by default.
             force: Export although validation found errors.
+            skip_checks: Validation checks to leave out (naming, scale,
+                transforms, materials, hierarchy, metadata, physics, geometry),
+                so that one check that does not apply does not need force,
+                which also lets every other error through.
 
         Returns:
             Dict with file_path (written exactly there; a missing folder is
             created), files_written, object_count (objects written), prims (object
             name and USD path), default_prim, meters_per_unit, up_axis, physics
-            and semantics summaries, skipped_objects, validation_passed, issues
-            and warnings. When validation found errors and force is false, an
-            error result with the issues instead, and no file is written.
+            (with joint_count and joints) and semantics summaries,
+            skipped_objects, validation_passed, issues and warnings (what the
+            joints leave out among them, validated or not). When validation
+            found errors and force is false, an error result with the issues
+            instead, and no file is written.
 
         Raises:
             PermissionError: If the path is outside the sandbox policy.
-            ValueError: For an unsupported extension, an empty object_names, an
-                unknown object, or a listed object that cannot be exported.
+            NotFoundError: For an unknown object (``details.code`` object_not_found).
+            ValidationError: For an unsupported extension (UnsupportedExtension),
+                an empty object_names (EmptyObjectList), an unknown check
+                (UnknownCheck), a listed object that cannot be exported
+                (NotInViewLayer) or nothing to export (NothingToExport).
         """
         # Written at file_path exactly, as export_file does.
         file_path = self._export_target(self._deny_outside_sandbox(file_path, write=True))
         extension = os.path.splitext(file_path)[1].lower()
         if extension not in self._SIMREADY_USD_EXTENSIONS:
-            raise ValueError(
+            raise ValidationError(
                 f"Unsupported SimReady export extension '{extension or file_path}'; "
-                f"use one of {', '.join(self._SIMREADY_USD_EXTENSIONS)}"
+                f"use one of {', '.join(self._SIMREADY_USD_EXTENSIONS)}",
+                "UnsupportedExtension",
             )
         if object_names is not None and not object_names:
-            raise ValueError(
+            raise ValidationError(
                 "object_names is empty; list the objects to export, or pass null "
-                "to export the whole scene"
+                "to export the whole scene",
+                "EmptyObjectList",
+            )
+        unknown_checks = sorted(set(skip_checks or ()) - set(self._SIMREADY_CHECKS))
+        if unknown_checks:
+            raise ValidationError(
+                self._unknown_name("check", unknown_checks[0], self._SIMREADY_CHECKS),
+                "UnknownCheck",
             )
         targets, listed, skipped = self._simready_export_targets(
             object_names, include_children, include_lights_and_cameras
         )
         if not targets:
-            raise ValueError(
+            raise ValidationError(
                 "Nothing to export: "
-                + "; ".join(f"{s['object_name']}: {s['reason']}" for s in skipped)
+                + "; ".join(f"{s['object_name']}: {s['reason']}" for s in skipped),
+                "NothingToExport",
             )
 
         issues: Optional[List[Dict[str, Any]]] = None
         validation_passed: Optional[bool] = None
         if validate_before_export:
-            result = self.validate_simready_compliance(
-                object_names=[o.name for o in targets if o.type == "MESH"]
+            # Every exported object is checked, the asset root included.
+            issues = self._simready_issues(
+                targets,
+                {check: check not in (skip_checks or ()) for check in self._SIMREADY_CHECKS},
+                self._scene_unit_scale(),
             )
-            issues = list(result.get("issues") or [])
-            validation_passed = bool(result.get("compliant", True))
+            validation_passed = not any(i["severity"] == "error" for i in issues)
             if not validation_passed and not force:
                 return self._simready_validation_refusal(issues)
 
-        plan = {
-            "objects": [
+        objects = []
+        stored_problems: List[str] = []
+        for obj in targets:
+            valid, invalid = self._simready_checked(self._read_simready_properties(obj))
+            objects.append(
                 {
                     "name": obj.name,
                     "parent": obj.parent.name if obj.parent is not None else None,
-                    **self._read_simready_properties(obj),
+                    "semantic": valid.get("semantic", {}),
+                    "physics": valid.get("physics", {}),
                 }
-                for obj in targets
-            ],
+            )
+            stored_problems.extend(
+                f"{obj.name}: stored {i['property']}={i['value']!r} {i['problem']}; not exported"
+                for i in invalid
+            )
+        joints, joint_issues = self._simready_joint_plan(targets, self._simready_world_resolver())
+        plan = {
+            "objects": objects,
+            "joints": joints,
             "asset_name": usd_identifier(os.path.splitext(os.path.basename(file_path))[0]),
             "meters_per_unit": self._scene_unit_scale(),
             "embed_metadata": embed_metadata,
@@ -7535,7 +9683,12 @@ class BlenderRuntimeSession:
 
         prims = sorted(report["prims"].items(), key=lambda item: item[1])
         limit = self._SIMREADY_RESULT_ITEMS
-        warnings = report["warnings"] + ([export_warning] if export_warning else [])
+        # What the joints left out holds with or without validation.
+        warnings = (
+            [message for _, _, message, _ in joint_issues]
+            + report["warnings"]
+            + ([export_warning] if export_warning else [])
+        )
         return {
             "file_path": file_path,
             "files_written": self._written_files(main_file.parent, before, file_path),
@@ -7550,9 +9703,11 @@ class BlenderRuntimeSession:
                 "collider_count": len(report["colliders"]),
                 "mass_count": len(report["mass_prims"]),
                 "physics_material_count": len(report["physics_materials"]),
+                "joint_count": len(report["joints"]),
                 "rigid_bodies": report["rigid_bodies"][:limit],
                 "colliders": report["colliders"][:limit],
                 "physics_materials": report["physics_materials"][:limit],
+                "joints": report["joints"][:limit],
             },
             "semantics": {
                 "labels_schema": report["semantics_schema"],
@@ -7564,7 +9719,7 @@ class BlenderRuntimeSession:
             "forced": bool(force and validation_passed is False),
             "issue_count": len(issues) if issues is not None else 0,
             "issues": issues[:limit] if issues is not None else None,
-            "warnings": warnings[:limit],
+            "warnings": (stored_problems + warnings)[:limit],
         }
 
     def _simready_validation_refusal(self, issues: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -7619,16 +9774,18 @@ class BlenderRuntimeSession:
         layer_objects = blender_module.context.view_layer.objects
         listed: List[Any] = []
         if object_names is None:
-            candidates = list(blender_module.context.scene.objects)
+            candidates = [o for o in blender_module.context.scene.objects if o is not None]
         else:
-            listed = [self._get_object_or_raise(name) for name in object_names]
+            listed = self._simready_objects(object_names)
             outside = sorted(o.name for o in listed if layer_objects.get(o.name) is None)
             if outside:
-                raise ValueError(
+                raise ValidationError(
                     "Cannot export "
                     + ", ".join(outside)
                     + ": not in the active view layer (another scene, or an excluded "
-                    "collection)"
+                    "collection)",
+                    "NotInViewLayer",
+                    objects=outside,
                 )
             candidates = list(listed)
             if include_children:
@@ -7645,6 +9802,11 @@ class BlenderRuntimeSession:
             reason = None
             if obj.type in self._SIMREADY_SCENE_TYPES and not include_lights_and_cameras:
                 reason = "lights and cameras are left out; pass include_lights_and_cameras"
+            elif self._simready_constraint_empty(obj):
+                reason = (
+                    "a rigid body constraint: exported as a UsdPhysics joint between its two "
+                    "objects, not as a prim"
+                )
             elif obj.name not in listed_names:
                 if layer_objects.get(obj.name) is None:
                     reason = "not in the active view layer"
@@ -7726,64 +9888,295 @@ class BlenderRuntimeSession:
         root_name: str,
         child_names: List[str],
         semantic: Optional[Dict[str, Any]] = None,
+        reuse_root: bool = False,
     ) -> Dict[str, Any]:
         """
-        Create a SimReady-compliant hierarchy with a root empty (XForm)
-        and parent the given children under it.
+        Put objects under a SimReady root empty (an Xform in the USD), keeping where they are.
 
-        The root empty is placed at the origin with identity transforms,
-        matching SimReady modeling best-practices.  Optionally applies
-        semantic labels to the root.
+        Each listed object without a listed ancestor is parented to the root;
+        a listed object under another listed object keeps its parent, so an
+        existing nesting stays. The object's matrix before constraints is
+        kept: from its former parent's world matrix (composed from the parent
+        chain for an object Blender does not evaluate, such as one in an
+        excluded collection). The transform moves into the object's own
+        location, rotation and scale, or into its parent inverse matrix when
+        its former parent's non-uniform scale skews it, which those cannot
+        express, or when object constraints act on it: then its location,
+        rotation and scale stay as they are, and so does the space a
+        constraint works in, local or parent space included, so the
+        constraints give the same pose. A bone or vertex parent becomes an
+        object parent. Everything is checked before anything changes, and a
+        failure part-way restores the parents and removes a root this call
+        created.
 
         Args:
-            root_name: Name for the root empty object.
-            child_names: Existing objects to parent under the root.
-            semantic: Optional semantic labels dict to apply to the root.
+            root_name: Name for the root empty: a USD identifier (letters,
+                digits and underscores, not starting with a digit).
+            child_names: Existing objects to put under the root.
+            semantic: Semantic labels to store on the root.
+            reuse_root: Put the objects under an existing empty named root_name;
+                without it, an existing object of that name is refused.
 
         Returns:
-            Dict with root_name, children, hierarchy_path.
+            Dict with root_name, root_created, children, reparented, kept_parent
+            (each with its current parent, which may be an unlisted object
+            between it and its listed ancestor), hierarchy_path (the root's
+            prim path in export_simready_usd's USD), prim_paths of the children
+            and warnings.
+
+        Raises:
+            NotFoundError: For unknown objects (``details.code`` object_not_found,
+                ``details.objects`` the missing names). Nothing is changed.
+            ValidationError: Nothing is changed. ``details.code`` names the
+                reason: InvalidRootName, NoChildren, RootIsChild, RootExists,
+                RootNotEmpty, RootNotInScene, RootCycle, RootNotInvertible,
+                UnsupportedParent, ObjectModeRequired, LinkedData, or
+                InvalidMetadata for the semantic labels.
         """
         blender_module: Any = bpy
-
-        # Validate root name follows SimReady conventions
         if not self._SIMREADY_NAME_RE.match(root_name):
-            raise ValueError(
-                f"Root name '{root_name}' violates SimReady naming "
-                "(lowercase letters, digits, underscores only)"
+            raise ValidationError(
+                f"Root name '{root_name}' is not a USD identifier (letters, digits and "
+                "underscores, not starting with a digit)",
+                "InvalidRootName",
             )
-
-        # Create root empty at origin
-        empty = blender_module.data.objects.new(root_name, None)
-        blender_module.context.scene.collection.objects.link(empty)
-        empty.empty_display_type = "PLAIN_AXES"
-        empty.location = (0.0, 0.0, 0.0)
-        empty.rotation_euler = (0.0, 0.0, 0.0)
-        empty.scale = (1.0, 1.0, 1.0)
-
-        # Parent children
-        parented: List[str] = []
-        for child_name in child_names:
-            child = self._get_object_or_raise(child_name)
-            child.parent = empty
-            parented.append(child.name)
-
-        # Apply semantic labels if provided
-        if semantic:
-            self.apply_simready_metadata(
-                empty.name,
-                {"semantic": semantic},
+        if not child_names:
+            raise ValidationError(
+                "child_names is empty; list the objects to put under the root", "NoChildren"
             )
+        children = self._simready_objects(list(dict.fromkeys(child_names)))
+        if any(child.name == root_name for child in children):
+            raise ValidationError(f"'{root_name}' cannot be put under itself", "RootIsChild")
+        root = blender_module.data.objects.get(root_name)
+        if root is not None:
+            if not reuse_root:
+                raise ValidationError(
+                    f"An object named '{root_name}' already exists; pass reuse_root=true to "
+                    "put the objects under it, or choose another root_name. Nothing was changed",
+                    "RootExists",
+                )
+            if root.type != "EMPTY":
+                raise ValidationError(
+                    f"'{root_name}' is a {str(root.type).lower()}, not an empty; a SimReady "
+                    "root must be an empty (an Xform in the USD)",
+                    "RootNotEmpty",
+                )
+            if blender_module.context.scene.objects.get(root_name) is None:
+                raise ValidationError(
+                    f"'{root_name}' is not in the current scene", "RootNotInScene"
+                )
+            above = {a.name for a in self._ancestors(root)}
+            cycle = sorted(child.name for child in children if child.name in above)
+            if cycle:
+                raise ValidationError(
+                    f"{', '.join(cycle)} is above '{root_name}'; it cannot also go under it",
+                    "RootCycle",
+                    objects=cycle,
+                )
+        self._simready_editable(
+            children + ([root] if root is not None else []), "setup_simready_hierarchy"
+        )
+        semantic_writes = self._simready_writes({"semantic": semantic}) if semantic else []
+        listed = {child.name for child in children}
+        top = [c for c in children if not any(a.name in listed for a in self._ancestors(c))]
+        kept = [c for c in children if c not in top]
 
-        hierarchy_parts = [f"/{empty.name}"]
-        for c in parented:
-            hierarchy_parts.append(f"/{empty.name}/{c}")
-        hierarchy_path = hierarchy_parts[0]
+        update = getattr(getattr(blender_module.context, "view_layer", None), "update", None)
+        if update is not None:
+            update()  # current world matrices to keep
+        worlds = self._simready_world_resolver()
+        root_world = worlds.world(root) if root is not None else [list(r) for r in _IDENTITY4]
+        root_inverse = _m4_inverse(root_world)
+        if root_inverse is None:
+            raise ValidationError(
+                f"The root '{root_name}' has zero scale, so nothing can keep its place under it",
+                "RootNotInvertible",
+            )
+        plans = [
+            (child, self._simready_parent_space(child, worlds))
+            for child in top
+            if root is None or child.parent is not root
+        ]
+        before = {child.name: worlds.world(child) for child, _ in plans}
 
+        created = root is None
+        if created:
+            root = blender_module.data.objects.new(root_name, None)
+            if root.name != root_name:
+                blender_module.data.objects.remove(root)
+                raise ValidationError(
+                    f"Blender named the root '{root.name}'; nothing was changed", "RootExists"
+                )
+            blender_module.context.scene.collection.objects.link(root)
+            root.empty_display_type = "PLAIN_AXES"
+            root.location = (0.0, 0.0, 0.0)
+            root.rotation_euler = (0.0, 0.0, 0.0)
+            root.scale = (1.0, 1.0, 1.0)
+        undo: List[Tuple[Any, Dict[str, Any]]] = []
+        reparented: List[str] = []
+        warnings: List[str] = []
+        try:
+            for child, space in plans:
+                undo.append((child, self._simready_parenting(child)))
+                child.parent = root
+                if getattr(child, "parent_type", "OBJECT") != "OBJECT":
+                    child.parent_type = "OBJECT"
+                    child.parent_bone = ""
+                basis = _m4_mul(space, _m4(child.matrix_basis))
+                skewed = _m4_shape(basis)[2] > self._SIMREADY_SHEAR
+                if not skewed and not self._simready_constrained(child):
+                    # root @ inverse(root) @ basis: the transform is the object's own.
+                    child.matrix_parent_inverse = self._matrix(root_inverse)
+                    child.matrix_basis = self._matrix(basis)
+                else:
+                    # The former parent space goes into the parent inverse and the
+                    # basis stays, so parent world @ parent inverse is what it was:
+                    # a constraint sees the same local and parent space as before.
+                    child.matrix_parent_inverse = self._matrix(_m4_mul(root_inverse, space))
+                    if skewed:
+                        warnings.append(
+                            f"{child.name}: its former parent's non-uniform scale skews it, "
+                            "which location, rotation and scale cannot express, so the skew is "
+                            "kept in its parent inverse matrix; validation reports the skew"
+                        )
+                reparented.append(child.name)
+            for key, value in semantic_writes:
+                root[key] = value
+        except Exception:
+            for child, state in reversed(undo):
+                # Best effort: one object that refuses must not keep the rest moved.
+                for attribute, value in state.items():
+                    try:
+                        setattr(child, attribute, value)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Could not restore %s.%s", child.name, attribute)
+            if created:
+                blender_module.data.objects.remove(root)
+            raise
+        if update is not None:
+            update()
+        after = self._simready_world_resolver()
+        for child, _ in plans:
+            if after.evaluated(child):
+                moved = max(
+                    abs(a - b)
+                    for row_a, row_b in zip(before[child.name], after.world(child))
+                    for a, b in zip(row_a, row_b)
+                )
+                if moved > 1e-4:
+                    warnings.append(
+                        f"{child.name}: its evaluated transform changed by up to {moved:.4g} "
+                        "after re-parenting (a constraint or driver that reads its parent); "
+                        "check its pose"
+                    )
+
+        root_path = f"/{usd_identifier(root.name)}"
+        paths: Dict[str, str] = {}
+
+        def prim_path(obj: Any) -> str:
+            names = [usd_identifier(obj.name)]
+            for ancestor in self._ancestors(obj):
+                if ancestor is root:
+                    break
+                names.append(usd_identifier(ancestor.name))
+            return root_path + "/" + "/".join(reversed(names))
+
+        for child in children:
+            path = prim_path(child)
+            clash = next((n for n, p in paths.items() if p == path), None)
+            if clash is not None:
+                warnings.append(
+                    f"{clash} and {child.name} both become the prim {path}; the export renames "
+                    "one of them (it reports the paths it wrote)"
+                )
+            paths[child.name] = path
         return {
-            "root_name": empty.name,
-            "children": parented,
-            "hierarchy_path": hierarchy_path,
+            "root_name": root.name,
+            "root_created": created,
+            "children": [child.name for child in children],
+            "reparented": reparented,
+            "kept_parent": [
+                {"object_name": child.name, "parent": child.parent.name} for child in kept
+            ],
+            "hierarchy_path": root_path,
+            "prim_paths": paths,
+            "warnings": warnings,
         }
+
+    def _simready_parent_space(self, child: Any, worlds: "_WorldResolver") -> _Matrix4:
+        """The matrix the child's basis is multiplied by: its world before constraints.
+
+        For an object parent that is the parent's world matrix times the
+        parent inverse matrix, whether or not Blender evaluates the child. A
+        bone or vertex parent's matrix is read from the child's evaluated
+        world matrix, which needs an evaluated child without constraints.
+
+        Raises:
+            ValidationError: For a bone or vertex parent that cannot be read.
+        """
+        parent = child.parent
+        if parent is None:
+            return [list(row) for row in _IDENTITY4]
+        if getattr(child, "parent_type", "OBJECT") == "OBJECT":
+            return _m4_mul(worlds.world(parent), _m4(child.matrix_parent_inverse))
+        basis_inverse = _m4_inverse(_m4(child.matrix_basis))
+        if (
+            self._simready_constrained(child)
+            or not worlds.evaluated(child)
+            or basis_inverse is None
+        ):
+            raise ValidationError(
+                f"{child.name} has a {str(child.parent_type).lower()} parent whose matrix cannot "
+                "be read (it has constraints, is not evaluated, or has zero scale); parent it to "
+                "an object first",
+                "UnsupportedParent",
+                objects=[child.name],
+            )
+        return _m4_mul(worlds.world(child), basis_inverse)
+
+    @staticmethod
+    def _simready_constrained(obj: Any) -> bool:
+        """Whether an object constraint acts on the object (not muted, with influence)."""
+        return any(
+            not getattr(c, "mute", False) and float(getattr(c, "influence", 1.0)) > 0.0
+            for c in getattr(obj, "constraints", ()) or ()
+        )
+
+    @staticmethod
+    def _simready_parenting(obj: Any) -> Dict[str, Any]:
+        """What re-parenting changes on an object, for the rollback."""
+        state = {
+            "parent": obj.parent,
+            "matrix_parent_inverse": obj.matrix_parent_inverse.copy(),
+            "matrix_basis": obj.matrix_basis.copy(),
+        }
+        if hasattr(obj, "parent_type"):
+            state = {
+                "parent": obj.parent,
+                "parent_type": obj.parent_type,
+                "parent_bone": getattr(obj, "parent_bone", ""),
+                "matrix_parent_inverse": state["matrix_parent_inverse"],
+                "matrix_basis": state["matrix_basis"],
+            }
+        return state
+
+    @staticmethod
+    def _matrix(rows: _Matrix4) -> Any:
+        """A mathutils Matrix of ``rows`` for a matrix property (the rows outside Blender)."""
+        try:
+            return _mathutils().Matrix(rows)
+        except ImportError:
+            return rows
+
+    @staticmethod
+    def _ancestors(obj: Any) -> Iterator[Any]:
+        """The object's parent, its parent's parent, and so on."""
+        seen: set = set()
+        current = getattr(obj, "parent", None)
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            yield current
+            current = getattr(current, "parent", None)
 
     # -- End SimReady methods --------------------------------------------------
 
@@ -7791,9 +10184,32 @@ class BlenderRuntimeSession:
         """Clean up resources for the Blender session."""
         self.logger.debug("Blender runtime session cleaned up")
 
+    def _simready_objects(self, object_names: Sequence[str]) -> List[Any]:
+        """The named objects in order, or one NotFoundError naming every missing one.
+
+        Its ``details`` are _get_object_or_raise's (code object_not_found and
+        the first missing object_name) plus ``objects``, all the missing names.
+        """
+        found: List[Any] = []
+        missing: List[str] = []
+        for name in object_names:
+            try:
+                found.append(self._get_object_or_raise(name))
+            except NotFoundError:
+                missing.append(name)
+        if missing:
+            raise NotFoundError(
+                f"Object{'s' if len(missing) > 1 else ''} not found: {', '.join(missing)}; "
+                "nothing was changed",
+                "object_not_found",
+                object_name=missing[0],
+                objects=missing,
+            )
+        return found
+
     def _get_object_or_raise(self, object_name: str) -> Any:
         """
-        Look up a Blender object by name or raise ValueError.
+        Look up a Blender object by name or raise NotFoundError (a ValueError).
 
         Args:
             object_name: Object name to look up.
@@ -7809,14 +10225,18 @@ class BlenderRuntimeSession:
         )
         obj = objects.get(object_name)
         if obj is None:
-            raise ValueError(f"Object not found: {object_name}")
+            raise NotFoundError(
+                f"Object not found: {object_name}", "object_not_found", object_name=object_name
+            )
         return obj
 
     def _extract_principled_params(self, node: Any) -> Dict[str, Any]:
         """
         Extract common Principled BSDF input values.
 
-        Version-aware: Blender 4.0+ renamed several socket labels.
+        Version-aware: Blender 4.0+ renamed several socket labels. An input a
+        link drives reports None: its own value is unused, and reporting it
+        made a textured Base Color read as the default grey.
 
         Args:
             node: ShaderNodeBsdfPrincipled node.
@@ -7839,6 +10259,10 @@ class BlenderRuntimeSession:
         for sock_name in target_sockets:
             sock = node.inputs.get(sock_name)
             if sock is None:
+                continue
+            if getattr(sock, "is_linked", False) and _live_links(sock):
+                # A muted link drives nothing: the socket's own value applies.
+                params[sock_name] = None
                 continue
             value = sock.default_value
             # Convert Vector/Color to list for serialisation
@@ -10386,6 +12810,7 @@ class BlenderRuntimeAdapter:
             "execute_blender_script",
             "create_blender_mesh_from_data",
             "blender_clean_mesh",
+            "blender_uv_unwrap",
             "apply_simready_metadata",
             "get_simready_metadata",
             "validate_simready_compliance",

@@ -34,6 +34,7 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
 | Load and validate | `load_usd_file`, `validate_usd_file` |
 | Query | `get_prim_info`, `get_prim_subtree`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
 | Edit | `create_prim`, `delete_prim`, `update_prim_attributes` |
+| Stages | `list_usd_stages`, `save_usd_stage`, `export_usd_stage`, `reload_usd_stage`, `unload_usd_stage` |
 
 - **Bounds.** `get_bounding_box`, and the bounds in `get_prim_info` and
   `summarize_scene`, are USD's own `UsdGeom.BBoxCache` bounds: every
@@ -155,8 +156,11 @@ for its scheme, which usd-core does not ship, so `omniverse://` fails with
 Every successful response carries `success: true`, like the other backends.
 The pxr work of each call runs on a worker thread, so a slow call does not
 hold up the server. Reads run concurrently, one at a time per stage, and an
-edit (`create_prim`, `update_prim_attributes`, `delete_prim`) runs alone,
-because pxr does not allow a write alongside reads of the same layers. A
+edit (`create_prim`, `update_prim_attributes`, `delete_prim`), a
+`load_usd_file` and a `reload_usd_stage` run alone, because pxr does not
+allow a write alongside reads of the same layers (a load or reload may reread
+a shared file in place). `save_usd_stage`, `export_usd_stage` and
+`unload_usd_stage` hold their stage like a read. A
 call that cannot start within `server.timeout` seconds (default 30) fails
 with `StageBusy`; retry it. Python cannot stop pxr mid-call, so a call the
 client cancels or times out still finishes in the background and holds its
@@ -232,6 +236,63 @@ an edit USD cannot express is an `UnsupportedOperation`.
   edits to them fail with `UnsupportedOperation`. Set `instanceable` to
   `false` on the instance first.
 
+### Stages, saving and sessions
+
+Edits live in memory until they are written; nothing is saved on its own,
+and unsaved edits are lost when the server exits.
+
+- **Each load is its own stage.** `load_usd_file` opens the file's root
+  layer as an instance no other stage shares, and every edit goes to that
+  root layer. Sublayers, references and payloads are shared, read-only
+  layers, so an unsaved edit in one stage never shows up in another stage
+  that loads or references the same file. Loading a file again returns the
+  same `stage_id` while that stage has no unsaved edits and none of its
+  files changed on disk. Otherwise the load opens a fresh stage from disk
+  (rereading changed sublayers and references first), and the older stage
+  keeps its id and its edits.
+- **Rereads stay in the sandbox.** A changed sublayer or referenced file is
+  shared, and rereading it updates every stage that composes it, including
+  other sessions' stages. So its new content is read into a throwaway layer
+  and held to the composition sandbox first. If it now reaches outside the
+  sandbox, nothing is reread, the stages keep the old content, and the load
+  or reload fails with `SandboxError` naming the file. A stage that reaches
+  outside after a reread anyway (a file swapped between the check and the
+  reread) is unloaded. A load or reload runs alone, after the running calls
+  finish, since rereading a shared file changes stages other calls may be
+  reading.
+- **Stages belong to the MCP session that loaded them.** Another session
+  gets `NotFoundError` for the id and cannot read or edit the stage. Stage
+  ids are random, not derived from the path. A stdio server has one
+  session. Over HTTP, each initialize-handshake connection is its own
+  session, and unauthenticated sessionless (2026-07-28) requests all share
+  one anonymous scope (see AGENTS.md, Runtime Notes). A session can hold
+  up to 32 stages; unload stages to load more.
+- **When a session ends, its stages are unloaded.** An initialize-handshake
+  connection that closes takes its stages with it, unsaved edits included
+  (the server logs a warning naming the stages that had unsaved edits).
+  Save or export before disconnecting. Stages of a session whose end the
+  server cannot observe (stdio's single session, the anonymous scope) stay
+  until they are unloaded or the server exits.
+- **`list_usd_stages`** shows the session's stages, whether each has
+  unsaved edits, and which of its files changed on disk since it read them.
+- **`save_usd_stage`** writes the root layer back to its own file, which
+  must be writable inside the sandbox. It refuses a `.usdz` root, which is a
+  read-only package; export it instead. It also refuses a file that changed
+  on disk after the stage read it, unless `overwrite_external_changes=true`.
+  `files_written` lists what was written; a stage with no unsaved edits
+  writes nothing.
+- **`export_usd_stage`** writes a new `.usda`, `.usdc`, `.usd` or `.usdz`
+  file (sandboxed, and refused if it exists unless `overwrite=true`). By
+  default it writes the root layer with its composition arcs, and
+  re-anchors relative asset paths (sublayers, references, textures) so they
+  resolve from the new location. `flatten=true` writes the composed stage
+  as one layer. A `.usdz` is packaged with the files it depends on. The
+  stage stays bound to its own file and keeps its unsaved state.
+- **`reload_usd_stage`** rereads the root file and any changed sublayer or
+  referenced file, each held to the sandbox first as above.
+  **`unload_usd_stage`** closes the stage. Both refuse a stage with unsaved
+  edits unless `discard_unsaved=true`.
+
 ## Isaac Sim
 
 Requires a running Isaac Sim 5.1.0, 6.0.0 or 6.0.1 reachable over the bridge
@@ -289,6 +350,54 @@ Notes:
   non-finite floats as `null`.
 - The `mass` and `rigid_body` aspects report an unset centre of mass (the
   schema's `-inf` fallback) as `null` with `center_of_mass_note`.
+- `delete_isaac_prim`, `duplicate_isaac_prim` and `reparent_isaac_prim` edit
+  the stage's edit target, not the root layer, and say what they did. A prim
+  that comes from a referenced asset (every link of an imported robot) or is
+  also defined in another layer can't be removed or moved from this stage:
+  - `delete_isaac_prim` with `mode="auto"` (default) deactivates it instead
+    (`action: "deactivated"`, with the `reason`; local overrides are kept).
+    `mode="remove"` refuses, and `mode="deactivate"` always deactivates.
+  - `duplicate_isaac_prim` copies the spec, arcs included, when the edit
+    target defines the prim. Otherwise it copies the flattened composed
+    result (`method: "flattened_copy"`), and instanceable prims inside stay
+    instanced.
+  - `reparent_isaac_prim` refuses unchanged.
+  
+  Instance proxies are refused by all three. `delete_isaac_prim` also
+  refuses prims marked `no_delete` and prims defined only in the session
+  layer (Kit's `OmniverseKit_*` viewport cameras), which a deactivation would
+  hide by writing into the scene's layer. `reparent_isaac_prim` keeps the
+  world pose (`keep_world_transform=true`) and retargets relationships and
+  connections that point into the moved subtree. Removal and moves go
+  through Kit's undoable `DeletePrims` / `MovePrim` (`destructive=false`)
+  when Kit is there; when Kit declines one, the tool reports
+  `KIT_DECLINED` and changes nothing rather than editing the layer itself.
+  `undoable` reports whether the whole edit is on Kit's undo stack.
+  Refusals are typed: `error_type` is `NotFoundError`, `ValidationError` or
+  `InvalidState`, and `details.code` names the case (`INSTANCE_PROXY`,
+  `DEFINED_ELSEWHERE`, `DESTINATION_EXISTS`, `UNKNOWN_PRIM_TYPE`, ...).
+- The listings (`list_isaac_prims`, `search_isaac_prims`, `get_isaac_subtree`,
+  `query_isaac_typed_prims`) descend into instanceable prims by default,
+  where Isaac assets keep their meshes and colliders; entries there carry
+  `instance_proxy: true` and are read-only. Pass
+  `include_instance_proxies=false` to stop at the instance. Pass
+  `include_inactive=true` to also see deactivated prims (`active: false`).
+  `list_isaac_physics_objects` counts instanced colliders too, and
+  `get_isaac_subtree` takes `max_depth=-1` as unlimited.
+- `create_isaac_prim` refuses a type that isn't a concrete registered schema
+  (`cube` gets a suggestion, `Cube`) and attributes the type's schema doesn't
+  define; a value that can't be set removes the new prim again, with any
+  ancestors the call created (`ancestors_created` lists them on success).
+  `create_isaac_object` checks its vectors before creating anything. When a
+  step fails, `left_on_stage` lists what the earlier steps created.
+- With `security.allow_script_execution` off, the prim tools refuse what
+  would plant code Kit runs (`ScriptExecutionDisabled`): code-carrying
+  attributes (`inputs:script*`, `inputs:codeStr`, Replicator's
+  `inputs:augmentationScript` / `inputs:conditionScript`), a `node:type` that
+  runs code (ScriptNode, omni.warp's WarpKernel, Replicator's OgnAugment and
+  condition-script nodes), any write to such a node, creating one, and
+  duplicating a subtree that holds one. They use the same predicates as the
+  graph tools (`graph.py`).
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
 - `create_isaac_physics_scene` derives a new scene's gravity from the stage:
@@ -1064,7 +1173,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Scene and files | `get_blender_info`, `get_blender_file_info`, `summarize_blender_scene`, `list_blender_scene_objects`, `search_blender_objects`, `open_blender_file`, `save_blender_file`, `import_blender_file`, `export_blender_file` |
 | Objects | `create_blender_object`, `delete_blender_object`, `set_blender_object_mode`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
-| Materials and lights | `get_blender_material_info`, `assign_blender_material`, `set_blender_light_params` |
+| Materials and lights | `get_blender_material_info`, `assign_blender_material`, `uv_unwrap_blender_mesh`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`, `get_blender_rigid_body_world`, `set_blender_rigid_body_world` |
 | Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `delete_blender_keyframe`, `get_blender_keyframes`, `get_blender_object_trajectory` |
 | Camera and viewport | `get_blender_camera_info`, `set_blender_camera_view`, `get_blender_viewport_info`, `focus_blender_on_object`, `capture_blender_viewport`, `capture_blender_viewport_sequence` |
@@ -1205,6 +1314,96 @@ Behaviour worth knowing:
   whose render settings differ (`show_render`, Subdivision `render_levels`).
   An object Blender does not evaluate (outside the view layer) has null
   evaluated counts.
+- `assign_blender_material` reuses the material named `material_name` when it
+  exists, so repeating a call changes nothing more (it used to create
+  `name.001` each time); `reuse_existing: false` creates a new one. Shading
+  arguments left out keep the material's own values, so an existing or
+  imported material can be assigned as it is. By default the material replaces
+  the object's: it goes into slot 0 and every face uses slot 0 (a second
+  material used to land in a slot no face used, so the USD kept the first).
+  `slot_index` sets one slot (the slot count appends one) and leaves the faces
+  alone; `face_indices` assigns the material to those faces through its slot,
+  or a new one. `link: "OBJECT"` puts the material in this object's slot
+  instead of the mesh's, but which faces use which slot, and how many slots
+  there are, belong to the mesh. So on mesh data that other objects share,
+  link OBJECT may change only an existing slot's material: assigning faces or
+  adding a slot is refused (`details.code: "shared_data"`, naming the other
+  objects) unless `single_user: true` gives this object its own copy of the
+  mesh first, which the reply reports. That copy needs the object, and its
+  data, in Object Mode: Blender 5.0.1 ignores a new data block for an object in
+  Edit Mode without an error. With link DATA the change is meant for every
+  object sharing the mesh, and the reply names them. `single_user` also makes
+  library-linked data local; a library-linked object is refused.
+  `base_color` is RGB or RGBA in 0-1: the alpha sets the Principled BSDF's
+  Alpha (exported as USD `opacity`) and, below 1,
+  `surface_render_method: BLENDED`. Image files can drive Base Color, Metallic
+  and Roughness, and Normal through a Normal Map node; a new texture replaces
+  the nodes of the old one. Data maps are read Non-Color; a base colour keeps
+  the colour space Blender loads the file in (sRGB for an 8-bit image, linear
+  for an EXR or other float image). An image of the same file already read
+  the way the input needs is reused, so repeating a call adds no datablock.
+  An image already in the file is never changed, since other materials may
+  read it: when every datablock of the file reads the other way, the input
+  gets one of its own (`albedo.png.001`). A texture replaced behind Reroute
+  nodes takes the Reroutes and its old nodes with it. Textures pass the filesystem sandbox; a missing file is
+  a `NotFoundError` and a file Blender cannot read as an image a
+  `ValidationError`. Textures need UV coordinates (`uv_unwrap_blender_mesh`);
+  a mesh without a UV map gets a warning, and so does a replaced material left
+  with no users (Blender discards it when the file is saved and reopened).
+  Everything is checked before the scene changes, and a failure removes the
+  material, slot, mesh copy and images the call made. Writing face indices
+  needs Object Mode, also of any other object editing the same mesh. On
+  Blender 5.0 the tool never touches the deprecated `Material.use_nodes`.
+  Blender's USD exporter writes UsdPreviewSurface materials only: SimReady's
+  `shader_type: OmniPBR` is recorded as metadata, not produced.
+- `get_blender_material_info` reports the Principled BSDF that feeds the
+  active Material Output. An input a link drives reads `null` in
+  `principled_params` (its own value is unused) and appears in
+  `linked_inputs` with the source node and socket and, for an image texture,
+  also behind a Normal Map node, the image's path, colour space and whether it
+  is packed. Reroute nodes are followed to the node behind them; a muted link
+  drives nothing, so its input reports its own value. `nodes` lists at most
+  `max_nodes` (default 50), those feeding the output first; `node_count`
+  counts the whole tree.
+- `uv_unwrap_blender_mesh` generates UVs for every face, hidden ones
+  included: `SMART_PROJECT` (islands split where faces meet at more than
+  `angle_limit`, 66 degrees by default, packed with `island_margin`) or
+  `CUBE_PROJECT` (`cube_size`). It writes `uv_map_name`, created when missing,
+  else the active UV map, else a new `UVMap`. The active UV map stays what it
+  was (a mesh's first UV map becomes the active and render one, as Blender
+  makes it); the reply's `render_uv_map` is the map image textures read and USD
+  export names `st`, with a warning when it is not the one written. The UV
+  operators need Edit Mode, so the object briefly becomes the active, only
+  selected one and its hidden faces are shown; the mesh's selection and hidden
+  faces, the object selection and the active object are restored, and a
+  failure removes a UV map the call created. The object and Blender must be in
+  Object Mode; a hidden object and library-linked data are refused.
+- The material, light and UV tools refuse bad arguments with `error_type`
+  `ValidationError` (or `NotFoundError` for a missing material or texture
+  file) and a stable `details.code`, such as `shared_data`, `out_of_range`,
+  `setting_not_for_light_type`, `wrong_mode` or `linked_from_library`.
+- These calls need a Blender add-on built for bridge protocol 11 or later:
+  assignment now replaces where it appended, so an older add-on is refused
+  with the rebuild instructions rather than silently appending a slot no face
+  uses.
+- `set_blender_light_params` checks each setting against the light's type
+  (after `light_type`, when given): `shadow_soft_size` is the radius of POINT
+  and SPOT lights, `spot_size` and `spot_blend` are SPOT's, `angle` is a sun's
+  softness, and `shape`, `size` and `size_y` (RECTANGLE and ELLIPSE) are an
+  area light's. A setting of another type is refused instead of ignored, a
+  value outside Blender's limits is refused instead of clamped, and energy
+  may not be negative. Nothing changes unless every value is valid, and the
+  reply reports every setting of the light's type as stored. Light data shared
+  by several objects is reported. Blender 5.0.1's USD exporter writes a point
+  or spot light as a SphereLight whose `radius` is `shadow_soft_size` (a
+  spot's cone as `shaping:cone:angle`, half of `spot_size` in degrees, and
+  `spot_blend` as its softness), a sun as a DistantLight whose `angle` is half
+  of the sun's `angle` in degrees, and an area light as a RectLight of
+  `size` x `size_y` (`size` x `size` for SQUARE) or a DiskLight of radius
+  `size` / 2.
+- Not covered by granular tools yet (use `execute_blender_script`): smooth
+  or flat shading and custom normals, and UV coordinates given with
+  `create_blender_mesh_from_data`.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
@@ -1427,18 +1626,42 @@ Behaviour worth knowing:
     (`UsdPhysics.MaterialAPI` on a `UsdShade.Material` under
     `<asset root>/PhysicsMaterials`) bound to those colliders with the
     `physics` purpose;
-  - the semantic fields: `UsdSemantics.LabelsAPI` labels in the taxonomies
-    `class`, `hierarchy`, `qcode` and each additional label's key. A Blender
+  - the semantic fields: `UsdSemantics.LabelsAPI` labels in SimReady's
+    taxonomies `class`, `hierarchy` and `wikidata_qcode`, and each additional
+    label's key (files from an earlier Simul carry the Q-code under `qcode`, so
+    a reader should accept both). A Blender
     whose bundled USD has no UsdSemantics module gets Isaac Sim's
     older `SemanticsAPI:Semantics_<taxonomy>` attributes instead;
-    `semantics.labels_schema` in the result says which.
+    `semantics.labels_schema` in the result says which;
+  - each rigid body constraint between two exported objects
+    (`add_blender_rigid_body_constraint`): a UsdPhysics joint under
+    `<asset root>/Joints`. FIXED becomes a `FixedJoint`, POINT a
+    `SphericalJoint`, HINGE a `RevoluteJoint` about the constraint's local Z,
+    SLIDER a `PrismaticJoint` along its local X, and PISTON, GENERIC and
+    GENERIC_SPRING a D6 `PhysicsJoint` with a `LimitAPI` per locked or limited
+    axis (an axis Blender leaves unlimited stays free). `body0` is object1's
+    rigid body (its own, the nearest exported one above it, or the object as a
+    static body) and `body1` object2's; `localPos`/`localRot` place the
+    constraint empty's frame in each body, `collisionEnabled` is the opposite
+    of `disable_collisions` and `jointEnabled` follows `enabled`. Limits are
+    written as UsdPhysics reads them, body1 relative to body0, in degrees:
+    Blender measures a HINGE's and a GENERIC's angular limits the other way
+    round (object1 relative to object2, measured on 5.0.1), so their range is
+    negated; linear limits and a PISTON's angle keep their sign. The
+    constraint empty itself is not written as a prim, so it neither adds a
+    stray Xform nor forces a wrapper root. A MOTOR has no UsdPhysics joint
+    (Blender's motor is a free joint whose drive is capped by an impulse per
+    step), and springs and breaking thresholds have no exact equivalent: each
+    is reported in `issues` and `warnings`, and `physics.joints` lists the
+    joints written.
 
   `collider_type` and the friction values also apply to the meshes of
   descendants that set none of their own, so metadata on an asset root makes
   all its meshes collide; rigid body and mass stay on the object that sets
   them. The result's `warnings` name a rigid body without a collider, nested
-  rigid bodies, a triangle-mesh collider on a dynamic body, and stored values
-  that are not valid numbers, which are left out. The asset root is the default
+  rigid bodies with no joint between them, a triangle-mesh collider on a
+  dynamic body, and stored values that are not valid numbers, which are left
+  out. The asset root is the default
   prim (kind `component`): the one top-level object, or an Xform named after
   the file when several objects share the top level. Blender's `/root`
   container goes, and the render materials move to `<asset root>/Looks`.
@@ -1460,16 +1683,100 @@ Behaviour worth knowing:
   unsaved mesh edits are written) and enters them again, and restores the
   selection; a SimReady asset is static, so animation is left out. Blender
   writes next to the destination and the authored layer replaces the file only
-  at the end; a `.usdz` is packaged from a `.usdc` with its textures. With `embed_metadata` (the default) the
+  at the end; a `.usdz` is packaged from a `.usdc` with its textures. With
+  `embed_metadata` (the default) the
   `simready_` properties stay as `userProperties` attributes too, and Blender's
   USD import reads them back as custom properties. The importer names an object
   merged with its single mesh after the mesh, and imports the `Looks` and
   `PhysicsMaterials` scopes as empties.
-- `validate_simready_compliance` judges sizes in real-world metres: a mesh's
-  world-space size times the scene's Unit Scale (`meters_per_unit` in the
-  result). Above 100 m or below 1 mm is an error, as the scene's units are then
-  not the ones the part was modelled in (a 0.5 m part modelled in millimetres
-  measures 500 m in a metre scene); above 20 m is a warning.
+- `apply_simready_metadata` advertises the real fields of `metadata`
+  (`semantic`, `physics`, `material`) in its input schema, `collider_type` as
+  an enum. An unknown group or field is refused with the closest valid name
+  (`physics.mass`: did you mean `mass_kg`?), and so is an invalid value; the
+  call then writes nothing. A field left out or null keeps its stored value,
+  `is_rigid_body: false` clears an earlier true, and `clear` removes stored
+  values first: a field, a group, `additional_labels` or `all`. Label keys
+  become semantics taxonomies, so they must be identifiers, and
+  `semantic_qcode` must look like `Q1420`. An additional label named after a
+  field's taxonomy (`class`, `hierarchy`, `wikidata_qcode`, or the older
+  `qcode`) sets that field, and one that disagrees with the field given in the
+  same call is refused, as it would overwrite the field's label in the USD.
+  `get_simready_metadata` returns the stored values that meet those rules as
+  `metadata`. The ones that do not (set by a script, an import or an older
+  Simul) are listed in `invalid_values` with the problem, so one bad value does
+  not fail the call.
+- `apply_simready_metadata` and `setup_simready_hierarchy` need Object Mode:
+  in Edit Mode Blender records their undo step on the mesh undo stack, which
+  holds no object changes, so the first Ctrl+Z did nothing and the second also
+  left Edit Mode. They also refuse objects linked from a library, whose changes
+  are lost when the file is reopened. Their refusals, and those of the other
+  SimReady tools, are `ValidationError`s whose `details.code` names the reason
+  (`InvalidMetadata`, `ObjectModeRequired`, `LinkedData`, `RootExists`,
+  `RootNotInvertible`, `EmptyObjectList` and so on); an unknown object is a
+  `NotFoundError` with `details.code` `object_not_found`, as in every Blender
+  tool, and a list naming several unknown objects lists them all in
+  `details.objects`.
+- `setup_simready_hierarchy` keeps every object where it is: it parents the
+  listed objects that have no listed ancestor to the root, and a listed object
+  under another listed object keeps its parent, which may be an unlisted
+  object between them (`reparented` and `kept_parent` in the result). It keeps
+  the object's matrix before constraints, and it computes it from the former
+  parent's world matrix and the parent inverse matrix: an object Blender does
+  not evaluate (in an excluded collection, or a collection or object disabled
+  in viewports) has a stale `matrix_world`, which moved such objects to the
+  origin. The transform moves into the object's own location, rotation and
+  scale; where the former parent's non-uniform scale skews it, which those
+  cannot express, the skew stays in its parent inverse matrix and `warnings`
+  says so. An object that object constraints act on keeps its location,
+  rotation and scale, and its former parent space goes into the parent inverse
+  matrix instead: Blender's local space for a constraint is relative to parent
+  world × parent inverse, so a local-space Limit Location (which moved such a
+  part 1.5 m) sees the same values and gives the same pose. A post-check still
+  warns if an evaluated pose moved. A bone or vertex parent becomes an object
+  parent in place (one with constraints is refused). It checks every name, the
+  root and the semantic labels before changing anything, and a failure
+  part-way puts the parents back and removes the root it created. An existing
+  object with the root's name is refused unless `reuse_root: true`, which
+  needs an empty that can be inverted (not zero-scale), so a retry never makes
+  `robot.001`. Root names are USD identifiers; camelCase is fine.
+  `hierarchy_path` and `prim_paths` are the prim paths `export_simready_usd`
+  writes; when two objects become the same prim name (`arm.L` and `arm_L`),
+  `warnings` says so and the export renames one.
+- `validate_simready_compliance` checks what `export_simready_usd` would
+  export: the listed objects with their descendants (`include_children`), or
+  with `object_names` null the scene's objects visible in renders, without
+  lights and cameras; `skipped_objects` names the rest. It reports
+  `compliant: false` for any issue of severity `error`; warnings never change
+  it. The rules follow NVIDIA's SimReady Robotics-Prop profile
+  (simready-foundation `fd677ad`) and Isaac Sim 5.1's asset validation; codes
+  in brackets:
+
+  | Check | Error | Warning |
+  |---|---|---|
+  | naming | | an object, material, light or camera name that is not a USD identifier (camelCase is fine); a mesh data name likewise; two siblings that become one prim name |
+  | scale | | a largest real-world size (world-space size × Unit Scale) above 100 m or below 1 mm; a Unit Scale other than 1 [UN.007] |
+  | transforms | the asset root, the prim that becomes the default prim, not the identity [VG.025]; a rigid body whose world transform is skewed, as a rotated part under a non-uniformly scaled group is [RB.009] | a scaled or mirrored part; a part skewed relative to its parent |
+  | materials | no material | an empty slot that faces use |
+  | hierarchy | | a mesh without a parent, or a root that is not an empty |
+  | metadata | no semantic label of any taxonomy on the mesh or an exported object above it [SL.001]; a stored value that breaks the rules | no collider_type on the mesh or an exported object above it |
+  | physics | a rigid body without mass or density [RB.007], without a collider, or nested in another rigid body with no joint the export writes between them [RB.012]; a rigid body constraint between exported objects that the export would drop: a MOTOR, or two objects that are parts of one rigid body | a triangle-mesh collider on a dynamic body; no rigid body at all [RB.001]; a constraint to an object the export leaves out, or between two static objects; springs, a breaking threshold, or several rotation axes limited to ranges (Blender reads them as Euler angles, PhysX as twist and swing) |
+  | geometry | degenerate (zero-area) faces [VG.014] | no UV map; n-gons |
+
+  Labels, colliders and physics count only from exported objects: an
+  unexported ancestor is written as a bare Xform without them. The default
+  prim is the top-most ancestor of the exported objects when they share one
+  (Blender writes unexported ancestors too), so a lone off-origin mesh is a root
+  error, and top-level objects that the export wraps in a new root are parts.
+  Transforms are read from the world matrices the exporter writes, so scale in
+  a parent inverse matrix counts; part rotation is not checked. Meshes are read
+  with modifiers applied and with Edit Mode's edits written back
+  (`update_from_editmode`). `severity` returns only errors or warnings, and
+  `offset` / `limit` (50 by default, at most 500) page through the issues:
+  `next_offset` is the next page's offset, null on the last. A page also stops
+  before 30 KB of issues so that it fits the result budget; `issue_count`,
+  `error_count` and `warning_count` count them all. `export_simready_usd` runs
+  every check on the objects it exports; `skip_checks` leaves checks out, so
+  that one that does not apply needs no `force`, which lets every error through.
 - Rigid bodies simulate only inside the rigid-body world's cache range
   (`rigid_body_cache` in the replies of `get_blender_rigid_body_world`,
   `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`
