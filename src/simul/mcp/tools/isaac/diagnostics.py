@@ -213,7 +213,7 @@ class DiagnosticsMixin:
         name="interrupt_isaac_script",
         description=(
             "Stop the script the Isaac Sim bridge is currently running, so a runaway "
-            "execute_isaac_script does not hold the instance for every agent. Reaches a "
+            "script does not hold the instance for every agent. Reaches a "
             "coroutine script or one suspended at an await; a synchronous script that never "
             "yields also blocks the bridge's event loop, so that one is stopped by the "
             "per-request timeout sent with every script instead. Requires the bridge "

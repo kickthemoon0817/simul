@@ -44,6 +44,7 @@ from fastmcp.utilities.tasks import TaskConfig as _TaskConfig
 from mcp.types import ImageContent, TextContent, ToolAnnotations
 from mcp.types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from .. import __version__ as _source_version
 from ..adapters import IsaacRuntimeAdapter, IsaacSocketClient
@@ -54,7 +55,9 @@ from ..resources import find_checkout_root, resource
 from ..utils.errors import exception_message, exception_type_name
 from ..utils.paths import PathPolicy, SandboxDenied, sandbox_error
 from ..utils.timing import RateLimiter
+from . import error_types
 from .backends import ALL_BACKEND_NAMES, BACKENDS, NOT_SELECTED, backend_skip_reason
+from .error_types import classify_exception, normalize_error_payload
 from .registration import register_stats_tools
 from .registration._helpers import apply_success_from_error
 from .result_budget import encode_result_budget
@@ -101,7 +104,8 @@ def build_instructions(
         tool_backends: Each registered tool's name mapped to the backend that
             registered it. The SimReady routing line names the backends that
             registered a tool containing ``simready`` and is left out when
-            none did, which is also what omitting this argument means.
+            none did, and a backend's script guidance is stated only when its
+            script tool registered; omitting this argument means neither did.
 
     Returns:
         The instructions text.
@@ -119,7 +123,10 @@ def build_instructions(
         "cheaper and return structured results. Every tool parameter's units and "
         "conventions are in its schema description.",
     ]
-    paragraphs += [spec.guidance for spec in specs if spec.guidance]
+    registered_tools = set(tool_backends or {})
+    paragraphs += [
+        _guidance(spec, registered_tools) for spec in specs if spec.guidance
+    ]
     routing = [
         "ROUTING — the backend name appears somewhere inside the tool name, usually as an "
         "infix (capture_<backend>_viewport):"
@@ -135,6 +142,18 @@ def build_instructions(
     routing.append("  get_tool_usage_stats is server metadata, not a backend.")
     paragraphs.append("\n".join(routing))
     return "\n\n".join(paragraphs)
+
+
+def _guidance(spec: Any, registered_tools: Set[str]) -> str:
+    """Return a backend's guidance, with its script sentences only when the script tool registered.
+
+    The script guidance joins the end of the guidance's first line, where it
+    always stood, so the text is unchanged when scripting is allowed.
+    """
+    if not spec.script_guidance or spec.script_tool not in registered_tools:
+        return str(spec.guidance)
+    head, separator, tail = spec.guidance.partition("\n")
+    return f"{head} {spec.script_guidance}{separator}{tail}"
 
 
 _FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
@@ -221,6 +240,131 @@ def _sniff_image_format(image_base64: str) -> Optional[str]:
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return "webp"
     return None
+
+
+# Longest argument string a ValidationError echoes in details.input; a script
+# or a document is replaced by its size.
+_ECHO_MAX_CHARS: int = 256
+
+
+def _validation_errors(exc: PydanticValidationError) -> List[Dict[str, Any]]:
+    """Describe each failed field of a pydantic error: ``field``, ``message``, ``type``."""
+    errors: List[Dict[str, Any]] = []
+    for error in exc.errors(include_url=False):
+        location = [str(part) for part in error.get("loc", ())]
+        message = str(error.get("msg", ""))
+        # pydantic prefixes a validator's own message with "Value error, ".
+        for prefix in ("Value error, ", "Assertion failed, "):
+            if message.startswith(prefix):
+                message = message[len(prefix):]
+        errors.append(
+            {
+                "field": ".".join(location) or None,
+                "message": message,
+                "type": str(error.get("type", "value_error")),
+            }
+        )
+    return errors
+
+
+def _summarize_validation_errors(errors: List[Dict[str, Any]]) -> str:
+    """Join per-field errors into one message: ``field: message; ...``."""
+    return "; ".join(
+        f"{error['field']}: {error['message']}" if error.get("field") else str(error["message"])
+        for error in errors
+    )
+
+
+def _echo_arguments(arguments: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return the arguments a ValidationError echoes, long strings replaced by their size."""
+    echoed: Dict[str, Any] = {}
+    for key, value in arguments.items():
+        if isinstance(value, str) and len(value) > _ECHO_MAX_CHARS:
+            echoed[key] = f"<{len(value)} characters>"
+        else:
+            echoed[key] = value
+    return echoed
+
+
+def validation_error_payload(
+    exc: BaseException, arguments: Mapping[str, Any], *, shorten: bool = False
+) -> Dict[str, Any]:
+    """Build the one ValidationError envelope every layer returns for invalid input.
+
+    The MCP schema (a wrong type, a missing or unexpected argument, a value
+    outside its bounds), a tool's request model and its own argument checks
+    all report the same shape: ``error`` joins ``field: message`` for each
+    failure, ``details.errors`` lists them, ``details.input`` echoes the
+    arguments.
+
+    Args:
+        exc: A pydantic ValidationError, or the exception an argument check
+            raised with its message as written.
+        arguments: The arguments the call received.
+        shorten: Replace argument strings longer than ``_ECHO_MAX_CHARS`` by
+            their size, for a layer with no ``input_echo`` hook of its own.
+
+    Returns:
+        The error envelope.
+    """
+    if isinstance(exc, PydanticValidationError):
+        errors = _validation_errors(exc)
+    else:
+        errors = [{"field": None, "message": exception_message(exc), "type": "value_error"}]
+    return ErrorResponse(
+        error=_summarize_validation_errors(errors),
+        error_type=error_types.VALIDATION_ERROR,
+        details={
+            "errors": errors,
+            "input": _echo_arguments(arguments) if shorten else dict(arguments),
+        },
+    ).model_dump()
+
+
+def build_error_envelope_middleware() -> Any:
+    """Build the middleware that turns FastMCP's own call refusals into tool error envelopes.
+
+    FastMCP checks a call against the tool's input schema before the tool
+    runs, and answered a mismatch (a wrong type, a missing or unexpected
+    argument, a value out of bounds) with pydantic's raw text, and an unknown
+    tool with plain text, while every other failure is a JSON envelope. This
+    returns the same JSON envelope for both, sent with ``isError: true``:
+    ``ValidationError`` with the failing fields in ``details.errors``, and
+    ``NotFoundError`` for a tool that is not registered. Such a call never
+    reaches the tool, so it spends no rate-limit token and leaves no usage
+    record; the audit log still records it.
+    """
+    from fastmcp.exceptions import NotFoundError as FastMCPNotFoundError
+    from fastmcp.exceptions import ValidationError as FastMCPValidationError
+    from fastmcp.server.middleware import Middleware
+
+    class ErrorEnvelopeMiddleware(Middleware):
+        """Answer schema-level refusals with the shared error envelope."""
+
+        async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+            message = context.message
+            arguments = dict(getattr(message, "arguments", None) or {})
+            try:
+                return await call_next(context)
+            except (FastMCPValidationError, PydanticValidationError) as exc:
+                cause = exc if isinstance(exc, PydanticValidationError) else exc.__cause__
+                payload = validation_error_payload(
+                    cause if isinstance(cause, PydanticValidationError) else exc,
+                    arguments,
+                    shorten=True,
+                )
+            except FastMCPNotFoundError as exc:
+                payload = ErrorResponse(
+                    error=exception_message(exc),
+                    error_type=error_types.NOT_FOUND_ERROR,
+                    details={"tool": getattr(message, "name", None)},
+                ).model_dump()
+            return ToolResult(
+                content=[TextContent(type="text", text=encode_result_budget(payload))],
+                is_error=True,
+            )
+
+    return ErrorEnvelopeMiddleware()
 
 
 @dataclass
@@ -415,6 +559,8 @@ class SimulMCPServer(LoggerMixin):
         from ..logging import build_request_context_middleware
 
         self.mcp.add_middleware(build_request_context_middleware())
+        # Inside the audit middleware, so the audit row sees the envelope.
+        self.mcp.add_middleware(build_error_envelope_middleware())
 
         self._register_tools()
 
@@ -603,6 +749,7 @@ class SimulMCPServer(LoggerMixin):
         label = default_agent_label(session_id)
         for key in [key for key in self._rate_limiters if key[0] == label]:
             del self._rate_limiters[key]
+        self.usage_tracker.forget_session(label)
 
     def _check_rate_limit(
         self, tool_name: str, agent_id: Optional[str] = None
@@ -641,7 +788,7 @@ class SimulMCPServer(LoggerMixin):
         security = self.settings.security
         payload = ErrorResponse(
             error=f"Rate limit exceeded; retry in {retry_after} s",
-            error_type="RateLimitError",
+            error_type=error_types.RATE_LIMIT_ERROR,
             details={
                 "tool": tool_name,
                 "agent_id": agent,
@@ -733,7 +880,7 @@ class SimulMCPServer(LoggerMixin):
                 "sessionless MCP protocol (2026-07-28) has no session, so the server "
                 "cannot tell its client from any other."
             ),
-            error_type="SessionRequired",
+            error_type=error_types.SESSION_REQUIRED,
             details={
                 "active_instance": self._active_instance,
                 "hint": (
@@ -1098,7 +1245,7 @@ class SimulMCPServer(LoggerMixin):
                 "isaac_sim.enforce_claims refuses mutating tools from other agents while "
                 "that claim is live." + impersonation
             ),
-            error_type="InstanceClaimed",
+            error_type=error_types.INSTANCE_CLAIMED,
             details=details,
         ).model_dump()
 
@@ -1135,7 +1282,7 @@ class SimulMCPServer(LoggerMixin):
                 "isaac_sim.enforce_claims refuses mutating tools from agents without a "
                 "claim of their own until the claim TTL has passed."
             ),
-            error_type="InstanceClaimed",
+            error_type=error_types.INSTANCE_CLAIMED,
             details={
                 "instance": instance_name,
                 "holder_agent_id": None,
@@ -1265,6 +1412,7 @@ class SimulMCPServer(LoggerMixin):
                 error=error,
                 agent_id=self._recorded_agent_id(agent_id),
                 script_sha256=script_sha256,
+                session=agent_id,
             )
 
         def refuse(refusal: Refusal) -> ToolResult:
@@ -1282,6 +1430,8 @@ class SimulMCPServer(LoggerMixin):
                 payload = await self._call_outcome(
                     tool_name, run, request_model, request_kwargs, response_model, input_echo
                 )
+                if payload.get("success") is False:
+                    normalize_error_payload(payload)
                 error = payload.get("error")
                 record(
                     (time.monotonic() - started) * 1000,
@@ -1321,7 +1471,7 @@ class SimulMCPServer(LoggerMixin):
             validated = self._validate_input(request_model, **(request_kwargs or {}))
             if isinstance(validated, dict):
                 if input_echo is not None:
-                    validated["details"] = {"input": input_echo(request_kwargs or {})}
+                    validated["details"]["input"] = input_echo(request_kwargs or {})
                 return validated
             request = validated
         try:
@@ -1339,7 +1489,20 @@ class SimulMCPServer(LoggerMixin):
                 return payload
             if response_model is not None:
                 # Constructing the model is the validation; its dump conforms.
-                return response_model(**payload).model_dump()
+                try:
+                    return response_model(**payload).model_dump()
+                except PydanticValidationError as exc:
+                    # The engine answered with something the tool's response
+                    # schema does not describe: not the caller's input.
+                    self.logger.error("Tool %s returned an unexpected payload: %s", tool_name, exc)
+                    return ErrorResponse(
+                        error=(
+                            f"{tool_name} received a reply that does not match its response "
+                            f"schema {response_model.__name__}: "
+                            f"{_summarize_validation_errors(_validation_errors(exc))}"
+                        ),
+                        error_type=error_types.ENGINE_ERROR,
+                    ).model_dump()
             return payload
         except Exception as exc:
             return self._exception_payload(tool_name, exc)
@@ -1366,11 +1529,24 @@ class SimulMCPServer(LoggerMixin):
         message = exception_message(exc)
         self.logger.error("Tool %s failed: %s: %s", tool_name, error_type, message)
         details = getattr(exc, "details", None)
-        return ErrorResponse(
+        details = dict(details) if isinstance(details, dict) and details else {}
+        declared = getattr(exc, "error_type", None)
+        if not (isinstance(declared, str) and declared):
+            # A library's exception name is no contract: map transport
+            # failures onto the shared classes and keep the name as the cause.
+            canonical = classify_exception(exc)
+            if canonical is not None and canonical != error_type:
+                details.setdefault("cause", error_type)
+                error_type = canonical
+        payload = ErrorResponse(
             error=message,
             error_type=error_type,
-            details=details if isinstance(details, dict) and details else None,
+            details=details or None,
         ).model_dump()
+        if error_type == error_types.VALIDATION_ERROR:
+            details.setdefault("errors", [{"field": None, "message": message, "type": "value_error"}])
+            payload["details"] = details
+        return payload
 
     @asynccontextmanager
     async def _isaac_admission(self, tool_name: str) -> AsyncIterator[Optional[Refusal]]:
@@ -1405,7 +1581,7 @@ class SimulMCPServer(LoggerMixin):
                         f"Isaac instance {instance_name!r} is busy with another "
                         "call. It is running, not unreachable — retry shortly."
                     ),
-                    error_type="InstanceBusy",
+                    error_type=error_types.INSTANCE_BUSY,
                 ).model_dump(),
                 "instance_busy",
             )
@@ -1497,6 +1673,37 @@ class SimulMCPServer(LoggerMixin):
             discard=coro.close,
         )
 
+    async def _exec_payload(
+        self,
+        tool_name: str,
+        payload: Union[Dict[str, Any], Callable[[], Awaitable[Dict[str, Any]]]],
+        params: Optional[Dict[str, Any]] = None,
+    ) -> ToolResult:
+        """Run a tool whose result the server computes itself through the shared envelope.
+
+        For the server's own tools (instance routing, claims, usage stats) and
+        for refusals decided before a backend is reached (an Isaac path
+        outside the sandbox), so they are rate limited, recorded and sent
+        like every other call.
+
+        Args:
+            tool_name: Registered tool name.
+            payload: The payload, or a coroutine function computing it inside
+                the envelope (an exception it raises becomes an error
+                envelope).
+            params: Call parameters worth keeping in the usage log.
+
+        Returns:
+            The payload as one JSON content block.
+        """
+
+        async def call(_request: Optional[BaseModel]) -> Dict[str, Any]:
+            if callable(payload):
+                return await payload()
+            return payload
+
+        return await self._run_envelope(tool_name, call, params=params)
+
     def _sandbox_denial(
         self, path_str: Optional[str], *, write: bool = False
     ) -> Optional[Dict[str, Any]]:
@@ -1531,9 +1738,7 @@ class SimulMCPServer(LoggerMixin):
         try:
             return model(**kwargs)
         except Exception as e:
-            return ErrorResponse(
-                error=str(e), error_type="ValidationError", details={"input": kwargs}
-            ).model_dump()
+            return validation_error_payload(e, kwargs)
 
     async def _exec_backend(
         self,
@@ -1619,7 +1824,7 @@ class SimulMCPServer(LoggerMixin):
         if adapter is None or not adapter.is_available():
             return ErrorResponse(
                 error=f"{adapter_label} runtime not available",
-                error_type="RuntimeError",
+                error_type=error_types.CONNECTION_ERROR,
             ).model_dump()
 
         arguments = () if request is None else (request,)
@@ -1652,6 +1857,8 @@ class SimulMCPServer(LoggerMixin):
         lift, so every envelope is covered by one rule and an image never
         counts against the text it accompanies.
 
+        A payload with ``success: false`` is sent with ``isError: true``.
+
         Args:
             payload: The tool's result dict.
 
@@ -1680,7 +1887,9 @@ class SimulMCPServer(LoggerMixin):
             content.append(ImageContent(type="image", data=image, mime_type=mime_type))
         text = encode_result_budget(payload)
         content.append(TextContent(type="text", text=text))
-        return ToolResult(content=content)
+        # MCP's isError is what clients branch on before they parse the JSON:
+        # every failed call is one, not only the ones FastMCP refuses itself.
+        return ToolResult(content=content, is_error=payload.get("success") is False)
 
     def _script_tool(self, **tool_kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Register an arbitrary-code tool, or leave it off the surface.
@@ -2263,6 +2472,7 @@ class SimulMCPServer(LoggerMixin):
         self._isaac_clients.clear()
         self._rate_limiters.clear()
         self.usage_tracker._stats.clear()
+        self.usage_tracker._session_stats.clear()
         self.usage_tracker._recent.clear()
         logger.info("Simul 3D MCP Server shut down")
 

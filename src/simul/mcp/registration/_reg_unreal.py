@@ -30,6 +30,7 @@ from typing import (
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, Field, create_model, model_validator
 
+from ._constraints import constrain, from_request_model
 from ._helpers import describe_params
 from ._unreal_tools import REQUIRED, ToolParam, UnrealTool, surface_tools
 
@@ -102,7 +103,10 @@ def build_tool_wrapper(
         An async callable named after the tool.
     """
     request_model = spec.request or request_model_for(spec)
-    annotations = {param.name: _described(param, documented.get(param.name)) for param in spec.params}
+    annotations = {
+        param.name: _described(param, documented.get(param.name), _advertised(spec, param))
+        for param in spec.params
+    }
     signature = inspect.Signature(
         [
             inspect.Parameter(
@@ -198,9 +202,20 @@ def _enforce(check: Callable[[Any], Optional[str]]) -> Callable[[Any], Any]:
     return validate
 
 
-def _described(param: ToolParam, documented: Optional[str]) -> Any:
+def _advertised(spec: UnrealTool, param: ToolParam) -> Any:
+    """The parameter's annotation with the bounds and choices its tool states.
+
+    From ``PARAM_CONSTRAINTS``, and from the declaration's own request model
+    when it has one, so the input schema says what the call will refuse.
+    """
+    annotation = from_request_model(spec.request, param.name, param.annotation)
+    return constrain(spec.name, param.name, annotation)
+
+
+def _described(param: ToolParam, documented: Optional[str], annotation: Any = None) -> Any:
     """The parameter's annotation, carrying its schema description when it has one."""
+    annotation = param.annotation if annotation is None else annotation
     text = param.description or documented
     if not text:
-        return param.annotation
-    return Annotated[param.annotation, Field(description=text)]
+        return annotation
+    return Annotated[annotation, Field(description=text)]

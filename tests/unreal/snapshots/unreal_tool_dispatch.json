@@ -4111,12 +4111,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Invalid format 'jpg'. Must be one of ['png']",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "Invalid format 'jpg'. Must be one of ['png']",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "resolution_x": 1920,
        "resolution_y": 1080,
@@ -4159,12 +4166,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Invalid mode 'Bogus'. Must be one of ['EvaluateStatement', 'ExecuteFile', 'ExecuteStatement']",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "Invalid mode 'Bogus'. Must be one of ['EvaluateStatement', 'ExecuteFile', 'ExecuteStatement']",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "code": "print(1)",
        "code_bytes": 8,
@@ -4202,12 +4216,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Give all three location components or none",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "Give all three location components or none",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "location_x": 1.0,
        "location_y": 2.0,
@@ -4245,12 +4266,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Give all three rotation components or none",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "Give all three rotation components or none",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "location_x": 1.0,
        "location_y": 2.0,
@@ -4276,37 +4304,30 @@
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "fov": 180.0
    },
-   "envelope": [
-    {
-     "tool": "focus_unreal_on_actor",
-     "label": "Unreal",
-     "response_model": "UnrealFocusActorResponse",
-     "params": null
-    }
-   ],
+   "envelope": [],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
-     "error": "fov must be at least 0.001 and less than 180 degrees, not 180.0",
+     "error": "fov: Input should be less than 180",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": "fov",
+        "message": "Input should be less than 180",
+        "type": "less_than"
+       }
+      ],
       "input": {
        "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-       "distance": 0.0,
-       "fov": 180.0,
-       "aspect_ratio": 1.7777777777777777
+       "fov": 180.0
       }
      }
     }
    },
-   "usage": [
-    {
-     "success": false,
-     "error": "fov must be at least 0.001 and less than 180 degrees, not 180.0"
-    }
-   ]
+   "usage": []
   },
   {
    "tool": "control_unreal_ui",
@@ -4314,41 +4335,29 @@
    "arguments": {
     "agent_control": "bogus"
    },
-   "envelope": [
-    {
-     "tool": "control_unreal_ui",
-     "label": "Unreal",
-     "response_model": "UnrealUIResponse",
-     "params": null
-    }
-   ],
+   "envelope": [],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
-     "error": "1 validation error for UnrealUIRequest\nagent_control\n  Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor' [type=literal_error, input_value='bogus', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
+     "error": "agent_control: Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor'",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": "agent_control",
+        "message": "Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor'",
+        "type": "literal_error"
+       }
+      ],
       "input": {
-       "agent_control": "bogus",
-       "target": null,
-       "property_name": null,
-       "value": null,
-       "enabled": null,
-       "agent_id": "agent",
-       "position": null,
-       "activity": null
+       "agent_control": "bogus"
       }
      }
     }
    },
-   "usage": [
-    {
-     "success": false,
-     "error": "1 validation error for UnrealUIRequest\nagent_control\n  Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor' [type=literal_error, input_value='bogus', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error"
-    }
-   ]
+   "usage": []
   },
   {
    "tool": "control_unreal_ui",
@@ -4362,45 +4371,35 @@
      3.0
     ]
    },
-   "envelope": [
-    {
-     "tool": "control_unreal_ui",
-     "label": "Unreal",
-     "response_model": "UnrealUIResponse",
-     "params": null
-    }
-   ],
+   "envelope": [],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
-     "error": "1 validation error for UnrealUIRequest\nproperty_name\n  Input should be 'location', 'rotation' or 'scale' [type=literal_error, input_value='color', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
+     "error": "property_name: Input should be 'location', 'rotation' or 'scale'",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": "property_name",
+        "message": "Input should be 'location', 'rotation' or 'scale'",
+        "type": "literal_error"
+       }
+      ],
       "input": {
        "agent_control": "set_property",
-       "target": null,
        "property_name": "color",
        "value": [
         1.0,
         2.0,
         3.0
-       ],
-       "enabled": null,
-       "agent_id": "agent",
-       "position": null,
-       "activity": null
+       ]
       }
      }
     }
    },
-   "usage": [
-    {
-     "success": false,
-     "error": "1 validation error for UnrealUIRequest\nproperty_name\n  Input should be 'location', 'rotation' or 'scale' [type=literal_error, input_value='color', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error"
-    }
-   ]
+   "usage": []
   },
   {
    "tool": "set_unreal_material_params",
@@ -4419,7 +4418,7 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
@@ -4450,7 +4449,7 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Expecting value: line 1 column 1 (char 0)",
@@ -4482,12 +4481,21 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "could not convert string to float: 'x'",
-     "error_type": "ValueError",
-     "details": null
+     "error_type": "ValidationError",
+     "details": {
+      "cause": "ValueError",
+      "errors": [
+       {
+        "field": null,
+        "message": "could not convert string to float: 'x'",
+        "type": "value_error"
+       }
+      ]
+     }
     }
    },
    "usage": [
@@ -4515,12 +4523,21 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "could not convert string to float: 'up'",
-     "error_type": "ValueError",
-     "details": null
+     "error_type": "ValidationError",
+     "details": {
+      "cause": "ValueError",
+      "errors": [
+       {
+        "field": null,
+        "message": "could not convert string to float: 'up'",
+        "type": "value_error"
+       }
+      ]
+     }
     }
    },
    "usage": [

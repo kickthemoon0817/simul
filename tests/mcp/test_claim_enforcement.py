@@ -261,8 +261,9 @@ async def test_a_refused_claim_reaches_the_client_once(
     )
 
     async with Client(instance.mcp) as client:
-        result = await client.call_tool(tool, arguments)
+        result = await client.call_tool(tool, arguments, raise_on_error=False)
 
+    assert result.is_error is True
     assert result.structured_content is None
     (block,) = result.content
     payload = json.loads(block.text)

@@ -156,6 +156,7 @@ from ..schemas.simready import (
     SimReadyValidateRequest,
     SimReadyValidateResponse,
 )
+from ._constraints import from_request_model
 from ._helpers import surface_tool, with_param_descriptions
 
 if TYPE_CHECKING:
@@ -187,9 +188,10 @@ READ_ONLY = Hints(read_only=True, idempotent=True)
 ADDITIVE = Hints(read_only=False, idempotent=False)
 #: Changes the view, frame or attachment target; repeating the call changes nothing more.
 IDEMPOTENT = Hints(read_only=False, idempotent=True)
-#: Overwrites state; repeating the call changes nothing more.
+#: Overwrites or deletes named state or files (a delete, a save, an export to a
+#: path); repeating the call changes nothing more.
 OVERWRITING = Hints(read_only=False, idempotent=True, destructive=True)
-#: Deletes or replaces state or files, or runs arbitrary code.
+#: Replaces state in a way that repeating compounds, or runs arbitrary code.
 DESTRUCTIVE = Hints(read_only=False, idempotent=False, destructive=True)
 
 # Marks a Param field that keeps what the operation's signature declares.
@@ -354,6 +356,8 @@ def _advertised_parameters(
             default = override.default_from(settings)
         elif default is _FROM_OPERATION:
             default = parameter.default
+        # The schema states the bounds and choices the request model enforces.
+        annotation = from_request_model(spec.request, name, annotation)
         parameters.append(parameter.replace(annotation=annotation, default=default))
     return parameters
 
@@ -864,7 +868,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="delete_blender_object",
         description="Delete an object from the Blender scene.",
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="delete_object",
         request=BlenderDeleteObjectRequest,
         response=BlenderDeleteObjectResponse,
@@ -923,7 +927,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="open_blender_file",
         description="Open a .blend file, replacing the current scene.",
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="open_blend_file",
         request=BlenderOpenFileRequest,
         response=BlenderOpenFileResponse,
@@ -947,7 +951,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="export_blender_file",
         description="Export scene objects to a file.",
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="export_file",
         request=BlenderExportFileRequest,
         response=BlenderExportFileResponse,
@@ -1002,7 +1006,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="delete_blender_keyframe",
         description="Delete a keyframe from an object property.",
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="delete_keyframe",
         request=BlenderDeleteKeyframeRequest,
         response=BlenderDeleteKeyframeResponse,
@@ -1075,7 +1079,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="bake_blender_simulation",
         description="Bake physics simulation for a frame range.",
-        hints=ADDITIVE,
+        hints=OVERWRITING,
         operation="bake_simulation",
         request=BlenderBakeSimulationRequest,
         response=BlenderBakeSimulationResponse,
@@ -1161,7 +1165,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Export a SimReady-compliant USD file from Blender. Validates objects before export, "
             "selects the requested objects, and carries simready_ custom properties into USD attributes."
         ),
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="export_simready_usd",
         request=SimReadyExportRequest,
         response=SimReadyExportResponse,

@@ -97,8 +97,23 @@ class TestExecuteJsonScript:
         tools = _make_tools(execute_side_effect=RuntimeError("boom"))
         result = asyncio.run(tools.get_isaac_stage_info())
         assert result["success"] is False
-        assert result["error_type"] == "Exception"
+        assert result["error_type"] == "EngineError"
+        assert result["details"] == {"cause": "RuntimeError"}
         assert "boom" in result["error"]
+
+    def test_a_reset_connection_is_a_connection_error(self) -> None:
+        """A peer reset used to come back as error_type 'Exception'."""
+        tools = _make_tools(execute_side_effect=ConnectionResetError(54, "Connection reset by peer"))
+        result = asyncio.run(tools.get_isaac_stage_info())
+        assert result["error_type"] == "ConnectionError"
+        assert result["details"] == {"cause": "ConnectionResetError"}
+
+    def test_a_timeout_without_a_message_says_what_happened(self) -> None:
+        """A read deadline used to come back as TimeoutError with an empty error."""
+        tools = _make_tools(execute_side_effect=TimeoutError())
+        result = asyncio.run(tools.get_isaac_stage_info())
+        assert result["error_type"] == "TimeoutError"
+        assert "did not answer in time" in result["error"]
 
     def test_script_failure(self) -> None:
         """Failed script execution returns error details."""

@@ -243,8 +243,8 @@ def test_isaac_tool_that_raises(
     assert payload == {
         "success": False,
         "error": "[Errno 54] Connection reset by peer",
-        "error_type": "ConnectionResetError",
-        "details": None,
+        "error_type": "ConnectionError",
+        "details": {"cause": "ConnectionResetError"},
     }
     assert _records(instance, "get_isaac_stage_info") == [
         {"success": False, "error": "[Errno 54] Connection reset by peer"}
@@ -269,12 +269,17 @@ def test_isaac_partial_failure_without_a_success_flag(
 
     payload = _call(instance, "get_isaac_stage_info")
 
+    # The parts that worked stay; the failure is typed and named like any other.
     assert payload == {
         "stage_url": "anon:stage",
         "timeline_error": "timeline unavailable",
         "success": False,
+        "error_type": "EngineError",
+        "error": "timeline_error: timeline unavailable",
     }
-    assert _records(instance, "get_isaac_stage_info") == [{"success": False}]
+    assert _records(instance, "get_isaac_stage_info") == [
+        {"success": False, "error": "timeline_error: timeline unavailable"}
+    ]
 
 
 def test_isaac_rate_limited(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -556,12 +561,24 @@ def test_blender_validation_error(
     payload = _call(instance, "list_blender_scene_objects", max_items=0)
 
     arguments = {"collection_name": None, "include_hidden": False, "max_items": 0}
-    message = _validation_message(BlenderSceneObjectsRequest, **arguments)
+    # The same shape the MCP schema layer reports: one line per field, the
+    # fields listed, the input echoed; no pydantic banner or help URL.
+    message = "max_items: Input should be greater than or equal to 1"
+    assert _validation_message(BlenderSceneObjectsRequest, **arguments).count("max_items") == 1
     assert payload == {
         "success": False,
         "error": message,
         "error_type": "ValidationError",
-        "details": {"input": arguments},
+        "details": {
+            "errors": [
+                {
+                    "field": "max_items",
+                    "message": "Input should be greater than or equal to 1",
+                    "type": "greater_than_equal",
+                }
+            ],
+            "input": arguments,
+        },
     }
     assert _records(instance, "list_blender_scene_objects") == [
         {"success": False, "error": message}
@@ -612,7 +629,7 @@ def test_blender_runtime_unavailable(
     assert payload == {
         "success": False,
         "error": "Blender runtime not available",
-        "error_type": "RuntimeError",
+        "error_type": "ConnectionError",
         "details": None,
     }
     assert _records(instance, "get_blender_info") == [
@@ -658,7 +675,11 @@ def _unreal_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, port: int) -
 def test_unreal_editor_refuses_the_connection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """aiohttp's exception escapes the session and is named by its class."""
+    """aiohttp's exception escapes the session; its class is kept as the cause.
+
+    It used to be the error_type itself, so an agent saw ClientConnectorError
+    from Unreal but ConnectionError from Isaac for the same failure.
+    """
     port = _refused_port()
     instance = _unreal_server(monkeypatch, tmp_path, port)
     message, raised = _aiohttp_refusal(port)
@@ -669,8 +690,8 @@ def test_unreal_editor_refuses_the_connection(
     assert payload == {
         "success": False,
         "error": message,
-        "error_type": "ClientConnectorError",
-        "details": None,
+        "error_type": "ConnectionError",
+        "details": {"cause": "ClientConnectorError"},
     }
     assert _records(instance, "execute_unreal_script") == [
         {
@@ -684,7 +705,11 @@ def test_unreal_editor_refuses_the_connection(
 def test_unreal_health_check_reports_the_refusal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The session catches this one itself; the envelope derives ``success`` from ``error``."""
+    """The session catches this one itself; the envelope derives ``success`` from ``error``.
+
+    It names the failure too: an unreachable editor is a ConnectionError, as
+    every refused connection is, where the payload used to carry no type.
+    """
     port = _refused_port()
     instance = _unreal_server(monkeypatch, tmp_path, port)
 
@@ -696,6 +721,7 @@ def test_unreal_health_check_reports_the_refusal(
         "connected": False,
         "error": payload["error"],
         "success": False,
+        "error_type": "ConnectionError",
     }
     assert _records(instance, "unreal_health_check") == [
         {"success": False, "error": payload["error"]}

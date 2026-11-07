@@ -65,8 +65,9 @@ default `true`). When `false`, the server does not register
 `execute_isaac_script`, `execute_unreal_script`, `execute_blender_script`, or
 Unreal's `call_unreal_actor_function` and `batch_unreal_operations`
 dispatchers, and `simul isaac exec` / `simul unreal exec` return a
-`ScriptExecutionDisabled` error. The fixed granular tools, including
-`control_unreal_ui`, keep working.
+`ScriptExecutionDisabled` error. The server's instructions and the other
+tools' descriptions then no longer point at the script tools. The fixed
+granular tools, including `control_unreal_ui`, keep working.
 
 This is the only switch that removes the agent-authored code surface. The
 Isaac bridge extension's `allow_unsafe_execution` setting (and
@@ -112,8 +113,13 @@ all-or-none camera groups of `set_unreal_camera_view` and `control_unreal_ui`'s
 control and property names) run inside the shared envelope, so a call they
 refuse spends a token and is recorded in the usage log like any other failed
 call. Arguments that do not match a tool's input schema (a wrong type, a
-missing required argument) are refused by the MCP layer before the call
-reaches the envelope: no token is spent and nothing is recorded.
+missing required argument, a value outside the schema's `minimum`/`maximum`
+or `enum`) are refused by the MCP layer before the call reaches the envelope:
+no token is spent and nothing is recorded in the usage log. They get the same
+`ValidationError` envelope, with `isError: true`, as every other refusal
+([tools.md](tools.md#errors)). The server's own tools (the Isaac instance and
+claim tools, `get_tool_usage_stats`) and an Isaac path the sandbox refuses go
+through the envelope too.
 
 ### Multi-agent claims
 
@@ -179,6 +185,9 @@ shows it, and by the session's default label otherwise.
 
 ## Usage statistics
 
-Every tool call is recorded in a persistent JSONL log. Agents read it with
-`get_tool_usage_stats`; operators read it with `simul stats` and clear it
-with `simul stats --reset`.
+Every tool call is recorded in a persistent JSONL log
+(`~/.simul/logs/tool_usage.jsonl`), each row with the agent label and the
+session label it came in on. Agents read their own session's calls with
+`get_tool_usage_stats` (`scope="server"` adds per-tool counts across every
+session, never other sessions' records); operators read everything with
+`simul stats` and clear it with `simul stats --reset`.

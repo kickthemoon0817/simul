@@ -49,9 +49,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderUIRequest\nagent_control\n  Input should be 'inspect', 'observe', 'move_cursor', 'clear_cursor', 'open_menu', 'select_object', 'set_tool', 'show_properties', 'set_property' or 'isolate_workspace' [type=literal_error, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
+          "error": "agent_control: Input should be 'inspect', 'observe', 'move_cursor', 'clear_cursor', 'open_menu', 'select_object', 'set_tool', 'show_properties', 'set_property' or 'isolate_workspace'",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "agent_control",
+                "message": "Input should be 'inspect', 'observe', 'move_cursor', 'clear_cursor', 'open_menu', 'select_object', 'set_tool', 'show_properties', 'set_property' or 'isolate_workspace'",
+                "type": "literal_error"
+              }
+            ],
             "input": {
               "agent_control": {"bogus": 1},
               "target": null,
@@ -84,8 +91,18 @@
         "response": {
           "success": false,
           "error": "Several Blender processes are running; pass instance_id",
-          "error_type": "ValueError",
-          "details": {"instances": []}
+          "error_type": "ValidationError",
+          "details": {
+            "instances": [],
+            "cause": "ValueError",
+            "errors": [
+              {
+                "field": null,
+                "message": "Several Blender processes are running; pass instance_id",
+                "type": "value_error"
+              }
+            ]
+          }
         },
         "usage": [{"tool": "attach_blender_window", "success": false}]
       },
@@ -105,9 +122,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderAttachWindowRequest\ninstance_id\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "instance_id: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"instance_id": {"bogus": 1}, "window_id": null}}
+          "details": {
+            "errors": [
+              {
+                "field": "instance_id",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"instance_id": {"bogus": 1}, "window_id": null}
+          }
         }
       }
     },
@@ -139,9 +165,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderSceneObjectsRequest\ncollection_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "collection_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"collection_name": {"bogus": 1}, "include_hidden": false, "max_items": 200}}
+          "details": {
+            "errors": [
+              {
+                "field": "collection_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"collection_name": {"bogus": 1}, "include_hidden": false, "max_items": 200}
+          }
         }
       }
     },
@@ -157,9 +192,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderObjectInfoRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}}
+          }
         }
       }
     },
@@ -175,9 +219,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderMeshInfoRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}}
+          }
         }
       }
     },
@@ -209,9 +262,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderBoundingBoxRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}, "world_space": true}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}, "world_space": true}
+          }
         }
       }
     },
@@ -243,9 +305,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderSearchObjectsRequest\nname_pattern\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "name_pattern: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"name_pattern": {"bogus": 1}, "object_type": null, "max_results": 50}}
+          "details": {
+            "errors": [
+              {
+                "field": "name_pattern",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"name_pattern": {"bogus": 1}, "object_type": null, "max_results": 50}
+          }
         }
       }
     },
@@ -269,9 +340,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderMaterialInfoRequest\nmaterial_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "material_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"material_name": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "material_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"material_name": {"bogus": 1}}
+          }
         }
       }
     },
@@ -292,9 +372,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderDistanceRequest\nobject_name_a\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name_a: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name_a": {"bogus": 1}, "object_name_b": "Sphere"}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name_a",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name_a": {"bogus": 1}, "object_name_b": "Sphere"}
+          }
         }
       }
     },
@@ -319,9 +408,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderBoundsCheckRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {"object_name": {"bogus": 1}, "bounds_min": [-1, -2, -3], "bounds_max": [1, 2, 3]}
           }
         }
@@ -376,9 +472,10 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderCaptureViewportRequest\nwidth\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
+          "error": "width: Input should be a valid integer",
           "error_type": "ValidationError",
           "details": {
+            "errors": [{"field": "width", "message": "Input should be a valid integer", "type": "int_type"}],
             "input": {
               "width": {"bogus": 1},
               "height": 512,
@@ -427,9 +524,10 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderSetCameraViewRequest\nlocation\n  Input should be a valid list [type=list_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/list_type",
+          "error": "location: Input should be a valid list",
           "error_type": "ValidationError",
           "details": {
+            "errors": [{"field": "location", "message": "Input should be a valid list", "type": "list_type"}],
             "input": {"location": {"bogus": 1}, "rotation_euler": [0.1, 0.2, 0.3], "camera_name": null}
           }
         }
@@ -482,9 +580,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderFocusOnObjectRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}, "distance_factor": 1.0, "camera_name": null}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}, "distance_factor": 1.0, "camera_name": null}
+          }
         }
       }
     },
@@ -551,9 +658,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderCaptureSequenceRequest\nstart_frame\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
+          "error": "start_frame: Input should be a valid integer",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "start_frame",
+                "message": "Input should be a valid integer",
+                "type": "int_type"
+              }
+            ],
             "input": {
               "start_frame": {"bogus": 1},
               "end_frame": 3,
@@ -614,9 +728,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderCreateObjectRequest\nobject_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_type: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "object_type",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {
               "object_type": {"bogus": 1},
               "name": null,
@@ -640,9 +761,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderDeleteObjectRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}}
+          }
         }
       }
     },
@@ -684,9 +814,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderSetTransformRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {"object_name": {"bogus": 1}, "location": null, "rotation_euler": null, "scale": null}
           }
         }
@@ -709,9 +846,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderSetParentRequest\nchild_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "child_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"child_name": {"bogus": 1}, "parent_name": "Car"}}
+          "details": {
+            "errors": [
+              {
+                "field": "child_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"child_name": {"bogus": 1}, "parent_name": "Car"}
+          }
         }
       }
     },
@@ -743,9 +889,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderClearParentRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}, "keep_transform": true}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}, "keep_transform": true}
+          }
         }
       }
     },
@@ -795,9 +950,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderAssignMaterialRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {
               "object_name": {"bogus": 1},
               "material_name": null,
@@ -852,9 +1014,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderAddModifierRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {
               "object_name": {"bogus": 1},
               "modifier_type": "SUBSURF",
@@ -917,9 +1086,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderSetLightParamsRequest\nlight_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "light_name: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "light_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {
               "light_name": {"bogus": 1},
               "energy": null,
@@ -945,9 +1121,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderOpenFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "file_path: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"file_path": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "file_path",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"file_path": {"bogus": 1}}
+          }
         }
       }
     },
@@ -969,9 +1154,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderSaveFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "file_path: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"file_path": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "file_path",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"file_path": {"bogus": 1}}
+          }
         }
       }
     },
@@ -992,9 +1186,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderImportFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "file_path: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"file_path": {"bogus": 1}, "file_format": "OBJ"}}
+          "details": {
+            "errors": [
+              {
+                "field": "file_path",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"file_path": {"bogus": 1}, "file_format": "OBJ"}
+          }
         }
       }
     },
@@ -1026,9 +1229,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderExportFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "file_path: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"file_path": {"bogus": 1}, "file_format": "GLTF", "selected_only": false}}
+          "details": {
+            "errors": [
+              {
+                "field": "file_path",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"file_path": {"bogus": 1}, "file_format": "GLTF", "selected_only": false}
+          }
         }
       }
     },
@@ -1052,9 +1264,12 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderSetFrameRequest\nframe\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
+          "error": "frame: Input should be a valid integer",
           "error_type": "ValidationError",
-          "details": {"input": {"frame": {"bogus": 1}}}
+          "details": {
+            "errors": [{"field": "frame", "message": "Input should be a valid integer", "type": "int_type"}],
+            "input": {"frame": {"bogus": 1}}
+          }
         }
       }
     },
@@ -1078,9 +1293,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderSetFrameRangeRequest\nframe_start\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
+          "error": "frame_start: Input should be a valid integer",
           "error_type": "ValidationError",
-          "details": {"input": {"frame_start": {"bogus": 1}, "frame_end": 250}}
+          "details": {
+            "errors": [
+              {
+                "field": "frame_start",
+                "message": "Input should be a valid integer",
+                "type": "int_type"
+              }
+            ],
+            "input": {"frame_start": {"bogus": 1}, "frame_end": 250}
+          }
         }
       }
     },
@@ -1102,9 +1326,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderPlayAnimationRequest\naction\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "action: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"action": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "action",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"action": {"bogus": 1}}
+          }
         }
       }
     },
@@ -1136,9 +1369,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderInsertKeyframeRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {"object_name": {"bogus": 1}, "data_path": "location", "frame": 10, "index": -1}
           }
         }
@@ -1172,9 +1412,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderDeleteKeyframeRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {"object_name": {"bogus": 1}, "data_path": "location", "frame": 10, "index": -1}
           }
         }
@@ -1192,9 +1439,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderGetKeyframesRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}}
+          }
         }
       }
     },
@@ -1253,9 +1509,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderSetupRigidBodyRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {
               "object_name": {"bogus": 1},
               "body_type": "ACTIVE",
@@ -1303,9 +1566,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderAddForceFieldRequest\nfield_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "field_type: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"field_type": {"bogus": 1}, "strength": 1.0, "location": null, "name": null}}
+          "details": {
+            "errors": [
+              {
+                "field": "field_type",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"field_type": {"bogus": 1}, "strength": 1.0, "location": null, "name": null}
+          }
         }
       }
     },
@@ -1321,9 +1593,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderGetForceFieldInfoRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}}
+          }
         }
       }
     },
@@ -1373,9 +1654,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderAddConstraintRequest\nconstraint_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "constraint_type: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "constraint_type",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {
               "constraint_type": {"bogus": 1},
               "object1_name": "A",
@@ -1399,9 +1687,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderGetConstraintInfoRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}}
+          }
         }
       }
     },
@@ -1417,9 +1714,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderGetPhysicsStateRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}}
+          }
         }
       }
     },
@@ -1451,9 +1757,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderGetTrajectoryRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}, "start_frame": 1, "end_frame": 10, "step": 1}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}, "start_frame": 1, "end_frame": 10, "step": 1}
+          }
         }
       }
     },
@@ -1469,9 +1784,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderBakeSimulationRequest\nframe_start\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
+          "error": "frame_start: Input should be a valid integer",
           "error_type": "ValidationError",
-          "details": {"input": {"frame_start": {"bogus": 1}, "frame_end": 50}}
+          "details": {
+            "errors": [
+              {
+                "field": "frame_start",
+                "message": "Input should be a valid integer",
+                "type": "int_type"
+              }
+            ],
+            "input": {"frame_start": {"bogus": 1}, "frame_end": 50}
+          }
         }
       }
     },
@@ -1511,9 +1835,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderExecuteScriptRequest\nscript\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "script: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"script": {"bogus": 1}, "timeout": null, "max_output_chars": 32000}}
+          "details": {
+            "errors": [
+              {
+                "field": "script",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"script": {"bogus": 1}, "timeout": null, "max_output_chars": 32000}
+          }
         }
       }
     },
@@ -1566,9 +1899,10 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderCreateMeshFromDataRequest\nname\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "name: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [{"field": "name", "message": "Input should be a valid string", "type": "string_type"}],
             "input": {
               "name": {"bogus": 1},
               "vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
@@ -1615,9 +1949,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for SimReadyApplyMetadataRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {
               "object_name": {"bogus": 1},
               "metadata": {
@@ -1642,9 +1983,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for SimReadyGetMetadataRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "object_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}}
+          }
         }
       }
     },
@@ -1697,9 +2047,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for SimReadyValidateRequest\nobject_names\n  Input should be a valid list [type=list_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/list_type",
+          "error": "object_names: Input should be a valid list",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "object_names",
+                "message": "Input should be a valid list",
+                "type": "list_type"
+              }
+            ],
             "input": {
               "object_names": {"bogus": 1},
               "check_naming": true,
@@ -1755,9 +2112,16 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for SimReadyExportRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "file_path: Input should be a valid string",
           "error_type": "ValidationError",
           "details": {
+            "errors": [
+              {
+                "field": "file_path",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
             "input": {
               "file_path": {"bogus": 1},
               "object_names": null,
@@ -1804,9 +2168,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for SimReadySetupHierarchyRequest\nroot_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "root_name: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"root_name": {"bogus": 1}, "child_names": ["Cube"], "semantic": null}}
+          "details": {
+            "errors": [
+              {
+                "field": "root_name",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"root_name": {"bogus": 1}, "child_names": ["Cube"], "semantic": null}
+          }
         }
       }
     }
@@ -1819,7 +2192,17 @@
         "response": {
           "success": false,
           "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
-          "error_type": "ValueError"
+          "error_type": "ValidationError",
+          "details": {
+            "cause": "ValueError",
+            "errors": [
+              {
+                "field": null,
+                "message": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
+                "type": "value_error"
+              }
+            ]
+          }
         },
         "usage": [{"tool": "attach_blender_window", "success": false}]
       },
@@ -1829,7 +2212,17 @@
         "response": {
           "success": false,
           "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
-          "error_type": "ValueError"
+          "error_type": "ValidationError",
+          "details": {
+            "cause": "ValueError",
+            "errors": [
+              {
+                "field": null,
+                "message": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
+                "type": "value_error"
+              }
+            ]
+          }
         },
         "usage": [{"tool": "attach_blender_window", "success": false}]
       },
@@ -1838,9 +2231,18 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderAttachWindowRequest\ninstance_id\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "instance_id: Input should be a valid string",
           "error_type": "ValidationError",
-          "details": {"input": {"instance_id": {"bogus": 1}, "window_id": null}}
+          "details": {
+            "errors": [
+              {
+                "field": "instance_id",
+                "message": "Input should be a valid string",
+                "type": "string_type"
+              }
+            ],
+            "input": {"instance_id": {"bogus": 1}, "window_id": null}
+          }
         }
       }
     }

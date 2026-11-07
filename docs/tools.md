@@ -8,9 +8,11 @@ selected (`--backends`), on `--unreal-tools` / `--blender-tools`, and on
 simul tools            # add --json for descriptions and input schemas
 ```
 
-Every tool returns a JSON object. Failures carry `success: false` and an
-error type such as `NotRunning`, `RefusedOperation` or
-`UnsupportedOperation`.
+Every tool returns a JSON object. A failure is sent with MCP `isError: true`
+and carries `success: false`, an `error_type` and an `error` message; see
+[Errors](#errors) for the types. Parameter bounds and choices are in each
+tool's input schema (`minimum`, `maximum`, `enum`), and a value outside them
+is refused with `ValidationError` before the tool runs.
 
 ## Headless USD
 
@@ -471,7 +473,67 @@ Behaviour worth knowing:
 
 | Tool | Purpose |
 |---|---|
-| `get_tool_usage_stats` | Per-tool call counts, success rates and durations from the persistent usage log. Clearing it is operator-only: `simul stats --reset` |
+| `get_tool_usage_stats` | Per-tool call counts, success rates and durations for the calling MCP session; `scope="server"` counts every session's calls. The recent call log (`include_recent`, `limit` 1 to 200) is always the caller's own, because records carry parameters, file paths and agent labels. Operators read every session with `simul stats`; clearing it is operator-only: `simul stats --reset` |
+
+## Errors
+
+Every failed call has the same shape, on every backend and whichever layer
+refused it (the MCP input schema, a request model, the tool, the engine):
+
+```json
+{"success": false, "error_type": "ValidationError", "error": "width: Input should be less than or equal to 3840",
+ "details": {"errors": [{"field": "width", "message": "...", "type": "less_than_equal"}], "input": {"width": 5000}}}
+```
+
+and it is sent with `isError: true`. The classes below mean the same on every
+backend; tools keep more specific domain types where those say more
+(`RefusedOperation`, `CaptureError`, `UnsupportedFormat`). A transport
+failure never shows a library's exception name: it is `ConnectionError` or
+`TimeoutError`, with the original name in `details.cause`
+(`ClientConnectorError`, `ConnectionResetError`, `EmptyResponse`, ...). The
+names live in `simul.mcp.error_types`.
+
+| `error_type` | Meaning | What to do |
+|---|---|---|
+| `ValidationError` | The arguments do not fit the tool: wrong type, missing or unexpected argument, out of bounds, not among the choices. `details.errors` lists each field | Fix the call |
+| `NotFoundError` | What the call names (prim, actor, stage, instance, tool) does not exist | Check the name |
+| `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
+| `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
+| `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a script that raised a non-domain error, a reply that does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
+| `InstanceBusy` | The Isaac instance is serving another call | Retry shortly |
+| `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
+| `RateLimitError` | The agent spent its rate-limit budget; `retry_after_seconds` says when to retry | Wait |
+| `InstanceClaimed` | Another agent holds a live claim on the Isaac instance (claims enforced) | Wait or use another instance |
+| `ClaimStoreError` | The claim records could not be read or saved | Check `~/.simul/sessions` |
+| `SessionRequired` | The tool keeps per-client state and the request has no client identity | Connect with a session |
+| `PermissionError` | The caller may not act on what it named (another agent's claim) | |
+| `RefusedOperation` | The tool refuses an operation that would damage the application or unsaved work without an override flag | Pass the flag if intended |
+| `PIEActive` | Unreal is in Play-In-Editor | Stop PIE |
+| `AuthenticationError` | The engine refused the credentials | Fix the token or passphrase |
+| `UnsupportedOperation` | The backend or mode cannot do this | |
+| `InvalidState` | Not possible in the current state (nothing claimed to release) | |
+
+Arguments that do not fit the input schema are refused by the MCP layer
+before the tool runs, so they spend no rate-limit token and leave no usage
+record (the audit log records them). Every other failure, a request model's
+or a tool's own check included, is rate limited and recorded.
+
+## Annotations
+
+Every tool's `readOnlyHint`, `destructiveHint` and `idempotentHint` follow one
+rule on every backend, pinned for all tools by
+`tests/mcp/test_tool_annotation_table.py`:
+
+- **read-only**: changes nothing, a capture that only returns the image
+  included (`capture_blender_viewport`);
+- **destructive**: overwrites or deletes existing state or files, or runs
+  arbitrary code (`capture_isaac_viewport` deletes the oldest captures in its
+  directory, so it is destructive; `capture_unreal_viewport` writes a new
+  screenshot and is only additive);
+- **idempotent**: repeating the call with the same arguments changes nothing
+  more (a set, a delete, a save or export to the same path, a focus); a
+  create, a step, a capture that writes a new file or an edit that compounds
+  (simplify, subdivide) is not.
 
 ## MCP resources
 

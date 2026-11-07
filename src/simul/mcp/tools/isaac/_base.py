@@ -8,6 +8,7 @@ from ....adapters.isaac_socket_client import BridgeRequestDeliveredError
 from ....config import Settings, get_settings
 from ....logging import LoggerMixin
 from ....utils.paths import PathPolicy
+from ... import error_types
 from ...registration._helpers import apply_success_from_error
 from ...schemas.common import ErrorResponse
 from ._shared import (
@@ -165,20 +166,29 @@ class IsaacScriptBase(LoggerMixin):
                 result = await self._client.execute_vscode_only(script)
             else:
                 result = await self._client.execute(script)
-        except ConnectionRefusedError as exc:
-            return ErrorResponse(
-                error=str(exc),
-                error_type="ConnectionError",
-            ).model_dump()
         except TimeoutError as exc:
+            # Before OSError, which TimeoutError subclasses.
             return ErrorResponse(
-                error=str(exc),
-                error_type="TimeoutError",
+                error=str(exc)
+                or f"Isaac Sim at {self._client.address} did not answer in time; the "
+                "script may still be running.",
+                error_type=error_types.TIMEOUT_ERROR,
+                details={"cause": type(exc).__name__},
+            ).model_dump()
+        except (ConnectionError, OSError) as exc:
+            # Refused, reset by the peer, or broken mid-reply: the shared class,
+            # with the transport's own name as the cause.
+            return ErrorResponse(
+                error=str(exc) or f"The connection to Isaac Sim at {self._client.address} failed.",
+                error_type=error_types.CONNECTION_ERROR,
+                details={"cause": type(exc).__name__},
             ).model_dump()
         except Exception as exc:
             logger.error("Script execution failed: %s", exc, exc_info=True)
             return ErrorResponse(
-                error=str(exc), error_type="Exception"
+                error=str(exc) or type(exc).__name__,
+                error_type=error_types.ENGINE_ERROR,
+                details={"cause": type(exc).__name__},
             ).model_dump()
 
         if not result.success:

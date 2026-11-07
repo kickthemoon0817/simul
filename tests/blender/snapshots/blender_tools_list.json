@@ -291,7 +291,13 @@
             "description": "Optional collection name filter."
           },
           "include_hidden": {"default": false, "description": "Include hidden objects when true.", "type": "boolean"},
-          "max_items": {"default": 200, "description": "Maximum number of objects to return.", "type": "integer"}
+          "max_items": {
+            "default": 200,
+            "description": "Maximum number of objects to return.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          }
         }
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
@@ -361,7 +367,13 @@
             "default": null,
             "description": "Blender object type filter (MESH, LIGHT, etc.)."
           },
-          "max_results": {"default": 50, "description": "Maximum number of results.", "type": "integer"}
+          "max_results": {
+            "default": 50,
+            "description": "Maximum number of results.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          }
         }
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
@@ -416,11 +428,15 @@
           "bounds_min": {
             "description": "Minimum corner of the box as [x, y, z] in scene units (Blender is Z-up).",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           },
           "bounds_max": {
             "description": "Maximum corner of the box as [x, y, z] in scene units.",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           }
         },
@@ -440,14 +456,24 @@
           "width": {
             "default": 512,
             "description": "Maximum image width in pixels. A viewport capture, or a render through a temporary camera aligned to the 3D View, keeps the view's aspect ratio inside width x height; other renders are exactly width x height.",
+            "maximum": 4096,
+            "minimum": 64,
             "type": "integer"
           },
           "height": {
             "default": 512,
             "description": "Maximum image height in pixels; see width.",
+            "maximum": 4096,
+            "minimum": 64,
             "type": "integer"
           },
-          "jpeg_quality": {"default": 85, "description": "JPEG compression quality (1-100).", "type": "integer"},
+          "jpeg_quality": {
+            "default": 85,
+            "description": "JPEG compression quality (1-100).",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
           "method": {
             "default": "auto",
             "description": "\"viewport\": the 3D View as the user sees it (view angle, shading, overlays, Edit Mode, unsaved changes); attached mode only. \"render\": a render through the scene camera, or through a temporary camera when the scene has none (aligned to the 3D View when attached, framing the visible objects otherwise), removed afterwards. \"auto\" (default): \"viewport\" when attached, \"render\" in embedded mode.",
@@ -480,11 +506,15 @@
           "location": {
             "description": "World-space camera location [x, y, z].",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           },
           "rotation_euler": {
             "description": "World-space camera rotation [rx, ry, rz] in radians, as an XYZ Euler.",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           },
           "camera_name": {
@@ -528,6 +558,8 @@
           "distance_factor": {
             "default": 1.0,
             "description": "Multiple of the framing distance (of ortho_scale for an orthographic camera): 1.0 fits the object's bounding sphere in the frame with 5% to spare, 2.0 shows the object at half that size, and below 1.0 crops it.",
+            "maximum": 20.0,
+            "minimum": 0.5,
             "type": "number"
           },
           "camera_name": {
@@ -559,18 +591,33 @@
         "properties": {
           "start_frame": {"description": "First frame to capture.", "type": "integer"},
           "end_frame": {"description": "Last frame to capture (inclusive).", "type": "integer"},
-          "step": {"default": 1, "description": "Frame step between captures.", "type": "integer"},
+          "step": {
+            "default": 1,
+            "description": "Frame step between captures.",
+            "minimum": 1,
+            "type": "integer"
+          },
           "width": {
             "default": 512,
             "description": "Maximum image width, as for capture_blender_viewport.",
+            "maximum": 4096,
+            "minimum": 64,
             "type": "integer"
           },
           "height": {
             "default": 512,
             "description": "Maximum image height, as for capture_blender_viewport.",
+            "maximum": 4096,
+            "minimum": 64,
             "type": "integer"
           },
-          "jpeg_quality": {"default": 85, "description": "JPEG compression quality.", "type": "integer"},
+          "jpeg_quality": {
+            "default": 85,
+            "description": "JPEG compression quality.",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
           "agent_id": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
@@ -606,18 +653,24 @@
             "default": [0.0, 0.0, 0.0],
             "description": "Initial location [x, y, z].",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           },
           "rotation_euler": {
             "default": [0.0, 0.0, 0.0],
             "description": "Initial rotation [rx, ry, rz] radians.",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           },
           "scale": {
             "default": [1.0, 1.0, 1.0],
             "description": "Initial scale [sx, sy, sz].",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           }
         },
@@ -636,7 +689,7 @@
         "properties": {"object_name": {"description": "Name of the object to delete.", "type": "string"}},
         "required": ["object_name"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_object_transform": {
@@ -649,17 +702,26 @@
         "properties": {
           "object_name": {"description": "Object to transform.", "type": "string"},
           "location": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "New location [x, y, z] or None to keep current."
           },
           "rotation_euler": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "New rotation [rx, ry, rz] or None to keep current."
           },
           "scale": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "New scale [sx, sy, sz] or None to keep current."
           }
@@ -725,8 +787,20 @@
             "items": {"type": "number"},
             "type": "array"
           },
-          "metallic": {"default": 0.0, "description": "Metallic value 0-1.", "type": "number"},
-          "roughness": {"default": 0.5, "description": "Roughness value 0-1.", "type": "number"}
+          "metallic": {
+            "default": 0.0,
+            "description": "Metallic value 0-1.",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "roughness": {
+            "default": 0.5,
+            "description": "Roughness value 0-1.",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          }
         },
         "required": ["object_name"]
       },
@@ -775,7 +849,10 @@
             "description": "Light energy/power."
           },
           "color": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Light color RGB [r, g, b]."
           },
@@ -815,7 +892,7 @@
         "properties": {"file_path": {"description": "Absolute path to the .blend file.", "type": "string"}},
         "required": ["file_path"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "save_blender_file": {
@@ -845,7 +922,11 @@
         "additionalProperties": false,
         "properties": {
           "file_path": {"description": "Absolute path to the file.", "type": "string"},
-          "file_format": {"description": "One of OBJ, FBX, GLTF, USD, STL, PLY.", "type": "string"}
+          "file_format": {
+            "description": "One of OBJ, FBX, GLTF, USD, STL, PLY.",
+            "enum": ["OBJ", "FBX", "GLTF", "USD", "STL", "PLY"],
+            "type": "string"
+          }
         },
         "required": ["file_path", "file_format"]
       },
@@ -861,7 +942,11 @@
         "additionalProperties": false,
         "properties": {
           "file_path": {"description": "Absolute path to export to.", "type": "string"},
-          "file_format": {"description": "One of OBJ, FBX, GLTF, USD, STL, PLY.", "type": "string"},
+          "file_format": {
+            "description": "One of OBJ, FBX, GLTF, USD, STL, PLY.",
+            "enum": ["OBJ", "FBX", "GLTF", "USD", "STL", "PLY"],
+            "type": "string"
+          },
           "selected_only": {
             "default": false,
             "description": "If True, export only selected objects.",
@@ -870,7 +955,7 @@
         },
         "required": ["file_path", "file_format"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_file_info": {
@@ -929,6 +1014,7 @@
           "action": {
             "default": "play",
             "description": "One of 'play', 'stop', or 'reverse'.",
+            "enum": ["play", "stop", "reverse"],
             "type": "string"
           }
         }
@@ -975,7 +1061,7 @@
         },
         "required": ["object_name", "data_path", "frame"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_keyframes": {
@@ -1007,7 +1093,13 @@
           },
           "mass": {"default": 1.0, "description": "Mass in kilograms.", "type": "number"},
           "friction": {"default": 0.5, "description": "Surface friction coefficient.", "type": "number"},
-          "restitution": {"default": 0.0, "description": "Bounciness (0-1).", "type": "number"},
+          "restitution": {
+            "default": 0.0,
+            "description": "Bounciness (0-1).",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
           "collision_shape": {"default": "CONVEX_HULL", "description": "Collision shape type.", "type": "string"},
           "linear_damping": {"default": 0.04, "description": "Linear damping factor.", "type": "number"},
           "angular_damping": {"default": 0.1, "description": "Angular damping factor.", "type": "number"}
@@ -1028,7 +1120,10 @@
           "field_type": {"description": "Force field type (FORCE, WIND, VORTEX, etc.).", "type": "string"},
           "strength": {"default": 1.0, "description": "Field strength.", "type": "number"},
           "location": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "World-space XYZ location; the world origin when omitted."
           },
@@ -1068,7 +1163,10 @@
           "object1_name": {"description": "First constrained object.", "type": "string"},
           "object2_name": {"description": "Second constrained object.", "type": "string"},
           "location": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Optional world-space location for the constraint empty."
           },
@@ -1140,7 +1238,7 @@
         },
         "required": ["frame_start", "frame_end"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "free_blender_bake": {
@@ -1159,15 +1257,17 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "script": {"description": "Python source code to execute.", "type": "string"},
+          "script": {"description": "Python source code to execute.", "minLength": 1, "type": "string"},
           "timeout": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"minimum": 0.1, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Maximum wall-clock seconds to wait for the script; ``None`` waits for it to finish."
           },
           "max_output_chars": {
             "default": 32000,
             "description": "Most characters of printed output to return, 1 to 100000 (default 32000). Longer output is cut to its first max_output_chars characters with output_truncated=true and output_total_chars set. Output that JSON escapes heavily (non-ASCII text, control characters) is cut earlier, at 300000 bytes of JSON, so the prefix always arrives. Write larger results to a file and return its path instead.",
+            "maximum": 100000,
+            "minimum": 1,
             "type": "integer"
           }
         },
@@ -1184,10 +1284,11 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "name": {"description": "Desired object name.", "type": "string"},
+          "name": {"description": "Desired object name.", "minLength": 1, "type": "string"},
           "vertices": {
             "description": "List of [x, y, z] vertex positions.",
             "items": {"items": {"type": "number"}, "type": "array"},
+            "minItems": 1,
             "type": "array"
           },
           "edges": {
@@ -1203,7 +1304,10 @@
             "type": "array"
           },
           "location": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Optional world-space origin [x, y, z]."
           },
@@ -1297,7 +1401,7 @@
         },
         "required": ["file_path"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "setup_simready_hierarchy": {

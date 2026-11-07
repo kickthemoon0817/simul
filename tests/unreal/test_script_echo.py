@@ -56,12 +56,13 @@ def test_a_long_script_with_a_bad_mode_is_echoed_by_size(tmp_path: Any) -> None:
     assert payload["error_type"] == "ValidationError"
     assert "Invalid mode 'Bogus'" in payload["error"]
     assert payload["details"] == {
+        "errors": [{"field": None, "message": payload["error"], "type": "value_error"}],
         "input": {
             "code": LONG_SCRIPT[:SCRIPT_ECHO_CHARS],
             "code_bytes": len(LONG_SCRIPT),
             "mode": "Bogus",
             "code_truncated": True,
-        }
+        },
     }
     # The rest of the source never reaches the caller.
     assert "value_599" not in outcome["text"]
@@ -85,7 +86,7 @@ def test_other_tools_still_echo_their_arguments(tmp_path: Any) -> None:
     outcome = _call(_server(tmp_path), "capture_unreal_viewport", arguments)
 
     assert outcome["payload"]["error_type"] == "ValidationError"
-    assert outcome["payload"]["details"] == {"input": arguments}
+    assert outcome["payload"]["details"]["input"] == arguments
 
 
 NON_ASCII_SCRIPT = "print('héllo wörld ✓')"  # 22 characters, 26 bytes in UTF-8
@@ -157,7 +158,7 @@ def test_the_envelope_echoes_through_the_hook(tmp_path: Any) -> None:
         )
         return json.loads(result.content[-1].text)
 
-    assert run(None)["details"] == {"input": {"name": "n" * 500, "count": "many"}}
-    assert run(lambda arguments: {"name_chars": len(arguments["name"])})["details"] == {
-        "input": {"name_chars": 500}
-    }
+    assert run(None)["details"]["input"] == {"name": "n" * 500, "count": "many"}
+    hooked = run(lambda arguments: {"name_chars": len(arguments["name"])})["details"]
+    assert hooked["input"] == {"name_chars": 500}
+    assert [error["field"] for error in hooked["errors"]] == ["count"]

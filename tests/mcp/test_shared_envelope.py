@@ -104,11 +104,19 @@ def _noted(exc: Exception, *notes: str) -> Exception:
     ("exc", "expected"),
     [
         pytest.param(
+            # A transport failure is named by its class in the shared
+            # taxonomy, not by whichever library raised it.
             ConnectionResetError(54, "Connection reset by peer"),
             {
                 "error": "[Errno 54] Connection reset by peer",
-                "error_type": "ConnectionResetError",
+                "error_type": "ConnectionError",
+                "details": {"cause": "ConnectionResetError"},
             },
+            id="transport-class",
+        ),
+        pytest.param(
+            KeyError("stage"),
+            {"error": "'stage'", "error_type": "KeyError"},
             id="class-name",
         ),
         pytest.param(
@@ -124,9 +132,21 @@ def _noted(exc: Exception, *notes: str) -> Exception:
             BridgeRemoteError(
                 "ValueError: Attached window is not in Object Mode", "ValueError", {}
             ),
+            # The class Blender raised is the cause; a ValueError is a
+            # ValidationError in the shared taxonomy, on every backend.
             {
                 "error": "ValueError: Attached window is not in Object Mode",
-                "error_type": "ValueError",
+                "error_type": "ValidationError",
+                "details": {
+                    "cause": "ValueError",
+                    "errors": [
+                        {
+                            "field": None,
+                            "message": "ValueError: Attached window is not in Object Mode",
+                            "type": "value_error",
+                        }
+                    ],
+                },
             },
             id="class-raised-inside-blender",
         ),
@@ -140,7 +160,10 @@ def _noted(exc: Exception, *notes: str) -> Exception:
         ),
         pytest.param(
             TimeoutError(),
-            {"error": "TimeoutError", "error_type": "TimeoutError"},
+            {
+                "error": "TimeoutError",
+                "error_type": "TimeoutError",
+            },
             id="no-message",
         ),
     ],
@@ -169,6 +192,7 @@ def test_isaac_and_backend_tools_report_an_exception_identically(
     )
 
     assert isaac == backend == {"success": False, "details": None, **expected}
+    assert isaac["error_type"] not in ("ConnectionResetError", "ClientConnectorError", "Exception")
     assert (
         _records(instance, "isaac_tool")
         == _records(instance, "backend_tool")
@@ -218,11 +242,17 @@ def test_isaac_payloads_are_normalised_like_backend_payloads(
     )
     succeeded = _payload(asyncio.run(instance._exec_isaac("isaac_tool", clean())))
 
-    assert failed == {"success": False, "reason": "nothing selected"}
+    # A failure always carries an error_type and a message, here the tool's reason.
+    assert failed == {
+        "success": False,
+        "reason": "nothing selected",
+        "error_type": "EngineError",
+        "error": "nothing selected",
+    }
     assert succeeded == {"prims": [], "success": True}
     # An explicit success=false used to be recorded as a success when it had no error key.
     assert _records(instance, "isaac_tool") == [
-        {"success": False, "error": None},
+        {"success": False, "error": "nothing selected"},
         {"success": True, "error": None},
     ]
 
@@ -293,7 +323,17 @@ def test_request_model_validates_inside_the_envelope(
     valid = run(name="Cube")
 
     assert invalid["error_type"] == "ValidationError"
-    assert invalid["details"] == {"input": {"name": ""}}
+    assert invalid["error"] == "name: String should have at least 1 character"
+    assert invalid["details"] == {
+        "errors": [
+            {
+                "field": "name",
+                "message": "String should have at least 1 character",
+                "type": "string_too_short",
+            }
+        ],
+        "input": {"name": ""},
+    }
     assert valid == {"success": True, "error": None, "value": "Cube"}
     assert adapter.sessions_opened == 1, "invalid input never opens a session"
     assert received == [(adapter.session, _Request(name="Cube"))]

@@ -4,6 +4,11 @@ Tool usage tracker for the Simul MCP server.
 Tracks per-tool call counts, success/failure rates, durations.
 Keeps both in-memory stats and a persistent JSONL log file
 so the CLI ``simul stats`` command can read historical data.
+
+The in-memory view is kept per MCP session too, because the agent-facing
+``get_tool_usage_stats`` shows a caller its own session's calls: the records
+carry parameters, file paths and agent labels of whoever made them. The JSONL
+log, which only the operator reads, keeps every record with its session.
 """
 
 from __future__ import annotations
@@ -12,15 +17,20 @@ import json
 import logging
 import os
 import time
-
-logger = logging.getLogger(__name__)
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
+logger = logging.getLogger(__name__)
+
 
 _DEFAULT_LOG_DIR = Path.home() / ".simul" / "logs"
+#: Recent records kept in memory (and the largest ``limit`` the stats tool takes).
+MAX_RECENT = 200
+#: Sessions whose per-session stats are kept; the least recently active is
+#: dropped first. The server also drops a session's stats when it ends.
+MAX_SESSIONS = 1024
 
 
 @dataclass
@@ -37,6 +47,16 @@ class ToolStats:
     def avg_duration_ms(self) -> float:
         return self.total_duration_ms / self.total_calls if self.total_calls else 0.0
 
+    def add(self, duration_ms: float, success: bool, now: float) -> None:
+        """Count one call."""
+        self.total_calls += 1
+        self.total_duration_ms += duration_ms
+        self.last_called = now
+        if success:
+            self.successes += 1
+        else:
+            self.failures += 1
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "total_calls": self.total_calls,
@@ -50,7 +70,13 @@ class ToolStats:
 
 @dataclass
 class CallRecord:
-    """Single tool call record."""
+    """Single tool call record.
+
+    ``session`` is the published label of the MCP session the call came in on
+    (never the transport's session id). It scopes what the stats tool shows
+    and is written to the JSONL log, but left out of ``to_dict``, the
+    agent-facing form, whose records are the caller's own anyway.
+    """
 
     tool_name: str
     timestamp: float
@@ -60,6 +86,7 @@ class CallRecord:
     error: Optional[str] = None
     agent_id: Optional[str] = None
     script_sha256: Optional[str] = None
+    session: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -78,6 +105,13 @@ class CallRecord:
             out["script_sha256"] = self.script_sha256
         return out
 
+    def to_log_dict(self) -> Dict[str, Any]:
+        """The JSONL row: ``to_dict`` plus the session."""
+        out = self.to_dict()
+        if self.session:
+            out["session"] = self.session
+        return out
+
 
 class ToolUsageTracker:
     """
@@ -89,15 +123,20 @@ class ToolUsageTracker:
 
     def __init__(
         self,
-        max_recent: int = 200,
+        max_recent: int = MAX_RECENT,
         log_dir: Optional[Path] = None,
     ) -> None:
         self._stats: Dict[str, ToolStats] = {}
+        self._session_stats: "OrderedDict[str, Dict[str, ToolStats]]" = OrderedDict()
         self._recent: Deque[CallRecord] = deque(maxlen=max_recent)
 
         self._log_dir = log_dir or _DEFAULT_LOG_DIR
         self._log_file = self._log_dir / "tool_usage.jsonl"
-        self._log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            self._log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:
+            # The in-memory stats still work; each append reports its failure.
+            logger.warning("Cannot create the usage log directory %s: %s", self._log_dir, exc)
 
     def record(
         self,
@@ -108,6 +147,7 @@ class ToolUsageTracker:
         error: Optional[str] = None,
         agent_id: Optional[str] = None,
         script_sha256: Optional[str] = None,
+        session: Optional[str] = None,
     ) -> None:
         """Record a tool call (in-memory + JSONL).
 
@@ -122,20 +162,21 @@ class ToolUsageTracker:
             script_sha256: Hex digest of the source for script-execution
                 tools, so identical scripts can be matched across sessions
                 without storing the code itself.
+            session: Published label of the MCP session the call came in on,
+                which scopes the agent-facing stats.
         """
         now = time.time()
 
-        if tool_name not in self._stats:
-            self._stats[tool_name] = ToolStats()
-
-        stats = self._stats[tool_name]
-        stats.total_calls += 1
-        stats.total_duration_ms += duration_ms
-        stats.last_called = now
-        if success:
-            stats.successes += 1
-        else:
-            stats.failures += 1
+        self._stats.setdefault(tool_name, ToolStats()).add(duration_ms, success, now)
+        if session:
+            per_tool = self._session_stats.get(session)
+            if per_tool is None:
+                per_tool = self._session_stats[session] = {}
+                while len(self._session_stats) > MAX_SESSIONS:
+                    self._session_stats.popitem(last=False)
+            else:
+                self._session_stats.move_to_end(session)
+            per_tool.setdefault(tool_name, ToolStats()).add(duration_ms, success, now)
 
         rec = CallRecord(
             tool_name=tool_name,
@@ -146,6 +187,7 @@ class ToolUsageTracker:
             error=error,
             agent_id=agent_id,
             script_sha256=script_sha256,
+            session=session,
         )
         self._recent.append(rec)
         self._append_log(rec)
@@ -158,32 +200,41 @@ class ToolUsageTracker:
                 "w",
                 encoding="utf-8",
             ) as f:
-                f.write(json.dumps(rec.to_dict()) + "\n")
+                f.write(json.dumps(rec.to_log_dict()) + "\n")
         except OSError as exc:
             logger.debug("Failed to write usage log: %s", exc)
+
+    def forget_session(self, session: str) -> None:
+        """Drop the per-session stats of an MCP session that has ended."""
+        self._session_stats.pop(session, None)
 
     # ------------------------------------------------------------------
     # In-memory queries (MCP tool)
     # ------------------------------------------------------------------
 
-    def get_stats(self, tool_name: Optional[str] = None) -> Dict[str, Any]:
+    def get_stats(
+        self, tool_name: Optional[str] = None, session: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Get in-memory usage statistics.
 
         Args:
             tool_name: If provided, return stats for that tool only.
+            session: If provided, count only that session's calls; otherwise
+                every call this server has served.
 
         Returns:
             Dict with per-tool stats sorted by total_calls descending.
         """
+        source = self._stats if session is None else self._session_stats.get(session, {})
         if tool_name:
-            stats = self._stats.get(tool_name)
+            stats = source.get(tool_name)
             if not stats:
                 return {"tool": tool_name, "stats": None}
             return {"tool": tool_name, "stats": stats.to_dict()}
 
         ranked = sorted(
-            self._stats.items(),
+            source.items(),
             key=lambda kv: kv[1].total_calls,
             reverse=True,
         )
@@ -197,17 +248,32 @@ class ToolUsageTracker:
         self,
         limit: int = 50,
         tool_name: Optional[str] = None,
+        session: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get recent call log from memory, newest first."""
+        """Get recent call log from memory, newest first.
+
+        Args:
+            limit: Most records to return; a value below 1 returns none.
+            tool_name: Only this tool's records.
+            session: Only this session's records.
+
+        Returns:
+            The records, newest first.
+        """
+        if limit < 1:
+            return []
         records = list(self._recent)
         if tool_name:
             records = [r for r in records if r.tool_name == tool_name]
+        if session is not None:
+            records = [r for r in records if r.session == session]
         records.reverse()
         return [r.to_dict() for r in records[:limit]]
 
     def reset(self) -> None:
         """Clear in-memory data and truncate the JSONL log."""
         self._stats.clear()
+        self._session_stats.clear()
         self._recent.clear()
         try:
             self._log_file.write_text("", encoding="utf-8")

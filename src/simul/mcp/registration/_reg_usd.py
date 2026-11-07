@@ -303,7 +303,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         name="update_prim_attributes",
         description="Update attributes on a USD prim.",
         annotations=server._tool_annotations(
-            read_only=False, idempotent=False, open_world=False, destructive=True
+            read_only=False, idempotent=True, open_world=False, destructive=True
         ),
         output_schema=None,
     )
@@ -367,7 +367,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         name="delete_prim",
         description="Delete a prim from a USD stage.",
         annotations=server._tool_annotations(
-            read_only=False, idempotent=False, open_world=False, destructive=True
+            read_only=False, idempotent=True, open_world=False, destructive=True
         ),
         output_schema=None,
     )

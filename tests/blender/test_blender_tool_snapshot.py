@@ -61,7 +61,8 @@ SESSION_AGENT = "<session agent id>"
 SNAPSHOT_AGENT = "snapshot-agent"
 INVALID_VALUE: Dict[str, Any] = {"bogus": 1}
 _PYDANTIC_URL = re.compile(r"https://errors\.pydantic\.dev/[0-9.]+/")
-_MODEL_CHECK = re.compile(r"^\d+ validation errors? for (\w+)\n")
+# A reply the response model refuses is an EngineError naming the model.
+_MODEL_CHECK = re.compile(r"^\w+ received a reply that does not match its response schema (\w+): ")
 
 # The listing configurations: (mode, surface, script execution allowed).
 SURFACES: Dict[str, Tuple[str, str, bool]] = {
@@ -565,7 +566,7 @@ def _outcome(payload: Dict[str, Any], called: bool) -> Dict[str, Any]:
     """The response, or just the model it was checked against when a call reached the session."""
     error = str(payload.get("error") or "")
     check = _MODEL_CHECK.match(error)
-    if called and payload.get("error_type") == "ValidationError" and check:
+    if called and payload.get("error_type") == "EngineError" and check:
         return {"checked_against": check.group(1)}
     return json.loads(
         _PYDANTIC_URL.sub("https://errors.pydantic.dev/<version>/", json.dumps(payload))

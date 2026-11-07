@@ -52,12 +52,15 @@ class UsdToolDriver:
 
         async def _run() -> Dict[str, Any]:
             async with Client(self._server.mcp) as client:
-                result = await client.call_tool(name, arguments)
+                result = await client.call_tool(name, arguments, raise_on_error=False)
                 # The payload must cross the wire once: as JSON text, with no
                 # structured_content duplicate riding along.
                 assert result.structured_content is None, name
                 assert len(result.content) == 1, name
-                return json.loads(result.content[0].text)
+                payload = json.loads(result.content[0].text)
+                # A failed call is sent with isError, a successful one without.
+                assert result.is_error is (payload.get("success") is False), name
+                return payload
 
         return asyncio.run(_run())
 

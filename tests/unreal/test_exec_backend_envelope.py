@@ -136,7 +136,7 @@ def test_absent_backend_reports_itself_by_name(server) -> None:
 
     result = _run(server, adapter)
 
-    assert result["error_type"] == "RuntimeError"
+    assert result["error_type"] == "ConnectionError"
     assert "Unreal runtime not available" in result["error"]
     assert adapter.sessions_opened == 0
 
@@ -144,7 +144,7 @@ def test_absent_backend_reports_itself_by_name(server) -> None:
 def test_missing_adapter_is_not_a_crash(server) -> None:
     result = _run(server, None)
 
-    assert result["error_type"] == "RuntimeError"
+    assert result["error_type"] == "ConnectionError"
 
 
 def test_error_payload_flips_success(server) -> None:

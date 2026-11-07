@@ -92,11 +92,15 @@
      "resolution_x": {
       "default": 1920,
       "description": "Width in pixels.",
+      "maximum": 16384,
+      "minimum": 1,
       "type": "integer"
      },
      "resolution_y": {
       "default": 1080,
       "description": "Height in pixels.",
+      "maximum": 16384,
+      "minimum": 1,
       "type": "integer"
      },
      "format": {
@@ -175,6 +179,17 @@
     "properties": {
      "agent_control": {
       "description": "inspect, select_actor, clear_selection, set_property, pilot_actor, eject_actor, set_game_view, move_cursor, or clear_cursor.",
+      "enum": [
+       "inspect",
+       "select_actor",
+       "clear_selection",
+       "set_property",
+       "pilot_actor",
+       "eject_actor",
+       "set_game_view",
+       "move_cursor",
+       "clear_cursor"
+      ],
       "type": "string"
      },
      "target": {
@@ -192,6 +207,11 @@
      "property_name": {
       "anyOf": [
        {
+        "enum": [
+         "location",
+         "rotation",
+         "scale"
+        ],
         "type": "string"
        },
        {
@@ -518,7 +538,7 @@
     "title": null,
     "readOnlyHint": true,
     "destructiveHint": null,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -695,11 +715,15 @@
      "fov": {
       "default": 90.0,
       "description": "Auto-fit only: field of view across the view, in degrees, at least 0.001 (the narrowest Unreal renders) and less than 180. The level viewport's; UE's default is 90.",
+      "exclusiveMaximum": 180.0,
+      "minimum": 0.001,
       "type": "number"
      },
      "aspect_ratio": {
       "default": 1.7777777777777777,
       "description": "Auto-fit only: the view's width over its height, from 1/16384 to 16384, such as a capture's resolution_x / resolution_y; 16:9 by default, as the default 1920x1080 capture.",
+      "maximum": 16384.0,
+      "minimum": 6.103515625e-05,
       "type": "number"
      }
     },
@@ -714,7 +738,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": null,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -815,7 +839,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -1028,7 +1052,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -1450,6 +1474,13 @@
     "properties": {
      "action": {
       "description": "One of start, stop, pause, resume, step.",
+      "enum": [
+       "start",
+       "stop",
+       "pause",
+       "resume",
+       "step"
+      ],
       "type": "string"
      }
     },
@@ -1854,7 +1885,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -2193,6 +2224,8 @@
      "max_results": {
       "default": 100,
       "description": "Maximum number of actors to return, 1 to 5000.",
+      "maximum": 5000,
+      "minimum": 1,
       "type": "integer"
      }
     },
@@ -2523,6 +2556,8 @@
      "level": {
       "default": 2,
       "description": "Subdivision level (1-4).",
+      "maximum": 4,
+      "minimum": 1,
       "type": "integer"
      },
      "scheme": {
@@ -2578,6 +2613,8 @@
      "target_percentage": {
       "anyOf": [
        {
+        "maximum": 1.0,
+        "minimum": 0.0,
         "type": "number"
        },
        {
@@ -2725,6 +2762,10 @@
      },
      "target_format": {
       "description": "'static_mesh' or 'dynamic_mesh'.",
+      "enum": [
+       "static_mesh",
+       "dynamic_mesh"
+      ],
       "type": "string"
      },
      "tessellation_options": {
@@ -2836,6 +2877,10 @@
      "method": {
       "default": "auto_uv",
       "description": "'xatlas' or 'patch_builder' (default xatlas).",
+      "enum": [
+       "xatlas",
+       "patch_builder"
+      ],
       "type": "string"
      },
      "uv_channel": {

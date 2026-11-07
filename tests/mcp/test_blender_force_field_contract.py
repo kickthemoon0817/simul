@@ -76,7 +76,7 @@ def _call(
 ) -> Dict[str, Any]:
     async def _run() -> Any:
         async with Client(instance.mcp) as client:
-            return await client.call_tool("add_blender_force_field", arguments)
+            return await client.call_tool("add_blender_force_field", arguments, raise_on_error=False)
 
     result = asyncio.run(_run())
     texts = [block for block in result.content if isinstance(block, TextContent)]
