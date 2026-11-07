@@ -936,7 +936,12 @@
     "open_blender_file": {
       "minimal": {
         "arguments": {"file_path": "/tmp/scene.blend"},
-        "session_calls": [{"method": "open_blend_file", "arguments": {"file_path": "'/tmp/scene.blend'"}}],
+        "session_calls": [
+          {
+            "method": "open_blend_file",
+            "arguments": {"file_path": "'/tmp/scene.blend'", "discard_unsaved": "False"}
+          }
+        ],
         "response": {"checked_against": "BlenderOpenFileResponse"},
         "usage": [{"tool": "open_blender_file", "success": false}]
       },
@@ -947,7 +952,7 @@
           "success": false,
           "error": "1 validation error for BlenderOpenFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"file_path": {"bogus": 1}}}
+          "details": {"input": {"file_path": {"bogus": 1}, "discard_unsaved": false}}
         }
       }
     },

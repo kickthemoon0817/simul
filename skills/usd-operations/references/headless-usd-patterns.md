@@ -66,7 +66,11 @@ If `has_normals: false`, the mesh will render with flat shading. This is common 
 ### World space vs local space
 
 - `world_space: true` — extents after applying all parent transforms. Use this for placement decisions ("will this fit in the shelf?").
-- `world_space: false` — extents in the prim's own coordinate frame. Use this for the asset's intrinsic size.
+- `world_space: false` — extents in the prim's own coordinate frame (its descendants' transforms apply, its own does not). Use this for the asset's intrinsic size.
+
+### Purposes
+
+Only geometry whose purpose is in `include_purposes` is bounded. The default, `["default", "render"]`, is what renderers and simulators see. Collision shapes are often authored with purpose `guide`, and preview stand-ins with `proxy`; pass `include_purposes: ["default", "render", "guide"]` to include them. An empty result is `has_geometry: false` with `bbox: null`, and `excluded_purposes_with_geometry` lists the purposes that would find geometry.
 
 ### Size calculation
 

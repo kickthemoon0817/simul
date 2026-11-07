@@ -814,11 +814,18 @@
     "open_blender_file": {
       "name": "open_blender_file",
       "title": "Open Blender File",
-      "description": "Open a .blend file, replacing the current scene.",
+      "description": "Open a .blend file, replacing the current scene. Refuses with UnsavedChangesError while the open file has unsaved changes (in attached mode every agent edit counts, as each is an undo step); save them first with save_blender_file, or pass discard_unsaved=true to discard them.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"file_path": {"description": "Absolute path to the .blend file.", "type": "string"}},
+        "properties": {
+          "file_path": {"description": "Absolute path to the .blend file.", "type": "string"},
+          "discard_unsaved": {
+            "default": false,
+            "description": "Open even though the current file has unsaved changes, which are then lost. To keep them, save first with save_blender_file.",
+            "type": "boolean"
+          }
+        },
         "required": ["file_path"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true},
@@ -1250,7 +1257,7 @@
     "execute_blender_script": {
       "name": "execute_blender_script",
       "title": "Execute Blender Script",
-      "description": "Execute arbitrary Python code inside Blender with access to bpy. Assign to __result__ to return a value. Printed output comes back in output, cut to its first max_output_chars characters (default 32000, at most 100000), or earlier when they exceed 300000 bytes of JSON (heavily non-ASCII output); a cut sets output_truncated=true and output_total_chars to the full length. Write larger results to a file and return its path instead.",
+      "description": "Execute arbitrary Python code inside Blender with access to bpy. Assign to __result__ to return a value. Printed output comes back in output, cut to its first max_output_chars characters (default 32000, at most 100000), or earlier when they exceed 300000 bytes of JSON (heavily non-ASCII output); a cut sets output_truncated=true and output_total_chars to the full length. Write larger results to a file and return its path instead. Anything the script raises, including SystemExit from sys.exit(), is reported in error and never ends Blender. In attached mode each call is one undo step.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
