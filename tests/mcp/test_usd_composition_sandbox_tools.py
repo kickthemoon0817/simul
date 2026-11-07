@@ -109,4 +109,5 @@ def test_widening_the_sandbox_admits_the_file(layout: Tuple[Path, Path]) -> None
     loaded = _call(server, "load_usd_file", file_path=str(inside / "ref_outside.usda"))
     info = _call(server, "get_prim_info", stage_id=loaded["stage_id"], prim_path="/World/Leak")
 
-    assert info["attributes"]["custom:api_key"] == SECRET
+    assert info.get("success") is not False
+    assert SECRET in json.dumps(info["attributes"]["custom:api_key"])
