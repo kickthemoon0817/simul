@@ -152,6 +152,11 @@ OPTION_STRUCTS: Dict[str, Dict[str, Any]] = {
     "RevolveOptions": {},
     "DegenerateTriangleOptions": {"mode": "REPAIR_OR_DELETE", "min_triangle_area": 0.001,
                                   "min_edge_length": 0.0001},
+    "SetStaticMeshCollisionOptions": {"mark_as_customized": True},
+    "CreateNewStaticMeshAssetOptions": {"enable_collision": True, "enable_nanite": False,
+                                        "nanite_settings": SimpleNamespace(enabled=False)},
+    "CopyMeshToAssetOptions": {"apply_nanite_settings": False, "new_nanite_settings": None},
+    "MeshWriteLOD": {},
 }
 
 
@@ -258,6 +263,10 @@ class DynamicMeshComponent(Component):
         self.mesh = mesh
         self.refreshed = 0
         self.collision = SimpleCollision()
+        self.materials: List[Any] = [None]
+
+    def get_materials(self) -> List[Any]:
+        return list(self.materials)
 
     def get_dynamic_mesh(self) -> DynamicMesh:
         return self.mesh
@@ -278,6 +287,10 @@ class StaticMeshComponent(Component):
 
     def get_editor_property(self, name: str) -> Any:
         return getattr(self, name)
+
+    def set_static_mesh(self, mesh: Any) -> bool:
+        self.static_mesh = mesh
+        return True
 
 
 class Actor:
@@ -340,8 +353,10 @@ class DynamicMeshActor(Actor):
 class StaticMeshActor(Actor):
     cls_name = "StaticMeshActor"
 
-    def __init__(self, editor: "FakeEditor", name: str, world: World, static_mesh: Any) -> None:
+    def __init__(self, editor: "FakeEditor", name: str, world: World, static_mesh: Any = None) -> None:
         super().__init__(editor, name, world)
+        if isinstance(static_mesh, DynamicMesh):
+            static_mesh = None  # what the fake spawn passes every class
         self.static_mesh_component = StaticMeshComponent(self, static_mesh)
         self.root_component = self.static_mesh_component
         self.components = [self.static_mesh_component]
@@ -349,14 +364,35 @@ class StaticMeshActor(Actor):
 
 class StaticMesh:
     def __init__(self, path: str, **stats: Any) -> None:
-        self.path = path
+        self.path = path if "." in path else path + "." + path.rpartition("/")[2]
         self.stats = mesh_stats(**stats)
+        self.static_materials: List[Any] = [SimpleNamespace(material_interface=None)]
+        self.materials: Dict[int, Any] = {}
+        self.collision = SimpleCollision()
+        self.nanite_settings = SimpleNamespace(enabled=False)
+        self.modified = 0
 
     def get_path_name(self) -> str:
         return self.path
 
     def get_name(self) -> str:
         return self.path.rpartition("/")[2].partition(".")[0]
+
+    def get_num_triangles(self, lod: int) -> int:
+        return self.stats["tris"]
+
+    def get_num_vertices(self, lod: int) -> int:
+        return self.stats["verts"]
+
+    def set_material(self, index: int, material: Any) -> None:
+        self.materials[index] = material
+
+    def get_editor_property(self, name: str) -> Any:
+        return getattr(self, name)
+
+    def modify(self) -> bool:
+        self.modified += 1
+        return True
 
 
 class FakeEditor:
@@ -386,7 +422,14 @@ class FakeEditor:
         self.modified: List[str] = []
         self.objects: Dict[str, Any] = {}
         self.assets: Dict[str, Any] = {}
+        self.saved: List[str] = []
         self.spawned = 0
+
+    def add_asset(self, asset: "StaticMesh") -> "StaticMesh":
+        package = asset.path.partition(".")[0]
+        self.assets[package] = asset
+        self.assets[asset.path] = asset
+        return asset
 
     # -- level ---------------------------------------------------------------
 
@@ -564,6 +607,23 @@ class FakeEditor:
             mesh.stats = copy.deepcopy(asset.stats)
             return mesh, "SUCCESS"
 
+        def copy_to_static(mesh, asset, options, lod, use_section_materials):
+            asset.stats = copy.deepcopy(mesh.stats)
+            if getattr(options, "apply_nanite_settings", False):
+                asset.nanite_settings = options.new_nanite_settings
+            return mesh, "SUCCESS"
+
+        def new_static_mesh(mesh, path, options):
+            asset = editor.add_asset(StaticMesh(path, **copy.deepcopy(mesh.stats)))
+            if options.enable_nanite:
+                asset.nanite_settings = options.nanite_settings
+            editor.record("create_asset", asset.path)
+            return asset, "SUCCESS"
+
+        def set_static_collision(collision, asset, options, static_options):
+            asset.collision = collision
+            editor.record("set_static_collision", asset.path, collision.shapes, options.emit_transaction)
+
         def positions(mesh, skip_gaps):
             return mesh, [Vector(*p) for p in mesh.stats["sample"][0]], False
 
@@ -643,7 +703,13 @@ class FakeEditor:
                                    asset_class_path=SimpleNamespace(asset_name=kind))
 
         def load_asset(path: str) -> Any:
+            if editor.pie:
+                return None
             return editor.assets.get(path) or editor.assets.get(path.partition(".")[0])
+
+        def save_asset(path: str, only_if_dirty: bool) -> bool:
+            editor.saved.append(path)
+            return True
 
         subsystems = {
             "EditorActorSubsystem": EditorActorSubsystem(),
@@ -700,6 +766,8 @@ class FakeEditor:
                 set_simple_collision_of_dynamic_mesh_component=gs("set_simple_collision_of_dynamic_mesh_component",
                                                                   set_collision),
                 get_simple_collision_from_component=lambda component: component.collision,
+                get_simple_collision_from_static_mesh=lambda asset: asset.collision,
+                set_simple_collision_of_static_mesh=gs("set_simple_collision_of_static_mesh", set_static_collision),
                 get_simple_collision_shape_count=lambda collision: collision.shapes,
             ),
             "GeometryScript_MeshSelection": SimpleNamespace(
@@ -749,6 +817,15 @@ class FakeEditor:
             ),
             "GeometryScript_AssetUtils": SimpleNamespace(
                 copy_mesh_from_static_mesh=gs("copy_mesh_from_static_mesh", static_copy),
+                copy_mesh_to_static_mesh=gs("copy_mesh_to_static_mesh", copy_to_static),
+                get_section_material_list_from_static_mesh=lambda asset, lod: (
+                    ["Material_" + asset.get_name()], [0], ["Slot"], "SUCCESS"),
+            ),
+            "GeometryScript_NewAssetUtils": SimpleNamespace(
+                create_new_static_mesh_asset_from_mesh=gs("create_new_static_mesh_asset_from_mesh", new_static_mesh),
+            ),
+            "GeometryScript_SceneUtils": SimpleNamespace(
+                set_component_material_list=lambda component, materials: setattr(component, "materials", materials),
             ),
         }
         if not self.geometry_script:
@@ -780,7 +857,15 @@ class FakeEditor:
             GeometryScriptRepairMeshMode=Enum("DELETE_ONLY", "REPAIR_OR_DELETE"),
             MathLibrary=SimpleNamespace(make_rot_from_z=lambda vector: Rotator()),
             SystemLibrary=SimpleNamespace(is_valid=is_valid),
-            EditorAssetLibrary=SimpleNamespace(find_asset_data=find_asset_data, load_asset=load_asset),
+            EditorAssetLibrary=SimpleNamespace(
+                find_asset_data=find_asset_data, load_asset=load_asset, save_asset=save_asset,
+                does_asset_exist=lambda path: path in editor.assets,
+            ),
+            Paths=SimpleNamespace(project_content_dir=lambda: "../../Project/Content/",
+                                  convert_relative_path_to_full=lambda path: "/Projects/Mesh/Content/"),
+            StaticMesh=StaticMesh,
+            GeometryScriptSimpleCollision=SimpleCollision,
+            GeometryScriptOutcomePins=Enum("SUCCESS", "FAILURE"),
             find_object=lambda outer, path: editor.objects.get(path),
             get_editor_subsystem=lambda name: subsystems[name],
             **{name: name for name in subsystems},
@@ -823,9 +908,9 @@ def level_editor() -> FakeEditor:
     editor.dynamic_actor("Body")
     editor.dynamic_actor("Ball", tris=1920, verts=962, quad_groups=False, uv_islands=1)
     editor.dynamic_actor("Big", tris=318_400, verts=159_202, quad_groups=False)
-    asset = StaticMesh("/Game/Meshes/SM_Crate.SM_Crate", tris=12, verts=24)
-    editor.assets["/Game/Meshes/SM_Crate"] = asset
-    editor.assets["/Game/Meshes/SM_Crate.SM_Crate"] = asset
-    editor.add(StaticMeshActor(editor, "Crate", editor.world, asset))
+    asset = editor.add_asset(StaticMesh("/Game/Meshes/SM_Crate.SM_Crate", tris=12, verts=24))
+    editor.add_asset(StaticMesh("/Engine/BasicShapes/Cube.Cube", tris=12, verts=24))
+    crate = editor.add(StaticMeshActor(editor, "Crate", editor.world, asset))
+    crate.transform = transform((0, 500, 0), yaw=45, scale=(2, 1, 1))
     editor.add(Actor(editor, "Light", editor.world))
     return editor

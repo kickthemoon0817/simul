@@ -43,6 +43,16 @@ What every script does the same way:
   booleans combine both actors' meshes at their world transforms, a plane cut
   converts a world plane into the mesh's local space, and the actors a tool
   creates from a source mesh take the source's whole transform.
+- The tools that only read a mesh or make a new one from it (validation, hull,
+  decomposition) also take a StaticMeshActor or a StaticMesh asset: its first
+  LOD is copied into a transient DynamicMesh (``read_source``). The tools that
+  edit a mesh in place refuse those, naming ``convert_unreal_mesh_format``,
+  which turns a StaticMesh into a DynamicMeshActor and a DynamicMeshActor
+  into a StaticMesh asset.
+- Assets are written only under ``/Game``: a StaticMesh made, overwritten or
+  given collision anywhere else (``/Engine``, a plugin's content) is refused
+  as ``SandboxError``, and a save writes exactly that asset's package, never
+  every dirty one.
 - Changes are refused while Play In Editor runs (``PIEActive``): Unreal spawns
   no editor actors then, and an edit of the editor world would not reach the
   running game. ``validate_unreal_mesh`` only reads and keeps working.
@@ -54,7 +64,7 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from ._unreal_errors import ENGINE_ERROR, NOT_FOUND_ERROR, VALIDATION_ERROR
+from ._unreal_errors import ENGINE_ERROR, NOT_FOUND_ERROR, SANDBOX_ERROR, VALIDATION_ERROR
 from ._unreal_scripts import ACTOR_HELPERS, PIE_ACTIVE
 
 #: ``error_type`` of a call this editor cannot serve as asked: the
@@ -66,7 +76,7 @@ UNSUPPORTED_OPERATION = "UnsupportedOperation"
 INVALID_STATE = "InvalidState"
 
 #: The error types a mesh script reports for a request it refused as asked.
-MESH_REFUSALS = (VALIDATION_ERROR, NOT_FOUND_ERROR, UNSUPPORTED_OPERATION, PIE_ACTIVE)
+MESH_REFUSALS = (VALIDATION_ERROR, NOT_FOUND_ERROR, UNSUPPORTED_OPERATION, PIE_ACTIVE, SANDBOX_ERROR)
 
 #: The most triangles ``compute_unreal_mesh_uv`` unwraps with XAtlas. XAtlas
 #: crashed the editor (a segfault in xatlas::Generate, packing the charts) on
@@ -121,6 +131,17 @@ HULL_OUTPUTS = ("actor", "collision", "both")
 #: The formats ``convert_unreal_mesh_format`` takes.
 TARGET_FORMATS = ("dynamic_mesh", "static_mesh")
 
+#: The simple collision a StaticMesh made by ``convert_unreal_mesh_format``
+#: gets: ``auto`` copies the DynamicMeshComponent's simple collision when it
+#: has any and otherwise computes one convex hull, ``component`` copies it
+#: (none when it has none), ``convex_hull`` computes one, ``none`` leaves the
+#: asset without simple collision.
+STATIC_MESH_COLLISION = ("auto", "component", "convex_hull", "none")
+
+#: Where ``convert_unreal_mesh_format`` puts a StaticMesh without an
+#: ``asset_path``: ``/Game/Generated/SM_<actor label>``.
+DEFAULT_ASSET_FOLDER = "/Game/Generated"
+
 #: The checks ``validate_unreal_mesh`` runs, in report order.
 VALIDATION_CHECKS = ("closed", "manifold", "degenerate_triangles", "orientation", "compact", "normals", "uvs")
 
@@ -151,6 +172,13 @@ CONVERT_HINT = (
     "places an editable DynamicMeshActor copy in the level; the mesh tools edit that copy."
 )
 
+#: The next step after writing a StaticMesh without replace_actor.
+EXPORT_HINT = (
+    "The DynamicMeshActor is still in the level. Unreal's USD exporter writes DynamicMeshActors as empty "
+    "Xforms, without their mesh: to export or ship this mesh, place the asset as a StaticMeshActor (run "
+    "this again with replace_actor true, or spawn_unreal_actor with the asset)."
+)
+
 #: What a failed Catmull-Clark subdivision suggests.
 CATMULL_CLARK_HINT = (
     "Catmull-Clark subdivides the mesh's polygroups as polygons, so it needs polygroups that form "
@@ -168,6 +196,8 @@ _MESH_PIE_HINT = {MESH_PIE_HINT!r}
 _CATMULL_CLARK_HINT = {CATMULL_CLARK_HINT!r}
 _XATLAS_MAX_TRIANGLES = {XATLAS_MAX_TRIANGLES!r}
 _MAX_RESULT_TRIANGLES = {MAX_RESULT_TRIANGLES!r}
+_DEFAULT_ASSET_FOLDER = {DEFAULT_ASSET_FOLDER!r}
+_EXPORT_HINT = {EXPORT_HINT!r}
 _WARNINGS = []
 """ + """
 class MeshError(Exception):
@@ -237,6 +267,94 @@ def mesh_component(actor):
 def refuse_during_pie(action):
     if pie_active():
         raise MeshError(_PIE_ACTIVE, _PIE_ERROR.format(action=action), hint=_MESH_PIE_HINT)
+
+def static_component(actor):
+    root = actor.root_component
+    if isinstance(root, unreal.StaticMeshComponent):
+        return root
+    found = list(actor.get_components_by_class(unreal.StaticMeshComponent))
+    if len(found) == 1:
+        return found[0]
+    if found:
+        refuse("AMBIGUOUS_STATIC_MESH", actor.get_actor_label() + " has " + str(len(found)) + " StaticMeshComponents "
+               "and none is its root, so the mesh to read is ambiguous", actor_path=actor.get_path_name())
+    return None
+
+def load_static_mesh(path):
+    asset = unreal.EditorAssetLibrary.load_asset(path)
+    if asset is None or not isinstance(asset, unreal.StaticMesh):
+        if pie_active():
+            # The editor asset library loads nothing while PIE runs.
+            raise MeshError(_PIE_ACTIVE, _PIE_ERROR.format(action="load assets"), hint=_MESH_PIE_HINT)
+        raise MeshError("NotFoundError", "StaticMesh asset not found: " + path)
+    return asset
+
+def static_mesh_copy(asset):
+    mesh = unreal.DynamicMesh()
+    result = gs("copy_mesh_from_static_mesh", unreal.GeometryScript_AssetUtils.copy_mesh_from_static_mesh, asset, mesh,
+                unreal.GeometryScriptCopyMeshFromAssetOptions(), unreal.GeometryScriptMeshReadLOD())
+    if isinstance(result, tuple) and result[-1] != unreal.GeometryScriptOutcomePins.SUCCESS:
+        raise MeshError("EngineError", "GeometryScript could not read the StaticMesh " + asset.get_path_name()
+                        + "; nothing was changed", "GEOMETRY_SCRIPT_FAILED")
+    return mesh
+
+def read_source(path):
+    # A DynamicMeshActor's mesh, or a StaticMeshActor's or StaticMesh asset's first LOD as a
+    # transient DynamicMesh, with what the new-output tools need around it.
+    try:
+        actor = actor_at(path)
+    except SimulNotFound as missing:
+        kind = asset_class(path)
+        if kind == "StaticMesh":
+            asset = load_static_mesh(path)
+            return {"mesh": static_mesh_copy(asset), "actor": None, "component": None, "asset": asset,
+                    "transform": unreal.Transform(), "label": asset.get_name(), "kind": "static_mesh_asset"}
+        if kind is not None:
+            refuse("NOT_A_MESH", path + " is a " + kind + " asset; give a DynamicMeshActor, a StaticMeshActor or "
+                   "a StaticMesh asset")
+        raise MeshError("NotFoundError", str(missing))
+    root = actor.root_component
+    dynamic = [root] if isinstance(root, unreal.DynamicMeshComponent) else list(
+        actor.get_components_by_class(unreal.DynamicMeshComponent))
+    if not dynamic:
+        component = static_component(actor)
+        if component is not None:
+            asset = component.get_editor_property("static_mesh")
+            if asset is None:
+                refuse("NO_MESH", actor.get_actor_label() + "'s StaticMeshComponent has no StaticMesh",
+                       actor_path=actor.get_path_name())
+            return {"mesh": static_mesh_copy(asset), "actor": actor, "component": None, "asset": asset,
+                    "transform": actor.get_actor_transform(), "label": actor.get_actor_label(),
+                    "kind": "static_mesh_actor"}
+    component = mesh_component(actor)
+    return {"mesh": component.get_dynamic_mesh(), "actor": actor, "component": component, "asset": None,
+            "transform": actor.get_actor_transform(), "label": actor.get_actor_label(), "kind": "dynamic_mesh_actor"}
+
+def require_game_asset(asset, what):
+    path = asset.get_path_name()
+    if not path.startswith("/Game/"):
+        raise MeshError("SandboxError", "Refusing to " + what + " " + path + ": simul writes only assets under "
+                        "/Game, never engine or plugin content; nothing was changed", "OUTSIDE_GAME_CONTENT",
+                        asset_path=path)
+
+def save_asset(asset):
+    path = asset.get_path_name().partition(".")[0]
+    saved = bool(unreal.EditorAssetLibrary.save_asset(path, False))
+    if not saved:
+        raise MeshError("EngineError", "Unreal did not save " + path + "; the change is in the editor, unsaved",
+                        "SAVE_FAILED", asset_path=path)
+    relative = path[len("/Game/"):] + ".uasset"
+    return unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_content_dir()) + relative
+
+def static_collision_count(asset):
+    collision = unreal.GeometryScript_Collision.get_simple_collision_from_static_mesh(asset)
+    return unreal.GeometryScript_Collision.get_simple_collision_shape_count(collision)
+
+def set_static_collision(asset, collision):
+    options = unreal.GeometryScriptSetSimpleCollisionOptions()
+    options.emit_transaction = True
+    gs("set_simple_collision_of_static_mesh", unreal.GeometryScript_Collision.set_simple_collision_of_static_mesh,
+       collision, asset, options, unreal.GeometryScriptSetStaticMeshCollisionOptions())
 
 def gs(operation, function, *call_args, **call_kwargs):
     debug = unreal.GeometryScriptDebug()
@@ -479,40 +597,59 @@ def main():
 run(main, "edit meshes")
 """
 
-# Shared by the hull and the decomposition: put the shapes where `output` says.
+# Shared by the hull and the decomposition: put the shapes where `output` says. A
+# StaticMesh source's collision goes on its asset (every actor using it), which
+# must be under /Game; `save` then saves that asset.
 _PLACE_CONVEX = """
-def place_convex(source, component, collision, shapes, output, suffix, description):
+def check_collision_target(source, output):
+    if output in ("collision", "both") and source["asset"] is not None:
+        require_game_asset(source["asset"], "set the simple collision of")
+
+def place_convex(source, collision, shapes, output, suffix, description, save):
     def change(placed):
         actor = None
         targets = []
         if output in ("actor", "both"):
-            actor = place_mesh_actor(source.get_actor_label() + suffix, source.get_actor_transform(), shapes)
+            actor = place_mesh_actor(source["label"] + suffix, source["transform"], shapes)
             placed.append(actor)
             set_simple_collision(actor.dynamic_mesh_component, collision)
-            targets.append(actor)
+            targets.append(("actor", actor))
         if output in ("collision", "both"):
-            source.modify()
-            component.modify()
-            set_simple_collision(component, collision)
-            targets.append(source)
+            if source["component"] is not None:
+                source["actor"].modify()
+                source["component"].modify()
+                set_simple_collision(source["component"], collision)
+                targets.append(("actor", source["actor"]))
+            else:
+                source["asset"].modify()
+                set_static_collision(source["asset"], collision)
+                targets.append(("asset", source["asset"]))
         return actor, targets
     actor, targets = in_transaction(description, change)
-    return actor, [{"actor_path": target.get_path_name(),
-                    "collision_shape_count": collision_shapes(mesh_component(target))} for target in targets]
+    collided = []
+    for kind, target in targets:
+        if kind == "actor":
+            collided.append({"actor_path": target.get_path_name(), "asset_path": None,
+                             "collision_shape_count": collision_shapes(mesh_component(target)), "saved_file": None})
+        else:
+            collided.append({"actor_path": None, "asset_path": target.get_path_name(),
+                             "collision_shape_count": static_collision_count(target),
+                             "saved_file": save_asset(target) if save else None})
+    return actor, collided
 """
 
-# Expects args: mesh, max_faces, output.
+# Expects args: mesh, max_faces, output, save.
 CONVEX_HULL = _PLACE_CONVEX + """
 def main():
-    source = mesh_actor(args["mesh"])
-    component = mesh_component(source)
-    mesh = component.get_dynamic_mesh()
+    source = read_source(args["mesh"])
+    check_collision_target(source, args["output"])
+    mesh = source["mesh"]
     collision, hull, count = convex_collision(mesh, 1, args["max_faces"])
     source_volume = closed_volume(mesh)
     hull_volume = volume_of(hull)
-    actor, collided = place_convex(source, component, collision, hull, args["output"], "_Hull",
-                                   "simul: convex hull of " + source.get_actor_label())
-    return {"mesh_path": source.get_path_name(), "output": args["output"],
+    actor, collided = place_convex(source, collision, hull, args["output"], "_Hull",
+                                   "simul: convex hull of " + source["label"], args["save"])
+    return {"mesh_path": args["mesh"], "source_kind": source["kind"], "output": args["output"],
             "hull_actor_path": actor.get_path_name() if actor is not None else None,
             "hull_vertex_count": vertex_count(hull), "hull_triangle_count": triangle_count(hull),
             "max_faces": args["max_faces"], "source_triangle_count": triangle_count(mesh),
@@ -523,7 +660,7 @@ run(main, "spawn actors" if args["output"] != "collision" else "edit meshes")
 """
 
 # Expects args: mesh, max_hulls, max_vertices_per_hull, error_tolerance,
-# min_part_thickness, output.
+# min_part_thickness, output, save.
 CONVEX_DECOMPOSITION = _PLACE_CONVEX + """
 def hull_info(index, part):
     low, high = bounds_of(part)
@@ -531,9 +668,9 @@ def hull_info(index, part):
             "volume": volume_of(part), "bounds_min": low, "bounds_max": high}
 
 def main():
-    source = mesh_actor(args["mesh"])
-    component = mesh_component(source)
-    mesh = component.get_dynamic_mesh()
+    source = read_source(args["mesh"])
+    check_collision_target(source, args["output"])
+    mesh = source["mesh"]
     # A closed convex hull of V vertices has 2V - 4 triangles.
     faces = 2 * args["max_vertices_per_hull"] - 4
     collision, shapes, count = convex_collision(mesh, args["max_hulls"], faces, args["error_tolerance"],
@@ -543,9 +680,9 @@ def main():
     hulls = [hull_info(index, part) for index, part in enumerate(parts)]
     source_volume = closed_volume(mesh)
     total_volume = sum(hull["volume"] for hull in hulls)
-    actor, collided = place_convex(source, component, collision, shapes, args["output"], "_Decomp",
-                                   "simul: convex decomposition of " + source.get_actor_label())
-    return {"mesh_path": source.get_path_name(), "output": args["output"],
+    actor, collided = place_convex(source, collision, shapes, args["output"], "_Decomp",
+                                   "simul: convex decomposition of " + source["label"], args["save"])
+    return {"mesh_path": args["mesh"], "source_kind": source["kind"], "output": args["output"],
             "decomp_actor_path": actor.get_path_name() if actor is not None else None,
             "hull_count": len(hulls), "hulls": hulls, "max_hulls": args["max_hulls"],
             "max_vertices_per_hull": args["max_vertices_per_hull"],
@@ -840,12 +977,13 @@ def run_check(name, mesh):
 
 def main():
     queries = unreal.GeometryScript_MeshQueries
-    actor = mesh_actor(args["mesh"])
-    mesh = mesh_component(actor).get_dynamic_mesh()
+    source = read_source(args["mesh"])
+    mesh = source["mesh"]
     checks = {name: run_check(name, mesh) for name in args["checks"]}
     low, high = bounds_of(mesh)
     area, volume = queries.get_mesh_volume_area(mesh)
-    return {"mesh_path": actor.get_path_name(), "is_valid": all(c["passed"] for c in checks.values()),
+    return {"mesh_path": args["mesh"], "source_kind": source["kind"],
+            "is_valid": all(c["passed"] for c in checks.values()),
             "checks": checks, "issues": [name + ": " + c["detail"] for name, c in checks.items() if not c["passed"]],
             "triangle_count": triangle_count(mesh), "vertex_count": vertex_count(mesh),
             "connected_components": first(queries.get_num_connected_components(mesh)),
@@ -855,40 +993,154 @@ def main():
 run(main)
 """
 
-# Expects args: mesh, target_format.
+# Expects args: mesh, target_format, location (dynamic_mesh from an asset),
+# asset_path, overwrite, save, replace_actor, collision, nanite.
 CONVERT = """
+def material_list(asset):
+    result = unreal.GeometryScript_AssetUtils.get_section_material_list_from_static_mesh(
+        asset, unreal.GeometryScriptMeshReadLOD())
+    return list(result[0])
+
 def to_dynamic_mesh():
     path = args["mesh"]
-    kind = asset_class(path)
-    if kind != "StaticMesh":
-        try:
-            actor = actor_at(path)
-        except SimulNotFound:
-            actor = None
-        if actor is not None:
-            refuse("NOT_A_STATIC_MESH_ASSET", path + " is an actor; give the path of the StaticMesh asset it "
-                   "renders to place an editable DynamicMeshActor copy of it")
-        if kind is not None:
-            refuse("NOT_A_STATIC_MESH_ASSET", path + " is a " + kind + " asset, not a StaticMesh")
-        raise MeshError("NotFoundError", "StaticMesh asset not found: " + path)
-    asset = unreal.EditorAssetLibrary.load_asset(path)
-    mesh = unreal.DynamicMesh()
-    lod = unreal.GeometryScriptMeshReadLOD()
-    gs("copy_mesh_from_static_mesh", unreal.GeometryScript_AssetUtils.copy_mesh_from_static_mesh, asset, mesh,
-       unreal.GeometryScriptCopyMeshFromAssetOptions(), lod)
-    actor = spawn_mesh_actor(asset.get_name() + "_Dynamic", unreal.Transform(), mesh,
-                             "simul: convert " + asset.get_name() + " to a DynamicMeshActor")
-    return {"source_path": path, "source_format": "static_mesh", "result_path": actor.get_path_name(),
-            "target_format": "dynamic_mesh", "triangle_count": triangle_count(mesh),
-            "vertex_count": vertex_count(mesh)}
+    try:
+        actor = actor_at(path)
+    except SimulNotFound as missing:
+        actor = None
+        kind = asset_class(path)
+        if kind is None:
+            raise MeshError("NotFoundError", str(missing))
+        if kind != "StaticMesh":
+            refuse("NOT_A_STATIC_MESH", path + " is a " + kind + " asset, not a StaticMesh")
+    if actor is not None:
+        component = None if actor.get_components_by_class(unreal.DynamicMeshComponent) else static_component(actor)
+        if component is None:
+            refuse("NOT_A_STATIC_MESH", actor.get_actor_label() + " (" + actor.get_class().get_name() + ") renders no "
+                   "StaticMesh; give a StaticMeshActor or a StaticMesh asset")
+        asset = component.get_editor_property("static_mesh")
+        if asset is None:
+            refuse("NO_MESH", actor.get_actor_label() + "'s StaticMeshComponent has no StaticMesh")
+        transform, label, kind = actor.get_actor_transform(), actor.get_actor_label(), "static_mesh_actor"
+    else:
+        if args["replace_actor"]:
+            refuse("NOTHING_TO_REPLACE", "replace_actor needs a StaticMeshActor; " + path + " is an asset")
+        asset = load_static_mesh(path)
+        transform = unreal.Transform()
+        transform.translation = vector(args["location"])
+        label, kind = asset.get_name(), "static_mesh_asset"
+    mesh = static_mesh_copy(asset)
+    materials = material_list(asset)
+
+    def change(placed):
+        placed_actor = place_mesh_actor(label + ("" if args["replace_actor"] else "_Dynamic"), transform, mesh)
+        placed.append(placed_actor)
+        unreal.GeometryScript_SceneUtils.set_component_material_list(placed_actor.dynamic_mesh_component, materials)
+        if args["replace_actor"]:
+            unreal.get_editor_subsystem(unreal.EditorActorSubsystem).destroy_actor(actor)
+        return placed_actor
+
+    placed_actor = in_transaction("simul: convert " + label + " to a DynamicMeshActor", change)
+    return {"source_path": path, "source_format": kind, "result_path": placed_actor.get_path_name(),
+            "target_format": "dynamic_mesh", "placed_actor_path": placed_actor.get_path_name(),
+            "removed_actor_path": path if args["replace_actor"] else None, "asset": None, "hint": None,
+            "triangle_count": triangle_count(mesh), "vertex_count": vertex_count(mesh)}
+
+def nanite_settings(settings):
+    settings.enabled = True
+    return settings
+
+def asset_collision(component, mesh):
+    choice = args["collision"]
+    if choice == "auto":
+        choice = "component" if collision_shapes(component) > 0 else "convex_hull"
+    if choice == "component":
+        return choice, unreal.GeometryScript_Collision.get_simple_collision_from_component(component)
+    if choice == "convex_hull":
+        return choice, convex_collision(mesh, 1, 250)[0]
+    return choice, unreal.GeometryScriptSimpleCollision()
+
+def to_static_mesh():
+    actor = mesh_actor(args["mesh"])
+    component = mesh_component(actor)
+    mesh = component.get_dynamic_mesh()
+    if triangle_count(mesh) == 0:
+        refuse("EMPTY_MESH", actor.get_actor_label() + " has no triangles to make a StaticMesh of")
+    name = "".join(c if c.isalnum() or c == "_" else "_" for c in actor.get_actor_label()).strip("_") or "Mesh"
+    path = args["asset_path"] or (_DEFAULT_ASSET_FOLDER + "/SM_" + name)
+    library = unreal.EditorAssetLibrary
+    overwritten = bool(library.does_asset_exist(path))
+    if overwritten:
+        if asset_class(path) != "StaticMesh":
+            refuse("ASSET_PATH_TAKEN", path + " is a " + str(asset_class(path)) + " asset, not a StaticMesh; give "
+                   "another asset_path", asset_path=path)
+        if not args["overwrite"]:
+            refuse("ASSET_EXISTS", "A StaticMesh already exists at " + path + "; pass overwrite true to replace its "
+                   "mesh (its references are kept) or give another asset_path", asset_path=path)
+    collision_kind, collision = asset_collision(component, mesh)
+    if overwritten:
+        asset = load_static_mesh(path)
+        require_game_asset(asset, "overwrite")
+        options = unreal.GeometryScriptCopyMeshToAssetOptions()
+        if args["nanite"]:
+            options.apply_nanite_settings = True
+            options.new_nanite_settings = nanite_settings(asset.get_editor_property("nanite_settings"))
+        result = gs("copy_mesh_to_static_mesh", unreal.GeometryScript_AssetUtils.copy_mesh_to_static_mesh, mesh, asset,
+                    options, unreal.GeometryScriptMeshWriteLOD(), True)
+        if isinstance(result, tuple) and result[-1] != unreal.GeometryScriptOutcomePins.SUCCESS:
+            raise MeshError("EngineError", "GeometryScript could not write the mesh into " + path,
+                            "GEOMETRY_SCRIPT_FAILED")
+    else:
+        options = unreal.GeometryScriptCreateNewStaticMeshAssetOptions()
+        options.enable_collision = True
+        if args["nanite"]:
+            # Unreal copies nanite_settings onto the new asset, enabled flag included (its default is off).
+            options.enable_nanite = True
+            options.nanite_settings = nanite_settings(options.nanite_settings)
+        result = gs("create_new_static_mesh_asset_from_mesh",
+                    unreal.GeometryScript_NewAssetUtils.create_new_static_mesh_asset_from_mesh, mesh, path, options)
+        asset = result[0] if isinstance(result, tuple) else result
+        if asset is None or (isinstance(result, tuple) and result[-1] != unreal.GeometryScriptOutcomePins.SUCCESS):
+            raise MeshError("EngineError", "GeometryScript did not create a StaticMesh at " + path + " (see the "
+                            "editor log); nothing was changed", "GEOMETRY_SCRIPT_FAILED", asset_path=path)
+    for index, material in enumerate(component.get_materials()):
+        if material is not None and index < len(asset.static_materials):
+            asset.set_material(index, material)
+    set_static_collision(asset, collision)
+    saved_file = save_asset(asset) if args["save"] else None
+    placed = None
+    if args["replace_actor"]:
+        def change(placed_actors):
+            actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+            transform = actor.get_actor_transform()
+            replacement = actors.spawn_actor_from_class(unreal.StaticMeshActor, transform.translation,
+                                                        transform.rotation.rotator())
+            if replacement is None:
+                raise MeshError("EngineError", "Unreal did not spawn the StaticMeshActor; the asset " + path
+                                + " was made, the level was not changed")
+            placed_actors.append(replacement)
+            replacement.set_actor_transform(transform, False, False)
+            replacement.set_actor_label(actor.get_actor_label())
+            replacement.static_mesh_component.set_static_mesh(asset)
+            actors.destroy_actor(actor)
+            return replacement
+        placed = in_transaction("simul: replace " + actor.get_actor_label() + " with a StaticMeshActor", change)
+    return {"source_path": args["mesh"], "source_format": "dynamic_mesh_actor", "result_path": asset.get_path_name(),
+            "target_format": "static_mesh", "placed_actor_path": placed.get_path_name() if placed else None,
+            "removed_actor_path": args["mesh"] if placed else None,
+            "asset": {"asset_path": asset.get_path_name(), "overwritten": overwritten, "saved_file": saved_file,
+                      "collision": collision_kind, "collision_shape_count": static_collision_count(asset),
+                      "material_slots": len(asset.static_materials),
+                      "nanite": bool(asset.get_editor_property("nanite_settings").enabled),
+                      "triangle_count": asset.get_num_triangles(0), "vertex_count": asset.get_num_vertices(0)},
+            "hint": None if placed else _EXPORT_HINT,
+            "triangle_count": triangle_count(mesh), "vertex_count": vertex_count(mesh)}
 
 def main():
     if args["target_format"] == "dynamic_mesh":
         return to_dynamic_mesh()
-    raise MeshError("UnsupportedOperation", "Converting a DynamicMeshActor to a StaticMesh asset is not "
-                    "implemented yet; nothing was changed", "NOT_IMPLEMENTED")
+    return to_static_mesh()
 
-run(main, "spawn actors")
+run(main, "spawn actors" if args["target_format"] == "dynamic_mesh" else "save assets")
 """
 
 # Expects args: mesh, target_edge_length, target_triangle_count (at most one
@@ -1148,6 +1400,42 @@ def edge_selection(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[s
     return None, refusal("INVALID_SELECTION", f"edge_selection {text!r} is not {EDGE_SELECTION_SYNTAX}")
 
 
+_ASSET_SEGMENT = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def game_asset_path(text: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Check a StaticMesh destination: a package path under ``/Game``.
+
+    Args:
+        text: ``/Game/Folder/SM_Name``, optionally with its object name
+            (``/Game/Folder/SM_Name.SM_Name``).
+
+    Returns:
+        ``(package path, None)``, or ``(None, refusal)``: ``SandboxError``
+        (``OUTSIDE_GAME_CONTENT``) for a path outside ``/Game`` (``/Engine``,
+        a plugin's mount point), ``ValidationError`` (``INVALID_ASSET_PATH``)
+        for a name Unreal would rewrite or refuse.
+    """
+    package, _, name = text.strip().partition(".")
+    if not package.startswith("/Game/"):
+        return None, {
+            "success": False,
+            "error_type": SANDBOX_ERROR,
+            "error": f"asset_path {text!r} is outside /Game: simul writes only project content, never engine or "
+            "plugin content. Nothing was changed.",
+            "details": {"code": "OUTSIDE_GAME_CONTENT", "asset_path": text},
+        }
+    segments = package[len("/Game/"):].split("/")
+    if not segments or not all(_ASSET_SEGMENT.match(segment) for segment in segments) or (
+        name and name != segments[-1]
+    ):
+        return None, refusal(
+            "INVALID_ASSET_PATH",
+            f"asset_path {text!r} must be /Game/<folders>/<name> with letters, digits and underscores only",
+        )
+    return package, None
+
+
 # The attachment guard (``_unreal_attach_scripts`` verify) runs before the tool
 # script and raises RuntimeError when the editor no longer matches the
 # attachment; the script never starts.
@@ -1188,6 +1476,7 @@ __all__ = [
     "COMPUTE_UV",
     "CONVERT",
     "CONVEX_DECOMPOSITION",
+    "DEFAULT_ASSET_FOLDER",
     "CONVEX_HULL",
     "EDGE_SELECTION_SYNTAX",
     "EDIT_TOPOLOGY",
@@ -1207,6 +1496,7 @@ __all__ = [
     "PRIMITIVE_TYPES",
     "REMESH",
     "SIMPLIFY",
+    "STATIC_MESH_COLLISION",
     "SUBDIVIDE",
     "SUBDIVISION_SCHEMES",
     "TARGET_FORMATS",
@@ -1219,6 +1509,7 @@ __all__ = [
     "attachment_refusal",
     "edge_selection",
     "face_selection",
+    "game_asset_path",
     "invalid_choice",
     "mesh_script",
     "primitive_dimensions",

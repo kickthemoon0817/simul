@@ -188,8 +188,11 @@ def test_static_mesh_inputs_are_refused_with_the_way_in() -> None:
         try:
             actor = await client.simplify_mesh(cube)
             assert (actor["error_type"], actor["details"]["code"]) == ("ValidationError", "STATIC_MESH_ACTOR")
-            asset = await client.validate_mesh("/Engine/BasicShapes/Cube")
+            asset = await client.remesh_mesh("/Engine/BasicShapes/Cube")
             assert (asset["error_type"], asset["details"]["code"]) == ("ValidationError", "STATIC_MESH_ASSET")
+            # The tools that only read a mesh take StaticMesh sources.
+            read = await client.validate_mesh("/Engine/BasicShapes/Cube")
+            assert (read["source_kind"], read["triangle_count"]) == ("static_mesh_asset", 48), read  # 4 tris a face
             for refusal in (actor, asset):
                 assert "convert_unreal_mesh_format" in json.dumps(refusal)
         finally:
@@ -269,6 +272,67 @@ def test_mesh_operations_work_where_the_actors_are() -> None:
             assert raised["faces_affected"] == 2 and raised["result_volume"] == pytest.approx(1_250_000), raised
         finally:
             await client._execute_json_script(_DESTROY % made)
+            await client.close()
+
+    asyncio.run(run())
+
+
+_ASSET = """
+import unreal, json
+def _asset(path):
+    mesh = unreal.EditorAssetLibrary.load_asset(path)
+    if mesh is None:
+        return {"exists": False}
+    tools = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+    return {"exists": True, "triangles": mesh.get_num_triangles(0),
+            "convex": tools.get_convex_collision_count(mesh), "nanite": bool(mesh.get_editor_property(
+                "nanite_settings").enabled)}
+print(json.dumps(_asset(%r)))
+del _asset
+"""
+
+_DELETE_ASSETS = """
+import unreal, json
+unreal.EditorAssetLibrary.delete_directory(%r)
+print(json.dumps({"deleted": True}))
+"""
+
+
+def test_static_mesh_round_trip_and_collision() -> None:
+    """A DynamicMeshActor becomes a saved /Game StaticMesh; a hull becomes that asset's collision (B7)."""
+
+    async def run() -> None:
+        client = _session()
+        made: List[str] = []
+        folder = "/Game/SimulLiveMesh"
+        try:
+            block = await _generate(client, made, "box", dimensions={"width": 300.0, "depth": 100.0, "height": 50.0})
+            written = await client.convert_mesh_format(block, "static_mesh", asset_path=folder + "/SM_Block",
+                                                       nanite=True, collision="none")
+            assert written["asset"]["saved_file"] and os.path.isfile(written["asset"]["saved_file"]), written
+            assert "empty Xform" in written["hint"]
+            state = await client._execute_json_script(_ASSET % (folder + "/SM_Block"))
+            assert state == {"exists": True, "triangles": 12, "convex": 0, "nanite": True}, state
+            again = await client.convert_mesh_format(block, "static_mesh", asset_path=folder + "/SM_Block")
+            assert again["details"]["code"] == "ASSET_EXISTS", again
+            engine = await client.convert_mesh_format(block, "static_mesh", asset_path="/Engine/SM_Block")
+            assert engine["error_type"] == "SandboxError", engine
+
+            hull = await client.compute_convex_hull(folder + "/SM_Block", output="collision", save=True)
+            assert hull["source_kind"] == "static_mesh_asset" and hull["collision"][0]["collision_shape_count"] == 1
+            state = await client._execute_json_script(_ASSET % (folder + "/SM_Block"))
+            assert state["convex"] == 1, state
+
+            swapped = await client.convert_mesh_format(block, "static_mesh", asset_path=folder + "/SM_Block",
+                                                       overwrite=True, replace_actor=True)
+            assert swapped["removed_actor_path"] == block and swapped["placed_actor_path"], swapped
+            made.append(swapped["placed_actor_path"])
+            back = await client.convert_mesh_format(swapped["placed_actor_path"], "dynamic_mesh")
+            made.append(back["result_path"])
+            assert back["source_format"] == "static_mesh_actor" and back["triangle_count"] == 12, back
+        finally:
+            await client._execute_json_script(_DESTROY % made)
+            await client._execute_json_script(_DELETE_ASSETS % folder)
             await client.close()
 
     asyncio.run(run())

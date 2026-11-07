@@ -501,13 +501,39 @@ Behaviour worth knowing:
     (restart an editor that was already running). Without it every mesh tool
     returns `error_type: "UnsupportedOperation"` with `details.code:
     "GEOMETRY_SCRIPTING_DISABLED"` and a hint naming setup.
-  - They take the path of a DynamicMeshActor in the level open in the editor,
-    found without loading a map. A path that names nothing is `NotFoundError`.
-    A StaticMeshActor (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh
-    asset path (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose
-    `details.hint` names `convert_unreal_mesh_format`, which places an
-    editable DynamicMeshActor copy of a StaticMesh asset in the level; any
-    other actor is `"NO_DYNAMIC_MESH"`.
+  - They take the path of an actor in the level open in the editor, found
+    without loading a map, or of an asset. A path that names nothing is
+    `NotFoundError`. `validate_unreal_mesh`, `compute_unreal_convex_hull` and
+    `decompose_unreal_convex_hull` read a DynamicMeshActor, a StaticMeshActor
+    or a StaticMesh asset (its first LOD, copied into a transient
+    DynamicMesh; the reply's `source_kind` says which). The tools that edit a
+    mesh in place take a DynamicMeshActor only: a StaticMeshActor
+    (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh asset path
+    (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose `details.hint` names
+    `convert_unreal_mesh_format`; any other actor is `"NO_DYNAMIC_MESH"`.
+  - `convert_unreal_mesh_format` moves meshes between the two kinds.
+    `dynamic_mesh` places a DynamicMeshActor copy of a StaticMesh asset (at
+    `location`) or of a StaticMeshActor (at its transform), with its
+    materials; `replace_actor` removes the StaticMeshActor in the same
+    transaction. `static_mesh` writes a DynamicMeshActor's mesh into a
+    StaticMesh asset: `asset_path` (default `/Game/Generated/SM_<label>`) must
+    be under `/Game` (anything else, `/Engine` or a plugin's content, is
+    `SandboxError` `"OUTSIDE_GAME_CONTENT"`); an existing StaticMesh is
+    refused (`"ASSET_EXISTS"`) unless `overwrite`, which replaces its mesh and
+    keeps its references; the component's materials go to its slots; its
+    simple collision is the component's, a convex hull or none (`collision`,
+    `auto` by default); `nanite` enables Nanite; `save` (default true) saves
+    that asset's package and nothing else, and the reply names the `.uasset`
+    written. `replace_actor` swaps the DynamicMeshActor for a StaticMeshActor
+    at its transform, in one undoable transaction; creating the asset is not
+    undoable (Unreal does not transact asset creation). Unreal's USD exporter
+    writes a DynamicMeshActor as an empty Xform, without its mesh, so convert
+    with `replace_actor` before exporting a mesh made with these tools; the
+    reply's `hint` says so when the DynamicMeshActor was left in place.
+  - A hull or decomposition with `output` `collision` or `both` on a
+    StaticMesh source sets the StaticMesh asset's simple collision (every
+    actor using it shares it), only for an asset under `/Game`, in one
+    undoable transaction; `save` saves that asset.
   - Every GeometryScript call is checked after it returns. GeometryScript
     reports most failures that way and otherwise leaves the mesh as it was
     (Catmull-Clark on a mesh without quad polygroups returned with the

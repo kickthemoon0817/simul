@@ -1253,10 +1253,16 @@ class UnrealApplyMeshBooleanResponse(BaseModel):
 
 
 class UnrealMeshCollisionTarget(BaseModel):
-    """An actor a hull or decomposition was set on as simple collision."""
+    """An actor or StaticMesh asset a hull or decomposition was set on as simple collision."""
 
-    actor_path: str = Field(..., description="Actor whose DynamicMeshComponent got the simple collision")
+    actor_path: Optional[str] = Field(
+        ..., description="Actor whose DynamicMeshComponent got the simple collision; null for an asset"
+    )
+    asset_path: Optional[str] = Field(
+        ..., description="StaticMesh asset that got it (every actor using the asset shares it); null for an actor"
+    )
     collision_shape_count: int = Field(..., description="Simple collision shapes it has now")
+    saved_file: Optional[str] = Field(..., description="The asset's file, when save saved it")
 
 
 class UnrealComputeConvexHullResponse(BaseModel):
@@ -1264,7 +1270,10 @@ class UnrealComputeConvexHullResponse(BaseModel):
 
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
-    mesh_path: str = Field(..., description="Source mesh actor path")
+    mesh_path: str = Field(..., description="Source path as given")
+    source_kind: str = Field(
+        ..., description="What mesh_path named: dynamic_mesh_actor, static_mesh_actor or static_mesh_asset"
+    )
     output: str = Field(..., description="Where the hull went: actor, collision or both")
     hull_actor_path: Optional[str] = Field(
         ..., description="Created hull DynamicMeshActor (at the source's transform); null for output collision"
@@ -1302,7 +1311,10 @@ class UnrealDecomposeConvexHullResponse(BaseModel):
 
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
-    mesh_path: str = Field(..., description="Source mesh actor path")
+    mesh_path: str = Field(..., description="Source path as given")
+    source_kind: str = Field(
+        ..., description="What mesh_path named: dynamic_mesh_actor, static_mesh_actor or static_mesh_asset"
+    )
     output: str = Field(..., description="Where the pieces went: actor, collision or both")
     decomp_actor_path: Optional[str] = Field(
         ...,
@@ -1413,7 +1425,10 @@ class UnrealValidateMeshResponse(BaseModel):
 
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
-    mesh_path: str = Field(..., description="Validated mesh actor path")
+    mesh_path: str = Field(..., description="Validated path as given")
+    source_kind: str = Field(
+        ..., description="What mesh_path named: dynamic_mesh_actor, static_mesh_actor or static_mesh_asset"
+    )
     is_valid: bool = Field(..., description="Whether every check that ran passed")
     checks: Dict[str, UnrealMeshCheck] = Field(
         ...,
@@ -1433,17 +1448,42 @@ class UnrealValidateMeshResponse(BaseModel):
     warnings: List[str] = _mesh_warnings_field()
 
 
+class UnrealStaticMeshAssetInfo(BaseModel):
+    """The StaticMesh asset convert_unreal_mesh_format wrote."""
+
+    asset_path: str = Field(..., description="The asset's object path")
+    overwritten: bool = Field(..., description="Whether an existing StaticMesh's mesh was replaced")
+    saved_file: Optional[str] = Field(..., description="The .uasset written; null when save was false")
+    collision: str = Field(..., description="How its simple collision was made: component, convex_hull or none")
+    collision_shape_count: int = Field(..., description="Simple collision shapes the asset has")
+    material_slots: int = Field(..., description="Material slots of the asset")
+    nanite: bool = Field(..., description="Whether the asset has Nanite enabled, read back")
+    triangle_count: int = Field(..., description="Triangles of the asset's LOD 0")
+    vertex_count: int = Field(..., description="Vertices of the asset's LOD 0")
+
+
 class UnrealConvertMeshFormatResponse(BaseModel):
     """Response after mesh format conversion."""
 
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
-    source_path: str = Field(..., description="Source mesh path")
-    source_format: str = Field(..., description="Format of the source")
-    result_path: str = Field(..., description="Path of the converted mesh")
-    target_format: str = Field(..., description="Format of the result")
-    triangle_count: int = Field(..., description="Result triangle count")
-    vertex_count: int = Field(..., description="Result vertex count")
+    source_path: str = Field(..., description="Source path as given")
+    source_format: str = Field(
+        ..., description="static_mesh_asset, static_mesh_actor or dynamic_mesh_actor"
+    )
+    result_path: str = Field(..., description="The DynamicMeshActor placed, or the StaticMesh asset written")
+    target_format: str = Field(..., description="dynamic_mesh or static_mesh")
+    placed_actor_path: Optional[str] = Field(
+        ..., description="The actor placed in the level, if any (the replacement with replace_actor)"
+    )
+    removed_actor_path: Optional[str] = Field(..., description="The source actor replace_actor removed")
+    asset: Optional[UnrealStaticMeshAssetInfo] = Field(..., description="The asset written (static_mesh)")
+    hint: Optional[str] = Field(
+        ..., description="What to do next: a static_mesh conversion without replace_actor leaves the "
+        "DynamicMeshActor, which Unreal's USD exporter writes as an empty Xform"
+    )
+    triangle_count: int = Field(..., description="Triangle count of the mesh converted")
+    vertex_count: int = Field(..., description="Vertex count of the mesh converted")
     warnings: List[str] = _mesh_warnings_field()
 
 
@@ -1555,6 +1595,7 @@ __all__ = [
     "UnrealConvexHullPart",
     "UnrealMeshCheck",
     "UnrealMeshCollisionTarget",
+    "UnrealStaticMeshAssetInfo",
     "UnrealDecomposeConvexHullResponse",
     "UnrealEditMeshTopologyResponse",
     "UnrealSubdivideMeshResponse",
