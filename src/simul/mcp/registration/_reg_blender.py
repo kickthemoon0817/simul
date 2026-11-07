@@ -50,6 +50,7 @@ from pydantic import BaseModel, StrictInt
 from ...adapters.blender_runtime import BlenderRuntimeSession
 from ...tool_surfaces import THIN_BLENDER_TOOLS
 from ..schemas.blender import (
+    LISTING_JSON_BYTES_MAX,
     SCRIPT_OUTPUT_CHARS_DEFAULT,
     SCRIPT_OUTPUT_CHARS_MAX,
     SCRIPT_OUTPUT_JSON_BYTES_MAX,
@@ -144,6 +145,8 @@ from ..schemas.blender import (
     BlenderSetFrameResponse,
     BlenderSetLightParamsRequest,
     BlenderSetLightParamsResponse,
+    BlenderSetObjectModeRequest,
+    BlenderSetObjectModeResponse,
     BlenderSetParentRequest,
     BlenderSetParentResponse,
     BlenderSetRigidBodyWorldRequest,
@@ -680,7 +683,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="list_blender_scene_objects",
-        description="List objects from the active Blender scene.",
+        description=(
+            "List objects from the active Blender scene, a page at a time: count objects from "
+            "offset, total matching, and next_offset for the next page (null after the last). "
+            f"A page stops before its entries pass {LISTING_JSON_BYTES_MAX} bytes of JSON, so it "
+            "can hold fewer than max_items. Each entry names a collection holding the object."
+        ),
         hints=READ_ONLY,
         operation="list_scene_objects",
         request=BlenderSceneObjectsRequest,
@@ -695,6 +703,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "include_hidden": "Include hidden objects when true.",
             "max_items": "Maximum number of objects to return.",
         },
+        added_params=("offset",),
     ),
     # -- Core observation ----------------------------------------------------
     BlenderTool(
@@ -735,15 +744,22 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="search_blender_objects",
-        description="Search for objects in the Blender scene by name pattern or type.",
+        description=(
+            "Search for objects in the Blender scene by name pattern or type (in any case), a "
+            "page at a time as list_blender_scene_objects pages: count, total and next_offset."
+        ),
         hints=READ_ONLY,
         operation="search_objects",
         request=BlenderSearchObjectsRequest,
         response=BlenderSearchObjectsResponse,
+        added_params=("offset",),
     ),
     BlenderTool(
         name="summarize_blender_scene",
-        description="Get a high-level summary of the Blender scene.",
+        description=(
+            "Get a high-level summary of the Blender scene: object counts by type, its "
+            "top-level collections, active camera and frame range."
+        ),
         hints=READ_ONLY,
         operation="summarize_scene",
         response=BlenderSceneSummaryResponse,
@@ -772,7 +788,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="check_blender_object_bounds",
-        description="Check if a Blender object is within spatial bounds.",
+        description=(
+            "Check where a Blender object's world-space bounding box lies relative to an "
+            "axis-aligned box: relation 'inside' (within_bounds), 'intersecting' or 'outside'. "
+            "The bounding box turns and scales with the object; origin_within_bounds tests the "
+            "origin alone. bounds_min must not exceed bounds_max."
+        ),
         hints=READ_ONLY,
         operation="is_object_within_bounds",
         request=BlenderBoundsCheckRequest,
@@ -891,7 +912,11 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     # -- Scene manipulation --------------------------------------------------
     BlenderTool(
         name="create_blender_object",
-        description="Create a new object in the Blender scene.",
+        description=(
+            "Create a new object in the Blender scene's active collection, or in the scene's own "
+            "collection when the active one is excluded, hidden or disabled in viewports (warning "
+            "says so). It stays in Object Mode whatever Blender's Enter Edit Mode preference."
+        ),
         hints=ADDITIVE,
         operation="create_object",
         request=BlenderCreateObjectRequest,
@@ -904,11 +929,28 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="delete_blender_object",
-        description="Delete an object from the Blender scene.",
+        description=(
+            "Delete an object from the current Blender scene with Blender's own Delete, which "
+            "also resets a rigid body's cache. Another scene linking it keeps it "
+            "(remaining_scenes); use_global=true deletes it from every scene and the file."
+        ),
         hints=DESTRUCTIVE,
         operation="delete_object",
         request=BlenderDeleteObjectRequest,
         response=BlenderDeleteObjectResponse,
+        added_params=("use_global",),
+    ),
+    BlenderTool(
+        name="set_blender_object_mode",
+        description=(
+            "Switch an object (the active one by default) into a mode, as the 3D View's mode menu "
+            "does: OBJECT by default, the way back for a window left in Edit or Pose Mode, where "
+            "create, delete, import and the other mode-sensitive tools refuse to run."
+        ),
+        hints=IDEMPOTENT,
+        operation="set_object_mode",
+        request=BlenderSetObjectModeRequest,
+        response=BlenderSetObjectModeResponse,
     ),
     BlenderTool(
         name="set_blender_object_transform",
@@ -1096,7 +1138,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_file_info",
-        description="Get information about the current .blend file.",
+        description=(
+            "Get information about the current .blend file: its path, saved and dirty state, the "
+            "current scene's name and object_count, and file_object_count for the whole file."
+        ),
         hints=READ_ONLY,
         operation="get_file_info",
         response=BlenderFileInfoResponse,

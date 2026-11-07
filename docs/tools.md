@@ -71,11 +71,47 @@ No running application needed. File arguments must be inside the sandbox
   depth-first (path, type, depth, child count, API schemas), paged with
   `max_results`/`offset`. `include_properties` adds each prim's authored
   attributes and relationship targets, so a whole robot reads in one call.
+- **Meshes.** `get_mesh_info` is computed with numpy over whole arrays (a
+  million-vertex mesh in about 0.3 s). It reports normals from
+  `primvars:normals` or `normals` (`normals_source`), `uv_sets`, and the
+  materials `UsdShade.MaterialBindingAPI` resolves: the mesh's, then each
+  `materialBind` subset's (also on the subset entry), plus a
+  `physics_material` that carries `PhysicsMaterialAPI`. `surface_area`, `volume` and
+  `bbox` are in the mesh's own space; `volume` is null unless the mesh is
+  closed, `surface_area` null for invalid topology, and `bbox` null without
+  points. Face areas use Newell's method, exact for planar faces, concave
+  ones included. Faces listed in `holeIndices` add no area and leave their
+  edges open. `time_code` reads a deforming mesh, and `points_time_samples`
+  says whether it deforms. A mesh whose points or topology exist only as
+  time samples has nothing to measure at the default time: it comes back
+  `measured: false`, with null topology and geometry (not invalid), its
+  `sampled_time_range` and a `note`. Subset indices are summarised
+  (`index_count` plus the first 16).
+- **Summaries.** `summarize_scene` reports:
+  - `scene_size_meters` next to `scene_size`;
+  - `has_animation` from an authored time range or time samples spanning
+    more than one time (`time_sample_range`), with `duration_seconds` (time
+    codes divided by `timeCodesPerSecond`);
+  - `warnings` for layers whose authored `upAxis` or `metersPerUnit` differs
+    from the stage's (USD rescales and reorients nothing), one entry per
+    mismatch and value with `layer_count` and up to 5 example `layers`;
+    at most 10 groups, then a `MoreUnitMismatches` count;
+  - `materials`, `root_prims` and their counts;
+  - `(typeless)` as the type key of untyped prims.
+
+  Instanced meshes count once per instance and are measured once. Mesh
+  `total_surface_area` and `total_volume` sum each mesh in its own space,
+  before transforms. A deforming mesh with time-sampled points is measured
+  at its first sample and counted in `meshes_measured_at_first_sample`.
+  `layer_count` (here and in `load_usd_file`) counts the file's layer stack,
+  not the session layer, and `load_usd_file`'s `has_animation` follows the
+  same rule as the summary.
 - **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
   lists of rows, asset paths their authored string.
 - **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
   is a `NotFoundError`; a relative, malformed or property path is a
-  `ValidationError`.
+  `ValidationError` with `details.code` `InvalidPrimPath`, as the edit tools
+  report it.
 
 `validate_usd_file` opens the file with pxr, as `load_usd_file` does, and
 keeps no stage. `can_read` says whether pxr opened it (so whether
@@ -273,6 +309,42 @@ Notes:
   Kit work may still complete; check the state before retrying.
 - A tool whose script shared Kit's stdout with another callback returns its
   result with the other text under `foreign_output` and a note in `warnings`.
+- Pose and velocity readers (`get_isaac_prim_detail` transform, info,
+  bounding_box and rigid_body aspects, `find_isaac_prims_in_area`,
+  `get_isaac_camera_info`) read USD. Under GPU physics Isaac Sim's
+  SimulationManager stops PhysX writing to USD (`/physics/updateToUsd` and
+  `/physics/updateVelocitiesToUsd` false, `omni.physx.fabric` on). While the
+  simulation runs, those results then carry `stale_under_fabric: true`,
+  `usd_readback` and a warning: the values are from before play. Read the
+  simulated state with `execute_isaac_script` through a physics view (see
+  [isaac-sim.md](isaac-sim.md#reading-simulated-state)).
+- `step_isaac_simulation` advances N timeline frames. Each frame runs
+  `frame_dt / physics_dt` physics steps, reported under `physics`. The call's
+  budget grows with N up to 110 s, and a step that runs out stops, pauses
+  and says how far it got. The timeline stays paused, and with
+  `/physics/resetOnStop` on (Isaac Sim's default) the next stop or reset
+  restores simulated prims to their pre-play state. Edits made in between
+  (`set_isaac_prim_transform`, `set_isaac_prim_attribute`,
+  `create_isaac_object`) are reverted with them, so those tools add a
+  warning while paused.
+- `raycast_isaac_scene` normalizes the direction and returns both the
+  collision shape hit (`collision_path`) and its body (`rigid_body_path`).
+  PhysX holds colliders only once the simulation has started, so a miss on a
+  stopped timeline is `SimulationNotRunning`, not "no hit".
+- `focus_isaac_viewport` frames the prim the way Edit > Focus Prim does and
+  restores the selection. `focused` is true only when the camera moved or
+  the framing call said so.
+- `read_isaac_aovs` handles annotators that return `{data, info}`
+  (segmentation, bounding boxes, pointcloud): it reports the array's stats,
+  plus per-field ranges and counts for bounding boxes, and an `info`
+  summary such as `idToLabels`.
+- `get_isaac_logs` reads this instance's log (Kit's `/log/file`). When Kit
+  does not name it, the tool falls back to the newest Kit log and warns that
+  it may be another process's.
+- `set_isaac_carb_settings` refuses the transport namespaces (bridge,
+  python_server, 5.x VS Code). It refuses `/persistent/` keys, which Kit saves
+  for later sessions, unless `allow_persistent=true`. `get_isaac_carb_settings`
+  reads `auth_token` values back as `***`.
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or
@@ -691,7 +763,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Group | Tools |
 |---|---|
 | Scene and files | `get_blender_info`, `get_blender_file_info`, `summarize_blender_scene`, `list_blender_scene_objects`, `search_blender_objects`, `open_blender_file`, `save_blender_file`, `import_blender_file`, `export_blender_file` |
-| Objects | `create_blender_object`, `delete_blender_object`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
+| Objects | `create_blender_object`, `delete_blender_object`, `set_blender_object_mode`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
 | Materials and lights | `get_blender_material_info`, `assign_blender_material`, `uv_unwrap_blender_mesh`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`, `get_blender_rigid_body_world`, `set_blender_rigid_body_world` |
@@ -740,12 +812,51 @@ Behaviour worth knowing:
   child's values become relative to the parent and it moves. A parent that is
   the child itself or one of its descendants is refused (Blender ignores such
   a parent without an error).
+- `create_blender_object` puts the object in the active collection, as
+  Blender's Add menu does. When that collection, or one holding it, is
+  excluded from the view layer, hidden or disabled in viewports, the object
+  goes in the scene's own collection instead, and `warning` says so; the
+  user's active collection stays as it was. The new object is the one the add
+  operator created (an object hidden in the 3D View is not its
+  `context.active_object`), and a failed call removes it again. It stays in
+  Object Mode whatever Blender's "Enter Edit Mode" preference says, and
+  outside Object Mode it is refused before anything is added (embedded mode
+  too, where an add operator would otherwise add to the edited mesh).
+  `set_blender_object_mode` switches an object (the active one by default)
+  into a mode, `OBJECT` by default: the way back for a window left in Edit or
+  Pose Mode, where creating, deleting, importing and the other mode-sensitive
+  tools refuse to run.
+- `delete_blender_object` runs Blender's own Delete on the object alone, the
+  selection untouched: the object leaves the current scene, and stays in the
+  file while another scene links it (`remaining_scenes`, `removed_from_file`).
+  `use_global: true` deletes it from every scene (Delete Globally). The
+  operator also resets a deleted rigid body's cache: removing the object
+  directly left the cache, so after a frame jump another body took the
+  deleted one's cached positions.
+- `list_blender_scene_objects` and `search_blender_objects` return a page:
+  `count` objects from `offset`, `total` matching, and `next_offset` for the
+  next page (`null` after the last; `truncated` says whether more follow). A
+  page stops before its entries pass 30 000 bytes of JSON, so it can hold
+  fewer than `max_items`/`max_results`: the server's 40 KB result budget used
+  to cut a longer list below the count it reported. Each entry's
+  `collection` names a collection holding the object, the scene's own being
+  "Scene Collection". `object_type` matches in any case and must be one of
+  the running Blender's object types.
+- `check_blender_object_bounds` tests the object's world-space bounding box,
+  turned and scaled with the object, against the axis-aligned bounds:
+  `relation` is `inside` (`within_bounds`), `intersecting` (touching counts)
+  or `outside`, and `origin_within_bounds` tests the origin alone, which is
+  all the tool used to test. `bounds_min` must not exceed `bounds_max`.
+- `summarize_blender_scene`'s `collection_names` are the scene's top-level
+  collections. `get_blender_file_info`'s `object_count` counts the current
+  scene's objects, and `file_object_count` the file's.
 - Reads of world-space transforms (object info, distance, bounds, bounding
   box, parenting) evaluate the depsgraph first: in embedded (bpy module) mode
   Blender leaves a transform written by an earlier call out of `matrix_world`
-  until then. An add-on built before `rotation_quaternion` and
-  `keep_transform` still answers calls that leave them at their defaults, with
-  its own behaviour; the newer reply fields then come back `null`.
+  until then. An add-on built before `rotation_quaternion`, `keep_transform`,
+  `offset` and `use_global` still answers calls that leave them at their
+  defaults, with its own behaviour; the newer reply fields then come back
+  `null`.
 - `create_blender_mesh_from_data` checks everything before it creates
   anything: each vertex is exactly `[x, y, z]` finite numbers, each index is
   an integer within the vertex list, no face repeats a vertex or the vertex

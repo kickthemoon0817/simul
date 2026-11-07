@@ -21,6 +21,7 @@
       "capture_blender_viewport_sequence",
       "create_blender_object",
       "delete_blender_object",
+      "set_blender_object_mode",
       "set_blender_object_transform",
       "set_blender_object_parent",
       "clear_blender_object_parent",
@@ -94,6 +95,7 @@
       "capture_blender_viewport_sequence",
       "create_blender_object",
       "delete_blender_object",
+      "set_blender_object_mode",
       "set_blender_object_transform",
       "set_blender_object_parent",
       "clear_blender_object_parent",
@@ -167,6 +169,7 @@
       "capture_blender_viewport_sequence",
       "create_blender_object",
       "delete_blender_object",
+      "set_blender_object_mode",
       "set_blender_object_transform",
       "set_blender_object_parent",
       "clear_blender_object_parent",
@@ -298,7 +301,7 @@
     "list_blender_scene_objects": {
       "name": "list_blender_scene_objects",
       "title": "List Blender Scene Objects",
-      "description": "List objects from the active Blender scene.",
+      "description": "List objects from the active Blender scene, a page at a time: count objects from offset, total matching, and next_offset for the next page (null after the last). A page stops before its entries pass 30000 bytes of JSON, so it can hold fewer than max_items. Each entry names a collection holding the object.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -309,7 +312,12 @@
             "description": "Optional collection name filter."
           },
           "include_hidden": {"default": false, "description": "Include hidden objects when true.", "type": "boolean"},
-          "max_items": {"default": 200, "description": "Maximum number of objects to return.", "type": "integer"}
+          "max_items": {"default": 200, "description": "Maximum number of objects to return.", "type": "integer"},
+          "offset": {
+            "default": 0,
+            "description": "How many matching objects to skip, as next_offset gives it.",
+            "type": "integer"
+          }
         }
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
@@ -364,7 +372,7 @@
     "search_blender_objects": {
       "name": "search_blender_objects",
       "title": "Search Blender Objects",
-      "description": "Search for objects in the Blender scene by name pattern or type.",
+      "description": "Search for objects in the Blender scene by name pattern or type (in any case), a page at a time as list_blender_scene_objects pages: count, total and next_offset.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -377,9 +385,14 @@
           "object_type": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
-            "description": "Blender object type filter (MESH, LIGHT, etc.)."
+            "description": "Blender object type filter (MESH, LIGHT, etc.), in any case."
           },
-          "max_results": {"default": 50, "description": "Maximum number of results.", "type": "integer"}
+          "max_results": {"default": 50, "description": "Maximum number of results.", "type": "integer"},
+          "offset": {
+            "default": 0,
+            "description": "How many matching objects to skip, as next_offset gives it.",
+            "type": "integer"
+          }
         }
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
@@ -388,7 +401,7 @@
     "summarize_blender_scene": {
       "name": "summarize_blender_scene",
       "title": "Summarize Blender Scene",
-      "description": "Get a high-level summary of the Blender scene.",
+      "description": "Get a high-level summary of the Blender scene: object counts by type, its top-level collections, active camera and frame range.",
       "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
@@ -428,7 +441,7 @@
     "check_blender_object_bounds": {
       "name": "check_blender_object_bounds",
       "title": "Check Blender Object Bounds",
-      "description": "Check if a Blender object is within spatial bounds.",
+      "description": "Check where a Blender object's world-space bounding box lies relative to an axis-aligned box: relation 'inside' (within_bounds), 'intersecting' or 'outside'. The bounding box turns and scales with the object; origin_within_bounds tests the origin alone. bounds_min must not exceed bounds_max.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -612,7 +625,7 @@
     "create_blender_object": {
       "name": "create_blender_object",
       "title": "Create Blender Object",
-      "description": "Create a new object in the Blender scene.",
+      "description": "Create a new object in the Blender scene's active collection, or in the scene's own collection when the active one is excluded, hidden or disabled in viewports (warning says so). It stays in Object Mode whatever Blender's Enter Edit Mode preference.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -650,14 +663,44 @@
     "delete_blender_object": {
       "name": "delete_blender_object",
       "title": "Delete Blender Object",
-      "description": "Delete an object from the Blender scene.",
+      "description": "Delete an object from the current Blender scene with Blender's own Delete, which also resets a rigid body's cache. Another scene linking it keeps it (remaining_scenes); use_global=true deletes it from every scene and the file.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"object_name": {"description": "Name of the object to delete.", "type": "string"}},
+        "properties": {
+          "object_name": {"description": "Name of the object to delete.", "type": "string"},
+          "use_global": {
+            "default": false,
+            "description": "Delete it from every scene and the file, not only from the current scene.",
+            "type": "boolean"
+          }
+        },
         "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "set_blender_object_mode": {
+      "name": "set_blender_object_mode",
+      "title": "Set Blender Object Mode",
+      "description": "Switch an object (the active one by default) into a mode, as the 3D View's mode menu does: OBJECT by default, the way back for a window left in Edit or Pose Mode, where create, delete, import and the other mode-sensitive tools refuse to run.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "default": "OBJECT",
+            "description": "OBJECT (default), EDIT, POSE, SCULPT, VERTEX_PAINT, WEIGHT_PAINT, TEXTURE_PAINT or another mode Blender's object.mode_set takes, in any case.",
+            "type": "string"
+          },
+          "object_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "The object to switch; the active object by default."
+          }
+        }
+      },
+      "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_object_transform": {
@@ -1111,7 +1154,7 @@
     "get_blender_file_info": {
       "name": "get_blender_file_info",
       "title": "Get Blender File Info",
-      "description": "Get information about the current .blend file.",
+      "description": "Get information about the current .blend file: its path, saved and dirty state, the current scene's name and object_count, and file_object_count for the whole file.",
       "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}

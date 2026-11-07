@@ -1830,6 +1830,11 @@ def set_carb_settings(
     assignments: List[str] = typer.Argument(
         ..., help="Key=value pairs (e.g. /rtx/fog/enabled=true /rtx/fog/fogEndDist=200.0)"
     ),
+    allow_persistent: bool = typer.Option(
+        False,
+        "--allow-persistent",
+        help="Also write /persistent/ keys, which Kit saves to the user's configuration for later sessions.",
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
@@ -1853,10 +1858,14 @@ def set_carb_settings(
                 except ValueError:
                     pass
         parsed[key] = val
-    result = _run(_tools(host, port).set_carb_settings(settings=parsed))
+    result = _run(
+        _tools(host, port).set_carb_settings(settings=parsed, allow_persistent=allow_persistent)
+    )
     if is_json_mode():
         emit(result)
         return
+    if result.get("warning"):
+        console.print(f"[yellow]{result['warning']}[/yellow]")
     applied = result.get("applied", {})
     table = Table(title=f"Applied ({result.get('count', len(applied))} settings)")
     table.add_column("Key", style="cyan", no_wrap=True)
@@ -2059,7 +2068,12 @@ def runtime_info(
     sections = [
         ("App", "app", ["version", "python_version", "update_number"]),
         ("Timeline", "timeline", ["is_playing", "is_stopped", "current_time", "fps"]),
-        ("Physics Config", "physics_config", ["gpu_dynamics_enabled", "physics_dt", "solver_type"]),
+        ("Physics", "physics", ["cuda_device", "update_to_usd", "physx_fabric_enabled", "reset_on_stop"]),
+        (
+            "Physics Config",
+            "physics_config",
+            ["scene_path", "time_steps_per_second", "gpu_dynamics_enabled", "physics_dt", "solver_type"],
+        ),
         ("Renderer", "renderer", ["gpu_name", "raytracing_mode", "hgi_driver"]),
         ("Stage", "stage", ["url", "prim_count"]),
         ("Extensions", "extensions", ["total", "enabled"]),
