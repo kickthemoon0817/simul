@@ -4,6 +4,7 @@ import textwrap
 from typing import Any, Dict, List, Optional
 
 from ._shared import (
+    PERSISTENT_CARB_SETTING_PREFIX,
     PROTECTED_CARB_SETTING_PREFIXES,
     _pyval,
 )
@@ -170,7 +171,12 @@ class SystemMixin:
                     "error": "Extension not found: " + ext_id,
                 }}))
         """)
-        return await self._execute_json_script(script)
+        # A large extension (and its dependency chain) can take longer to
+        # start than the default budget; an interrupt then lands inside some
+        # extension's startup code.
+        return await self._execute_json_script(
+            script, timeout_seconds=self._heavy_script_timeout()
+        )
 
     # ------------------------------------------------------------------
     # Carb settings
@@ -182,7 +188,8 @@ class SystemMixin:
             "Read one or more Carbonite (carb) settings by key path. Settings control RTX "
             "renderer options, fog, exposure, tone mapping, and other runtime parameters. "
             "Key paths look like /rtx/fog/enabled, /rtx/post/tonemap/op, "
-            "/rtx/raytracing/showLights. Returns the current value for each requested key."
+            "/rtx/raytracing/showLights. Returns the current value for each requested key; "
+            "transport auth tokens (any auth_token key) read back as ***."
         ),
         read_only=True,
         idempotent=True,
@@ -204,6 +211,16 @@ class SystemMixin:
 
             settings = carb.settings.get_settings()
             keys = {_keys}
+
+            # Transport tokens stay out of tool results (and so out of agent
+            # transcripts), whether asked for directly or inside a subtree.
+            def _redact(name, value):
+                if name == "auth_token":
+                    return "***" if value else value
+                if isinstance(value, dict):
+                    return {{k: _redact(k, v) for k, v in value.items()}}
+                return value
+
             result = {{}}
             for key in keys:
                 val = settings.get(key)
@@ -212,7 +229,7 @@ class SystemMixin:
                         val = list(val)
                 except Exception:
                     val = str(val)
-                result[key] = val
+                result[key] = _redact(key.rstrip("/").rsplit("/", 1)[-1], val)
             print(json.dumps({{"settings": result}}))
         """)
         return await self._execute_json_script(script)
@@ -223,40 +240,63 @@ class SystemMixin:
             "Write one or more Carbonite (carb) settings by key path. Takes a dict of "
             'key-value pairs (e.g. {"/rtx/fog/enabled": true, "/rtx/fog/fogEndDist": '
             "200.0}). Returns the verified new values after applying. Changes take effect "
-            "immediately in the renderer. Keys under /exts/khemoo.simul/ and "
-            "/exts/isaacsim.code_editor.python_server/ configure the MCP transport and are "
-            "refused."
+            "immediately in the renderer. Keys under /exts/khemoo.simul/, "
+            "/exts/isaacsim.code_editor.python_server/ and /exts/isaacsim.code_editor.vscode/ "
+            "configure the MCP transport and are refused. Keys under /persistent/ are saved "
+            "to the user's Kit configuration and outlive this session, so they are refused "
+            "unless allow_persistent=true."
         ),
         read_only=False,
         destructive=True,
         idempotent=True,
     )
-    async def set_carb_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+    async def set_carb_settings(
+        self, settings: Dict[str, Any], allow_persistent: bool = False
+    ) -> Dict[str, Any]:
         """
         Write one or more Carbonite settings by key path.
 
         Args:
             settings: Dict mapping key paths to values
                       (e.g. {"/rtx/fog/enabled": true, "/rtx/fog/fogEndDist": 200.0}).
+            allow_persistent: Also write keys under /persistent/, which Kit
+                saves to the user's configuration (Isaac Sim's .kit files set
+                settings.persistent = true), so the change applies to every
+                later session too. Refused without it.
 
         Returns:
-            Dict with applied settings and their verified new values, or a
-            RefusedOperation error when any key configures the MCP transport.
+            Dict with applied settings and their verified new values (plus a
+            warning naming any persistent keys written), or a
+            RefusedOperation error when any key configures the MCP transport
+            or is persistent without allow_persistent.
         """
+        def _normalized(key: str) -> str:
+            return "/" + key.lstrip("/")
+
         protected_keys = sorted(
-            key
-            for key in settings
-            if ("/" + key.lstrip("/")).startswith(PROTECTED_CARB_SETTING_PREFIXES)
+            key for key in settings if _normalized(key).startswith(PROTECTED_CARB_SETTING_PREFIXES)
         )
         if protected_keys:
             return self._refusal(
                 "Refusing to write transport settings: "
                 + ", ".join(protected_keys)
                 + ". Keys under "
-                + " and ".join(PROTECTED_CARB_SETTING_PREFIXES)
+                + ", ".join(PROTECTED_CARB_SETTING_PREFIXES)
                 + " configure the socket simul is speaking through. No settings were applied.",
                 refused_keys=protected_keys,
                 protected_prefixes=list(PROTECTED_CARB_SETTING_PREFIXES),
+            )
+        persistent_keys = sorted(
+            key for key in settings if _normalized(key).startswith(PERSISTENT_CARB_SETTING_PREFIX)
+        )
+        if persistent_keys and not allow_persistent:
+            return self._refusal(
+                "Refusing to write persistent settings without allow_persistent=true: "
+                + ", ".join(persistent_keys)
+                + ". Keys under /persistent/ are saved to the user's Kit configuration and "
+                "apply to every later session. No settings were applied.",
+                refused_keys=persistent_keys,
+                override="allow_persistent",
             )
         _settings = _pyval(settings)
         script = textwrap.dedent(f"""\
@@ -277,5 +317,11 @@ class SystemMixin:
                 applied[key] = new_val
             print(json.dumps({{"applied": applied, "count": len(applied)}}))
         """)
-        return await self._execute_json_script(script)
-
+        result = await self._execute_json_script(script)
+        if persistent_keys and result.get("success"):
+            result["persistent_keys"] = persistent_keys
+            result["warning"] = (
+                "Wrote " + ", ".join(persistent_keys) + " under /persistent/: Kit saves these "
+                "to the user's configuration, so they also apply to later sessions."
+            )
+        return result

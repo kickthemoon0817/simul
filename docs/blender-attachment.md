@@ -16,7 +16,7 @@ unsaved work, or fall back to an embedded scene when the editor is unavailable.
 simul blender install-bridge
 ```
 
-This builds `~/.simul/blender/simul_blender_bridge.zip`. In the **existing
+This builds `$SIMUL_HOME/blender/simul_blender_bridge.zip` (`SIMUL_HOME` defaults to `~/.simul`; see [configuration.md](configuration.md#state-directory-simul_home)). In the **existing
 Blender window**, open Preferences → Add-ons → Install from Disk, select the
 ZIP, and enable **Simul Blender Bridge**. No restart or scene reload is
 needed. The bridge must be enabled inside the process to control its memory;
@@ -342,10 +342,10 @@ Disable the add-on in Blender to stop its listener.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BLENDER__MODE` | `embedded` | Choose local bpy or an attached editor |
-| `BLENDER__DISCOVERY_DIR` | `~/.simul/blender` | Directory searched by the CLI |
-| `BLENDER__ATTACHMENT_PATH` | `~/.simul/blender/attachment.json` | Selection used by this client/server |
+| `BLENDER__DISCOVERY_DIR` | `$SIMUL_HOME/blender` (`~/.simul/blender`) | Directory searched by the CLI |
+| `BLENDER__ATTACHMENT_PATH` | `$SIMUL_HOME/blender/attachment.json` | Selection used by this client/server |
 | `BLENDER__CONNECTION_TIMEOUT` | `30` | Maximum seconds to wait per operation |
-| `SIMUL_BLENDER_DISCOVERY_DIR` | `~/.simul/blender` | Override discovery location in Blender's environment |
+| `SIMUL_BLENDER_DISCOVERY_DIR` | `$SIMUL_HOME/blender` (`~/.simul/blender`) | Override discovery location in Blender's environment; Blender must otherwise see the server's `SIMUL_HOME` |
 
 Use distinct attachment paths for independent MCP servers controlling different
 windows. Set the same path on each server and the CLI used to select its target.
