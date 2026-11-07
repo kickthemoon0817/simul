@@ -336,7 +336,8 @@ class Editor:
             with redirect_stdout(out):
                 exec(code, {})
         except Exception as exc:
-            return {"ReturnValue": False, "CommandResult": repr(exc)}
+            # UE reports the traceback, whose last line is "<Type>: <message>".
+            return {"ReturnValue": False, "CommandResult": f"{type(exc).__name__}: {exc}"}
         return {
             "ReturnValue": True,
             "LogOutput": [
@@ -954,8 +955,8 @@ def test_focus_on_a_missing_actor_fails_before_the_camera_moves(
 
     result = asyncio.run(session.focus_on_actor(LEVEL + "Missing"))
 
-    assert result["success"] is False and result["error_type"] == "ScriptError"
-    assert "Actor not found: " + LEVEL + "Missing" in result["error"]
+    assert result["success"] is False and result["error_type"] == "NotFoundError"
+    assert result["error"].startswith("Actor not found: " + LEVEL + "Missing (")
     assert session.calls == [] and editor.selection_calls == []
 
 

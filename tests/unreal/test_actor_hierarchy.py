@@ -391,8 +391,12 @@ def _run(editor: Editor, monkeypatch: pytest.MonkeyPatch, method: str, *args: An
 
 
 def _not_found(result: Dict[str, Any], path: str) -> bool:
-    """The refusal ``actor_at`` raises for ``path``, as the session reports it."""
-    return result.get("success") is False and ACTOR_NOT_FOUND.format(path=path) in result.get("error", "")
+    """The refusal ``actor_at`` raises for ``path``, as the session reports it: NotFoundError."""
+    return (
+        result.get("success") is False
+        and result.get("error_type") == "NotFoundError"
+        and result.get("error", "").startswith(ACTOR_NOT_FOUND.format(path=path) + " (")
+    )
 
 
 # ---------------------------------------------------------------------------

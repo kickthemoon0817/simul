@@ -169,10 +169,52 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 
 Behaviour worth knowing:
 
+- A failed call names its cause with one `error_type` from the set the
+  backends share:
+  - `ConnectionError`: nothing answered at the Remote Control endpoint, or
+    the editor closed the connection without answering (it may have crashed).
+  - `TimeoutError`: no answer within `UNREAL__TIMEOUT`. A script or a change
+    may still be running in the editor, and Remote Control cannot cancel it,
+    so check the editor's state before retrying.
+  - `EngineError`: Remote Control answered with HTTP 5xx.
+  - `ValidationError`: Remote Control refused the request as made (HTTP 400),
+    for example a read-only, `EditConst` or protected property, or a value of
+    the wrong type.
+  - `NotFoundError`: the object, property, function or console variable
+    named does not exist, whether Remote Control (HTTP 404, or a 400 saying
+    so) or a tool's editor script reports it.
+  - `InstanceBusy`: the editor was saving or collecting garbage.
+  - `AuthenticationError`: Remote Control refused this client (HTTP 401).
+
+  `error` carries Remote Control's own message, and `details` carries the
+  `status`, the `route` and `remote_control_message`. The domain types
+  (`PIEActive`, `TransformNotApplied` and the like) are unchanged.
+- `batch_unreal_operations` (registered with script execution allowed) sends
+  each operation as `RequestId`, `URL`, `Verb`, `Body`, in that order, with a
+  unique `RequestId`. Operations without one are numbered. Remote Control
+  hands each `Body` to the last `RequestId` before it, so an operation
+  without one, a repeated one or one written after its `Body` would run with
+  another operation's body. A malformed batch is refused with
+  `ValidationError` before anything is sent: at most 100 operations, `/remote/`
+  routes only and no batch inside a batch, with `Verb` one of GET, PUT, POST,
+  PATCH or DELETE. Every batch carries a `Passphrase` header, a placeholder
+  when `UNREAL__PASSPHRASE` is unset. UE 5.7's batch route reads that header
+  unchecked and aborts the editor without it; Remote Control ignores the value
+  unless it enforces passphrases. A failed operation's result also has
+  `error` and `error_type`.
+- `set_unreal_render_settings` sets one existing numeric `r.*` or `sg.*`
+  console variable and reads it back: `applied` is true only when it holds the
+  value afterwards, with `value` and `previous_value` as Unreal formats them
+  (`true`/`false` for a bool). A name Unreal has no variable for fails with
+  `NotFoundError`, and nothing is run. A value Unreal did not take fails with
+  `RenderSettingNotApplied`. That covers a read-only variable, such as
+  `r.RayTracing`, which only startup configuration sets, and one Unreal limits
+  or rounds. Post-process settings live on PostProcessVolume actors, not in
+  console variables, and this tool does not change them.
 - The actor tools take an actor's full object path, as `list_unreal_actors`
   reports it, in the level open in the editor. A path that names no live actor
-  there fails with an `Actor not found: <path>` error saying why: nothing is at
-  that path, the actor was deleted (Unreal keeps a deleted actor in memory, empty,
+  there fails with `NotFoundError`, `Actor not found: <path>` and why: nothing
+  is at that path, the actor was deleted (Unreal keeps a deleted actor in memory, empty,
   until garbage collection), or it belongs to another map, loaded or not, or to
   the running game during PIE. The actor is looked up among the objects already
   loaded, so simul never loads a map that is not open: a lookup that loaded one

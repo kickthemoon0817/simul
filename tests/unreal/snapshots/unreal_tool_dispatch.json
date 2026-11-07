@@ -2852,12 +2852,7 @@
     {
      "method": "batch_operations",
      "arguments": {
-      "operations": [
-       {
-        "objectPath": "/Script/Engine.Default__KismetSystemLibrary",
-        "functionName": "GetEngineVersion"
-       }
-      ]
+      "operations": "[{\"objectPath\": \"/Script/Engine.Default__KismetSystemLibrary\", \"functionName\": \"GetEngineVersion\"}]"
      }
     }
    ],
@@ -4538,20 +4533,24 @@
      "params": null
     }
    ],
-   "session": [],
+   "session": [
+    {
+     "method": "batch_operations",
+     "arguments": {
+      "operations": "not json"
+     }
+    }
+   ],
    "result": {
     "is_error": false,
     "payload": {
-     "success": false,
-     "error": "Expecting value: line 1 column 1 (char 0)",
-     "error_type": "JSONDecodeError",
-     "details": null
+     "success": true,
+     "method": "batch_operations"
     }
    },
    "usage": [
     {
-     "success": false,
-     "error": "Expecting value: line 1 column 1 (char 0)"
+     "success": true
     }
    ]
   },

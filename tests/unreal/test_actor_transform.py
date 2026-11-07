@@ -146,7 +146,8 @@ def editor(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             with redirect_stdout(out):
                 exec(code, {})
         except Exception as exc:  # UE reports a raised script this way
-            return {"ReturnValue": False, "CommandResult": repr(exc)}
+            # UE reports the traceback, whose last line is "<Type>: <message>".
+            return {"ReturnValue": False, "CommandResult": f"{type(exc).__name__}: {exc}"}
         return {
             "ReturnValue": True,
             "LogOutput": [{"Type": "Info", "Output": line} for line in out.getvalue().splitlines()],
@@ -271,14 +272,15 @@ def test_a_root_less_actor_reads_back_identity_so_an_identity_request_matches(
     assert result["error"] == "Unreal did not apply: location"
 
 
-def test_a_missing_actor_is_a_script_error(editor: SimpleNamespace) -> None:
+def test_a_missing_actor_is_not_found(editor: SimpleNamespace) -> None:
     result = asyncio.run(
         editor.session.set_actor_transform("/Game/Map.Map:PersistentLevel.Gone", location=[0, 0, 0])
     )
 
     assert result["success"] is False
-    assert result["error_type"] == "ScriptError"
-    assert "Actor not found" in result["error"]
+    assert result["error_type"] == "NotFoundError"
+    assert result["error"].startswith("Actor not found: /Game/Map.Map:PersistentLevel.Gone (")
+    assert editor.transactions == []
 
 
 @pytest.mark.parametrize(
