@@ -1761,6 +1761,7 @@ class TestUnrealRuntimeSessionPhase8:
         result = asyncio.run(session.edit_mesh_topology(
             mesh_path="/Game/Maps/T.T:PersistentLevel.Body",
             operation="extrude_faces",
+            face_selection="normal:0,0,1",
             distance=20.0,
         ))
 

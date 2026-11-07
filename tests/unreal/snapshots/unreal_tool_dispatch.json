@@ -3229,7 +3229,7 @@
    "case": "every argument",
    "arguments": {
     "primitive_type": "box",
-    "dimensions": "{\"x\": 100}",
+    "dimensions": "{\"width\": 100}",
     "segments": 8,
     "location": "1,2,3",
     "actor_label": "Box"
@@ -3248,7 +3248,7 @@
      "arguments": {
       "primitive_type": "box",
       "dimensions": {
-       "x": 100
+       "width": 100
       },
       "segments": 8,
       "location": [
@@ -3330,7 +3330,48 @@
     {
      "method": "compute_convex_hull",
      "arguments": {
-      "mesh_path": "/Game/Meshes/SM_Chair"
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "max_faces": 250,
+      "output": "actor"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "compute_convex_hull"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "compute_unreal_convex_hull",
+   "case": "every argument",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "max_faces": 64,
+    "output": "both"
+   },
+   "envelope": [
+    {
+     "tool": "compute_unreal_convex_hull",
+     "label": "Unreal",
+     "response_model": "UnrealComputeConvexHullResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "compute_convex_hull",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "max_faces": 64,
+      "output": "both"
      }
     }
    ],
@@ -3366,10 +3407,11 @@
      "method": "decompose_convex_hull",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "max_hulls": 16,
+      "max_hulls": 8,
       "max_vertices_per_hull": 32,
-      "min_cluster_size": 256,
-      "resolution": 100000
+      "error_tolerance": 0.0,
+      "min_part_thickness": 0.1,
+      "output": "actor"
      }
     }
    ],
@@ -3393,8 +3435,9 @@
     "mesh_path": "/Game/Meshes/SM_Chair",
     "max_hulls": 4,
     "max_vertices_per_hull": 16,
-    "min_cluster_size": 64,
-    "resolution": 5000
+    "error_tolerance": 1.5,
+    "min_part_thickness": 0.2,
+    "output": "collision"
    },
    "envelope": [
     {
@@ -3411,8 +3454,9 @@
       "mesh_path": "/Game/Meshes/SM_Chair",
       "max_hulls": 4,
       "max_vertices_per_hull": 16,
-      "min_cluster_size": 64,
-      "resolution": 5000
+      "error_tolerance": 1.5,
+      "min_part_thickness": 0.2,
+      "output": "collision"
      }
     }
    ],
@@ -3434,7 +3478,7 @@
    "case": "required",
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
-    "operation": "extrude"
+    "operation": "bevel_edges"
    },
    "envelope": [
     {
@@ -3449,12 +3493,11 @@
      "method": "edit_mesh_topology",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "operation": "extrude",
+      "operation": "bevel_edges",
       "face_selection": null,
       "edge_selection": null,
       "distance": null,
       "offset": null,
-      "scale": null,
       "count": null
      }
     }
@@ -3477,12 +3520,11 @@
    "case": "every argument",
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
-    "operation": "extrude",
-    "face_selection": "0,1",
-    "edge_selection": "2",
+    "operation": "bevel_edges",
+    "face_selection": "box:0,0,0,1,1,1",
+    "edge_selection": "sharp:30",
     "distance": 5.0,
     "offset": 1.5,
-    "scale": "1, 2,3",
     "count": 4
    },
    "envelope": [
@@ -3498,16 +3540,11 @@
      "method": "edit_mesh_topology",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "operation": "extrude",
-      "face_selection": "0,1",
-      "edge_selection": "2",
+      "operation": "bevel_edges",
+      "face_selection": "box:0,0,0,1,1,1",
+      "edge_selection": "sharp:30",
       "distance": 5.0,
       "offset": 1.5,
-      "scale": [
-       1.0,
-       2.0,
-       3.0
-      ],
       "count": 4
      }
     }
@@ -3645,8 +3682,8 @@
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
     "target_triangle_count": 500,
-    "target_percentage": 0.5,
-    "max_error": 0.01
+    "target_percentage": null,
+    "max_error": null
    },
    "envelope": [
     {
@@ -3662,8 +3699,8 @@
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
       "target_triangle_count": 500,
-      "target_percentage": 0.5,
-      "max_error": 0.01
+      "target_percentage": null,
+      "max_error": null
      }
     }
    ],
@@ -3712,7 +3749,8 @@
        1.0
       ],
       "fill_holes": true,
-      "keep_both_sides": false
+      "keep_both_sides": false,
+      "space": "world"
      }
     }
    ],
@@ -3737,7 +3775,8 @@
     "plane_origin": "0, 0,10",
     "plane_normal": "0,0,1",
     "fill_holes": false,
-    "keep_both_sides": true
+    "keep_both_sides": true,
+    "space": "local"
    },
    "envelope": [
     {
@@ -3763,7 +3802,8 @@
        1.0
       ],
       "fill_holes": false,
-      "keep_both_sides": true
+      "keep_both_sides": true,
+      "space": "local"
      }
     }
    ],
@@ -3979,9 +4019,9 @@
    "case": "every argument",
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
-    "mode": "adaptive",
+    "mode": "uniform",
     "target_edge_length": 2.5,
-    "target_triangle_count": 1000,
+    "target_triangle_count": null,
     "smoothing_iterations": 5
    },
    "envelope": [
@@ -3997,9 +4037,9 @@
      "method": "remesh_mesh",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "mode": "adaptive",
+      "mode": "uniform",
       "target_edge_length": 2.5,
-      "target_triangle_count": 1000,
+      "target_triangle_count": null,
       "smoothing_iterations": 5
      }
     }
@@ -4038,7 +4078,8 @@
       "mesh_path": "/Game/Meshes/SM_Chair",
       "method": "auto",
       "uv_channel": 0,
-      "island_padding": 2.0
+      "island_padding": 2.0,
+      "texture_resolution": 1024
      }
     }
    ],
@@ -4060,9 +4101,10 @@
    "case": "every argument",
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
-    "method": "planar",
+    "method": "patch_builder",
     "uv_channel": 1,
-    "island_padding": 4.0
+    "island_padding": 4.0,
+    "texture_resolution": 2048
    },
    "envelope": [
     {
@@ -4077,9 +4119,10 @@
      "method": "compute_mesh_uv",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "method": "planar",
+      "method": "patch_builder",
       "uv_channel": 1,
-      "island_padding": 4.0
+      "island_padding": 4.0,
+      "texture_resolution": 2048
      }
     }
    ],

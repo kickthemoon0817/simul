@@ -4,10 +4,10 @@ The mesh tools (``simul.adapters._unreal_mesh_scripts``) run fixed Python in
 the editor. These tests run the same scripts against this fake, which keeps a
 small level (DynamicMeshActors, a StaticMeshActor, a StaticMesh asset), fakes
 the GeometryScript libraries over meshes described by their counts and bounds,
-and records what a script did: every GeometryScript call (with whether it got
-a ``GeometryScriptDebug``), every transaction, every spawn. The numbers follow
-the rules below rather than real geometry, which is enough to check what a
-script reports against what it did.
+and records what a script did: every GeometryScript call with its arguments
+(and whether it got a ``GeometryScriptDebug``), every transaction, every
+spawn. The numbers follow the rules below rather than real geometry, which is
+enough to check what a script reports against what it did.
 
 Shapes the fake reproduces from UE 5.7.4:
 
@@ -17,12 +17,15 @@ Shapes the fake reproduces from UE 5.7.4:
   returns normally (``fail`` names the functions that fail).
 - ``set_dynamic_mesh`` gives the new mesh to the component; the old one is
   left as it was.
+- ``unreal.Rotator`` takes (roll, pitch, yaw) positionally; the fake takes
+  keywords only.
 """
 
 from __future__ import annotations
 
 import copy
 import io
+import math
 import sys
 from contextlib import redirect_stdout
 from types import SimpleNamespace
@@ -40,6 +43,9 @@ class Vector:
     def __iter__(self):
         return iter((self.x, self.y, self.z))
 
+    def __repr__(self) -> str:
+        return f"Vector({self.x}, {self.y}, {self.z})"
+
 
 class Vector2D:
     def __init__(self, x: float = 0.0, y: float = 0.0) -> None:
@@ -47,7 +53,9 @@ class Vector2D:
 
 
 class Rotator:
-    def __init__(self, pitch: float = 0.0, yaw: float = 0.0, roll: float = 0.0) -> None:
+    """Yaw-only rotations are enough for the tests."""
+
+    def __init__(self, *, pitch: float = 0.0, yaw: float = 0.0, roll: float = 0.0) -> None:
         self.pitch, self.yaw, self.roll = pitch, yaw, roll
 
     def quaternion(self) -> "Quat":
@@ -61,6 +69,14 @@ class Quat:
     def rotator(self) -> Rotator:
         return self._rotator
 
+    def rotate_vector(self, v: Vector) -> Vector:
+        a = math.radians(self._rotator.yaw)
+        return Vector(v.x * math.cos(a) - v.y * math.sin(a), v.x * math.sin(a) + v.y * math.cos(a), v.z)
+
+    def unrotate_vector(self, v: Vector) -> Vector:
+        a = -math.radians(self._rotator.yaw)
+        return Vector(v.x * math.cos(a) - v.y * math.sin(a), v.x * math.sin(a) + v.y * math.cos(a), v.z)
+
 
 class Transform:
     def __init__(self) -> None:
@@ -68,11 +84,25 @@ class Transform:
         self.rotation = Quat()
         self.scale3d = Vector(1, 1, 1)
 
+    def inverse_transform_location(self, v: Vector) -> Vector:
+        moved = self.rotation.unrotate_vector(Vector(v.x - self.translation.x, v.y - self.translation.y,
+                                                     v.z - self.translation.z))
+        return Vector(moved.x / self.scale3d.x, moved.y / self.scale3d.y, moved.z / self.scale3d.z)
+
+
+def transform(location: Tuple[float, float, float] = (0, 0, 0), yaw: float = 0.0,
+              scale: Tuple[float, float, float] = (1, 1, 1)) -> Transform:
+    xf = Transform()
+    xf.translation = Vector(*location)
+    xf.rotation = Quat(Rotator(yaw=yaw))
+    xf.scale3d = Vector(*scale)
+    return xf
+
 
 class Box:
-    def __init__(self, lo: Tuple[float, ...], hi: Tuple[float, ...]) -> None:
+    def __init__(self, lo: Tuple[float, ...] = (0, 0, 0), hi: Tuple[float, ...] = (0, 0, 0)) -> None:
         self.min, self.max = Vector(*lo), Vector(*hi)
-        self.is_valid = True
+        self.is_valid = False
 
 
 class Box2D:
@@ -82,20 +112,47 @@ class Box2D:
 
 
 class Options:
-    """Every GeometryScript options struct: attributes the script sets."""
+    """Every GeometryScript options struct: attributes the script sets, over their defaults."""
+
+    defaults: Dict[str, Any] = {}
 
     def __init__(self, **values: Any) -> None:
+        self.__dict__.update(copy.deepcopy(type(self).defaults))
         self.__dict__.update(values)
 
 
+def options_struct(name: str, **defaults: Any) -> type:
+    return type(name, (Options,), {"defaults": defaults})
+
+
 #: The GeometryScript option structs the scripts build, without their
-#: ``GeometryScript`` prefix.
-OPTION_STRUCTS = (
-    "PrimitiveOptions", "MeshBooleanOptions", "ConvexHullOptions", "ConvexDecompositionOptions",
-    "MeshSelection", "MeshLinearExtrudeOptions", "MeshBevelSelectionOptions", "MeshInsetOutsetFacesOptions",
-    "GroupLayer", "SimplifyMeshOptions", "MeshPlaneCutOptions", "RemeshOptions", "UniformRemeshOptions",
-    "XAtlasOptions", "PatchBuilderOptions", "CopyMeshFromAssetOptions", "MeshReadLOD",
-)
+#: ``GeometryScript`` prefix, and the defaults the scripts read.
+OPTION_STRUCTS: Dict[str, Dict[str, Any]] = {
+    "PrimitiveOptions": {},
+    "MeshBooleanOptions": {},
+    "MeshSelection": {},
+    "MeshLinearExtrudeOptions": {},
+    "MeshBevelSelectionOptions": {},
+    "MeshInsetOutsetFacesOptions": {},
+    "GroupLayer": {},
+    "SimplifyMeshOptions": {},
+    "MeshPlaneCutOptions": {},
+    "RemeshOptions": {},
+    "UniformRemeshOptions": {},
+    "XAtlasOptions": {},
+    "PatchBuilderOptions": {"auto_pack": True, "packing_options": None},
+    "RepackUVsOptions": {"target_image_width": 512, "optimize_island_rotation": True},
+    "CopyMeshFromAssetOptions": {},
+    "MeshReadLOD": {},
+    "CollisionFromMeshOptions": {"auto_detect_spheres": True, "auto_detect_boxes": True,
+                                 "auto_detect_capsules": True, "max_convex_hulls_per_mesh": 1,
+                                 "convex_hull_target_face_count": 25, "simplify_hulls": True},
+    "SetSimpleCollisionOptions": {"emit_transaction": True},
+    "SimpleCollisionTriangulationOptions": {},
+    "RevolveOptions": {},
+    "DegenerateTriangleOptions": {"mode": "REPAIR_OR_DELETE", "min_triangle_area": 0.001,
+                                  "min_edge_length": 0.0001},
+}
 
 
 class Enum:
@@ -120,11 +177,15 @@ def mesh_stats(**overrides: Any) -> Dict[str, Any]:
         "components": 1,
         "normals": True,
         "gaps": False,
+        "vertex_gaps": False,
+        "bowties": 0,
+        "degenerate": 0,
         "uv_sets": 1,
         "uv_islands": 6,
         "uv_area": 0.6,
         "uv_lo": (0.0, 0.0),
         "uv_hi": (1.0, 1.0),
+        "unset_uvs": False,
         "quad_groups": True,
         # A sample of the mesh's geometry for the edge-length average:
         # (positions, triangles).
@@ -159,6 +220,18 @@ class DynamicMesh:
         return True
 
 
+class SimpleCollision:
+    def __init__(self, shapes: int = 0) -> None:
+        self.shapes = shapes
+
+
+class Selection:
+    """A mesh selection: what selected it and how many elements."""
+
+    def __init__(self, kind: str, count: int, how: Any = None) -> None:
+        self.kind, self.count, self.how = kind, count, how
+
+
 class GeometryScriptDebug:
     def __init__(self) -> None:
         self.messages: List[SimpleNamespace] = []
@@ -184,6 +257,7 @@ class DynamicMeshComponent(Component):
         super().__init__(owner)
         self.mesh = mesh
         self.refreshed = 0
+        self.collision = SimpleCollision()
 
     def get_dynamic_mesh(self) -> DynamicMesh:
         return self.mesh
@@ -218,7 +292,6 @@ class Actor:
         self.valid = True
         self.root_component: Any = None
         self.components: List[Any] = []
-        self.location = Vector()
         self.transform = Transform()
 
     def get_actor_label(self) -> str:
@@ -240,11 +313,13 @@ class Actor:
         return [c for c in self.components if isinstance(c, cls)]
 
     def get_actor_location(self) -> Vector:
-        return self.location
+        return self.transform.translation
 
-    def set_actor_transform(self, transform: Transform, sweep: bool, teleport: bool) -> None:
-        self.transform = transform
-        self.location = transform.translation
+    def get_actor_transform(self) -> Transform:
+        return self.transform
+
+    def set_actor_transform(self, xf: Transform, sweep: bool, teleport: bool) -> None:
+        self.transform = xf
 
     def modify(self) -> bool:
         self.editor.modified.append(self.path)
@@ -293,6 +368,7 @@ class FakeEditor:
         fail: GeometryScript function name -> the error message it reports.
         warn: GeometryScript function name -> the warning it reports.
         calls: (function, got a debug object) per GeometryScript call.
+        arguments: function -> the positional arguments of its last call.
         transactions: Descriptions of the transactions that ended (not cancelled).
         events: What the scripts did to the level, in order.
     """
@@ -304,6 +380,7 @@ class FakeEditor:
         self.fail: Dict[str, str] = {}
         self.warn: Dict[str, str] = {}
         self.calls: List[Tuple[str, bool]] = []
+        self.arguments: Dict[str, Tuple[Any, ...]] = {}
         self.transactions: List[str] = []
         self.events: List[Tuple[Any, ...]] = []
         self.modified: List[str] = []
@@ -318,7 +395,10 @@ class FakeEditor:
         return actor
 
     def dynamic_actor(self, name: str, **stats: Any) -> DynamicMeshActor:
-        return self.add(DynamicMeshActor(self, name, self.world, DynamicMesh(**stats)))  # type: ignore[return-value]
+        """A DynamicMeshActor whose mesh is ``mesh_stats(**stats)``: a 100 cm box by default."""
+        mesh = DynamicMesh()
+        mesh.stats = mesh_stats(**stats)
+        return self.add(DynamicMeshActor(self, name, self.world, mesh))  # type: ignore[return-value]
 
     def record(self, *event: Any) -> None:
         self.events.append(event)
@@ -344,6 +424,7 @@ class FakeEditor:
 
         def function(*args: Any, debug: Optional[GeometryScriptDebug] = None, **kwargs: Any) -> Any:
             self.calls.append((name, debug is not None))
+            self.arguments[name] = args
             if name in self.warn and debug is not None:
                 debug.messages.append(SimpleNamespace(message=self.warn[name], message_type=WARNING))
             error = self.fail.get(name) or (refuse(*args, **kwargs) if refuse is not None else None)
@@ -355,7 +436,7 @@ class FakeEditor:
 
         return function
 
-    def module(self) -> SimpleNamespace:
+    def module(self) -> SimpleNamespace:  # noqa: C901 - one fake module, one place
         """The fake ``unreal`` module."""
         editor = self
         gs = self.gs
@@ -380,13 +461,14 @@ class FakeEditor:
 
         def append_box(mesh, options, xf, dx=100.0, dy=100.0, dz=100.0, *rest):
             return append(dict(lo=(-dx / 2, -dy / 2, -dz / 2), hi=(dx / 2, dy / 2, dz / 2), volume=dx * dy * dz,
-                               area=2 * (dx * dy + dy * dz + dx * dz)))(mesh)
+                               area=2 * (dx * dy + dy * dz + dx * dz),
+                               quad_groups=options.polygroup_mode == "PER_QUAD"))(mesh)
 
         def append_sphere(mesh, options, xf, radius=50.0, phi=10, theta=16, *rest):
             r = radius
             return append(dict(tris=2 * theta * (phi - 2), verts=theta * (phi - 2) + 2, lo=(-r, -r, -r), hi=(r, r, r),
                                volume=4.18879 * r ** 3, area=12.566 * r * r, uv_islands=1,
-                               quad_groups=False))(mesh)
+                               quad_groups=options.polygroup_mode == "PER_QUAD"))(mesh)
 
         def append_round(mesh, options, xf, radius=50.0, height=100.0, steps=12, *rest):
             return append(dict(tris=4 * steps, verts=2 * steps + 2, lo=(-radius, -radius, -height / 2),
@@ -397,23 +479,35 @@ class FakeEditor:
             return append_round(mesh, options, xf, base, height, steps)
 
         def append_capsule(mesh, options, xf, radius=30.0, length=75.0, hemi=5, circle=8, *rest):
-            return append(dict(tris=circle * hemi * 4, verts=circle * hemi * 2 + 2, uv_islands=1))(mesh)
+            half = length / 2 + radius
+            return append(dict(tris=circle * hemi * 4, verts=circle * hemi * 2 + 2, uv_islands=1,
+                               lo=(-radius, -radius, -half), hi=(radius, radius, half)))(mesh)
+
+        def append_torus(mesh, options, xf, revolve, major=50.0, minor=25.0, steps=16, minor_steps=8, *rest):
+            outer = major + minor
+            return append(dict(tris=2 * steps * minor_steps, verts=steps * minor_steps, uv_islands=1,
+                               lo=(-outer, -outer, -minor), hi=(outer, outer, minor)))(mesh)
 
         def boolean(target, target_xf, tool, tool_xf, operation, options):
             target.stats["tris"] += tool.stats["tris"] if operation != "INTERSECTION" else 0
             target.stats["verts"] += tool.stats["verts"] // 2
+            if operation == "SUBTRACT":
+                target.stats["volume"] -= tool.stats["volume"] / 2
             return target
 
-        def hull(mesh, out, selection, options):
-            out.stats = mesh_stats(tris=min(mesh.stats["tris"], 40), verts=min(mesh.stats["verts"], 22),
-                                   lo=mesh.stats["lo"], hi=mesh.stats["hi"], volume=mesh.stats["volume"] * 1.25)
-            return mesh, out, out
+        def collision_from_mesh(mesh, options):
+            hulls = options.max_convex_hulls_per_mesh
+            return SimpleCollision(shapes=min(hulls, mesh.stats.get("convex_parts", hulls)))
 
-        def decompose(mesh, out, options):
-            pieces = max(1, min(options.num_hulls, 3))
-            out.stats = mesh_stats(tris=12 * pieces, verts=8 * pieces, components=pieces,
-                                   volume=mesh.stats["volume"] * 1.1)
-            return mesh, out, out
+        def collision_shapes(mesh, options, xf, collision, triangulation):
+            n = collision.shapes
+            faces = 12 if n == 1 else 12 * n
+            mesh.stats = mesh_stats(tris=faces, verts=faces // 2 + 2, components=n, volume=1100000.0)
+            return mesh
+
+        def set_collision(collision, component, options):
+            component.collision = collision
+            editor.record("set_collision", component.owner.path, collision.shapes)
 
         def split(mesh, pool):
             n = mesh.stats["components"]
@@ -429,9 +523,6 @@ class FakeEditor:
 
             return apply
 
-        def catmull_clark(mesh, level, layer):
-            return scale_tris(lambda tris, lvl, _layer: tris * 4 ** lvl)(mesh, level, layer)
-
         def needs_quads(mesh, *rest):
             if mesh.stats["quad_groups"]:
                 return None
@@ -445,8 +536,9 @@ class FakeEditor:
             return check
 
         def plane_cut(mesh, frame, options):
-            kept = mesh.stats["tris"] // 2
-            mesh.stats["tris"] = kept + (6 if options.fill_holes else 0)
+            side = mesh.stats.get("side_tris", {})
+            kept = side.get("front" if options.flip_cut_side else "back", mesh.stats["tris"] // 2)
+            mesh.stats["tris"] = kept + (6 if options.fill_holes and kept else 0)
             mesh.stats["verts"] = mesh.stats["tris"] // 2 + 2
             return mesh
 
@@ -464,6 +556,10 @@ class FakeEditor:
 
             return apply
 
+        def repack(mesh, channel, options):
+            mesh.stats["uv_area"] = 0.5
+            return mesh
+
         def static_copy(asset, mesh, options, lod):
             mesh.stats = copy.deepcopy(asset.stats)
             return mesh, "SUCCESS"
@@ -477,13 +573,42 @@ class FakeEditor:
         def uv_box(mesh, channel):
             return Box2D(mesh.stats["uv_lo"], mesh.stats["uv_hi"]), True, False
 
+        def uv_size_info(mesh, channel, selection):
+            return (mesh, mesh.stats["area"], mesh.stats["uv_area"], None, None, channel < mesh.stats["uv_sets"],
+                    mesh.stats["unset_uvs"])
+
+        def split_bowties(mesh, mesh_bowties, attribute_bowties):
+            mesh.stats["verts"] += mesh.stats["bowties"]
+            return mesh
+
+        def repair_degenerates(mesh, options):
+            mesh.stats["tris"] -= mesh.stats["degenerate"]
+            return mesh
+
+        def select_all(mesh, kind):
+            return mesh, Selection(kind, mesh.stats["tris"], "all")
+
+        def select_normal(mesh, normal, angle, kind, invert, points):
+            facing = mesh.stats.get("facing", {}).get(tuple(normal), 2)
+            return mesh, Selection(kind, facing, ("normal", tuple(normal), angle))
+
+        def select_box(mesh, box, kind, invert, points):
+            assert box.is_valid
+            return mesh, Selection(kind, mesh.stats.get("in_box", 4), ("box", tuple(box.min), tuple(box.max)))
+
+        def select_sharp(mesh, angle):
+            return mesh, Selection("EDGES", mesh.stats.get("sharp_edges", 12), ("sharp", angle))
+
+        def boundary(mesh, selection, exclude):
+            return mesh, Selection("EDGES", 4, ("boundary", selection.how))
+
         class EditorActorSubsystem:
             def spawn_actor_from_class(self, cls, location, rotation=None):
                 if editor.pie:
                     return None
                 editor.spawned += 1
                 actor = cls(editor, f"DynamicMeshActor_{editor.spawned}", editor.world, DynamicMesh())
-                actor.location = location
+                actor.transform = transform(tuple(location))
                 editor.add(actor)
                 editor.record("spawn", actor.path)
                 return actor
@@ -538,6 +663,7 @@ class FakeEditor:
                 get_num_connected_components=query("components"),
                 get_has_triangle_normals=query("normals"),
                 get_has_triangle_id_gaps=query("gaps"),
+                get_has_vertex_id_gaps=query("vertex_gaps"),
                 get_is_closed_mesh=lambda mesh: mesh.stats["open_edges"] == 0,
                 get_num_uv_sets=query("uv_sets"),
                 get_num_uv_islands=lambda mesh, channel: (mesh.stats["uv_islands"], True),
@@ -558,6 +684,8 @@ class FakeEditor:
                 append_cylinder=gs("append_cylinder", append_round),
                 append_cone=gs("append_cone", append_cone),
                 append_capsule=gs("append_capsule", append_capsule),
+                append_torus=gs("append_torus", append_torus),
+                append_simple_collision_shapes=gs("append_simple_collision_shapes", collision_shapes),
             ),
             "GeometryScript_MeshDecomposition": SimpleNamespace(
                 copy_mesh_to_mesh=gs("copy_mesh_to_mesh", copy_to),
@@ -567,20 +695,34 @@ class FakeEditor:
                 apply_mesh_boolean=gs("apply_mesh_boolean", boolean),
                 apply_mesh_plane_cut=gs("apply_mesh_plane_cut", plane_cut),
             ),
-            "GeometryScript_Containment": SimpleNamespace(
-                compute_mesh_convex_hull=gs("compute_mesh_convex_hull", hull),
-                compute_mesh_convex_decomposition=gs("compute_mesh_convex_decomposition", decompose),
+            "GeometryScript_Collision": SimpleNamespace(
+                generate_collision_from_mesh=gs("generate_collision_from_mesh", collision_from_mesh),
+                set_simple_collision_of_dynamic_mesh_component=gs("set_simple_collision_of_dynamic_mesh_component",
+                                                                  set_collision),
+                get_simple_collision_from_component=lambda component: component.collision,
+                get_simple_collision_shape_count=lambda collision: collision.shapes,
+            ),
+            "GeometryScript_MeshSelection": SimpleNamespace(
+                create_select_all_mesh_selection=select_all,
+                select_mesh_elements_by_normal_angle=select_normal,
+                select_mesh_elements_in_box=select_box,
+                select_mesh_sharp_edges=select_sharp,
+                select_selection_boundary_edges=boundary,
+                get_mesh_unique_selection_info=lambda mesh, selection: (selection.kind, selection.count),
             ),
             "GeometryScript_MeshModeling": SimpleNamespace(
                 apply_mesh_linear_extrude_faces=gs("apply_mesh_linear_extrude_faces",
-                                                   scale_tris(lambda tris, *a: tris * 2)),
+                                                   scale_tris(lambda tris, *a: tris + 8)),
                 apply_mesh_bevel_selection=gs("apply_mesh_bevel_selection", scale_tris(lambda tris, *a: tris * 3)),
                 apply_mesh_inset_outset_faces=gs("apply_mesh_inset_outset_faces",
                                                  scale_tris(lambda tris, *a: tris * 5)),
             ),
             "GeometryScript_OpenSubdiv": SimpleNamespace(
-                apply_polygroup_catmull_clark_sub_d=gs("apply_polygroup_catmull_clark_sub_d", catmull_clark,
+                apply_polygroup_catmull_clark_sub_d=gs("apply_polygroup_catmull_clark_sub_d",
+                                                       scale_tris(lambda tris, level, layer: tris * 4 ** level),
                                                        needs_quads),
+                apply_triangle_loop_sub_d=gs("apply_triangle_loop_sub_d",
+                                             scale_tris(lambda tris, level: tris * 4 ** level)),
             ),
             "GeometryScript_MeshSubdivide": SimpleNamespace(
                 apply_uniform_tessellation=gs("apply_uniform_tessellation",
@@ -589,6 +731,12 @@ class FakeEditor:
             "GeometryScript_MeshSimplification": SimpleNamespace(
                 apply_simplify_to_triangle_count=gs("apply_simplify_to_triangle_count",
                                                     scale_tris(lambda tris, target, options: min(tris, target))),
+                apply_simplify_to_tolerance=gs("apply_simplify_to_tolerance",
+                                               scale_tris(lambda tris, tolerance, options: max(4, tris // 4))),
+            ),
+            "GeometryScript_MeshRepair": SimpleNamespace(
+                split_mesh_bowties=gs("split_mesh_bowties", split_bowties),
+                repair_mesh_degenerate_geometry=gs("repair_mesh_degenerate_geometry", repair_degenerates),
             ),
             "GeometryScript_Remeshing": SimpleNamespace(apply_uniform_remesh=gs("apply_uniform_remesh", remesh)),
             "GeometryScript_UVs": SimpleNamespace(
@@ -596,6 +744,8 @@ class FakeEditor:
                                                    needs_uv_set("AutoGenerateXAtlasMeshUVs")),
                 auto_generate_patch_builder_mesh_u_vs=gs("auto_generate_patch_builder_mesh_u_vs", unwrap(11),
                                                          needs_uv_set("AutoGeneratePatchBuilderMeshUVs")),
+                repack_mesh_u_vs=gs("repack_mesh_u_vs", repack),
+                get_mesh_uv_size_info=uv_size_info,
             ),
             "GeometryScript_AssetUtils": SimpleNamespace(
                 copy_mesh_from_static_mesh=gs("copy_mesh_from_static_mesh", static_copy),
@@ -613,14 +763,21 @@ class FakeEditor:
             DynamicMesh=DynamicMesh,
             Vector=Vector,
             Transform=Transform,
+            Box=Box,
             ScopedEditorTransaction=ScopedEditorTransaction,
             GeometryScriptDebug=GeometryScriptDebug,
             GeometryScriptDebugMessageType=SimpleNamespace(ERROR_MESSAGE=ERROR, WARNING_MESSAGE=WARNING),
             GeometryScriptBooleanOperation=Enum("UNION", "SUBTRACT", "INTERSECTION"),
+            GeometryScriptBooleanOutputSpace=Enum("TARGET_TRANSFORM_SPACE", "TOOL_TRANSFORM_SPACE"),
             GeometryScriptPrimitivePolygroupMode=Enum("PER_FACE", "PER_QUAD", "SINGLE_GROUP"),
             GeometryScriptPrimitiveOriginMode=Enum("CENTER", "BASE"),
             GeometryScriptUniformRemeshTargetType=Enum("TARGET_EDGE_LENGTH", "TRIANGLE_COUNT"),
-            GeometryScriptMeshBevelSelectionMode=Enum("TRIANGLE_AREA", "ALL_POLYGROUP_EDGES"),
+            GeometryScriptMeshBevelSelectionMode=Enum("TRIANGLE_AREA", "ALL_POLYGROUP_EDGES", "SELECTED_EDGES"),
+            GeometryScriptMeshSelectionType=Enum("TRIANGLES", "EDGES"),
+            GeometryScriptLinearExtrudeDirection=Enum("FIXED_DIRECTION", "AVERAGE_FACE_NORMAL"),
+            GeometryScriptPolyOperationArea=Enum("ENTIRE_SELECTION", "PER_POLYGROUP"),
+            GeometryScriptCollisionGenerationMethod=Enum("CONVEX_HULLS", "MIN_VOLUME_SHAPES"),
+            GeometryScriptRepairMeshMode=Enum("DELETE_ONLY", "REPAIR_OR_DELETE"),
             MathLibrary=SimpleNamespace(make_rot_from_z=lambda vector: Rotator()),
             SystemLibrary=SimpleNamespace(is_valid=is_valid),
             EditorAssetLibrary=SimpleNamespace(find_asset_data=find_asset_data, load_asset=load_asset),
@@ -629,8 +786,8 @@ class FakeEditor:
             **{name: name for name in subsystems},
             **libraries,
         )
-        for name in OPTION_STRUCTS:
-            setattr(module, "GeometryScript" + name, Options)
+        for name, defaults in OPTION_STRUCTS.items():
+            setattr(module, "GeometryScript" + name, options_struct("GeometryScript" + name, **defaults))
         return module
 
     # -- running scripts -----------------------------------------------------

@@ -75,7 +75,11 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "control_unreal_simulation": (RW, False, True),
     "set_unreal_camera_view": (RW, True, True),
     "simplify_unreal_mesh": (DESTRUCTIVE, False, True),
-    "compute_unreal_convex_hull": (RW, False, True),
+    # output collision replaces the source's simple collision.
+    "compute_unreal_convex_hull": (DESTRUCTIVE, False, True),
+    "decompose_unreal_convex_hull": (DESTRUCTIVE, False, True),
+    "generate_unreal_mesh_primitive": (RW, False, True),
+    "validate_unreal_mesh": (RO, True, True),
     # Blender
     "get_blender_info": (RO, True, True),
     "attach_blender_window": (RW, True, True),  # selects the target; Blender untouched
