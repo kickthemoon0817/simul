@@ -207,6 +207,12 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "params": {"levels": 2},
         },
     },
+    "apply_blender_modifier": {
+        "minimal": {"object_name": "Cube", "modifier_name": "Decimate"}
+    },
+    "remove_blender_modifier": {
+        "minimal": {"object_name": "Cube", "modifier_name": "Decimate"}
+    },
     "set_blender_light_params": {
         "minimal": {"light_name": "Light"},
         "full": {
@@ -337,6 +343,15 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "faces": [[0, 1, 2]],
             "location": [1, 2, 3],
             "collection_name": "Props",
+        },
+    },
+    "clean_blender_mesh": {
+        "minimal": {"object_name": "Cube"},
+        "full": {
+            "object_name": "Cube",
+            "merge_distance": 0.001,
+            "dissolve_degenerate_distance": 0.0001,
+            "recalculate_normals": True,
         },
     },
     "apply_simready_metadata": {

@@ -8,10 +8,12 @@ optional `bpy` Python module.
 from __future__ import annotations
 
 import base64
+import difflib
 import io
 import json
 import logging
 import math
+import numbers
 import os
 import re
 import tempfile
@@ -307,6 +309,37 @@ _IMAGE_FORMAT_FIELDS = (
     "color_depth",
     "quality",
 )
+
+# Settings of a modifier that add_modifier takes from its own arguments rather
+# than from params: the name comes from modifier_name, the type from
+# modifier_type, and rna_type is Blender's description of the struct.
+_RESERVED_MODIFIER_SETTINGS = frozenset({"name", "type", "rna_type"})
+
+# Where a datablock named for a pointer setting is looked up: the bpy.data
+# collection of each ID type such a setting can point to, by its RNA struct
+# identifier. A subtype (GeometryNodeTree, say) is found through its base.
+_ID_COLLECTIONS: Dict[str, str] = {
+    "Action": "actions",
+    "CacheFile": "cache_files",
+    "Camera": "cameras",
+    "Collection": "collections",
+    "Curve": "curves",
+    "Image": "images",
+    "Light": "lights",
+    "Material": "materials",
+    "Mesh": "meshes",
+    "NodeTree": "node_groups",
+    "Object": "objects",
+    "Texture": "textures",
+    "VectorFont": "fonts",
+}
+
+# Modifier types whose viewport and render results can differ through a
+# second level setting: (viewport setting, render setting).
+_RENDER_LEVEL_SETTINGS: Dict[str, Tuple[str, str]] = {
+    "MULTIRES": ("levels", "render_levels"),
+    "SUBSURF": ("levels", "render_levels"),
+}
 
 
 class UnsavedChangesError(RuntimeError):
@@ -706,6 +739,80 @@ def _channel_name(data_path: str, index: int) -> str:
     return data_path if index < 0 else f"{data_path}[{index}]"
 
 
+def _did_you_mean(name: str, choices: Sequence[str]) -> str:
+    """``; did you mean 'a' or 'b'?`` for the choices closest to a mistyped name."""
+    close = difflib.get_close_matches(name, list(choices), n=3, cutoff=0.6)
+    if not close:
+        return ""
+    return "; did you mean " + " or ".join(f"'{choice}'" for choice in close) + "?"
+
+
+def _enum_item(value: Any, items: Sequence[str], what: str) -> str:
+    """The enum item identifier a value names, matched case-insensitively.
+
+    An empty ``items`` means the enum lists its items only at run time, so the
+    value passes through for Blender to check.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{what} takes one of {', '.join(items)}, got {value!r}")
+    if not items or value in items:
+        return value
+    folded = [item for item in items if item.lower() == value.lower()]
+    if len(folded) == 1:
+        return folded[0]
+    raise ValueError(
+        f"{what} must be one of {', '.join(items)}, got '{value}'{_did_you_mean(value.upper(), items)}"
+    )
+
+
+def _check_rna_number(prop: Any, value: Any, what: str) -> None:
+    """Refuse a value outside an INT or FLOAT property's hard limits.
+
+    Blender clamps such a value without an error, so a DECIMATE ratio of 7
+    would silently become 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise ValueError(f"{what} takes a number, got {value!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"{what} must be finite, got {value!r}")
+    if prop.type == "INT" and not float(value).is_integer():
+        raise ValueError(f"{what} takes a whole number, got {value!r}")
+    if value < prop.hard_min or value > prop.hard_max:
+        raise ValueError(
+            f"{what} must lie between {prop.hard_min:g} and {prop.hard_max:g}, got {value!r}"
+        )
+
+
+def _finite_triple(value: Any, what: str) -> Tuple[float, float, float]:
+    """Three finite coordinates as floats, or a ValueError naming ``what``.
+
+    ``from_pydata`` flattens its vertex list before storing it, so a vertex
+    of two or four numbers shifted every later vertex instead of failing.
+    """
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__len__"):
+        raise ValueError(f"{what} must be [x, y, z], got {value!r}")
+    if len(value) != 3:
+        raise ValueError(f"{what} must have exactly 3 coordinates [x, y, z], got {len(value)}")
+    triple = []
+    for component in value:
+        if isinstance(component, bool) or not isinstance(component, numbers.Real):
+            raise ValueError(f"{what} coordinates must be numbers, got {component!r}")
+        if not math.isfinite(component):
+            raise ValueError(f"{what} coordinates must be finite, got {component!r}")
+        triple.append(float(component))
+    return (triple[0], triple[1], triple[2])
+
+
+def _mesh_index(value: Any, what: str, vertex_count: int) -> int:
+    """A vertex index of an edge or face, checked to be an integer within the vertex list."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(f"{what} index {value!r} is not an integer")
+    index = int(value)
+    if index < 0 or index >= vertex_count:
+        raise ValueError(f"{what} index {index} out of range [0, {vertex_count})")
+    return index
+
+
 @dataclass
 class BlenderObjectEntry:
     """Serializable Blender object summary."""
@@ -998,30 +1105,105 @@ class BlenderRuntimeSession:
 
     def get_mesh_info(self, object_name: str) -> Dict[str, Any]:
         """
-        Get counts-only mesh geometry information (O(1) attribute access).
+        Get a mesh object's geometry counts, before and after its modifiers.
+
+        The base counts are the mesh data as stored; the evaluated counts are
+        what Blender's depsgraph makes of it with the modifiers enabled in the
+        viewport, which is the geometry an export writes. A mesh in Edit Mode
+        is written back from the edit mesh first, so neither count is stale.
 
         Args:
             object_name: Name of the mesh object.
 
         Returns:
-            Dictionary with vertex/edge/face counts and UV layer names.
+            Dictionary with vertex/edge/face/triangle counts of the base and
+            of the evaluated mesh, the modifiers evaluated, UV layer names and
+            warnings.
         """
         obj = self._get_object_or_raise(object_name)
         if obj.type != "MESH":
             raise ValueError(f"Object '{object_name}' is not a MESH (type={obj.type})")
 
+        edit_mode = getattr(obj, "mode", "OBJECT") == "EDIT"
+        if edit_mode:
+            # Edit Mode keeps its changes in an edit mesh that the mesh data
+            # sees only once they are written back.
+            obj.update_from_editmode()
         mesh_data: Any = obj.data
-        uv_layer_names = [layer.name for layer in mesh_data.uv_layers]
-        has_shape_keys = mesh_data.shape_keys is not None
+        base = self._mesh_counts(mesh_data)
+        evaluated = self._evaluated_mesh_counts(obj)
+        modifiers = list(getattr(obj, "modifiers", []))
+        warnings: List[str] = []
+        if evaluated is None:
+            warnings.append(
+                f"Blender does not evaluate '{obj.name}' (it is not in the view "
+                "layer), so the counts after its modifiers are unknown"
+            )
+        render_differs = [mod.name for mod in modifiers if self._render_differs(mod)]
+        if render_differs:
+            warnings.append(
+                "The evaluated counts are the viewport's, and these modifiers are set "
+                f"differently for render, which USD export evaluates: {', '.join(render_differs)}"
+            )
 
         return {
             "object_name": object_name,
-            "vertex_count": len(mesh_data.vertices),
-            "edge_count": len(mesh_data.edges),
-            "face_count": len(mesh_data.polygons),
-            "uv_layer_names": uv_layer_names,
-            "has_shape_keys": has_shape_keys,
+            **base,
+            **{
+                f"evaluated_{key}": (None if evaluated is None else evaluated[key])
+                for key in base
+            },
+            "evaluated_modifiers": [mod.name for mod in modifiers if mod.show_viewport],
+            "edit_mode": edit_mode,
+            "uv_layer_names": [layer.name for layer in mesh_data.uv_layers],
+            "has_shape_keys": mesh_data.shape_keys is not None,
+            "warnings": warnings,
         }
+
+    @staticmethod
+    def _mesh_counts(mesh: Any) -> Dict[str, int]:
+        """Vertex, edge, face and triangle counts of one mesh datablock.
+
+        A face of n corners triangulates into n - 2 triangles, so the triangle
+        count is the corner (loop) count less two per face.
+        """
+        faces = len(mesh.polygons)
+        return {
+            "vertex_count": len(mesh.vertices),
+            "edge_count": len(mesh.edges),
+            "face_count": faces,
+            "triangle_count": len(mesh.loops) - 2 * faces,
+        }
+
+    def _evaluated_mesh_counts(self, obj: Any) -> Optional[Dict[str, int]]:
+        """Counts of the mesh Blender evaluates for ``obj``, its modifiers applied.
+
+        Returns:
+            The counts, or None when the depsgraph holds no evaluated copy of
+            the object (it is not in the view layer).
+        """
+        blender_module: Any = bpy
+        depsgraph = blender_module.context.evaluated_depsgraph_get()
+        evaluated = obj.evaluated_get(depsgraph)
+        if not getattr(evaluated, "is_evaluated", False):
+            return None
+        mesh = evaluated.to_mesh()
+        try:
+            return self._mesh_counts(mesh)
+        finally:
+            evaluated.to_mesh_clear()
+
+    @staticmethod
+    def _render_differs(modifier: Any) -> bool:
+        """Whether a modifier gives render a different result than the viewport."""
+        if bool(modifier.show_render) != bool(modifier.show_viewport):
+            return True
+        if not modifier.show_render:
+            return False
+        levels = _RENDER_LEVEL_SETTINGS.get(modifier.type)
+        return levels is not None and getattr(modifier, levels[0], None) != getattr(
+            modifier, levels[1], None
+        )
 
     def get_bounding_box(
         self, object_name: str, world_space: bool = True
@@ -1942,33 +2124,343 @@ class BlenderRuntimeSession:
         """
         Add a modifier to an object.
 
+        Every key of ``params`` must be a writable setting of the modifier
+        type, checked against Blender's RNA: an unknown key is refused with
+        the closest setting names, an enum value must be one of its items, a
+        number must lie within the setting's limits, and an object, collection
+        or other datablock setting takes the datablock's name. When a setting
+        fails, the modifier is removed again, so a refused call leaves the
+        object as it was. Decimate is refused on a mesh with invalid geometry
+        (faces repeating a vertex, duplicate faces or edges), which can make
+        Blender's collapse loop forever; clean_mesh repairs such a mesh.
+
         Args:
             object_name: Object to add modifier to.
             modifier_type: Modifier type (SUBSURF, MIRROR, ARRAY, etc.).
             modifier_name: Modifier display name.
-            params: Modifier-specific parameters to set.
+            params: Modifier settings by RNA name, e.g. {"ratio": 0.5} for
+                DECIMATE or {"object": "Cutter"} for BOOLEAN.
 
         Returns:
-            Dictionary with object_name, modifier_name, modifier_type.
+            Dictionary with object_name, modifier_name, modifier_type and the
+            settings as Blender stored them.
         """
+        blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
-        mod_name = modifier_name or modifier_type.title()
-        mod = obj.modifiers.new(name=mod_name, type=modifier_type.upper())
+        if obj.type not in _MODIFIER_OWNER_TYPES:
+            raise ValueError(
+                f"Object '{object_name}' is a {obj.type} object, which has no modifier "
+                f"stack; modifiers go on {', '.join(sorted(_MODIFIER_OWNER_TYPES))} objects"
+            )
+        mod_type = modifier_type.upper()
+        known_types = self._enum_items(
+            getattr(getattr(blender_module, "types", None), "Modifier", None), "type"
+        )
+        if known_types and mod_type not in known_types:
+            raise ValueError(
+                f"Unknown modifier type '{modifier_type}'{_did_you_mean(mod_type, known_types)}"
+            )
+        if mod_type == "DECIMATE" and obj.type == "MESH":
+            self._refuse_invalid_geometry(obj, "Decimate")
 
-        if params:
-            for key, value in params.items():
-                if hasattr(mod, key):
-                    setattr(mod, key, value)
-                else:
-                    self.logger.warning(
-                        "Modifier %s has no attribute '%s'", mod.type, key
-                    )
+        mod = obj.modifiers.new(name=modifier_name or modifier_type.title(), type=mod_type)
+        if mod is None:
+            raise ValueError(
+                f"Blender cannot add a {mod_type} modifier to {obj.type} object '{object_name}'"
+            )
+        try:
+            applied = self._set_rna_settings(mod, params or {}, f"{mod_type} modifier")
+        except Exception:
+            obj.modifiers.remove(mod)
+            raise
 
         return {
             "object_name": object_name,
             "modifier_name": mod.name,
             "modifier_type": mod.type,
+            "params": applied,
         }
+
+    def apply_modifier(self, object_name: str, modifier_name: str) -> Dict[str, Any]:
+        """
+        Apply one modifier to a mesh object's data, baking its result.
+
+        Blender's own Apply: the modifier's result replaces the mesh data and
+        the modifier leaves the stack. A modifier below others is applied to
+        the base mesh as if the ones above it were not there, and the reply
+        warns about it. Mesh data that other objects share is first copied for
+        this object, so their geometry does not change. A modifier disabled in
+        the viewport is refused, since Blender would drop it unapplied, and
+        Decimate is refused on a mesh with invalid geometry, as by
+        add_modifier. The object must be in Object Mode.
+
+        Args:
+            object_name: Mesh object holding the modifier.
+            modifier_name: Name of the modifier to apply.
+
+        Returns:
+            Dictionary with the applied modifier, the mesh counts afterwards,
+            the remaining modifiers, made_single_user and warnings.
+        """
+        blender_module: Any = bpy
+        obj = self._get_object_or_raise(object_name)
+        if obj.type != "MESH":
+            raise ValueError(
+                f"Object '{object_name}' is a {obj.type} object; only mesh modifiers can be applied"
+            )
+        self._require_object_mode(obj, "apply a modifier")
+        mod = self._modifier_or_raise(obj, modifier_name)
+        mod_type = mod.type
+        if not mod.show_viewport:
+            # Blender 5.0.1 answers FINISHED and drops such a modifier from
+            # the stack without applying it.
+            raise ValueError(
+                f"Modifier '{modifier_name}' of '{object_name}' is disabled in the viewport, "
+                "so Blender would remove it without applying it; enable it (show_viewport) "
+                "first, or use remove_blender_modifier"
+            )
+        if mod_type == "DECIMATE":
+            self._refuse_invalid_geometry(obj, "Decimate")
+        warnings: List[str] = []
+        names = [other.name for other in obj.modifiers]
+        above = names[: names.index(mod.name)]
+        if above:
+            warnings.append(
+                f"'{modifier_name}' was not first in the stack: Blender applied it to the "
+                f"base mesh without the modifiers above it ({', '.join(above)})"
+            )
+        shared = obj.data.users > 1
+        with blender_module.context.temp_override(object=obj, active_object=obj):
+            result = _bpy_op(
+                f"Failed to apply modifier '{modifier_name}' to '{object_name}'",
+                blender_module.ops.object.modifier_apply,
+                modifier=mod.name,
+                single_user=shared,
+            )
+        if "FINISHED" not in result:
+            raise RuntimeError(
+                f"Blender did not apply modifier '{modifier_name}' to '{object_name}' "
+                f"({', '.join(sorted(result))})"
+            )
+        return {
+            "object_name": object_name,
+            "modifier_name": modifier_name,
+            "modifier_type": mod_type,
+            **self._mesh_counts(obj.data),
+            "remaining_modifiers": [other.name for other in obj.modifiers],
+            "made_single_user": shared,
+            "warnings": warnings,
+        }
+
+    def remove_modifier(self, object_name: str, modifier_name: str) -> Dict[str, Any]:
+        """
+        Remove one modifier from an object's stack without applying it.
+
+        Args:
+            object_name: Object holding the modifier.
+            modifier_name: Name of the modifier to remove.
+
+        Returns:
+            Dictionary with the removed modifier and the remaining modifiers.
+        """
+        obj = self._get_object_or_raise(object_name)
+        mod = self._modifier_or_raise(obj, modifier_name)
+        mod_type = mod.type
+        obj.modifiers.remove(mod)
+        return {
+            "object_name": object_name,
+            "modifier_name": modifier_name,
+            "modifier_type": mod_type,
+            "remaining_modifiers": [other.name for other in obj.modifiers],
+        }
+
+    @staticmethod
+    def _modifier_or_raise(obj: Any, modifier_name: str) -> Any:
+        """The object's modifier of that name, or a ValueError listing its modifiers."""
+        modifiers = getattr(obj, "modifiers", None)
+        mod = None if modifiers is None else modifiers.get(modifier_name)
+        if mod is None:
+            names = [other.name for other in modifiers or []]
+            raise ValueError(
+                f"Object '{obj.name}' has no modifier '{modifier_name}'; "
+                + (f"its modifiers are: {', '.join(names)}" if names else "it has none")
+            )
+        return mod
+
+    @staticmethod
+    def _require_object_mode(obj: Any, action: str) -> None:
+        """Refuse to change an object's mesh data while it is edited in another mode."""
+        mode = getattr(obj, "mode", "OBJECT")
+        if mode != "OBJECT":
+            raise ValueError(
+                f"Object '{obj.name}' is in {mode.replace('_', ' ').title()} Mode; "
+                f"switch it to Object Mode to {action}"
+            )
+
+    @staticmethod
+    def _refuse_invalid_geometry(obj: Any, purpose: str) -> None:
+        """Refuse a mesh that Blender's validation would change.
+
+        Faces that repeat a vertex, duplicate faces and duplicate edges are
+        invalid topology that Blender's tools assume away: on Blender 5.0.1,
+        Decimate's collapse looped forever on such a mesh, pinning the main
+        thread. The check validates a throwaway copy, as Blender's C validation
+        is both exact and fast (0.17 s for a million faces); leaving the mesh
+        itself unchanged keeps the repair an explicit clean_mesh call.
+
+        Args:
+            obj: The mesh object.
+            purpose: What the mesh is checked for, named in the error.
+        """
+        blender_module: Any = bpy
+        if getattr(obj, "mode", "OBJECT") == "EDIT":
+            obj.update_from_editmode()
+        probe = obj.data.copy()
+        try:
+            invalid = bool(probe.validate(verbose=False, clean_customdata=False))
+        finally:
+            blender_module.data.meshes.remove(probe)
+        if invalid:
+            raise ValueError(
+                f"Mesh of '{obj.name}' has invalid geometry (faces that repeat a vertex, "
+                f"duplicate faces or duplicate edges), on which {purpose} can freeze Blender; "
+                "run clean_blender_mesh on it first"
+            )
+
+    def _set_rna_settings(
+        self, struct: Any, settings: Dict[str, Any], what: str
+    ) -> Dict[str, Any]:
+        """Set settings on a Blender struct after checking each against its RNA.
+
+        Args:
+            struct: The struct, such as a modifier.
+            settings: Values by RNA property identifier.
+            what: The struct as an error names it, e.g. ``DECIMATE modifier``.
+
+        Returns:
+            Each setting as Blender stored it, in JSON-friendly form.
+
+        Raises:
+            ValueError: For an unknown, reserved or read-only setting, a value
+                outside its limits or items, or a datablock that is not found
+                or that Blender refuses for the setting.
+        """
+        properties = struct.bl_rna.properties
+        writable = sorted(
+            prop.identifier
+            for prop in properties
+            if not prop.is_readonly
+            and prop.identifier not in _RESERVED_MODIFIER_SETTINGS
+        )
+        applied: Dict[str, Any] = {}
+        for key, value in settings.items():
+            if key in ("name", "type"):
+                raise ValueError(
+                    f"Set the {what}'s {key} through modifier_{key}, not params"
+                )
+            prop = None if key in _RESERVED_MODIFIER_SETTINGS else properties.get(key)
+            if prop is None:
+                raise ValueError(
+                    f"{what} has no setting '{key}'{_did_you_mean(key, writable)}; "
+                    f"its settings are: {', '.join(writable)}"
+                )
+            if prop.is_readonly:
+                raise ValueError(f"{what} setting '{key}' is read-only")
+            converted = self._rna_value(prop, value, f"{what} setting '{key}'")
+            setattr(struct, key, converted)
+            stored = getattr(struct, key)
+            if prop.type == "POINTER":
+                if stored != converted:
+                    # Blender drops a datablock its poll function refuses,
+                    # such as a camera for a Boolean's object, without an error.
+                    raise ValueError(
+                        f"Blender refused '{value}' for {what} setting '{key}': it does not "
+                        f"take that {prop.fixed_type.identifier}"
+                    )
+                applied[key] = None if stored is None else stored.name
+            else:
+                applied[key] = self._rna_echo(stored)
+        return applied
+
+    def _rna_value(self, prop: Any, value: Any, what: str) -> Any:
+        """The value to assign to an RNA property, checked against its definition.
+
+        Enum items match case-insensitively and an enum flag takes a list;
+        a datablock is named; a number must lie within the hard limits that
+        Blender would otherwise clamp it to silently.
+        """
+        kind = prop.type
+        if kind == "ENUM":
+            items = [item.identifier for item in prop.enum_items]
+            if prop.is_enum_flag:
+                values = [value] if isinstance(value, str) else value
+                if not isinstance(values, (list, tuple, set, frozenset)):
+                    raise ValueError(f"{what} takes a list of {', '.join(items)}")
+                return {_enum_item(item, items, what) for item in values}
+            return _enum_item(value, items, what)
+        if kind == "POINTER":
+            return self._named_datablock(prop, value, what)
+        if kind in ("INT", "FLOAT"):
+            length = getattr(prop, "array_length", 0)
+            if not length:
+                _check_rna_number(prop, value, what)
+                return int(value) if kind == "INT" else value
+            if not isinstance(value, (list, tuple)) or len(value) != length:
+                raise ValueError(f"{what} takes {length} numbers")
+            for item in value:
+                _check_rna_number(prop, item, what)
+            return [int(item) for item in value] if kind == "INT" else list(value)
+        return value
+
+    def _named_datablock(self, prop: Any, value: Any, what: str) -> Any:
+        """Resolve the name given for a pointer setting to its datablock."""
+        if value is None:
+            return None
+        type_name = prop.fixed_type.identifier
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{what} takes the name of a {type_name}, got {type(value).__name__}"
+            )
+        rna = prop.fixed_type
+        while rna is not None and rna.identifier not in _ID_COLLECTIONS:
+            rna = getattr(rna, "base", None)
+        if rna is None:
+            raise ValueError(f"{what} points to a {type_name}, which cannot be set by name")
+        if rna.identifier == "Object":
+            # Objects resolve like every other object argument: within the
+            # attached scene in attached mode.
+            try:
+                return self._get_object_or_raise(value)
+            except ValueError:
+                raise ValueError(f"{what}: object '{value}' not found") from None
+        blender_module: Any = bpy
+        datablock = getattr(blender_module.data, _ID_COLLECTIONS[rna.identifier]).get(value)
+        if datablock is None:
+            raise ValueError(f"{what}: {type_name} '{value}' not found")
+        return datablock
+
+    @staticmethod
+    def _rna_echo(value: Any) -> Any:
+        """A stored RNA value in JSON-friendly form: datablocks by name, sets sorted."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, (set, frozenset)):
+            return sorted(value)
+        if hasattr(value, "bl_rna") and hasattr(value, "name"):
+            return value.name
+        try:
+            return [BlenderRuntimeSession._rna_echo(item) for item in value]
+        except TypeError:
+            return str(value)
+
+    @staticmethod
+    def _enum_items(struct_type: Any, identifier: str) -> List[str]:
+        """The item identifiers of an enum property of a Blender type, or [] when unknown."""
+        try:
+            prop = struct_type.bl_rna.properties[identifier]
+        except (AttributeError, KeyError, TypeError):
+            return []
+        return [item.identifier for item in prop.enum_items]
 
     def set_light_params(
         self,
@@ -3769,79 +4261,266 @@ class BlenderRuntimeSession:
         """
         Create a mesh object from raw vertex, edge, and face data.
 
-        Uses ``bpy.data.meshes.new()`` + ``mesh.from_pydata()`` which is the
-        standard Blender Python API for procedural mesh creation.
+        Every argument is checked before anything is created: each vertex is
+        exactly three finite numbers, each index lies within the vertex list,
+        no face repeats a vertex or the vertex set of an earlier face, and no
+        edge joins a vertex to itself or repeats another edge. Such geometry
+        is invalid in Blender and froze its Decimate. The collection must be
+        in the current scene. The mesh is then built with
+        ``mesh.from_pydata()`` and checked with ``mesh.validate()``; when any
+        step fails, the mesh and object made so far are removed again.
 
         Args:
             name: Desired object name.
-            vertices: List of [x, y, z] vertex positions.
-            edges: List of [v0, v1] edge index pairs.
-            faces: List of vertex-index lists per face.
+            vertices: Vertex positions, each exactly [x, y, z] finite numbers.
+            edges: Loose edges as [v0, v1] pairs of two different vertices;
+                face edges are made from the faces.
+            faces: Faces as lists of three or more vertex indices, each vertex
+                once and each vertex set once.
             location: Optional world-space origin [x, y, z].
-            collection_name: Target collection (scene collection if None).
+            collection_name: Target collection in the current scene (the
+                scene collection if None).
 
         Returns:
-            Dict with object_name, mesh_name, vertex_count,
-            edge_count, face_count.
+            Dict with object_name, mesh_name, vertex_count, edge_count,
+            face_count and warnings.
 
         Raises:
-            ValueError: If vertices list is empty or indices are invalid.
+            ValueError: If the geometry, location or collection is invalid.
         """
-        if not vertices:
-            raise ValueError("vertices list must not be empty")
-
         blender_module: Any = bpy
-        safe_edges: List[List[int]] = edges or []
-        safe_faces: List[List[int]] = faces or []
+        coordinates = [
+            _finite_triple(vertex, f"Vertex {index}")
+            for index, vertex in enumerate(vertices)
+        ]
+        if not coordinates:
+            raise ValueError("vertices list must not be empty")
+        edge_list = self._mesh_edges(edges or [], len(coordinates))
+        face_list = self._mesh_faces(faces or [], len(coordinates))
+        origin = None if location is None else _finite_triple(location, "location")
+        collection = self._link_collection(collection_name)
+        warnings = self._collection_warnings(collection)
 
-        # Validate index bounds
-        num_verts = len(vertices)
-        for ei, edge in enumerate(safe_edges):
-            if len(edge) != 2:
-                raise ValueError(
-                    f"Edge {ei} must have exactly 2 indices, got {len(edge)}"
+        mesh: Any = None
+        obj: Any = None
+        try:
+            mesh = blender_module.data.meshes.new(name)
+            mesh.from_pydata(coordinates, edge_list, face_list)
+            if mesh.validate(verbose=False):
+                warnings.append(
+                    "Blender's mesh validation changed the geometry; the counts are "
+                    "what it kept"
                 )
-            for idx in edge:
-                if idx < 0 or idx >= num_verts:
-                    raise ValueError(
-                        f"Edge {ei} index {idx} out of range " f"[0, {num_verts})"
-                    )
-        for fi, face in enumerate(safe_faces):
-            if len(face) < 3:
-                raise ValueError(f"Face {fi} must have >= 3 indices, got {len(face)}")
-            for idx in face:
-                if idx < 0 or idx >= num_verts:
-                    raise ValueError(
-                        f"Face {fi} index {idx} out of range " f"[0, {num_verts})"
-                    )
+            mesh.update()
+            obj = blender_module.data.objects.new(name, mesh)
+            if origin is not None:
+                obj.location = origin
+            collection.objects.link(obj)
+        except Exception:
+            # Leave no orphan behind: an unlinked object or mesh is still
+            # written by whole-scene exports, which then fail on it.
+            if obj is not None:
+                blender_module.data.objects.remove(obj, do_unlink=True)
+            if mesh is not None:
+                blender_module.data.meshes.remove(mesh)
+            raise
 
-        # Create mesh data-block and populate
-        mesh = blender_module.data.meshes.new(name)
-        vert_tuples = [tuple(v) for v in vertices]
-        edge_tuples = [tuple(e) for e in safe_edges]
-        face_tuples = [tuple(f) for f in safe_faces]
-        mesh.from_pydata(vert_tuples, edge_tuples, face_tuples)
-        mesh.update()
-
-        # Create object and link to scene
-        obj = blender_module.data.objects.new(name, mesh)
-        if location is not None:
-            obj.location = tuple(location)
-
-        if collection_name is not None:
-            col = blender_module.data.collections.get(collection_name)
-            if col is None:
-                raise ValueError(f"Collection '{collection_name}' not found")
-            col.objects.link(obj)
-        else:
-            blender_module.context.scene.collection.objects.link(obj)
-
+        if obj.name != name:
+            warnings.append(
+                f"The name '{name}' was taken or too long; Blender named the object '{obj.name}'"
+            )
         return {
             "object_name": obj.name,
             "mesh_name": mesh.name,
             "vertex_count": len(mesh.vertices),
             "edge_count": len(mesh.edges),
             "face_count": len(mesh.polygons),
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _mesh_edges(edges: Sequence[Sequence[int]], vertex_count: int) -> List[Tuple[int, int]]:
+        """Checked edge index pairs: in range, two distinct vertices, no edge twice."""
+        checked: List[Tuple[int, int]] = []
+        seen: Dict[Tuple[int, int], int] = {}
+        for ei, edge in enumerate(edges):
+            if len(edge) != 2:
+                raise ValueError(f"Edge {ei} must have exactly 2 indices, got {len(edge)}")
+            first, second = (_mesh_index(idx, f"Edge {ei}", vertex_count) for idx in edge)
+            if first == second:
+                raise ValueError(f"Edge {ei} joins vertex {first} to itself")
+            key = (min(first, second), max(first, second))
+            if key in seen:
+                raise ValueError(f"Edge {ei} repeats edge {seen[key]}")
+            seen[key] = ei
+            checked.append((first, second))
+        return checked
+
+    @staticmethod
+    def _mesh_faces(faces: Sequence[Sequence[int]], vertex_count: int) -> List[Tuple[int, ...]]:
+        """Checked faces: three or more indices in range, each vertex once, no face twice.
+
+        Two faces over the same vertex set count as duplicates whatever their
+        order: they overlap entirely.
+        """
+        checked: List[Tuple[int, ...]] = []
+        seen: Dict[Tuple[int, ...], int] = {}
+        for fi, face in enumerate(faces):
+            if len(face) < 3:
+                raise ValueError(f"Face {fi} must have >= 3 indices, got {len(face)}")
+            indices = tuple(_mesh_index(idx, f"Face {fi}", vertex_count) for idx in face)
+            if len(set(indices)) != len(indices):
+                repeated = next(idx for idx in indices if indices.count(idx) > 1)
+                raise ValueError(
+                    f"Face {fi} repeats vertex {repeated}; a face uses each vertex once"
+                )
+            key = tuple(sorted(indices))
+            if key in seen:
+                raise ValueError(
+                    f"Face {fi} uses the same vertices as face {seen[key]} (a duplicate face)"
+                )
+            seen[key] = fi
+            checked.append(indices)
+        return checked
+
+    def _link_collection(self, collection_name: Optional[str]) -> Any:
+        """The collection a new object goes into: one that belongs to the current scene.
+
+        An object linked only to a collection outside the scene is not part
+        of it: attached-mode lookups do not find it, and whole-scene exports
+        fail on it.
+        """
+        blender_module: Any = bpy
+        scene = blender_module.context.scene
+        if collection_name is None:
+            return scene.collection
+        collection = blender_module.data.collections.get(collection_name)
+        if collection is None:
+            raise ValueError(f"Collection '{collection_name}' not found")
+        if collection not in scene.collection.children_recursive:
+            raise ValueError(
+                f"Collection '{collection_name}' is not in scene '{scene.name}', so the "
+                "object would not be part of the scene; link the collection to the "
+                "scene, or omit collection_name"
+            )
+        if getattr(collection, "library", None) is not None:
+            raise ValueError(
+                f"Collection '{collection_name}' is linked from a library and cannot take new objects"
+            )
+        return collection
+
+    @staticmethod
+    def _collection_warnings(collection: Any) -> List[str]:
+        """A warning when the view layer excludes the collection an object goes into."""
+        blender_module: Any = bpy
+        view_layer: Any = getattr(blender_module.context, "view_layer", None)
+        pending = [getattr(view_layer, "layer_collection", None)]
+        while pending:
+            layer = pending.pop()
+            if layer is None:
+                continue
+            if layer.collection == collection:
+                if layer.exclude:
+                    return [
+                        f"Collection '{collection.name}' is excluded from view layer "
+                        f"'{view_layer.name}': Blender neither evaluates nor exports the object there"
+                    ]
+                return []
+            pending.extend(layer.children)
+        return []
+
+    def clean_mesh(
+        self,
+        object_name: str,
+        merge_distance: Optional[float] = None,
+        dissolve_degenerate_distance: Optional[float] = None,
+        recalculate_normals: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Repair a mesh object's data: validate it, then optionally merge, dissolve and recalculate.
+
+        ``mesh.validate()`` always runs first and removes invalid topology:
+        faces that repeat a vertex, duplicate faces and duplicate edges, which
+        can make Decimate loop forever. The optional steps then run in order
+        on the valid mesh: merge vertices closer than ``merge_distance``
+        (Merge by Distance), dissolve edges shorter and faces smaller than
+        ``dissolve_degenerate_distance`` (Degenerate Dissolve), and point the
+        face normals consistently outward. Mesh data shared by several objects
+        changes for all of them. The object must be in Object Mode.
+
+        Args:
+            object_name: Mesh object whose data to clean.
+            merge_distance: Merge vertices within this distance; None skips it.
+            dissolve_degenerate_distance: Dissolve edges and faces smaller than
+                this; None skips it.
+            recalculate_normals: Make face normals point consistently outside.
+
+        Returns:
+            Dictionary with the counts before and after, whether validation
+            changed anything, the merged vertex count, the operations run, the
+            mesh's user count and warnings.
+        """
+        obj = self._get_object_or_raise(object_name)
+        if obj.type != "MESH":
+            raise ValueError(f"Object '{object_name}' is not a MESH (type={obj.type})")
+        self._require_object_mode(obj, "clean its mesh")
+        distances: Dict[str, Any] = {
+            "merge_distance": merge_distance,
+            "dissolve_degenerate_distance": dissolve_degenerate_distance,
+        }
+        for label, distance in distances.items():
+            if distance is not None and (
+                isinstance(distance, bool)
+                or not isinstance(distance, numbers.Real)
+                or not math.isfinite(distance)
+                or distance <= 0
+            ):
+                raise ValueError(f"{label} must be a finite distance above 0, got {distance!r}")
+
+        mesh = obj.data
+        before = self._mesh_counts(mesh)
+        validation_fixed = bool(mesh.validate(verbose=False))
+        operations = ["validate"]
+        vertices_merged = 0
+        if merge_distance or dissolve_degenerate_distance or recalculate_normals:
+            import bmesh  # type: ignore[import-not-found]
+
+            bm = bmesh.new()
+            try:
+                bm.from_mesh(mesh)
+                if merge_distance:
+                    count = len(bm.verts)
+                    bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=merge_distance)
+                    vertices_merged = count - len(bm.verts)
+                    operations.append("merge_by_distance")
+                if dissolve_degenerate_distance:
+                    bmesh.ops.dissolve_degenerate(
+                        bm, dist=dissolve_degenerate_distance, edges=list(bm.edges)
+                    )
+                    operations.append("dissolve_degenerate")
+                if recalculate_normals:
+                    bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+                    operations.append("recalculate_normals")
+                bm.to_mesh(mesh)
+            finally:
+                bm.free()
+            mesh.update()
+
+        warnings: List[str] = []
+        if mesh.users > 1:
+            warnings.append(
+                f"Mesh '{mesh.name}' is shared by {mesh.users} users; all of them changed"
+            )
+        return {
+            "object_name": object_name,
+            "mesh_name": mesh.name,
+            "before": before,
+            "after": self._mesh_counts(mesh),
+            "validation_fixed": validation_fixed,
+            "vertices_merged": vertices_merged,
+            "operations": operations,
+            "mesh_users": int(mesh.users),
+            "warnings": warnings,
         }
 
     # -- End scripting & mesh-from-data methods ------------------------------
@@ -6807,6 +7486,8 @@ class BlenderRuntimeAdapter:
             "blender_clear_parent",
             "blender_assign_material",
             "blender_add_modifier",
+            "blender_apply_modifier",
+            "blender_remove_modifier",
             "blender_set_light_params",
             "blender_open_file",
             "blender_save_file",
@@ -6831,6 +7512,7 @@ class BlenderRuntimeAdapter:
             "blender_free_bake",
             "execute_blender_script",
             "create_blender_mesh_from_data",
+            "blender_clean_mesh",
             "apply_simready_metadata",
             "get_simready_metadata",
             "validate_simready_compliance",
