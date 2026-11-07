@@ -562,6 +562,8 @@ def test_wrong_shape_names_the_expected_one(
     )
 
     assert message in result["error"]
+    assert result["error_type"] == "ValidationError"
+    assert result["details"]["code"] == "VALUE_REJECTED"
 
 
 @pytest.mark.parametrize(

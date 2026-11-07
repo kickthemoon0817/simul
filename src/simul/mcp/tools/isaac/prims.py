@@ -218,29 +218,36 @@ PRIM_LAYERING_CORE = """\
         # "unavailable": no omni.kit.commands, so pxr does the edit.
         # "done": Kit did it. "declined": Kit ran and changed nothing, as it
         # does for a prim marked no_delete or one it treats as referenced
-        # content; that refusal is respected, not overridden with pxr.
-        # "raised": Kit failed. An older Kit without an optional keyword is
-        # called again without it.
+        # content; that refusal is respected, not overridden. "raised": Kit
+        # failed. Only a TypeError naming one of the optional keywords (an
+        # older Kit without it) earns another call without that keyword: a
+        # call that returned and changed nothing is Kit declining, and
+        # calling again with Kit's defaults (destructive=True edits every
+        # local layer) would override it.
         try:
             import omni.kit.commands
         except Exception:
             return "unavailable", None
-        attempts = [dict(kwargs)]
-        if optional:
-            attempts.append({key: value for key, value in kwargs.items() if key not in optional})
-        error = None
-        for index, call in enumerate(attempts):
+        call = dict(kwargs)
+        dropped = []
+        while True:
             try:
                 omni.kit.commands.execute(name, **call)
-            except Exception as exc:
-                error = type(exc).__name__ + ": " + str(exc).strip()
+            except TypeError as exc:
+                unknown = [key for key in optional if key in call and key in str(exc)]
+                if not unknown:
+                    return "raised", "TypeError: " + str(exc).strip()
+                dropped.extend(unknown)
+                call = {key: value for key, value in call.items() if key not in unknown}
                 continue
-            error = None
-            if done():
-                if index:
-                    return "done", "this Kit's " + name + " takes no " + ", ".join(optional) + "; called without"
-                return "done", None
-        return ("raised", error) if error else ("declined", None)
+            except Exception as exc:
+                return "raised", type(exc).__name__ + ": " + str(exc).strip()
+            break
+        if not done():
+            return "declined", None
+        if dropped:
+            return "done", "this Kit's " + name + " takes no " + ", ".join(dropped) + "; called without"
+        return "done", None
 """
 
 DELETE_PRIM_CORE = """\
@@ -1081,7 +1088,11 @@ class PrimEditMixin:
                 else:
                     attr = prim.GetAttribute({_attr_name})
                     if not attr.IsValid():
-                        print(json.dumps({{"error": "Attribute not found: " + {_attr_name} + " on " + {_prim_path}}}))
+                        print(json.dumps({{
+                            "error": "Attribute not found: " + {_attr_name} + " on " + {_prim_path},
+                            "error_type": "NotFoundError",
+                            "details": {{"code": "ATTRIBUTE_NOT_FOUND"}},
+                        }}))
                     else:
                         val = json.loads({_val_str})
                         type_label = str(attr.GetTypeName())
@@ -1098,6 +1109,8 @@ class PrimEditMixin:
                         if failure is not None:
                             print(json.dumps({{
                                 "error": "Failed to set " + {_attr_name} + " (" + type_label + "): " + failure,
+                                "error_type": "ValidationError",
+                                "details": {{"code": "VALUE_REJECTED", "type": type_label}},
                                 "type": type_label,
                             }}))
                         else:

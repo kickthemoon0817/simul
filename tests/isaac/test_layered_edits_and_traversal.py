@@ -329,6 +329,76 @@ def test_a_kit_that_declines_the_delete_is_respected(
     assert stage.GetPrimAtPath("/World/Box").IsDefined(), "pxr did not override Kit"
 
 
+def _declines_unless_destructive(stage: Usd.Stage, kind: str) -> Callable[..., None]:
+    """A Kit command that changes nothing under destructive=False and acts without it."""
+
+    def run(**kwargs: Any) -> None:
+        if kwargs.get("destructive", True) is False:
+            return
+        if kind == "DeletePrims":
+            for path in kwargs["paths"]:
+                stage.RemovePrim(path)
+            return
+        edit = Sdf.BatchNamespaceEdit()
+        edit.Add(
+            Sdf.NamespaceEdit.Reparent(
+                kwargs["path_from"], Sdf.Path(kwargs["path_to"]).GetParentPath(), -1
+            )
+        )
+        stage.GetRootLayer().Apply(edit)
+
+    return run
+
+
+def test_a_decline_under_destructive_false_is_not_retried_destructively(
+    capturing_tools: Tools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second call with Kit's default destructive=True overrode the decline."""
+    stage = _local_stage()
+    UsdGeom.Cube.Define(stage, "/World/Box")
+    tools, captured = capturing_tools
+    asyncio.run(tools.delete_isaac_prim("/World/Box"))
+
+    result = _run_with_kit(
+        captured[-1],
+        stage,
+        {"DeletePrims": _declines_unless_destructive(stage, "DeletePrims")},
+        monkeypatch,
+    )
+
+    assert result["details"]["code"] == "KIT_DECLINED"
+    assert result["_kit_kwargs"] == [{"paths": ["/World/Box"], "destructive": False}]
+    assert stage.GetPrimAtPath("/World/Box").IsDefined()
+
+
+def test_a_declined_move_is_not_retried_destructively(
+    capturing_tools: Tools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = _local_stage()
+    UsdGeom.Xform.Define(stage, "/World/A")
+    UsdGeom.Xform.Define(stage, "/World/B")
+    UsdGeom.Cube.Define(stage, "/World/A/Box")
+    tools, captured = capturing_tools
+    asyncio.run(
+        tools.reparent_isaac_prim(
+            "/World/A/Box", "/World/B", keep_world_transform=False
+        )
+    )
+
+    result = _run_with_kit(
+        captured[-1],
+        stage,
+        {"MovePrim": _declines_unless_destructive(stage, "MovePrim")},
+        monkeypatch,
+    )
+
+    assert result["details"]["code"] == "KIT_DECLINED"
+    assert len(result["_kit_kwargs"]) == 1
+    assert result["_kit_kwargs"][0]["destructive"] is False
+    assert stage.GetPrimAtPath("/World/A/Box").IsValid()
+    assert not stage.GetPrimAtPath("/World/B/Box").IsValid()
+
+
 def test_an_older_kit_without_destructive_is_called_again(
     capturing_tools: Tools, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -350,6 +420,25 @@ def test_an_older_kit_without_destructive_is_called_again(
     ]
     assert result["method"] == "omni.kit.commands DeletePrims"
     assert "destructive" in result["kit_note"]
+
+
+def test_a_kit_error_is_reported_not_worked_around(
+    capturing_tools: Tools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = _local_stage()
+    UsdGeom.Cube.Define(stage, "/World/Box")
+    tools, captured = capturing_tools
+    asyncio.run(tools.delete_isaac_prim("/World/Box"))
+
+    def _broken(**kwargs: Any) -> None:
+        raise RuntimeError("stage is locked")
+
+    result = _run_with_kit(captured[-1], stage, {"DeletePrims": _broken}, monkeypatch)
+
+    assert result["details"]["code"] == "KIT_ERROR"
+    assert "stage is locked" in result["error"]
+    assert len(result["_kit_kwargs"]) == 1
+    assert stage.GetPrimAtPath("/World/Box").IsDefined()
 
 
 def test_session_layer_prims_are_not_deleted(
