@@ -291,6 +291,26 @@ def test_setup_payload_includes_engine_ini_when_bind_supplied(
     assert "DefaultBindAddress" in engine_ini["added"]
 
 
+def test_setup_enables_geometry_scripting_and_says_so(tmp_path: Path, monkeypatch) -> None:
+    """The mesh tools need GeometryScripting; setup enables it and reports why in the payload."""
+    uproject = _write_uproject(tmp_path)
+
+    async def _fake_poll(session, timeout, interval):
+        del session, timeout, interval
+        return {"connected": False}
+
+    monkeypatch.setattr(unreal_cli, "_poll_health", _fake_poll)
+
+    result = runner.invoke(app, ["--json", "unreal", "setup", str(uproject), "--no-launch", "--yes"])
+
+    payload = json.loads(result.stdout)
+    assert "GeometryScripting" in payload["patched"]["uproject"]["added"]
+    (warning,) = payload["patched"]["uproject"]["warnings"]
+    assert "mesh tools" in warning and "restart" in warning
+    plugins = {p["Name"]: p["Enabled"] for p in json.loads(uproject.read_text())["Plugins"]}
+    assert plugins["GeometryScripting"] is True
+
+
 def test_setup_payload_engine_ini_is_none_when_no_bind(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -457,10 +457,9 @@ Behaviour worth knowing:
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:
   - `spawn_unreal_actor`, `delete_unreal_actor`,
-    `generate_unreal_procedural_scene`, the mesh tools that create an actor
-    (`generate_unreal_mesh_primitive`, `compute_unreal_convex_hull`,
-    `decompose_unreal_convex_hull`, `convert_unreal_mesh_format` to
-    `dynamic_mesh`), `import_unreal_usd`, `export_unreal_usd` and, in attached
+    `generate_unreal_procedural_scene`, every mesh tool except
+    `validate_unreal_mesh` (they create actors or replace meshes, see below),
+    `import_unreal_usd`, `export_unreal_usd` and, in attached
     mode, every `control_unreal_ui` action except `inspect` and `clear_cursor`
     return `error_type: "PIEActive"`, with `details.hint` naming the way out:
     `control_unreal_simulation` with action `stop` (CLI: `simul unreal sim stop`).
@@ -495,6 +494,46 @@ Behaviour worth knowing:
     starts) the camera stays where it was put; when a Play session in the
     level viewport stops, Unreal replaces the editor camera, by default with
     the game camera's last view.
+- The mesh tools (`generate_unreal_mesh_primitive`, `validate_unreal_mesh`
+  and the other `*_unreal_mesh*` and `*_unreal_convex_hull` tools) run
+  GeometryScript in the editor:
+  - They need the GeometryScripting plugin, which `simul unreal setup` enables
+    (restart an editor that was already running). Without it every mesh tool
+    returns `error_type: "UnsupportedOperation"` with `details.code:
+    "GEOMETRY_SCRIPTING_DISABLED"` and a hint naming setup.
+  - They take the path of a DynamicMeshActor in the level open in the editor,
+    found without loading a map. A path that names nothing is `NotFoundError`.
+    A StaticMeshActor (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh
+    asset path (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose
+    `details.hint` names `convert_unreal_mesh_format`, which places an
+    editable DynamicMeshActor copy of a StaticMesh asset in the level; any
+    other actor is `"NO_DYNAMIC_MESH"`.
+  - Every GeometryScript call is checked after it returns. GeometryScript
+    reports most failures that way and otherwise leaves the mesh as it was
+    (Catmull-Clark on a mesh without quad polygroups returned with the
+    triangle count unchanged). An error fails the tool with `EngineError`,
+    `details.code: "GEOMETRY_SCRIPT_FAILED"` and GeometryScript's messages in
+    `details.messages`, and nothing is changed; warnings come back in
+    `warnings`.
+  - An edit runs on a copy of the mesh, and the copy replaces the component's
+    mesh in one transaction, so a failed edit changes nothing, one Undo
+    reverts one edit and the level is marked dirty for Save. A tool that
+    creates an actor spawns it, with its mesh, in one transaction too. After
+    an Undo the DynamicMeshComponent keeps the bounds of the mesh that was
+    undone (Unreal does not recompute them on Undo), until a mesh tool next
+    reads the actor.
+  - `compute_unreal_mesh_uv` unwraps with XAtlas only up to 20,000 triangles:
+    XAtlas crashed the editor on a 130,048- and a 318,400-triangle mesh, and
+    took 28.6 s for 32,256 (UE 5.7.4). Method `auto`, the default, uses
+    PatchBuilder above that size (29 s for 318,400 triangles) and the reply's
+    `method` names the one that ran; `xatlas` on a larger mesh is refused with
+    `details.code: "MESH_TOO_LARGE_FOR_XATLAS"`. A `uv_channel` the mesh does
+    not have is refused (`"UV_CHANNEL_MISSING"`).
+  - A mesh script runs under an HTTP timeout of at least 120 s, whatever
+    `UNREAL__TIMEOUT` says, since a GeometryScript call cannot be cancelled.
+  - In attached mode, a call the attachment guard refuses (the editor shows
+    another map or instance) is `error_type: "InvalidState"`, `details.code:
+    "ATTACHMENT_CHANGED"`.
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.

@@ -3,8 +3,8 @@ Unreal Remote Control auto-setup and launcher.
 
 Pure stdlib helpers that:
 
-1. Idempotently patch ``<Project>.uproject`` to enable the ``RemoteControl``
-   and ``PythonScriptPlugin`` plugins.
+1. Idempotently patch ``<Project>.uproject`` to enable the ``RemoteControl``,
+   ``PythonScriptPlugin`` and ``GeometryScripting`` plugins.
 2. Idempotently patch ``<Project>/Config/DefaultRemoteControl.ini`` so the
    Remote Control web server starts automatically and allows Python execution.
 3. Resolve a platform-appropriate Unreal Editor launch command
@@ -29,7 +29,15 @@ from typing import Dict, List, Optional, Tuple
 
 REMOTE_CONTROL_SECTION = "/Script/RemoteControlCommon.RemoteControlSettings"
 
-REQUIRED_PLUGINS: Tuple[str, ...] = ("RemoteControl", "PythonScriptPlugin")
+REQUIRED_PLUGINS: Tuple[str, ...] = ("RemoteControl", "PythonScriptPlugin", "GeometryScripting")
+
+#: The plugin the GeometryScript mesh tools (``generate_unreal_mesh_primitive``
+#: and the other ``*_unreal_mesh*`` tools) need. It ships with the engine as
+#: prebuilt binaries, so enabling it compiles nothing, and its dependencies
+#: (GeometryProcessing, MeshModelingToolset, PlanarCut) are the ones the
+#: stock Modeling Mode already loads. Unreal loads a plugin only at editor
+#: start, so an editor that was running when setup enabled it needs a restart.
+GEOMETRY_SCRIPTING_PLUGIN = "GeometryScripting"
 
 # Identifier we stamp on simul-managed passphrase entries. UE doesn't use
 # this for matching (only the hashed Passphrase field is compared) — it's
@@ -354,11 +362,13 @@ class SetupResult:
 
 
 def patch_uproject(uproject_path: Path, *, agent_overlay: bool = False) -> PatchResult:
-    """Enable RemoteControl and PythonScriptPlugin in ``.uproject``.
+    """Enable RemoteControl, PythonScriptPlugin and GeometryScripting in ``.uproject``.
 
     Writes the file back only when something actually changed. Preserves
     existing keys and ordering. Plugin entries are matched case-sensitively
-    by ``Name`` — matches UE5's own handling.
+    by ``Name`` — matches UE5's own handling. Enabling GeometryScripting adds
+    a warning that the mesh tools need it and that a running editor loads it
+    only after a restart.
     """
     uproject_path = Path(uproject_path)
     if not uproject_path.is_file():
@@ -390,6 +400,13 @@ def patch_uproject(uproject_path: Path, *, agent_overlay: bool = False) -> Patch
             result.updated.append(name)
         else:
             result.already_ok.append(name)
+
+    if GEOMETRY_SCRIPTING_PLUGIN in result.added + result.updated:
+        result.warnings.append(
+            "Enabled GeometryScripting, which the Unreal mesh tools (generate_unreal_mesh_primitive "
+            "and the other *_unreal_mesh* tools) need. Unreal loads plugins at startup, so an editor "
+            "that is already running needs a restart before those tools work."
+        )
 
     if result.added or result.updated:
         result.changed = True

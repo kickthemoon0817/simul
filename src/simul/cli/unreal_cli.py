@@ -1044,7 +1044,7 @@ def setup(
     ``RemoteControl`` / ``PythonScriptPlugin`` in the .uproject and editing
     ``Config/DefaultRemoteControl.ini`` before every simul session.
 
-    What gets enabled (the only two plugins required by simul):
+    What gets enabled (the plugins simul's tools need):
 
       * ``RemoteControl``       — UE's HTTP/WebSocket API server (the thing
                                   simul talks to). Not the Marketplace
@@ -1053,6 +1053,10 @@ def setup(
       * ``PythonScriptPlugin``  — embedded Python interpreter for the
                                   remote ``exec`` endpoint. Required because
                                   ``bEnableRemotePythonExecution=True``.
+      * ``GeometryScripting``   — the GeometryScript library the mesh tools
+                                  (``*_unreal_mesh*``) run on. Prebuilt with
+                                  the engine; a running editor loads it only
+                                  after a restart.
 
     See ``docs/unreal-setup.md`` for the full disambiguation, including which
     similarly-named plugins (PixelStreaming, Concert, Remote Control Presets,
@@ -1183,7 +1187,11 @@ def setup(
         console.print(patch.ini.summary())
         if patch.engine_ini is not None and patch.engine_ini.changed:
             console.print(patch.engine_ini.summary())
-        for warning in patch.ini.warnings + (patch.engine_ini.warnings if patch.engine_ini else []):
+        for warning in (
+            patch.uproject.warnings
+            + patch.ini.warnings
+            + (patch.engine_ini.warnings if patch.engine_ini else [])
+        ):
             console.print(f"[yellow]warning:[/yellow] {warning}")
 
     # Launch if requested.
@@ -1232,6 +1240,7 @@ def setup(
                 "changed": patch.uproject.changed,
                 "added": patch.uproject.added,
                 "updated": patch.uproject.updated,
+                "warnings": patch.uproject.warnings,
             },
             "ini": {
                 "changed": patch.ini.changed,

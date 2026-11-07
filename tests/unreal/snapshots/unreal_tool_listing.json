@@ -2239,7 +2239,7 @@
   {
    "name": "generate_unreal_mesh_primitive",
    "title": "Generate Unreal Mesh Primitive",
-   "description": "Create a parametric mesh primitive (box, sphere, cylinder, cone, torus, capsule).",
+   "description": "Create a parametric mesh primitive (box, sphere, cylinder, cone or capsule) as a new DynamicMeshActor; the spawn is one undoable transaction. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2299,7 +2299,7 @@
   {
    "name": "apply_unreal_mesh_boolean",
    "title": "Apply Unreal Mesh Boolean",
-   "description": "Apply boolean operation (union, subtract, intersect) between two meshes.",
+   "description": "Apply a boolean (union, subtract, intersect) of a tool DynamicMeshActor's mesh to a target DynamicMeshActor's mesh, in place and undoable. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2342,7 +2342,7 @@
   {
    "name": "compute_unreal_convex_hull",
    "title": "Compute Unreal Convex Hull",
-   "description": "Compute convex hull envelope of a mesh.",
+   "description": "Compute the convex hull of a DynamicMeshActor's mesh as a new DynamicMeshActor (one undoable spawn), with the hull's and the source's volume. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2375,7 +2375,7 @@
   {
    "name": "decompose_unreal_convex_hull",
    "title": "Decompose Unreal Convex Hull",
-   "description": "V-HACD convex decomposition for collision geometry.",
+   "description": "Decompose a DynamicMeshActor's mesh into convex pieces, placed together in one new DynamicMeshActor (one undoable spawn), and report each piece. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2391,17 +2391,17 @@
      },
      "max_vertices_per_hull": {
       "default": 32,
-      "description": "Max vertices per hull.",
+      "description": "Simplifies each piece to this many triangles.",
       "type": "integer"
      },
      "min_cluster_size": {
       "default": 256,
-      "description": "Minimum cluster size for V-HACD.",
+      "description": "Unused.",
       "type": "integer"
      },
      "resolution": {
       "default": 100000,
-      "description": "Voxelization resolution.",
+      "description": "Unused.",
       "type": "integer"
      }
     },
@@ -2428,7 +2428,7 @@
   {
    "name": "edit_unreal_mesh_topology",
    "title": "Edit Unreal Mesh Topology",
-   "description": "Edit mesh topology (extrude, bevel, inset, loop cut, scale_faces).",
+   "description": "Extrude, bevel or inset the faces of a DynamicMeshActor's mesh, in place and undoable. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2438,7 +2438,7 @@
       "type": "string"
      },
      "operation": {
-      "description": "extrude_faces, bevel_edges, inset_faces, loop_cut, scale_faces.",
+      "description": "extrude_faces, bevel_edges or inset_faces.",
       "type": "string"
      },
      "face_selection": {
@@ -2531,7 +2531,7 @@
   {
    "name": "subdivide_unreal_mesh",
    "title": "Subdivide Unreal Mesh",
-   "description": "Catmull-Clark / Loop / bilinear subdivision.",
+   "description": "Subdivide a DynamicMeshActor's mesh, in place and undoable: Catmull-Clark (needs quad polygroups) or uniform tessellation. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2542,12 +2542,12 @@
      },
      "level": {
       "default": 2,
-      "description": "Subdivision level (1-4).",
+      "description": "Subdivision level, clamped to 1-4.",
       "type": "integer"
      },
      "scheme": {
       "default": "catmull_clark",
-      "description": "catmull_clark, loop, or uniform.",
+      "description": "catmull_clark; any other value runs uniform tessellation.",
       "type": "string"
      }
     },
@@ -2574,7 +2574,7 @@
   {
    "name": "simplify_unreal_mesh",
    "title": "Simplify Unreal Mesh",
-   "description": "Simplify/decimate a mesh to reduce triangle count.",
+   "description": "Simplify a DynamicMeshActor's mesh to a triangle count or a fraction of its triangles, in place and undoable. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2605,7 +2605,7 @@
        }
       ],
       "default": null,
-      "description": "Target percentage (0.0-1.0)."
+      "description": "Fraction of the triangles to keep (0.0-1.0)."
      },
      "max_error": {
       "anyOf": [
@@ -2617,7 +2617,7 @@
        }
       ],
       "default": null,
-      "description": "Max geometric error tolerance."
+      "description": "Unused."
      }
     },
     "required": [
@@ -2643,7 +2643,7 @@
   {
    "name": "cut_unreal_mesh_plane",
    "title": "Cut Unreal Mesh Plane",
-   "description": "Cut/slice a mesh along an arbitrary plane.",
+   "description": "Cut a DynamicMeshActor's mesh with a plane given in the mesh's local space, keeping one side, in place and undoable. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2653,7 +2653,7 @@
       "type": "string"
      },
      "plane_origin": {
-      "description": "Plane origin [x, y, z] in cm.",
+      "description": "Plane origin [x, y, z] in cm, in the mesh's space.",
       "type": "string"
      },
      "plane_normal": {
@@ -2667,7 +2667,7 @@
      },
      "keep_both_sides": {
       "default": false,
-      "description": "Keep both halves (unused \u2014 UE plane cut keeps one side and optionally fills).",
+      "description": "Keep both halves (unused: the cut keeps one side).",
       "type": "boolean"
      }
     },
@@ -2696,7 +2696,7 @@
   {
    "name": "validate_unreal_mesh",
    "title": "Validate Unreal Mesh",
-   "description": "Validate mesh integrity (manifold, normals, degenerates, self-intersection).",
+   "description": "Check a DynamicMeshActor's mesh: watertight (no open border edges), compact (no triangle ID gaps) and with normals, with the counts behind each. Reads only, also while PIE runs. Needs the GeometryScripting plugin, which simul unreal setup enables.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2734,17 +2734,17 @@
   {
    "name": "convert_unreal_mesh_format",
    "title": "Convert Unreal Mesh Format",
-   "description": "Convert mesh between formats (static mesh, dynamic mesh, skeletal mesh).",
+   "description": "Place an editable DynamicMeshActor copy of a StaticMesh asset at the world origin (one undoable spawn), for the other mesh tools to edit; target_format 'dynamic_mesh'. 'static_mesh' (back to an asset) is not implemented yet and is refused. Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
-      "description": "Source mesh actor/asset path.",
+      "description": "StaticMesh asset path, such as /Game/Meshes/SM_Crate.",
       "type": "string"
      },
      "target_format": {
-      "description": "'static_mesh' or 'dynamic_mesh'.",
+      "description": "'dynamic_mesh'; 'static_mesh' is refused as not implemented yet.",
       "type": "string"
      },
      "tessellation_options": {
@@ -2777,7 +2777,7 @@
   {
    "name": "remesh_unreal_mesh",
    "title": "Remesh Unreal Mesh",
-   "description": "Remesh a mesh (uniform, adaptive) to improve triangle quality.",
+   "description": "Uniformly remesh a DynamicMeshActor's mesh to a target edge length or triangle count, in place and undoable; reports the result's mean edge length. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2844,7 +2844,7 @@
   {
    "name": "compute_unreal_mesh_uv",
    "title": "Compute Unreal Mesh Uv",
-   "description": "Generate or recompute UV coordinates for a mesh.",
+   "description": "Generate UVs for a DynamicMeshActor's mesh with XAtlas or PatchBuilder, in place and undoable. Method 'auto' uses XAtlas up to 20,000 triangles and PatchBuilder above that; 'xatlas' on a larger mesh is refused, since XAtlas crashed the editor on larger meshes. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2854,18 +2854,18 @@
       "type": "string"
      },
      "method": {
-      "default": "auto_uv",
-      "description": "'xatlas' or 'patch_builder' (default xatlas).",
+      "default": "auto",
+      "description": "auto, xatlas or patch_builder; the reply's method names the one that ran.",
       "type": "string"
      },
      "uv_channel": {
       "default": 0,
-      "description": "UV set index.",
+      "description": "UV channel to write; it must exist on the mesh.",
       "type": "integer"
      },
      "island_padding": {
       "default": 2.0,
-      "description": "Unused (reserved for future option support).",
+      "description": "Unused.",
       "type": "number"
      }
     },

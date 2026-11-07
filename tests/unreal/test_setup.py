@@ -37,11 +37,15 @@ def test_patch_uproject_adds_missing_plugins(tmp_path: Path) -> None:
     result = patch_uproject(uproject)
 
     assert result.changed is True
-    assert set(result.added) == {"RemoteControl", "PythonScriptPlugin"}
+    assert set(result.added) == {"RemoteControl", "PythonScriptPlugin", "GeometryScripting"}
     data = json.loads(uproject.read_text())
     names = {p["Name"]: p for p in data["Plugins"]}
     assert names["RemoteControl"]["Enabled"] is True
     assert names["PythonScriptPlugin"]["Enabled"] is True
+    assert names["GeometryScripting"]["Enabled"] is True
+    # Setup says why it enabled GeometryScripting, and that a running editor needs a restart.
+    assert len(result.warnings) == 1
+    assert "mesh tools" in result.warnings[0] and "restart" in result.warnings[0]
 
 
 def test_patch_uproject_enables_present_but_disabled_plugins(tmp_path: Path) -> None:
@@ -60,10 +64,32 @@ def test_patch_uproject_enables_present_but_disabled_plugins(tmp_path: Path) -> 
 
     assert result.changed is True
     assert result.updated == ["RemoteControl"]
+    assert result.added == ["GeometryScripting"]
     assert result.already_ok == ["PythonScriptPlugin"]
     data = json.loads(uproject.read_text())
     # Unrelated plugin preserved.
     assert any(p["Name"] == "SomeOther" for p in data["Plugins"])
+
+
+def test_patch_uproject_enables_a_disabled_geometry_scripting(tmp_path: Path) -> None:
+    """The mesh tools need it; a project that turned it off gets it back, with the reason."""
+    uproject = _write_uproject(
+        tmp_path,
+        {
+            "Plugins": [
+                {"Name": "RemoteControl", "Enabled": True},
+                {"Name": "PythonScriptPlugin", "Enabled": True},
+                {"Name": "GeometryScripting", "Enabled": False},
+            ]
+        },
+    )
+
+    result = patch_uproject(uproject)
+
+    assert result.updated == ["GeometryScripting"]
+    assert "GeometryScripting" in result.warnings[0]
+    data = json.loads(uproject.read_text())
+    assert {p["Name"]: p["Enabled"] for p in data["Plugins"]}["GeometryScripting"] is True
 
 
 def test_patch_uproject_noop_when_already_configured(tmp_path: Path) -> None:
@@ -73,6 +99,7 @@ def test_patch_uproject_noop_when_already_configured(tmp_path: Path) -> None:
             "Plugins": [
                 {"Name": "RemoteControl", "Enabled": True},
                 {"Name": "PythonScriptPlugin", "Enabled": True},
+                {"Name": "GeometryScripting", "Enabled": True},
             ]
         },
     )
@@ -81,7 +108,7 @@ def test_patch_uproject_noop_when_already_configured(tmp_path: Path) -> None:
     result = patch_uproject(uproject)
 
     assert result.changed is False
-    assert result.added == [] and result.updated == []
+    assert result.added == [] and result.updated == [] and result.warnings == []
     assert uproject.read_text() == before  # file untouched
 
 
