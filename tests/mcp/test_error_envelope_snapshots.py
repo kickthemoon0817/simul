@@ -353,7 +353,9 @@ def test_isaac_claimed_instance_refusal(
             "hint": (
                 "Read-only tools still work. Ask the holder to call release_isaac_instance, or "
                 "wait for the claim to expire (120 s without activity), then call "
-                "claim_isaac_instance yourself. list_isaac_instances shows other instances."
+                "claim_isaac_instance yourself. list_isaac_instances shows other instances. "
+                "An operator can list and clear claims with `simul isaac claims` "
+                "(`simul isaac claims --clear --port 8226`)."
             ),
         },
     }
