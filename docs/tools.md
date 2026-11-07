@@ -187,23 +187,31 @@ Behaviour worth knowing:
   half as far above it; the reply's `distance` is the one used. A positive
   `distance` looks at the actor's location. With `distance` 0 (the default) or
   less the camera looks at the center of the actor's bounds and stands back until
-  their bounding sphere fills the view's height with 10% to spare. Editor
-  Python cannot read the level viewport's field of view, so UE's default is
-  assumed: 90 degrees across on a 16:9 viewport; a narrower field of view or a
-  viewport wider than about 2:1 can crop the actor. An actor whose bounds have
-  no size, such as a StaticMeshActor without a mesh, gets 500 cm from its
-  location instead, with a `fit_warning`; an empty actor or a light is framed
-  by its editor icon. The editor-only components the editor's own Focus leaves
-  out are left out of the bounds too, since theirs can reach far beyond the
-  actor, so a camera is framed by its editor mesh. They include the frustum
-  the editor draws for a camera or a scene capture (10 m on every side of it),
-  a CineCamera's debug focus plane (100 m across at the focus distance, 1 km by
-  default; turning the plane off only hides it) and a spare icon attached to
-  nothing, such as the one a SkyLight leaves at the world origin. A component
-  that is not editor-only always counts, such as a trigger box's collision
-  shape, which the editor's own Focus ignores. An actor whose bounds are not
-  the box around its components, such as a level instance or a NavLinkProxy,
-  is framed by the bounds Unreal reports.
+  their bounding sphere fills the narrower side of the view with 10% to spare.
+  The view is `fov` degrees across (default 90, UE's default) and
+  `aspect_ratio` wide per unit of height (default 16:9, the default
+  1920x1080 capture's), and keeps its field of view across the width, as
+  Unreal's viewports and captures do. Editor Python cannot read the level
+  viewport's field of view, so pass `fov` when it was changed, and
+  `aspect_ratio` for a capture of another shape: otherwise a narrower field of
+  view, or a view wider than about 2:1, can crop the actor. An actor whose
+  bounds have no size, such as a StaticMeshActor without a mesh, gets 500 cm
+  from its location instead, with a `fit_warning`; an empty actor or a light
+  is framed by its editor icon. The editor-only components the editor's own
+  Focus leaves out are left out of the bounds too, since theirs can reach far
+  beyond the actor, so a camera is framed by its editor mesh. They include the
+  frustum the editor draws for a camera or a scene capture (10 m on every side
+  of it), a CineCamera's debug focus plane (100 m across at the focus
+  distance, 1 km by default; turning the plane off only hides it) and a spare
+  icon attached to nothing, such as the one a SkyLight leaves at the world
+  origin. A shape (box, sphere or capsule component) whose collision is turned
+  off is left out too, as the editor's own Focus leaves out every shape: it
+  collides with nothing, like a SphereReflectionCapture's influence sphere
+  (30 m in radius by default) or a BoxReflectionCapture's boxes, so a
+  reflection capture is framed by its icon, as a light is. Any other component
+  that is not editor-only counts, such as a trigger box's collision shape. An
+  actor whose bounds are not the box around its components, such as a level
+  instance or a NavLinkProxy, is framed by the bounds Unreal reports.
 - While Play In Editor (or Simulate In Editor) runs, Unreal's editor refuses
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:

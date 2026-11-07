@@ -253,6 +253,13 @@ def _whole_camera_groups(request: Any) -> Optional[str]:
     return None
 
 
+def _focus_view(request: Any) -> Optional[str]:
+    """Auto-fit needs a field of view in (0, 180) degrees and a positive aspect ratio."""
+    from ...adapters.unreal_runtime import focus_view_error
+
+    return focus_view_error(request.fov, request.aspect_ratio)
+
+
 def _camera_arguments(request: Any) -> Dict[str, Any]:
     """The location and rotation triples; None for a group left unchanged."""
     arguments: Dict[str, Any] = {}
@@ -611,11 +618,13 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="focus_unreal_on_actor",
         description=(
             "Focus the editor viewport camera on a specific actor and select it. With distance 0 the camera "
-            "looks at the center of the actor's bounds and backs off until they fit the view, assuming UE's "
-            "default 90-degree field of view on a 16:9 viewport (editor Python cannot read the viewport's); "
-            "distance reports the distance used, and fit_warning says when an actor without bounds got the "
-            "default 500 cm. selected reports whether Unreal selected it. While PIE runs, Unreal's editor "
-            "selects nothing, so the camera moves but selected is false, with pie_active true and a warning."
+            "looks at the center of the actor's bounds and backs off until they fit a view fov degrees across "
+            "and aspect_ratio wide per unit of height: by default UE's default 90-degree field of view on the "
+            "16:9 of the default capture. Editor Python cannot read the viewport's field of view, so pass fov "
+            "when it was changed, and aspect_ratio for a capture of another shape. distance reports the "
+            "distance used, and fit_warning says when an actor without bounds got the default 500 cm. "
+            "selected reports whether Unreal selected it. While PIE runs, Unreal's editor selects nothing, so "
+            "the camera moves but selected is false, with pie_active true and a warning."
         ),
         response=UnrealFocusActorResponse,
         read_only=False,
@@ -631,7 +640,26 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "it (0 or less = auto-fit to the actor's bounds)."
                 ),
             ),
+            ToolParam(
+                "fov",
+                float,
+                90.0,
+                description=(
+                    "Auto-fit only: field of view across the view, in degrees, more than 0 and less than 180. "
+                    "The level viewport's; UE's default is 90."
+                ),
+            ),
+            ToolParam(
+                "aspect_ratio",
+                float,
+                16.0 / 9.0,
+                description=(
+                    "Auto-fit only: the view's width over its height, such as a capture's resolution_x / "
+                    "resolution_y; 16:9 by default, as the default 1920x1080 capture."
+                ),
+            ),
         ),
+        check=_focus_view,
     ),
     # -- Scene manipulation ---------------------------------------------------
     UnrealTool(

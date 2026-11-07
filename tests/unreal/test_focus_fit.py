@@ -3,17 +3,21 @@
 Distance 0 was documented as auto-fit, but the camera always stood a fixed
 500 cm behind the actor's location (UE 5.7.4): a 20 m cube put the camera
 inside the cube, and a 10 cm one was a speck. Now distance 0 reads the actor's
-bounds and backs the camera off until their bounding sphere fills the view's
-height with a margin, looking at their center. Editor Python cannot read the
-level viewport's field of view, so UE's default is assumed: 90 degrees across
-on a 16:9 viewport. An actor without bounds (zero extent) keeps the 500 cm and
-the reply says so; an explicit distance places the camera as before.
+bounds and backs the camera off until their bounding sphere fills the narrower
+side of the view with a margin, looking at their center. Editor Python cannot
+read the level viewport's field of view, so the caller can pass the view's
+field of view across and its aspect ratio; the defaults are UE's default, 90
+degrees across, on the 16:9 of the default capture. An actor without bounds
+(zero extent) keeps the 500 cm and the reply says so; an explicit distance
+places the camera as before.
 
 The bounds leave out the editor-only components the editor's own Focus leaves
 out, whose bounds can reach far beyond the actor: the frustum the editor draws
 for a camera, a CineCamera's debug focus plane, an icon not attached to the
-actor. A component that is not editor-only always counts, and an actor that
-reports bounds other than the box around its components keeps them.
+actor. They also leave out a shape whose collision is turned off, such as a
+reflection capture's influence sphere, which collides with nothing. Any other
+component that is not editor-only counts, a trigger's shape included, and an
+actor that reports bounds other than the box around its components keeps them.
 
 The adapter tests run the real editor script against a stand-in for the
 ``unreal`` module and the camera calls against a stand-in level viewport. The
@@ -24,6 +28,7 @@ camera read back.
 from __future__ import annotations
 
 import asyncio
+import enum
 import io
 import json
 import math
@@ -38,16 +43,18 @@ from fastmcp import Client
 from simul.adapters import unreal_runtime
 from simul.config import Settings
 from simul.mcp import server as server_module
+from simul.mcp.registration._unreal_tools import UNREAL_TOOLS
 from simul.mcp.usage_tracker import ToolUsageTracker
 from tests.fakes import AvailableAdapter
 
 LEVEL = "/Game/Maps/Lab.Lab:PersistentLevel."
 
-# UE's default level viewport, which the fit assumes: 90 degrees across on a
-# 16:9 viewport, so the view reaches tan(45 degrees) across and 9/16 of that up
-# per unit of depth. Unreal clips anything nearer than 10 cm.
-HALF_WIDTH = math.tan(math.radians(45.0))
-HALF_HEIGHT = HALF_WIDTH * 9.0 / 16.0
+# The view the fit assumes by default: UE's default level viewport field of
+# view, 90 degrees across, on the 16:9 of the default capture. A view keeps its
+# field of view across its width, so it reaches tan(fov / 2) across and 1 /
+# aspect of that up per unit of depth. Unreal clips anything nearer than 10 cm.
+FOV = 90.0
+ASPECT = 16.0 / 9.0
 NEAR_CLIP = 10.0
 
 
@@ -71,12 +78,22 @@ class SceneComponent:
         return self.parent
 
 
+class CollisionEnabled(enum.Enum):
+    """``unreal.CollisionEnabled``."""
+
+    NO_COLLISION = 0
+    QUERY_ONLY = 1
+    PHYSICS_ONLY = 2
+    QUERY_AND_PHYSICS = 3
+
+
 class PrimitiveComponent(SceneComponent):
     """A primitive component and its world bounds (``Bounds``) as a center and a half-size.
 
-    ``editor_only`` is ``bIsEditorOnly`` and ``ignore_focus`` what
-    ``GetIgnoreBoundsForEditorFocus`` returns. An ``attached`` component is attached
-    under the root of the actor it is given to; any other one is attached to nothing.
+    ``editor_only`` is ``bIsEditorOnly``, ``ignore_focus`` what
+    ``GetIgnoreBoundsForEditorFocus`` returns and ``collision`` what
+    ``GetCollisionEnabled`` returns. An ``attached`` component is attached under the
+    root of the actor it is given to; any other one is attached to nothing.
     """
 
     def __init__(
@@ -86,17 +103,40 @@ class PrimitiveComponent(SceneComponent):
         editor_only: bool = False,
         ignore_focus: bool = False,
         attached: bool = True,
+        collision: CollisionEnabled = CollisionEnabled.QUERY_AND_PHYSICS,
     ) -> None:
         super().__init__()
         self.center, self.extent = tuple(center), tuple(extent)
         self.editor_only, self.ignore_focus = editor_only, ignore_focus
-        self.attached = attached
+        self.attached, self.collision = attached, collision
 
     def get_editor_property(self, name: str) -> Any:
         return {"is_editor_only": self.editor_only}[name]
 
     def get_ignore_bounds_for_editor_focus(self) -> bool:
         return self.ignore_focus
+
+    def get_collision_enabled(self) -> CollisionEnabled:
+        return self.collision
+
+
+class ShapeComponent(PrimitiveComponent):
+    """A box, sphere or capsule component: the editor's own Focus ignores every shape
+    (UShapeComponent::GetIgnoreBoundsForEditorFocus, UE 5.7). Unreal makes a trigger's
+    shape and a reflection capture's influence shapes as plain components, not
+    editor-only ones; the trigger's collides (the Trigger profile, query only), the
+    influence shapes collide with nothing (UE 5.7.4)."""
+
+    def __init__(
+        self,
+        center: Sequence[float],
+        extent: Sequence[float],
+        collision: CollisionEnabled,
+        attached: bool = True,
+    ) -> None:
+        super().__init__(
+            center, extent, ignore_focus=True, attached=attached, collision=collision
+        )
 
 
 class DrawFrustumComponent(PrimitiveComponent):
@@ -237,6 +277,8 @@ class Editor:
         return SimpleNamespace(
             Actor=Actor,
             PrimitiveComponent=PrimitiveComponent,
+            ShapeComponent=ShapeComponent,
+            CollisionEnabled=CollisionEnabled,
             DrawFrustumComponent=DrawFrustumComponent,
             SystemLibrary=SimpleNamespace(get_component_bounds=get_component_bounds),
             EditorActorSubsystem="EditorActorSubsystem",
@@ -308,14 +350,21 @@ def _focus(
 
 
 def _in_view(
-    camera: Sequence[float], rotation: Sequence[float], point: Sequence[float]
+    camera: Sequence[float],
+    rotation: Sequence[float],
+    point: Sequence[float],
+    fov: float = FOV,
+    aspect: float = ASPECT,
 ) -> Tuple[float, float, float]:
     """Where ``point`` is in the view of a camera at ``camera`` with (pitch, yaw, roll) ``rotation``.
 
+    The view is ``fov`` degrees across and ``aspect`` wide per unit of height.
     Returns the depth along the view axis, and how far across and up the
     point is, as fractions of the view's half-width and half-height at that
     depth: the point is in the view when both are within [-1, 1].
     """
+    half_width = math.tan(math.radians(fov) / 2)
+    half_height = half_width / aspect
     pitch, yaw = math.radians(rotation[0]), math.radians(rotation[1])
     assert rotation[2] == 0.0, "no roll"
     forward = (
@@ -335,11 +384,15 @@ def _in_view(
         return sum(o * a for o, a in zip(offset, axis))
 
     depth = along(forward)
-    return depth, along(right) / depth / HALF_WIDTH, along(up) / depth / HALF_HEIGHT
+    return depth, along(right) / depth / half_width, along(up) / depth / half_height
 
 
 def _box_in_view(
-    result: Dict[str, Any], origin: Sequence[float], extent: Sequence[float]
+    result: Dict[str, Any],
+    origin: Sequence[float],
+    extent: Sequence[float],
+    fov: float = FOV,
+    aspect: float = ASPECT,
 ) -> Tuple[float, float]:
     """The nearest depth of the box's corners, and the largest share of the view they reach.
 
@@ -349,7 +402,7 @@ def _box_in_view(
     for signs in [(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]:
         corner = [o + s * e for o, s, e in zip(origin, signs, extent)]
         depth, across, up = _in_view(
-            result["camera_location"], result["camera_rotation"], corner
+            result["camera_location"], result["camera_rotation"], corner, fov, aspect
         )
         assert depth > 0.0, f"corner {corner} is behind the camera"
         nearest, reach = min(nearest, depth), max(reach, abs(across), abs(up))
@@ -574,10 +627,10 @@ def test_a_component_that_is_not_editor_only_counts_even_where_the_editor_focus_
     editor: Editor, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The editor's own Focus ignores collision shapes too, and frames a trigger box by
-    its icon. The shape is the trigger's volume, not an editor-only drawing, so it
+    its icon. The shape is the trigger's volume, which collides, not a drawing, so it
     counts, like any component that is not editor-only, attached to the actor or not."""
-    volume = PrimitiveComponent(
-        (0.0, 0.0, 200.0), (500.0, 500.0, 200.0), ignore_focus=True
+    volume = ShapeComponent(
+        (0.0, 0.0, 200.0), (500.0, 500.0, 200.0), CollisionEnabled.QUERY_ONLY
     )
     icon = PrimitiveComponent((0.0, 0.0, 200.0), (128.0,) * 3, editor_only=True)
     loose = PrimitiveComponent((2000.0, 0.0, 200.0), (10.0,) * 3, attached=False)
@@ -602,6 +655,58 @@ def test_a_component_that_is_not_editor_only_counts_even_where_the_editor_focus_
     )
 
 
+@pytest.mark.parametrize(
+    "influence",
+    [
+        # A SphereReflectionCapture: its influence sphere, 30 m in radius by default,
+        # and the small sphere of its capture radius.
+        [((3000.0,) * 3), ((32.0,) * 3)],
+        # A BoxReflectionCapture: its influence box and its capture box.
+        [(1000.0, 1000.0, 400.0), (900.0, 900.0, 300.0)],
+    ],
+    ids=["sphere reflection capture", "box reflection capture"],
+)
+def test_distance_0_frames_a_reflection_capture_by_its_icon_not_by_its_influence_shapes(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, influence: List[Tuple[float, ...]]
+) -> None:
+    """Unreal draws a reflection capture's influence with shapes it makes as plain
+    components, not editor-only ones, so they counted: a SphereReflectionCapture was
+    framed by its 30 m influence sphere from 104 m away, its icon a speck (UE 5.7.4).
+    The shapes collide with nothing, which tells them from a trigger's, and the
+    editor's own Focus ignores every shape: the capture is framed by its icons, as a
+    light is."""
+    capture = (0.0, 50000.0, 200.0)
+    # Its icons collide with nothing either, but they are not shapes.
+    sprite, offset = (
+        PrimitiveComponent(
+            capture, extent, editor_only=True, collision=CollisionEnabled.NO_COLLISION
+        )
+        for extent in ((128.0,) * 3, (51.2,) * 3)
+    )
+    shapes = [
+        ShapeComponent(capture, extent, CollisionEnabled.NO_COLLISION)
+        for extent in influence
+    ]
+    components = [sprite, offset, *shapes]
+    path = editor.add(
+        Actor(
+            "ReflectionCapture_0", capture, *_union(components), components=components
+        )
+    )
+
+    result = _focus(editor, monkeypatch, path)
+
+    assert result["distance"] == pytest.approx(
+        unreal_runtime._focus_fit_distance(sprite.extent)
+    )
+    assert result["camera_location"] == pytest.approx(
+        _placement(capture, result["distance"])[0]
+    )
+    nearest, reach = _box_in_view(result, capture, sprite.extent)
+    assert nearest > NEAR_CLIP and 0.4 < reach <= 1.0
+    assert "fit_warning" not in result
+
+
 def test_with_nothing_left_out_the_bounds_are_those_unreal_reports(
     editor: Editor, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -618,10 +723,19 @@ def test_with_nothing_left_out_the_bounds_are_those_unreal_reports(
         (1000.0,) * 3,
         components=[DrawFrustumComponent((0.0, 5000.0, 0.0))],
     )
+    marker = ((0.0, 9000.0, 100.0), (400.0, 300.0, 100.0))
+    marker_only = Actor(
+        "Marker",
+        marker[0],
+        *marker,
+        components=[ShapeComponent(*marker, CollisionEnabled.NO_COLLISION)],
+    )
     for actor, (origin, extent) in (
         (instance, content),
-        # An actor with nothing but a frustum keeps it, as the editor's own Focus does.
+        # An actor with nothing but a frustum, or nothing but a shape that collides
+        # with nothing, keeps it, as the editor's own Focus does.
         (frustum_only, ((0.0, 5000.0, 0.0), (1000.0,) * 3)),
+        (marker_only, marker),
     ):
         result = _focus(editor, monkeypatch, editor.add(actor))
 
@@ -728,6 +842,89 @@ def test_distance_0_fits_the_actor_during_pie_too(
 
 
 # ---------------------------------------------------------------------------
+# The view the actor is fitted in
+# ---------------------------------------------------------------------------
+
+
+def test_the_default_view_is_the_default_field_of_view_on_the_default_capture() -> None:
+    """Without a view, the fit is unchanged: 90 degrees across on 16:9, which put a
+    20 m cube 3475.9 cm away (UE 5.7.4). The tool advertises the session's defaults."""
+    extent = (1000.0, 1000.0, 1000.0)
+    assert unreal_runtime._focus_fit_distance(extent) == pytest.approx(
+        3475.93, abs=0.01
+    )
+    assert unreal_runtime._focus_fit_distance(
+        extent
+    ) == unreal_runtime._focus_fit_distance(extent, FOV, ASPECT)
+    spec = next(s for s in UNREAL_TOOLS if s.name == "focus_unreal_on_actor")
+    defaults = {param.name: param.default for param in spec.params}
+    assert (defaults["fov"], defaults["aspect_ratio"]) == (
+        unreal_runtime.FOCUS_FOV_DEGREES,
+        unreal_runtime.FOCUS_ASPECT_RATIO,
+    )
+
+
+@pytest.mark.parametrize(
+    "fov, aspect, cropped_by_default",
+    [
+        (50.0, ASPECT, True),
+        (90.0, 3.0, True),
+        (30.0, 1.0, True),
+        # Taller than wide: the width is the narrower side, and the default fit,
+        # which stood back for the height of a 16:9 view, left more room than needed.
+        (90.0, 9.0 / 16.0, False),
+    ],
+    ids=["narrower field of view", "3:1", "30 degrees square", "9:16"],
+)
+def test_distance_0_fits_the_actor_in_the_view_it_is_given(
+    editor: Editor,
+    monkeypatch: pytest.MonkeyPatch,
+    fov: float,
+    aspect: float,
+    cropped_by_default: bool,
+) -> None:
+    """Editor Python cannot read the level viewport's field of view, so the fit
+    assumed UE's default, 90 degrees across, on 16:9: a narrower field of view or a
+    view wider than about 2:1 cropped the actor. Given the view, the fit backs off
+    until the actor fits it, with the same margin."""
+    origin, extent = (0.0, 0.0, 1000.0), (1000.0, 1000.0, 1000.0)
+    path = editor.add(Actor("Tower", (0.0, 0.0, 0.0), origin, extent))
+
+    default = _focus(editor, monkeypatch, path)
+    result = _focus(editor, monkeypatch, path, fov=fov, aspect_ratio=aspect)
+
+    assert (_box_in_view(default, origin, extent, fov, aspect)[1] > 1.0) is (
+        cropped_by_default
+    )
+    nearest, reach = _box_in_view(result, origin, extent, fov, aspect)
+    assert nearest > NEAR_CLIP and 0.4 < reach <= 1.0
+    assert result["distance"] == pytest.approx(
+        unreal_runtime._focus_fit_distance(extent, fov, aspect)
+    )
+    camera, rotation = _placement(origin, result["distance"])
+    assert result["camera_location"] == pytest.approx(camera)
+    assert result["camera_rotation"] == pytest.approx(rotation)
+    assert "fit_warning" not in result
+
+
+def test_the_view_leaves_an_explicit_distance_alone(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fov and aspect_ratio shape the auto-fit only: a positive distance still looks
+    at the actor's location from that distance."""
+    path = editor.add(
+        Actor("Lamp", (100.0, 200.0, 0.0), (100.0, 200.0, 150.0), (50.0, 50.0, 150.0))
+    )
+
+    result = _focus(
+        editor, monkeypatch, path, distance=250.0, fov=30.0, aspect_ratio=1.0
+    )
+
+    assert result["camera_location"] == (-150.0, 200.0, 125.0)
+    assert result["distance"] == 250.0
+
+
+# ---------------------------------------------------------------------------
 # Through the MCP tool
 # ---------------------------------------------------------------------------
 
@@ -795,3 +992,58 @@ def test_an_agent_sees_the_distance_used_and_why_it_was_not_fitted(
     )
     assert (fallback["success"], fallback["distance"]) == (True, 500.0)
     assert fallback["fit_warning"] == unreal_runtime.FOCUS_NO_BOUNDS_WARNING
+
+
+def test_an_agent_can_give_the_view_to_fit(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """fov and aspect_ratio reach the fit through the tool."""
+    extent = (50.0, 50.0, 50.0)
+    path = editor.add(Actor("Crate", (0.0, 0.0, 0.0), (0.0, 0.0, 50.0), extent))
+
+    fit = _call(
+        editor,
+        monkeypatch,
+        tmp_path,
+        {"actor_path": path, "fov": 40.0, "aspect_ratio": 2.4},
+    )
+
+    assert fit["success"] is True
+    assert fit["distance"] == pytest.approx(
+        unreal_runtime._focus_fit_distance(extent, 40.0, 2.4)
+    )
+    nearest, reach = _box_in_view(fit, (0.0, 0.0, 50.0), extent, 40.0, 2.4)
+    assert nearest > NEAR_CLIP and 0.4 < reach <= 1.0
+
+
+@pytest.mark.parametrize(
+    "view, named",
+    [
+        ({"fov": 0.0}, "fov"),
+        ({"fov": 180.0}, "fov"),
+        ({"fov": -45.0}, "fov"),
+        ({"aspect_ratio": 0.0}, "aspect_ratio"),
+        ({"aspect_ratio": -1.5}, "aspect_ratio"),
+    ],
+)
+def test_a_view_the_fit_cannot_use_is_refused_before_anything_moves(
+    editor: Editor,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    view: Dict[str, float],
+    named: str,
+) -> None:
+    """A field of view outside (0, 180) degrees or an aspect ratio that is not
+    positive has no fit: the tool refuses it as invalid input, and the session
+    raises, before the actor is selected or the camera moves."""
+    path = editor.add(
+        Actor("Crate", (0.0, 0.0, 0.0), (0.0, 0.0, 50.0), (50.0, 50.0, 50.0))
+    )
+
+    refused = _call(editor, monkeypatch, tmp_path, {"actor_path": path, **view})
+
+    assert (refused["success"], refused["error_type"]) == (False, "ValidationError")
+    assert named in refused["error"]
+    with pytest.raises(ValueError, match=named):
+        asyncio.run(_session(editor, monkeypatch).focus_on_actor(path, **view))
+    assert editor.selection == [] and editor.camera_writes == []
