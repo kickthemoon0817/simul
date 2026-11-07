@@ -181,7 +181,8 @@ class PrimEditMixin:
                 )))
             """,
         )
-        return await self._execute_json_script(script)
+        # A placement made while paused after a step is reverted on stop.
+        return await self._execute_json_script(script, annotations=("paused_edit",))
 
     @tool_meta(
         name="set_isaac_prim_visibility",
@@ -289,7 +290,7 @@ class PrimEditMixin:
                         except Exception as e:
                             print(json.dumps({{"error": f"Failed to set attribute: {{e}}"}}))
         """)
-        return await self._execute_json_script(script)
+        return await self._execute_json_script(script, annotations=("paused_edit",))
 
     @tool_meta(
         name="duplicate_isaac_prim",
@@ -407,4 +408,3 @@ class PrimEditMixin:
                             print(json.dumps({{"error": "Reparent operation failed"}}))
         """)
         return await self._execute_json_script(script)
-

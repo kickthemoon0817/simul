@@ -121,7 +121,8 @@ class PhysicsMixin:
                         "diagonal_inertia": inertia,
                     }}))
         """)
-        return await self._execute_json_script(script)
+        # Velocities come from USD, which GPU physics stops updating.
+        return await self._execute_json_script(script, annotations=("usd_readback",))
 
     @tool_meta(
         name="list_isaac_physics_objects",
@@ -356,7 +357,10 @@ class PhysicsMixin:
                         "density": density,
                         "center_of_mass": list(com) if com else None,
                         "diagonal_inertia": list(inertia) if inertia else None,
-                        "principal_axes": [principal_axes.GetReal()] + list(principal_axes.GetImaginary()) if principal_axes else None,
+                        "principal_axes": (
+                            [principal_axes.GetReal()] + list(principal_axes.GetImaginary())
+                            if principal_axes else None
+                        ),
                     }}))
         """)
         return await self._execute_json_script(script)
@@ -669,4 +673,3 @@ class PhysicsMixin:
                         print(json.dumps(result))
         """)
         return await self._execute_json_script(script)
-

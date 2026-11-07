@@ -359,7 +359,10 @@ class SceneInspectionMixin:
                         "is_defined": prim.IsDefined(),
                         "is_instance": prim.IsInstance(),
                         "purpose": UsdGeom.Imageable(prim).ComputePurpose() if prim.IsA(UsdGeom.Imageable) else None,
-                        "visibility": UsdGeom.Imageable(prim).ComputeVisibility() if prim.IsA(UsdGeom.Imageable) else None,
+                        "visibility": (
+                            UsdGeom.Imageable(prim).ComputeVisibility()
+                            if prim.IsA(UsdGeom.Imageable) else None
+                        ),
                         "children_count": len(children),
                         "children_types": child_types,
                         "children": children[:50],
@@ -369,7 +372,10 @@ class SceneInspectionMixin:
                     }}))
         """)
         mode = self._raw_script_transport_mode
-        return await self._execute_json_script(script, transport_mode=mode)
+        # The transform comes from USD, which GPU physics stops updating.
+        return await self._execute_json_script(
+            script, transport_mode=mode, annotations=("usd_readback",)
+        )
 
     async def get_isaac_prim_transform(
         self,
@@ -437,7 +443,9 @@ class SceneInspectionMixin:
                     }}))
         """)
         mode = self._raw_script_transport_mode
-        return await self._execute_json_script(script, transport_mode=mode)
+        return await self._execute_json_script(
+            script, transport_mode=mode, annotations=("usd_readback",)
+        )
 
     @tool_meta(
         name="search_isaac_prims",
@@ -614,4 +622,3 @@ class SceneInspectionMixin:
                 }))
         """)
         return await self._execute_json_script(script)
-

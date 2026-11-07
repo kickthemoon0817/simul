@@ -6,6 +6,48 @@
 - `~/isaac-sim-5.1.0/exts/isaacsim.core.prims/isaacsim/core/prims/impl/`
 - `~/isaac-sim-5.1.0/exts/isaacsim.core.utils/`
 
+> **Version note: this page is the Isaac Sim 5.1 API.** Isaac Sim 6.0.0 and
+> 6.0.1 deprecate all three packages above in favour of
+> `isaacsim.core.experimental.*`, and the `omni.isaac.*` shims are gone. On
+> 6.0 a script that imports `isaacsim.core.api` / `.prims` / `.utils` may still
+> load but leans on code slated for removal. Check the version first
+> (`get_isaac_runtime_info` → `app.isaac_version`) and use the 6.0 equivalents
+> below there; the namespace-migration reference in the scripting skill has the
+> full map.
+
+## Isaac Sim 6.0 equivalents
+
+Read from the v6.0.1 sources of `isaacsim.core.experimental.prims`,
+`isaacsim.core.experimental.utils` and `isaacsim.core.simulation_manager`.
+
+| 5.1 (this page) | 6.0 |
+|---|---|
+| `from isaacsim.core.prims import RigidPrim, XFormPrim, Articulation` | `from isaacsim.core.experimental.prims import RigidPrim, XformPrim, Articulation, GeomPrim` (note `XformPrim`) |
+| `SimulationContext.play()` / `.pause()` / `.stop()` | `import isaacsim.core.experimental.utils.app as app_utils`; `app_utils.play(commit=True)`, `pause`, `stop`, `is_playing` |
+| `SimulationContext.step()` / physics dt | `from isaacsim.core.simulation_manager import SimulationManager`; `SimulationManager.set_device("cuda:0")` |
+| `isaacsim.core.utils.stage` / `.prims` helpers | `isaacsim.core.experimental.utils.stage`, `isaacsim.core.experimental.utils.prim` (the modules `SimulationManager` itself imports, with `.app` and `.ops`) |
+| numpy arrays from views | warp arrays: `positions, orientations = RigidPrim(paths="/World/Box").get_world_poses()`, then `.numpy()` |
+
+```python
+# Isaac Sim 6.0: simulated pose and velocity of a rigid body
+import isaacsim.core.experimental.utils.app as app_utils
+from isaacsim.core.experimental.prims import RigidPrim
+
+body = RigidPrim(paths="/World/Box")
+app_utils.play(commit=True)  # the physics tensor view needs a running simulation
+positions, orientations = body.get_world_poses()       # (N, 3), (N, 4) wxyz
+linear, angular = body.get_velocities()                # (N, 3), (N, 3)
+print(positions.numpy().tolist(), linear.numpy().tolist())
+```
+
+**Reading simulated state, either version.** With GPU physics Isaac Sim's
+`SimulationManager` turns on `omni.physx.fabric` and sets
+`/physics/updateToUsd` and `/physics/updateVelocitiesToUsd` to false, so USD
+(and every simul tool that reads USD, which then flags `stale_under_fabric`)
+holds the values from before play. Read poses and velocities through the
+physics views on this page (5.1) or the experimental prims above (6.0)
+instead.
+
 ---
 
 ## Imports
