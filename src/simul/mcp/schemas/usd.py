@@ -46,6 +46,7 @@ class USDIssue(BaseModel):
 class USDFileInfo(BaseModel):
     """USD file information."""
 
+    success: bool = Field(True, description="Whether the file was checked (see is_valid)")
     file_path: str = Field(..., description="Path to USD file")
     file_size: int = Field(..., description="File size in bytes")
     format: str = Field(..., description="File extension (usd, usda, usdc, usdz)")
@@ -89,6 +90,7 @@ class USDValidateRequest(BaseModel):
 class StageInfo(BaseModel):
     """USD stage information."""
 
+    success: bool = Field(True, description="Whether the stage loaded")
     stage_id: str = Field(..., description="Unique stage identifier")
     file_path: str = Field(..., description="Path to USD file")
     up_axis: str = Field(..., description="Stage up axis (Y or Z)")
@@ -119,6 +121,7 @@ class PrimInfo(BaseModel):
     ``"Infinity"``, ``"-Infinity"`` or ``"NaN"``.
     """
 
+    success: bool = Field(True, description="Whether the prim was read")
     path: str = Field(..., description="Prim path")
     name: str = Field(..., description="Prim name")
     type: str = Field(..., description="Prim type")
@@ -256,6 +259,7 @@ class PrimDeleteRequest(BaseModel):
 class MeshInfo(BaseModel):
     """USD mesh information."""
 
+    success: bool = Field(True, description="Whether the mesh was read")
     prim_path: str = Field(..., description="Mesh prim path")
     vertex_count: int = Field(..., description="Number of vertices")
     face_count: int = Field(..., description="Number of faces")
@@ -532,6 +536,106 @@ class BBoxResponse(BaseModel):
     error: Optional[str] = Field(None, description="Error message if failed")
 
 
+class StageRequest(BaseModel):
+    """Request naming one loaded stage."""
+
+    stage_id: str = Field(..., description="Stage identifier", min_length=1)
+
+
+class StageSaveRequest(StageRequest):
+    """Request to save a stage's root layer in place."""
+
+    overwrite_external_changes: bool = Field(
+        False, description="Save over a file that changed on disk after the stage read it"
+    )
+
+
+class StageExportRequest(StageRequest):
+    """Request to write a stage to a new file."""
+
+    file_path: str = Field(..., description="Destination .usda, .usdc, .usd or .usdz", min_length=1)
+    flatten: bool = Field(False, description="Write the composed stage as one layer")
+    overwrite: bool = Field(False, description="Replace an existing file")
+
+
+class StageDiscardRequest(StageRequest):
+    """Request to reload or unload a stage."""
+
+    discard_unsaved: bool = Field(False, description="Drop unsaved edits")
+
+
+class FileWritten(BaseModel):
+    """One file a save or export wrote."""
+
+    path: str = Field(..., description="Absolute path of the file")
+    bytes: int = Field(..., description="Size of the file written")
+
+
+class StageStatus(BaseModel):
+    """A loaded stage's file and unsaved state."""
+
+    stage_id: str = Field(..., description="Stage identifier")
+    file_path: str = Field(..., description="Root file the stage was loaded from")
+    has_unsaved_changes: bool = Field(..., description="The root layer has edits not saved to disk")
+    changed_on_disk: List[str] = Field(
+        ..., description="Files the stage composes that changed on disk since it read them"
+    )
+
+
+class StageListResponse(BaseModel):
+    """The stages the calling MCP session has loaded."""
+
+    success: bool = Field(..., description="Whether request was successful")
+    stages: List[StageStatus] = Field(..., description="Loaded stages")
+    count: int = Field(..., description="Number of loaded stages")
+
+
+class StageSaveResponse(BaseModel):
+    """Result of saving a stage in place."""
+
+    success: bool = Field(..., description="Whether request was successful")
+    stage_id: str = Field(..., description="Stage identifier")
+    file_path: str = Field(..., description="The stage's root file")
+    saved: bool = Field(..., description="False when there were no unsaved edits to write")
+    files_written: List[FileWritten] = Field(..., description="Files written")
+    message: str = Field(..., description="Status message")
+
+
+class StageExportResponse(BaseModel):
+    """Result of writing a stage to a new file."""
+
+    success: bool = Field(..., description="Whether request was successful")
+    stage_id: str = Field(..., description="Stage identifier")
+    file_path: str = Field(..., description="The file written")
+    format: str = Field(..., description="usda, usdc, usd or usdz")
+    flatten: bool = Field(..., description="Whether the composed stage was flattened")
+    files_written: List[FileWritten] = Field(..., description="Files written")
+    rewritten_asset_paths: int = Field(
+        ..., description="Relative asset paths re-anchored to the new location"
+    )
+    message: str = Field(..., description="Status message")
+
+
+class StageReloadResponse(BaseModel):
+    """Result of rereading a stage from disk."""
+
+    success: bool = Field(..., description="Whether request was successful")
+    stage_id: str = Field(..., description="Stage identifier")
+    file_path: str = Field(..., description="The stage's root file")
+    discarded_unsaved: bool = Field(..., description="Unsaved edits were dropped")
+    reloaded_files: List[str] = Field(..., description="Files reread from disk")
+    message: str = Field(..., description="Status message")
+
+
+class StageUnloadResponse(BaseModel):
+    """Result of unloading a stage."""
+
+    success: bool = Field(..., description="Whether request was successful")
+    stage_id: str = Field(..., description="Stage identifier")
+    discarded_unsaved: bool = Field(..., description="Unsaved edits were dropped")
+    message: str = Field(..., description="Status message")
+
+
 __all__ = [
     "USDIssue",
     "USDFileInfo",
@@ -555,4 +659,15 @@ __all__ = [
     "PrimSubtreeResponse",
     "BBoxRequest",
     "BBoxResponse",
+    "StageRequest",
+    "StageSaveRequest",
+    "StageExportRequest",
+    "StageDiscardRequest",
+    "FileWritten",
+    "StageStatus",
+    "StageListResponse",
+    "StageSaveResponse",
+    "StageExportResponse",
+    "StageReloadResponse",
+    "StageUnloadResponse",
 ]

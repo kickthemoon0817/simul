@@ -37,6 +37,7 @@ from typing import (
     Coroutine,
     Dict,
     List,
+    Literal,
     Mapping,
     Optional,
     Tuple,
@@ -44,7 +45,7 @@ from typing import (
 )
 
 from fastmcp.tools import ToolResult
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from ...adapters.blender_runtime import BlenderRuntimeSession
 from ...tool_surfaces import THIN_BLENDER_TOOLS
@@ -166,6 +167,8 @@ from ..schemas.blender import (
     BlenderSetupRigidBodyResponse,
     BlenderSpringAxis,
     BlenderSpringSettings,
+    BlenderUVUnwrapRequest,
+    BlenderUVUnwrapResponse,
     BlenderViewportInfoResponse,
     FieldTenth,
     NonNegativeFloat,
@@ -179,12 +182,17 @@ from ..schemas.blender_ui import AgentControl, BlenderUIRequest, BlenderUIRespon
 from ..schemas.simready import (
     SimReadyApplyMetadataRequest,
     SimReadyApplyMetadataResponse,
+    SimReadyCheckName,
+    SimReadyClearName,
     SimReadyExportRequest,
     SimReadyExportResponse,
     SimReadyGetMetadataRequest,
     SimReadyGetMetadataResponse,
+    SimReadyMetadata,
+    SimReadySemanticLabels,
     SimReadySetupHierarchyRequest,
     SimReadySetupHierarchyResponse,
+    SimReadySeverity,
     SimReadyValidateRequest,
     SimReadyValidateResponse,
 )
@@ -799,7 +807,13 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_material_info",
-        description="Get material information with bounded node tree traversal.",
+        description=(
+            "Get a Blender material's Principled BSDF values and what drives them: an input a "
+            "link drives reads null in principled_params, and linked_inputs names its source "
+            "node and, for an image texture (also behind a Normal Map node), the image file, "
+            "colour space and packing. Lists at most max_nodes nodes, those feeding the output "
+            "first, with node_count for the whole tree."
+        ),
         hints=READ_ONLY,
         operation="get_material_info",
         request=BlenderMaterialInfoRequest,
@@ -1030,12 +1044,34 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="assign_blender_material",
-        description="Assign a Principled BSDF material to a Blender object.",
+        description=(
+            "Assign a Principled BSDF material to a Blender object. A material of that name is "
+            "reused (repeating the call changes nothing more; reuse_existing=false creates a new "
+            "one), and shading arguments left out keep the material's values, so an existing "
+            "material can be assigned as it is. By default it replaces the object's material: "
+            "slot 0, every face. slot_index puts it in one slot (the slot count adds one); "
+            "face_indices assigns it to those faces only. link='OBJECT' puts it in this object's "
+            "slot instead of the mesh's, but faces and the slot count belong to the mesh: on mesh "
+            "data other objects share, changing them is refused unless single_user=true gives this "
+            "object its own copy first (in Object Mode). base_color is RGB or RGBA in 0-1; alpha "
+            "below 1 sets the "
+            "Principled Alpha and blended rendering (exported as USD opacity). Image textures can "
+            "drive base color, metallic, roughness and normal (they need a UV map: "
+            "uv_unwrap_blender_mesh); an image already in the file keeps its colour space, and an "
+            "input reading it differently gets its own copy. Blender's USD exporter writes "
+            "UsdPreviewSurface; it does not write OmniPBR or MDL. Everything is checked first; a "
+            "failure leaves nothing behind."
+        ),
         hints=OVERWRITING,
         operation="assign_material",
         request=BlenderAssignMaterialRequest,
         response=BlenderAssignMaterialResponse,
-        params={"base_color": Param(List[float], [0.8, 0.8, 0.8, 1.0])},
+        params={
+            # Strict, so FastMCP's argument check does not read true as face or slot 1.
+            "slot_index": Param(Optional[StrictInt]),
+            "face_indices": Param(Optional[List[StrictInt]]),
+            "link": Param(Literal["DATA", "OBJECT"], "DATA"),
+        },
     ),
     BlenderTool(
         name="add_blender_modifier",
@@ -1079,11 +1115,22 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="set_blender_light_params",
-        description="Set light parameters on a Blender light object.",
+        description=(
+            "Set a Blender light's parameters, optionally changing its type first (light_type). "
+            "Each setting must belong to the light's type: shadow_soft_size is the radius of POINT "
+            "and SPOT lights, spot_size and spot_blend are SPOT's, angle is a SUN's softness, and "
+            "shape, size and size_y are an AREA light's; others are refused, as are values outside "
+            "Blender's limits (which it would clamp silently) and negative energy. The reply "
+            "echoes every setting of the light's type as stored."
+        ),
         hints=OVERWRITING,
         operation="set_light_params",
         request=BlenderSetLightParamsRequest,
         response=BlenderSetLightParamsResponse,
+        params={
+            "light_type": Param(Optional[Literal["POINT", "SUN", "SPOT", "AREA"]]),
+            "shape": Param(Optional[Literal["SQUARE", "RECTANGLE", "DISK", "ELLIPSE"]]),
+        },
     ),
     # -- File I/O ------------------------------------------------------------
     BlenderTool(
@@ -1455,23 +1502,50 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         request=BlenderCleanMeshRequest,
         response=BlenderCleanMeshResponse,
     ),
+    BlenderTool(
+        name="uv_unwrap_blender_mesh",
+        description=(
+            "Generate UV coordinates for every face of a Blender mesh object, hidden ones "
+            "included, as image textures need: SMART_PROJECT (Smart UV Project: islands split at "
+            "angle_limit, packed with island_margin) or CUBE_PROJECT (each face projected onto the "
+            "cube side it faces). Writes uv_map_name (created when missing), else the active UV "
+            "map, else a new UVMap; the active UV map stays as it was, and the reply names the "
+            "render UV map, the one textures read. Enters Edit Mode briefly and restores the mesh's "
+            "selection and hidden faces, the object selection and the active object. Requires "
+            "Object Mode."
+        ),
+        hints=OVERWRITING,
+        operation="uv_unwrap_mesh",
+        request=BlenderUVUnwrapRequest,
+        response=BlenderUVUnwrapResponse,
+        params={"method": Param(Literal["SMART_PROJECT", "CUBE_PROJECT"], "SMART_PROJECT")},
+    ),
     # -- SimReady asset format -----------------------------------------------
     BlenderTool(
         name="apply_simready_metadata",
         description=(
-            "Apply NVIDIA SimReady metadata (semantic labels, physics properties, material info) "
-            "to a Blender object as custom properties. Stored with simready_ prefix for USD export."
+            "Store NVIDIA SimReady metadata (semantic labels, physics properties, material info) "
+            "on a Blender object as simready_ custom properties, which export_simready_usd writes "
+            "as UsdPhysics and UsdSemantics schemas. Omitted fields keep their stored value; "
+            "clear removes stored values. An additional label named after a field's taxonomy "
+            "(class, hierarchy, wikidata_qcode) sets that field. Unknown fields, invalid values, "
+            "Edit Mode and linked objects are refused, before anything changes."
         ),
         hints=OVERWRITING,
         operation="apply_simready_metadata",
         request=SimReadyApplyMetadataRequest,
         response=SimReadyApplyMetadataResponse,
+        params={
+            "metadata": Param(Optional[SimReadyMetadata]),
+            "clear": Param(Optional[List[SimReadyClearName]]),
+        },
     ),
     BlenderTool(
         name="get_simready_metadata",
         description=(
-            "Read NVIDIA SimReady metadata from a Blender object. Returns semantic labels, "
-            "physics properties, and material info stored as simready_ custom properties."
+            "Read NVIDIA SimReady metadata from a Blender object: semantic labels, physics "
+            "properties and material info stored as simready_ custom properties. Stored values "
+            "that break the rules are listed in invalid_values instead of failing the call."
         ),
         hints=READ_ONLY,
         operation="get_simready_metadata",
@@ -1481,39 +1555,55 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="validate_simready_compliance",
         description=(
-            "Validate Blender objects against NVIDIA SimReady conventions: naming "
-            "(lowercase_underscore), scale (meters), clean transforms, material segmentation, hierarchy."
+            "Validate the Blender objects export_simready_usd would export against the SimReady "
+            "Robotics-Prop rules and Isaac Sim's asset checks; any error makes them non-compliant. Errors: an "
+            "asset root that is not the identity, a rigid body skewed in the world, no material, no "
+            "semantic label on a mesh or an exported object above it, invalid stored values, a "
+            "rigid body without mass, without a collider or nested in another with no joint, a "
+            "constraint the export cannot write as a joint (MOTOR), degenerate faces. Warnings: "
+            "names, sizes and units, scaled parts, an empty slot faces use, missing colliders, "
+            "what a joint leaves out, UVs, n-gons. Filter by severity and page with offset/limit "
+            "(next_offset)."
         ),
         hints=READ_ONLY,
         operation="validate_simready_compliance",
         request=SimReadyValidateRequest,
         response=SimReadyValidateResponse,
+        params={"severity": Param(SimReadySeverity)},
     ),
     BlenderTool(
         name="export_simready_usd",
         description=(
             "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ "
             "metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, "
-            "and UsdSemantics labels. The asset root is the default prim and holds its materials; "
+            "and UsdSemantics labels; rigid body constraints between exported objects become "
+            "UsdPhysics joints (fixed, revolute, prismatic, spherical, D6 with limits). The asset "
+            "root is the default prim and holds its materials and joints; "
             "metersPerUnit follows the scene's Unit Scale. Listed objects export with their "
             "descendants, hidden ones too; lights, cameras and the World are left out by default. "
-            "Refuses when validation finds errors unless force=true. Returns each object's prim path."
+            "Refuses when validation finds errors; skip_checks leaves a check out, force=true "
+            "ignores every error. Returns each object's prim path."
         ),
         hints=DESTRUCTIVE,
         operation="export_simready_usd",
         request=SimReadyExportRequest,
         response=SimReadyExportResponse,
+        params={"skip_checks": Param(Optional[List[SimReadyCheckName]])},
     ),
     BlenderTool(
         name="setup_simready_hierarchy",
         description=(
-            "Create a SimReady-compliant object hierarchy in Blender with a root empty (XForm "
-            "equivalent) and parent the given children under it. Optionally applies semantic "
-            "labels to the root."
+            "Put Blender objects under a SimReady root empty (an Xform in the USD), keeping where "
+            "they are, also for objects in excluded collections, skewed by a parent or under "
+            "constraints. Only listed objects without a listed ancestor are re-parented; existing "
+            "nesting stays. Needs Object Mode; refuses linked objects. Checks everything first "
+            "and changes nothing on failure; an existing root name is refused unless "
+            "reuse_root=true. Optionally stores semantic labels on the root."
         ),
         hints=ADDITIVE,
         operation="setup_simready_hierarchy",
         request=SimReadySetupHierarchyRequest,
         response=SimReadySetupHierarchyResponse,
+        params={"semantic": Param(Optional[SimReadySemanticLabels])},
     ),
 )

@@ -109,8 +109,9 @@ Procedure for both: `docs/releasing.md`.
   finds every live claim foreign, and gets `SessionRequired` from
   `set_active_isaac_instance`, `claim_isaac_instance` and
   `release_isaac_instance`. Per-session state (Isaac routing, bindings and
-  claims, rate-limit buckets, the default `agent_id`) keys on that session
-  (`SimulMCPServer._get_request_session_id`).
+  claims, rate-limit buckets, the default `agent_id`, loaded headless USD
+  stages) keys on that session (`SimulMCPServer._get_request_session_id`);
+  the anonymous requests share one scope.
 - Unreal attached mode: `simul unreal instances` / `attach` select an existing
   editor, map and level viewport. `simul server --backends unreal --unreal-mode attached`
   uses that selection; `control_unreal_ui` provides named editor controls even with

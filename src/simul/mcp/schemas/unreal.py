@@ -268,22 +268,53 @@ class UnrealActorEntry(BaseModel):
     )
     scale: Tuple[float, float, float] = Field(..., description="3D scale")
     tags: List[str] = Field(default_factory=list, description="Actor tags")
+    parent: Optional[str] = Field(
+        None,
+        description="Path of the actor this one is attached to (its root component's attach parent), or null",
+    )
+    children: List[str] = Field(
+        default_factory=list,
+        description="Paths of the first 20 actors attached to this one; child_count counts them all",
+    )
+    child_count: int = Field(0, description="Number of actors attached directly to this one")
+
+
+def _next_offset_field() -> Any:
+    """The ``next_offset`` field of a paged read."""
+    return Field(
+        None,
+        description="Offset of the next page; null when this page reached the end",
+    )
+
+
+def _page_hint_field() -> Any:
+    """The ``hint`` field of a paged read."""
+    return Field(None, description="How to get the rest, when this page did not reach the end")
 
 
 class UnrealListActorsResponse(BaseModel):
-    """Response for actor listing."""
+    """One page of the level's actors that pass the filters."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     actors: List[UnrealActorEntry] = Field(
-        default_factory=list, description="Actors in the level"
+        default_factory=list, description="The page's actors"
     )
-    count: int = Field(..., description="Number of actors returned")
+    count: int = Field(..., description="Number of actors in this page")
+    total: int = Field(0, description="Number of level actors that pass the filters, on every page")
+    offset: int = Field(0, description="Matching actors skipped before this page")
+    next_offset: Optional[int] = _next_offset_field()
     truncated: bool = Field(
-        False, description="Whether results were truncated by max_results"
+        False,
+        description=(
+            "Whether matching actors are left after this page (by max_results, or by the response "
+            "budget a page stays within)"
+        ),
     )
+    hint: Optional[str] = _page_hint_field()
+    warnings: List[str] = Field(default_factory=list, description="What the listing could not do as asked")
     pie_active: bool = _pie_active_field()
 
 
@@ -318,6 +349,74 @@ class UnrealGetActorInfoResponse(BaseModel):
     tags: List[str] = Field(default_factory=list, description="Actor tags")
     mobility: str = Field("Static", description="Mobility (Static/Stationary/Movable)")
     is_hidden: bool = Field(False, description="Whether actor is hidden in game")
+    parent: Optional[str] = Field(
+        None,
+        description="Path of the actor this one is attached to (its root component's attach parent), or null",
+    )
+    children: List[str] = Field(
+        default_factory=list,
+        description="Paths of the first 200 actors attached to this one; child_count counts them all",
+    )
+    child_count: int = Field(0, description="Number of actors attached directly to this one")
+    pie_active: bool = _pie_active_field()
+
+
+class UnrealComponentBounds(BaseModel):
+    """A primitive component's world bounds."""
+
+    origin: Tuple[float, float, float] = Field(..., description="Center of the bounding box (X, Y, Z) in cm")
+    extent: Tuple[float, float, float] = Field(..., description="Half-size of the bounding box in cm")
+    sphere_radius: float = Field(..., description="Radius of the bounding sphere in cm")
+
+
+class UnrealComponentEntry(BaseModel):
+    """One component of an actor."""
+
+    name: str = Field(..., description="Component name")
+    path: str = Field(..., description="Full object path of the component")
+    class_name: str = Field(..., description="UClass name of the component")
+    is_root: bool = Field(False, description="Whether this is the actor's root component")
+    is_scene_component: bool = Field(False, description="Whether it has a transform (a SceneComponent)")
+    editor_only: bool = Field(False, description="Whether it exists only in the editor (sprites, arrows)")
+    attach_parent: Optional[str] = Field(
+        None,
+        description=(
+            "Component it is attached to: its name when it is this actor's, its path when it belongs "
+            "to another actor; null for none or a component without a transform"
+        ),
+    )
+    location: Optional[Tuple[float, float, float]] = Field(
+        None, description="World location (X, Y, Z) in cm; null for a component without a transform"
+    )
+    mobility: Optional[str] = Field(
+        None, description="Static, Stationary or Movable; null for a component without a transform"
+    )
+    visible: Optional[bool] = Field(
+        None, description="Whether it is visible; null for a component without a transform"
+    )
+    bounds: Optional[UnrealComponentBounds] = Field(
+        None, description="World bounds of a primitive component; null for others"
+    )
+
+
+class UnrealListActorComponentsResponse(BaseModel):
+    """One page of an actor's components."""
+
+    success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    actor_path: str = Field(..., description="Actor whose components these are")
+    components: List[UnrealComponentEntry] = Field(
+        default_factory=list, description="The page's components"
+    )
+    count: int = Field(..., description="Number of components in this page")
+    total: int = Field(0, description="Number of components that pass the filter, on every page")
+    offset: int = Field(0, description="Components skipped before this page")
+    next_offset: Optional[int] = _next_offset_field()
+    truncated: bool = Field(False, description="Whether components are left after this page")
+    hint: Optional[str] = _page_hint_field()
+    warnings: List[str] = Field(default_factory=list, description="What the listing could not do as asked")
     pie_active: bool = _pie_active_field()
 
 
@@ -1160,18 +1259,49 @@ class UnrealBatchOperationsResponse(BaseModel):
     failed: int = Field(0, description="Number that failed")
 
 
+class UnrealSceneGraphCut(BaseModel):
+    """A subtree drawn shallower than max_depth to fit the page."""
+
+    path: str = Field(..., description="Actor at the top of the subtree")
+    depth: int = Field(..., description="Levels below the root the subtree was drawn to")
+
+
 class UnrealQuerySceneGraphResponse(BaseModel):
-    """Response with scene graph tree."""
+    """One page of the level's attachment hierarchy."""
 
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     root: Dict[str, Any] = Field(
-        ..., description="Scene graph tree (nested dicts with children)"
+        ...,
+        description=(
+            "The tree: the level (class_name World) or the root_path actor, with name, path, "
+            "class_name, child_count and children; each actor nests the same way, with "
+            "children_truncated when its children are below max_depth, matches_filter with a "
+            "class_filter, and components with include_components"
+        ),
     )
-    total_actors: int = Field(..., description="Total actors in graph")
-    total_depth: int = Field(..., description="Deepest nesting level")
+    total_actors: int = Field(
+        ..., description="Actors below the root at every depth (after class_filter), whatever the page and max_depth"
+    )
+    total_depth: int = Field(
+        ..., description="Deepest level below the root (its children are level 1), whatever max_depth"
+    )
+    returned_actors: int = Field(0, description="Actors in this page's tree, at every depth")
+    count: int = Field(0, description="Root children in this page")
+    total: int = Field(0, description="Root children in all (after class_filter)")
+    offset: int = Field(0, description="Root children skipped before this page")
+    next_offset: Optional[int] = _next_offset_field()
+    truncated: bool = Field(
+        False, description="Whether root children are left after this page or a subtree was drawn shallower"
+    )
+    hint: Optional[str] = _page_hint_field()
+    depth_limited: List[UnrealSceneGraphCut] = Field(
+        default_factory=list, description="Subtrees drawn shallower than max_depth to fit the page"
+    )
+    warnings: List[str] = Field(default_factory=list, description="What the query could not do as asked")
+    pie_active: bool = _pie_active_field()
 
 
 class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
@@ -1244,14 +1374,22 @@ class UnrealGetActorBySemanticLabelResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actors: List[UnrealActorEntry] = Field(
-        ..., description="Matching actors with their paths, transforms and tags"
+        ..., description="The page's matching actors with their paths, transforms, tags and attachment"
     )
+    count: int = Field(0, description="Number of actors in this page")
     total_matches: int = Field(
-        ..., description="Number of matching actors, including any past max_results"
+        ..., description="Number of matching actors, on every page"
     )
+    offset: int = Field(0, description="Matching actors skipped before this page")
+    next_offset: Optional[int] = _next_offset_field()
     truncated: bool = Field(
-        False, description="Whether matches were left out by max_results"
+        False,
+        description=(
+            "Whether matching actors are left after this page (by max_results, or by the response "
+            "budget a page stays within)"
+        ),
     )
+    hint: Optional[str] = _page_hint_field()
     label_searched: str = Field(..., description="Label that was searched")
     pie_active: bool = _pie_active_field()
 

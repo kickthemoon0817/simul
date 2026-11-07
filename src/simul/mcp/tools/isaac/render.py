@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from ._shared import (
     DEFAULT_MAX_RESULTS,
     JSON_VALUE_CORE,
+    TRAVERSAL_PREDICATE_CORE,
     _compose_script,
     _pyval,
 )
@@ -377,8 +378,10 @@ class RenderMixin:
             "match prims that have them applied, and an unknown name is refused. Attributes "
             "resolve via the schema API first (e.g. 'intensity' -> GetIntensityAttr), then "
             "the plain and inputs: names; values come back as JSON (quaternions [w, x, y, z]), "
-            "arrays longer than max_array_elements as a length summary. Paged "
-            "(max_results/offset)."
+            "arrays longer than max_array_elements as a length summary. Searches inside "
+            "instanceable prims (matches there carry instance_proxy=true) unless "
+            "include_instance_proxies=false; include_inactive=true also matches "
+            "deactivated prims. Paged (max_results/offset)."
         ),
         read_only=True,
         idempotent=True,
@@ -392,6 +395,8 @@ class RenderMixin:
         max_results: int = 200,
         offset: int = 0,
         max_array_elements: int = 16,
+        include_instance_proxies: bool = True,
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         """
         Query prims by USD schema type and read specified attributes.
@@ -420,6 +425,11 @@ class RenderMixin:
                 faceVertexIndices, ...) returned in full; a longer one comes
                 back as ``{"type", "length", "elements_omitted": true}``.
                 Clamped to [0, 10000].
+            include_instance_proxies: Search inside instanceable prims, where
+                Isaac robot assets keep their meshes and colliders. Matches
+                there carry ``instance_proxy: true``.
+            include_inactive: Also match deactivated prims, which carry
+                ``active: false``.
 
         Returns:
             Dict with the resolved ``schema``, the matching prims and their
@@ -435,6 +445,8 @@ class RenderMixin:
         _type_name = _pyval(type_name)
         _attributes = _pyval(attributes)
         _root_path = _pyval(root_path)
+        _proxies = _pyval(bool(include_instance_proxies))
+        _inactive = _pyval(bool(include_inactive))
         script = _compose_script(
             """\
             import importlib
@@ -443,6 +455,7 @@ class RenderMixin:
             from pxr import Usd, Sdf, Gf, Tf
             """,
             JSON_VALUE_CORE,
+            TRAVERSAL_PREDICATE_CORE,
             """\
             def _resolve_schema(type_str):
                 # Returns (kind, tf_type, schema_cls, error). kind is "typed"
@@ -521,7 +534,7 @@ class RenderMixin:
                     # Usd.PrimRange over an invalid prim is empty; the root
                     # check below keeps a mistyped root from reading as "no
                     # prims of that type".
-                    for prim in Usd.PrimRange(root_prim):
+                    for prim in Usd.PrimRange(root_prim, _traversal_predicate({_proxies}, {_inactive})):
                         if kind == "typed":
                             hit = prim.IsA(tf_type)
                         elif kind == "api":
@@ -537,6 +550,10 @@ class RenderMixin:
                             truncated = True
                             break
                         prim_info = {{"path": str(prim.GetPath()), "type": prim.GetTypeName()}}
+                        if prim.IsInstanceProxy():
+                            prim_info["instance_proxy"] = True
+                        if not prim.IsActive():
+                            prim_info["active"] = False
                         if attr_names:
                             typed_prim = schema_cls(prim) if schema_cls is not None else None
                             prim_info["attributes"] = {{name: _read(prim, typed_prim, name) for name in attr_names}}
@@ -568,6 +585,8 @@ class RenderMixin:
                         "offset": offset,
                         "applied_limit": max_results,
                         "max_array_elements": max_array_elements,
+                        "include_instance_proxies": {_proxies},
+                        "include_inactive": {_inactive},
                         "truncated": truncated,
                         "next_offset": offset + len(prims_data) if truncated else None,
                         "prims": prims_data,

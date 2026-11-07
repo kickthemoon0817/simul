@@ -5,12 +5,16 @@ Every tool here is a thin closure around ``server._exec_backend``: the
 closure validates its input, performs the stage operation and builds the
 response model; the envelope owns the rate limit, usage record, sandbox
 and exception wrapping, result budget and single transmission.
+
+The pxr work of every tool runs on a worker thread through one
+``USDCallScheduler`` per server, so a slow call no longer stalls the event
+loop: reads run concurrently (one at a time per stage), and an edit, a load
+or a reload runs alone (see ``simul.mcp.usd_scheduler``).
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from fastmcp.tools import ToolResult
 
@@ -35,21 +39,41 @@ from ..schemas.usd import (
     SceneSummaryRequest,
     SceneSummaryResponse,
     SearchType,
-    SummaryFormat,
+    StageDiscardRequest,
+    StageExportRequest,
+    StageExportResponse,
     StageInfo,
+    StageListResponse,
+    StageReloadResponse,
+    StageSaveRequest,
+    StageSaveResponse,
+    StageUnloadResponse,
+    SummaryFormat,
     USDFileInfo,
     USDFileRequest,
     USDValidateRequest,
 )
 from ...logging import get_logger
-from ...usd.validation import WARNING, composition_issues
+from ...usd.sandbox import CompositionSandbox
+from ...usd.validation import WARNING, composition_issues, url_scheme
 from ...usd.validation import validate_usd_file as run_validation
+from ..usd_scheduler import USDCallScheduler
 from ._helpers import with_param_descriptions
 
 if TYPE_CHECKING:
     from ...adapters.headless_usd import HeadlessUSDSession
     from ...usd.editing import USDEditError
     from ..server import SimulMCPServer
+
+SessionWork = Callable[["HeadlessUSDSession"], Dict[str, Any]]
+SessionCall = Callable[["HeadlessUSDSession"], Awaitable[Dict[str, Any]]]
+
+# Stage-bound queries an agent makes once per prim while it inspects an
+# asset. They count only against the per-agent ceiling
+# (security.global_requests_per_minute), not a per-tool bucket of their own.
+PER_PRIM_QUERY_TOOLS = frozenset(
+    {"get_prim_info", "get_mesh_info", "get_bounding_box", "search_prims"}
+)
 
 logger = get_logger(__name__)
 
@@ -88,23 +112,99 @@ def _loaded_stage(session: "HeadlessUSDSession", stage_id: str) -> Any:
 
 def register_usd_tools(server: "SimulMCPServer") -> None:
     """Register USD-related tools."""
+    scheduler = USDCallScheduler(server.settings.server.timeout)
+    server.exempt_from_per_tool_rate_limit(PER_PRIM_QUERY_TOOLS)
+
+    def request_owner() -> Optional[str]:
+        """The MCP session of the current request, read on the event loop.
+
+        Its end is hooked here, so the session's stages are released then.
+        """
+        session_id = server._get_request_session_id()
+        if session_id is not None:
+            server._watch_session_end(session_id)
+        return session_id
+
+    def scheduled(
+        tool_name: str, work: SessionWork, *, stage_id: Optional[str] = None, writes: bool = False
+    ) -> SessionCall:
+        """Run ``work`` on a worker thread once the scheduler admits it.
+
+        The worker thread cannot see the MCP request, so the calling session
+        is read here, on the event loop, and the work runs as that session
+        (``HeadlessUSDSession.acting_for``): a stage belongs to the session
+        that loaded it.
+        """
+
+        async def call(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            owner = request_owner()
+            acting_for = getattr(session, "acting_for", None)
+
+            def run() -> Dict[str, Any]:
+                if acting_for is None:
+                    return work(session)
+                with acting_for(owner):
+                    return work(session)
+
+            return await scheduler.run(tool_name, run, stage_key=stage_id, writes=writes)
+
+        return call
+
+    def usd_target(file_path: str) -> str:
+        """The location a file argument names, checked against the sandbox.
+
+        A local path comes back absolute: ``~`` and ``$VARS`` expanded and a
+        relative path resolved against ``security.relative_path_base`` (the
+        server's working directory by default), with the sandbox on or off. A
+        URL comes back verbatim; the session refuses one no installed asset
+        resolver handles.
+
+        Raises:
+            SandboxDenied: The location is outside the sandbox.
+        """
+        authorized = server._path_policy.authorize(file_path)
+        if url_scheme(authorized) is not None:
+            return authorized
+        return str(server._path_policy.resolve(authorized))
+
     from ...usd.editing import USDEditError
+
+    # Stages belong to the MCP session that loaded them (see scheduled above)
+    # and are released when that session ends; files a load or reload rereads
+    # are held to the composition sandbox.
+    adapter = server.headless_adapter
+    if adapter is not None and hasattr(adapter, "release_session"):
+        server.add_session_end_hook(adapter.release_session)
+        adapter.set_sandbox_factory(lambda: CompositionSandbox(server._path_policy))
 
     @server.mcp.tool(
         name="load_usd_file",
         description=(
-            "Load a USD file and return stage information. A file pxr cannot open "
-            "fails with LoadError, whose details.reason names the cause (ParseError "
+            "Load a USD file into a stage private to this MCP session and return stage "
+            "information. Loading the same file again returns the same stage while it has "
+            "no unsaved edits and its files are unchanged on disk; otherwise a fresh stage "
+            "is read from disk, rereading changed sublayers and references (each held to "
+            "the sandbox first). Edits stay in memory until save_usd_stage or "
+            "export_usd_stage writes them, and are dropped when the session ends. "
+            "A file pxr cannot open fails with LoadError, whose details.reason names "
+            "the cause (ParseError "
             "with line and column, CorruptFile, EmptyFile, FileTooLarge, "
-            "PermissionDenied, UnsupportedExtension, FileNotFound, NotAFile). Missing "
-            "sublayers, references or payloads do not fail the load; they are listed "
-            "in warnings. Paths: sandbox (security.allowed_paths)."
+            "PermissionDenied, UnsupportedExtension, FileNotFound, NotAFile, "
+            "UnsupportedURL for a URL no installed asset resolver opens, such as "
+            "omniverse:// here). Missing sublayers, references or payloads do not fail "
+            "the load; they are listed in warnings. A relative path resolves against "
+            "security.relative_path_base (default: the server's working directory); "
+            "file_path in the result is the resolved path. Paths: sandbox "
+            "(security.allowed_paths), which also holds every sublayer, reference, "
+            "payload, clip and asset path the file draws on: one outside it fails the "
+            "load with SandboxError listing them."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
         output_schema=None,
-        task=server._task_optional(),
+        # Foreground only: a stage belongs to the MCP session read from the
+        # request as the call runs, which a background task would run without.
     )
     @with_param_descriptions()
     async def load_usd_file(file_path: str) -> ToolResult:
@@ -118,26 +218,26 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             Stage information or error
         """
 
-        def _load(session: "HeadlessUSDSession") -> Dict[str, Any]:
-            input_data = server._validate_input(USDFileRequest, file_path=file_path)
-            if isinstance(input_data, dict):
-                return input_data
-
+        def _load(session: "HeadlessUSDSession", target: str) -> Dict[str, Any]:
             # A USDLoadError carries pxr's reason; the envelope reports it as
-            # LoadError with details.reason.
-            stage_id = session.load_stage_or_raise(
-                server._path_policy.authorize(input_data.file_path)
-            )
+            # LoadError with details.reason. A session at its stage limit is
+            # refused as a RefusedOperation.
+            try:
+                stage_id = session.load_stage_or_raise(
+                    target, sandbox=CompositionSandbox(server._path_policy)
+                )
+            except USDEditError as exc:
+                return _edit_error("load_usd_file", exc)
             stage = session.get_stage(stage_id)
             stage_info = session.get_stage_info(stage_id)
             if stage is None or stage_info is None:
                 return ErrorResponse(
-                    error=f"Loaded {input_data.file_path} but could not read its stage information",
+                    error=f"Loaded {target} but could not read its stage information",
                     error_type="LoadError",
                 ).model_dump()
             return StageInfo(
                 stage_id=stage_id,
-                file_path=input_data.file_path,
+                file_path=target,
                 up_axis=stage_info.up_axis,
                 meters_per_unit=stage_info.meters_per_unit,
                 time_codes_per_second=stage_info.time_codes_per_second,
@@ -152,12 +252,22 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 warnings=[issue.to_dict() for issue in composition_issues(stage, WARNING)],
             ).model_dump()
 
+        async def _load_call(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(USDFileRequest, file_path=file_path)
+            if isinstance(input_data, dict):
+                return input_data
+            target = usd_target(input_data.file_path)
+            # Alone: a load may reread a changed sublayer or reference in place,
+            # which recomposes every stage using it. Its stage id is random and
+            # only known once it registers, so no read can be waiting on it.
+            return await scheduled("load_usd_file", lambda s: _load(s, target), writes=True)(session)
+
         return await server._exec_backend(
             "load_usd_file",
             server.headless_adapter,
             "USD",
             StageInfo,
-            _load,
+            _load_call,
             params={"file_path": file_path},
         )
 
@@ -173,7 +283,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "and pxr's UsdValidation validators, with the usdz package rules for a "
             ".usdz. Returns is_valid (no error-severity issue), can_read (pxr opened "
             "it, so load_usd_file can) and issues with severity, code and location. "
-            "Paths: sandbox (security.allowed_paths)."
+            "Paths: sandbox (security.allowed_paths), applied to everything the file "
+            "draws on as load_usd_file applies it."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -192,21 +303,28 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             File validity information or error
         """
 
-        def _validate(session: "HeadlessUSDSession") -> Dict[str, Any]:
+        def _validate(target: str) -> Dict[str, Any]:
+            report = run_validation(
+                target,
+                server.settings.usd,
+                sandbox=CompositionSandbox(server._path_policy),
+            )
+            return USDFileInfo(**report.to_dict()).model_dump()
+
+        async def _validate_call(session: "HeadlessUSDSession") -> Dict[str, Any]:
             input_data = server._validate_input(USDValidateRequest, file_path=file_path)
             if isinstance(input_data, dict):
                 return input_data
-
-            path = Path(server._path_policy.authorize(input_data.file_path))
-            report = run_validation(str(path.resolve()), server.settings.usd)
-            return USDFileInfo(**report.to_dict()).model_dump()
+            target = usd_target(input_data.file_path)
+            # Touches no loaded stage: it waits only for a running edit.
+            return await scheduler.run("validate_usd_file", lambda: _validate(target))
 
         return await server._exec_backend(
             "validate_usd_file",
             server.headless_adapter,
             "USD",
             USDFileInfo,
-            _validate,
+            _validate_call,
             params={"file_path": file_path},
         )
 
@@ -292,7 +410,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimInfo,
-            _prim_info,
+            scheduled("get_prim_info", _prim_info, stage_id=stage_id),
             params={"stage_id": stage_id, "prim_path": prim_path, "time_code": time_code},
         )
 
@@ -393,7 +511,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimActionResponse,
-            _create,
+            scheduled("create_prim", _create, writes=True),
             params={
                 "stage_id": stage_id,
                 "prim_path": prim_path,
@@ -486,7 +604,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimActionResponse,
-            _update,
+            scheduled("update_prim_attributes", _update, writes=True),
             params={
                 "stage_id": stage_id,
                 "prim_path": prim_path,
@@ -559,7 +677,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimActionResponse,
-            _delete,
+            scheduled("delete_prim", _delete, writes=True),
             params={
                 "stage_id": stage_id,
                 "prim_path": prim_path,
@@ -632,7 +750,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             MeshInfo,
-            _mesh_info,
+            scheduled("get_mesh_info", _mesh_info, stage_id=stage_id),
             params={"stage_id": stage_id, "prim_path": prim_path, "time_code": time_code},
         )
 
@@ -746,7 +864,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimSearchResponse,
-            _search,
+            scheduled("search_prims", _search, stage_id=stage_id),
             params={
                 "stage_id": stage_id,
                 "search_type": search_type,
@@ -851,7 +969,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimSubtreeResponse,
-            _subtree,
+            scheduled("get_prim_subtree", _subtree, stage_id=stage_id),
             params={"stage_id": stage_id, "root_path": root_path, "offset": offset},
         )
 
@@ -952,7 +1070,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             BBoxResponse,
-            _bbox,
+            scheduled("get_bounding_box", _bbox, stage_id=stage_id),
             params={
                 "stage_id": stage_id,
                 "prim_path": prim_path,
@@ -981,7 +1099,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=False
         ),
         output_schema=None,
-        task=server._task_optional(),
+        # Foreground only, like load_usd_file: the stage is looked up for the
+        # MCP session of the request.
     )
     @with_param_descriptions()
     async def summarize_scene(
@@ -1052,6 +1171,284 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             SceneSummaryResponse,
-            _summarize,
+            scheduled("summarize_scene", _summarize, stage_id=stage_id),
             params={"stage_id": stage_id, "include_meshes": include_meshes, "format": format},
+        )
+
+    @server.mcp.tool(
+        name="list_usd_stages",
+        description=(
+            "List the USD stages this MCP session has loaded: each one's stage_id, file, "
+            "whether it has unsaved edits, and which of its files changed on disk since it "
+            "was read. Stages are private to the session that loaded them, and edits live "
+            "in memory until save_usd_stage or export_usd_stage writes them."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=False
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def list_usd_stages() -> ToolResult:
+        """
+        List the loaded USD stages.
+
+        Returns:
+            The stages with their unsaved and on-disk state
+        """
+
+        def _list(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            stages = [session.stage_status(stage_id) for stage_id in session.list_stages()]
+            return StageListResponse(success=True, stages=stages, count=len(stages)).model_dump()
+
+        return await server._exec_backend(
+            "list_usd_stages",
+            server.headless_adapter,
+            "USD",
+            StageListResponse,
+            scheduled("list_usd_stages", _list),
+            params={},
+        )
+
+    @server.mcp.tool(
+        name="save_usd_stage",
+        description=(
+            "Save a stage's edits to its own file: the root layer, which every edit "
+            "targets. Paths: sandbox (security.allowed_paths); the file must be writable "
+            "there. Refuses a .usdz root (use export_usd_stage) and a file that changed on "
+            "disk after the stage read it, unless overwrite_external_changes=true. A stage "
+            "with no unsaved edits writes nothing. Reports the files written."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=False, destructive=True
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def save_usd_stage(
+        stage_id: str, overwrite_external_changes: bool = False
+    ) -> ToolResult:
+        """
+        Save a USD stage in place.
+
+        Args:
+            stage_id: Stage identifier returned by load_usd_file
+            overwrite_external_changes: Save even though the file changed on disk after
+                the stage read it, replacing those changes
+
+        Returns:
+            The files written, or error
+        """
+
+        def _save(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(
+                StageSaveRequest,
+                stage_id=stage_id,
+                overwrite_external_changes=overwrite_external_changes,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                server._path_policy.authorize(
+                    session.stage_file_path(input_data.stage_id), write=True
+                )
+                result = session.save_stage(
+                    input_data.stage_id,
+                    overwrite_external_changes=input_data.overwrite_external_changes,
+                )
+            except USDEditError as exc:
+                return _edit_error("save_usd_stage", exc)
+            message = (
+                f"Saved {result['file_path']}"
+                if result["saved"]
+                else f"No unsaved edits; {result['file_path']} was not written"
+            )
+            return StageSaveResponse(success=True, message=message, **result).model_dump()
+
+        return await server._exec_backend(
+            "save_usd_stage",
+            server.headless_adapter,
+            "USD",
+            StageSaveResponse,
+            scheduled("save_usd_stage", _save, stage_id=stage_id),
+            params={
+                "stage_id": stage_id,
+                "overwrite_external_changes": overwrite_external_changes,
+            },
+        )
+
+    @server.mcp.tool(
+        name="export_usd_stage",
+        description=(
+            "Write a stage to a new file: .usda, .usdc, .usd, or .usdz (packaged with the "
+            "files it depends on). flatten=true writes the composed stage as one layer; "
+            "otherwise the root layer is written with its sublayers, references and "
+            "payloads kept as composition arcs and relative asset paths re-anchored to the "
+            "new location. Refuses an existing file unless overwrite=true. The stage stays "
+            "bound to its own file and keeps its unsaved state. "
+            "Paths: sandbox (security.allowed_paths)."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=False, destructive=True
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def export_usd_stage(
+        stage_id: str, file_path: str, flatten: bool = False, overwrite: bool = False
+    ) -> ToolResult:
+        """
+        Export a USD stage to a new file.
+
+        Args:
+            stage_id: Stage identifier returned by load_usd_file
+            file_path: Destination file; its extension (.usda, .usdc, .usd, .usdz) picks
+                the format, and its directory must exist
+            flatten: Write the composed stage (all layers and arcs) as a single layer
+            overwrite: Replace the destination if it already exists
+
+        Returns:
+            The file written, or error
+        """
+
+        def _export(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(
+                StageExportRequest,
+                stage_id=stage_id,
+                file_path=file_path,
+                flatten=flatten,
+                overwrite=overwrite,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            destination = server._path_policy.authorize(input_data.file_path, write=True)
+            try:
+                result = session.export_stage(
+                    input_data.stage_id,
+                    destination,
+                    flatten=input_data.flatten,
+                    overwrite=input_data.overwrite,
+                )
+            except USDEditError as exc:
+                return _edit_error("export_usd_stage", exc)
+            how = "flattened " if result["flatten"] else ""
+            message = f"Wrote {how}{result['format']} file {result['file_path']}"
+            return StageExportResponse(success=True, message=message, **result).model_dump()
+
+        return await server._exec_backend(
+            "export_usd_stage",
+            server.headless_adapter,
+            "USD",
+            StageExportResponse,
+            scheduled("export_usd_stage", _export, stage_id=stage_id),
+            params={
+                "stage_id": stage_id,
+                "file_path": file_path,
+                "flatten": flatten,
+                "overwrite": overwrite,
+            },
+        )
+
+    @server.mcp.tool(
+        name="reload_usd_stage",
+        description=(
+            "Reread a stage from disk: its root file, and any sublayer or referenced file "
+            "that changed. Use it after the files were edited outside this server, or to "
+            "drop edits. Refuses a stage with unsaved edits unless discard_unsaved=true."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=False, destructive=True
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def reload_usd_stage(stage_id: str, discard_unsaved: bool = False) -> ToolResult:
+        """
+        Reload a USD stage from disk.
+
+        Args:
+            stage_id: Stage identifier returned by load_usd_file
+            discard_unsaved: Reload even though the stage has unsaved edits, which are lost
+
+        Returns:
+            The files reread, or error
+        """
+
+        def _reload(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(
+                StageDiscardRequest, stage_id=stage_id, discard_unsaved=discard_unsaved
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                result = session.reload_stage(
+                    input_data.stage_id, discard_unsaved=input_data.discard_unsaved
+                )
+            except USDEditError as exc:
+                return _edit_error("reload_usd_stage", exc)
+            dropped = "; unsaved edits were discarded" if result["discarded_unsaved"] else ""
+            message = f"Reloaded {result['file_path']}{dropped}"
+            return StageReloadResponse(success=True, message=message, **result).model_dump()
+
+        return await server._exec_backend(
+            "reload_usd_stage",
+            server.headless_adapter,
+            "USD",
+            StageReloadResponse,
+            scheduled("reload_usd_stage", _reload, writes=True),
+            params={"stage_id": stage_id, "discard_unsaved": discard_unsaved},
+        )
+
+    @server.mcp.tool(
+        name="unload_usd_stage",
+        description=(
+            "Close a loaded stage and free its memory; its stage_id stops working. "
+            "Refuses a stage with unsaved edits unless discard_unsaved=true."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=False, destructive=True
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def unload_usd_stage(stage_id: str, discard_unsaved: bool = False) -> ToolResult:
+        """
+        Unload a USD stage.
+
+        Args:
+            stage_id: Stage identifier returned by load_usd_file
+            discard_unsaved: Unload even though the stage has unsaved edits, which are lost
+
+        Returns:
+            Confirmation, or error
+        """
+
+        def _unload(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(
+                StageDiscardRequest, stage_id=stage_id, discard_unsaved=discard_unsaved
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                dirty = session.stage_status(input_data.stage_id)["has_unsaved_changes"]
+                session.unload_stage(
+                    input_data.stage_id, discard_unsaved=input_data.discard_unsaved
+                )
+            except USDEditError as exc:
+                return _edit_error("unload_usd_stage", exc)
+            dropped = "; unsaved edits were discarded" if dirty else ""
+            return StageUnloadResponse(
+                success=True,
+                stage_id=input_data.stage_id,
+                discarded_unsaved=dirty,
+                message=f"Unloaded stage {input_data.stage_id}{dropped}",
+            ).model_dump()
+
+        return await server._exec_backend(
+            "unload_usd_stage",
+            server.headless_adapter,
+            "USD",
+            StageUnloadResponse,
+            scheduled("unload_usd_stage", _unload, stage_id=stage_id),
+            params={"stage_id": stage_id, "discard_unsaved": discard_unsaved},
         )

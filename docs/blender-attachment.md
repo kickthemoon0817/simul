@@ -366,7 +366,7 @@ script still makes the GUI unresponsive while it runs, and the calls behind it
 wait.
 
 Every request starts with its protocol and the instance's token (bridge
-protocol 11), so the add-on refuses a connection that is not Simul's after a
+protocol 13), so the add-on refuses a connection that is not Simul's after a
 few dozen bytes, without reading or decoding the rest. A connection has 2
 seconds of the bridge's time to send them, and an authenticated one 60
 seconds to send its whole request; time Blender spends in an operation, a
