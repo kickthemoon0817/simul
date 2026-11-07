@@ -106,11 +106,22 @@ def fail(
     raise typer.Exit(exit_code)
 
 
-def _bad_option_value(param: Optional[click.Parameter], value: Any, expected: str) -> NoReturn:
-    """Exit 2 with ``InvalidArgument`` because an option's value is not ``expected``."""
+def _bad_option_value(
+    value: Any, param: Optional[click.Parameter], ctx: Optional[click.Context], expected: str
+) -> NoReturn:
+    """Exit 2 with ``InvalidArgument`` because an option's value is not ``expected``.
+
+    Shell completion parses the command line resiliently and drops a value
+    its type refuses, so there the refusal is a quiet ``click.BadParameter``,
+    as Click's ``INT`` raises: what the CLI prints while it completes is what
+    the shell reads as the candidates.
+    """
     opts = list(getattr(param, "opts", None) or ["option"])
     name = next((opt for opt in opts if opt.startswith("--")), opts[0])
-    fail(f"{name} takes {expected}, got {value!r}", "InvalidArgument", exit_code=2)
+    message = f"{name} takes {expected}, got {value!r}"
+    if ctx is not None and ctx.resilient_parsing:
+        raise click.BadParameter(message, ctx=ctx, param=param)
+    fail(message, "InvalidArgument", exit_code=2)
 
 
 class _PortNumber(click.types.IntParamType):
@@ -130,7 +141,7 @@ class _PortNumber(click.types.IntParamType):
         except click.BadParameter:
             port = 0  # not an integer: refused below like any port out of range
         if not 1 <= port <= 65535:
-            _bad_option_value(param, value, "a port number from 1 to 65535")
+            _bad_option_value(value, param, ctx, "a port number from 1 to 65535")
         return port
 
 
@@ -149,7 +160,7 @@ class _TimeoutSeconds(click.types.FloatParamType):
         except click.BadParameter:
             seconds = math.nan  # not a number: refused below like nan itself
         if not (math.isfinite(seconds) and seconds > 0):
-            _bad_option_value(param, value, "a finite number of seconds greater than 0")
+            _bad_option_value(value, param, ctx, "a finite number of seconds greater than 0")
         return seconds
 
 

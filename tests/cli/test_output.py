@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, patch
 import click
 import pytest
 import typer
+from click.shell_completion import ShellComplete
 from typer.testing import CliRunner
 
 from simul.cli import isaac as isaac_cli
@@ -393,6 +394,32 @@ def test_a_bad_port_or_timeout_is_text_on_stderr_in_human_mode(
     assert result.exit_code == 2, result.output
     assert result.stdout == ""
     assert human_mode == [f"[red]{message}[/red]"]
+
+
+@pytest.mark.parametrize(
+    ("args", "incomplete", "expected"),
+    [
+        (["isaac", "exec", "--port", "70000"], "--ti", ["--timeout"]),
+        (["isaac", "ping", "--timeout", "nan"], "--ho", ["--host"]),
+        (["unreal", "health", "-p", "abc"], "--ho", ["--host"]),
+    ],
+    ids=["isaac exec --port", "isaac ping --timeout", "unreal health -p"],
+)
+def test_shell_completion_drops_a_bad_port_or_timeout_without_printing(
+    args: List[str], incomplete: str, expected: List[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Completion parses the line as Click does for a bad ``INT``: the value is dropped and nothing is printed.
+
+    What the CLI writes while it completes is what the shell reads as the
+    candidates, so an envelope there would become one, and in zsh, which
+    reads three lines per candidate, it would shift every candidate after it.
+    """
+    completions = ShellComplete(typer.main.get_command(main_app), {}, "simul", "_SIMUL_COMPLETE").get_completions(
+        args, incomplete
+    )
+
+    assert [item.value for item in completions] == expected
+    assert capsys.readouterr() == ("", "")
 
 
 def test_valid_ports_and_timeouts_reach_the_command_as_numbers(monkeypatch: pytest.MonkeyPatch) -> None:
