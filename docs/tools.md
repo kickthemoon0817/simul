@@ -125,6 +125,10 @@ Notes:
 - `execute_isaac_script` scripts should follow the scripting reference served
   as the `simul://isaac-sim/skills` resource. Isaac Sim 6.0 deprecates
   `isaacsim.core.{api,prims,utils}` and removes the `omni.isaac.*` shims.
+- `ping_isaac` does not wait for a call already running on the instance and
+  reports `busy` when one is. A call the client cancels keeps the instance
+  until Isaac Sim has finished it (the bridge is asked to interrupt it first);
+  see [isaac-sim.md](isaac-sim.md#transports).
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or

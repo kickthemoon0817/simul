@@ -47,9 +47,10 @@ used by `simul isaac launch` and `install-bridge`; the YAML default for
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LOGGING__LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `LOGGING__LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` for simul's loggers and the console; `--log-level` sets it per run. Third-party loggers keep their quieter level unless this one is stricter |
+| `LOGGING__FORMAT` | `detailed` | Console and text log format: `detailed`, `simple` (`LEVEL - logger - message`) or `json` (one object per line: `ts`, `level`, `logger`, `request_id`, `tool`, `msg`, ...) |
 | `LOGGING__FILE_PATH` | `~/.simul/logs/simul.log` | Text log (rotated daily, 14 days kept) |
-| `LOGGING__AUDIT_PATH` | `~/.simul/logs/audit.jsonl` | One JSON line per tool call |
+| `LOGGING__AUDIT_PATH` | `~/.simul/logs/audit.jsonl` | One JSON line per tool call (see [Audit log](#audit-log)) |
 | `ISAAC_SIM__ENABLED` | `auto` | Register the Isaac Sim tools: `auto` on Linux and Windows only (elsewhere when `--backends` names `isaac`), `true` on any OS, `false` never; see [isaac-sim.md](isaac-sim.md#platforms) |
 | `ISAAC_SIM__SOCKET_PORT` / `ISAAC_SIM__BRIDGE_PORT` | `8226` / `8229` | Isaac Sim transports |
 | `ISAAC_SIM__SOCKET_PROTOCOL` | `auto` | `python_server` (6.0+) or `vscode` (5.x) skips the one-time probe |
@@ -185,7 +186,19 @@ your data. Each refusal is a structured `RefusedOperation` error:
 
 `security.rate_limiting` limits calls per agent session and per tool
 (`SECURITY__REQUESTS_PER_MINUTE`, `SECURITY__BURST_SIZE`), with an overall
-per-agent cap across all tools. An Unreal tool's own argument checks (such as
+per-agent cap across all tools (`SECURITY__GLOBAL_REQUESTS_PER_MINUTE`).
+
+The defaults are meant to stop a runaway loop, not parallel work: one tool
+takes `burst_size` (10) calls at once and then `requests_per_minute` (60, one
+a second), and the agent's calls across every tool take
+`global_requests_per_minute` (600) with a burst of ten seconds' worth (100).
+An agent that fans one tool out in parallel (`get_isaac_prim_detail` on 50
+prims at once) gets 10 answers and 40 `RateLimitError`s, each with
+`retry_after_seconds`. For such agents raise the per-tool burst, for example
+`SECURITY__BURST_SIZE=50` (the per-agent ceiling still applies), or turn the
+limit off with `SECURITY__RATE_LIMITING_ENABLED=false` when the server has a
+single trusted client. Over HTTP every sessionless client has its own budget
+(see [Multi-agent claims](#multi-agent-claims)). An Unreal tool's own argument checks (such as
 `capture_unreal_viewport`'s format, `execute_unreal_script`'s mode, the
 all-or-none camera groups of `set_unreal_camera_view` and `control_unreal_ui`'s
 control and property names) run inside the shared envelope, so a call they
@@ -246,8 +259,14 @@ protocol has no session there, and the server cannot tell one such client
 from another. Every such client acts as the agent `anonymous`: it uses the
 default Isaac instance and finds every live claim held by someone else.
 `set_active_isaac_instance`, `claim_isaac_instance` and
-`release_isaac_instance` refuse it with `SessionRequired`, and all such
-clients share one rate-limit budget. Connect agents that need their own
+`release_isaac_instance` refuse it with `SessionRequired`. For its rate-limit
+budget and in the usage and audit logs it is named by its TCP peer,
+`anonymous@<host>:<port>`, which the network assigns and a client keeps while
+its connection stays open, so each client has its own budget (it used to be
+one budget for all of them). This is not a security boundary: a client that
+reconnects gets a fresh budget, as one opening a new session does. A client
+may name itself for the logs with an `X-Simul-Agent` header, recorded as
+`anonymous:<label>`; the label decides nothing. Connect agents that need their own
 instance or claim with the handshake (for example `fastmcp.Client(url,
 mode="legacy")`) or over stdio. With a [bearer token](#network-transports-http-and-sse)
 configured, sessionless clients are authenticated, and since they all present
@@ -266,8 +285,34 @@ shows it, and by the session's default label otherwise.
 ## Usage statistics
 
 Every tool call is recorded in a persistent JSONL log
-(`~/.simul/logs/tool_usage.jsonl`), each row with the agent label and the
-session label it came in on. Agents read their own session's calls with
-`get_tool_usage_stats` (`scope="server"` adds per-tool counts across every
-session, never other sessions' records); operators read everything with
-`simul stats` and clear it with `simul stats --reset`.
+(`~/.simul/logs/tool_usage.jsonl`), each row with the agent label, the
+session label it came in on and the `request_id` its audit row carries. A
+call the client cancels is recorded too (`error: "cancelled"`, or
+`cancelled_before_start` when it was still waiting for the instance). The log
+is rotated at 10 MB into `tool_usage.jsonl.1` ... `.5` (the oldest is
+dropped), and `simul stats` streams the files, keeping only the records it
+shows. Agents read their own session's calls with `get_tool_usage_stats`
+(`scope="server"` adds per-tool counts across every session, never other
+sessions' records); operators read everything with `simul stats` and clear
+it, rotated copies included, with `simul stats --reset`.
+
+## Audit log
+
+`audit.jsonl` has one row per tool call, written as the call ends:
+
+```json
+{"ts": "...", "request_id": "3c34508323c0", "tool": "load_usd_file", "duration_ms": 1.2,
+ "status": "error", "error_type": "SandboxError", "agent_id": "robot-1", "session": "session-3b00cb8d6c8f"}
+```
+
+`status` is `ok`, `error` (with the envelope's `error_type`, and `reason`
+`rate_limited`, `instance_busy` or `instance_claimed` for a call refused
+before it ran) or `cancelled`; an exception that escaped the tool adds
+`error_class`. `request_id` matches the call's usage row and the
+`[request_id tool]` prefix of its lines in `simul.log`.
+
+Log files are private to the user: directories simul creates for them are
+0700 and every log, audit and usage file, rotated copies and `simul.json`
+included, is created 0600. Existing ones the user owns are tightened to 0600,
+and so is an existing directory inside simul's state directory
+(`~/.simul`, or `$SIMUL_HOME`); a log directory elsewhere keeps its mode.

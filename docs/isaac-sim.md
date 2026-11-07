@@ -144,6 +144,16 @@ From an agent, `ping_isaac` does the same check.
   synchronous loop that never yields also blocks the bridge's event loop, so
   only the timeout reaches it; a blocking C call is interrupted when it
   returns to Python.
+- **Cancelled calls.** When an MCP client cancels a call (or times out on
+  it), Isaac Sim keeps running the script. The server asks the bridge to
+  interrupt it and keeps the instance until the engine has finished, so the
+  next call is not let in while the first is still being served (it waits,
+  or gets `InstanceBusy` after `server.timeout`). The cancelled call is
+  recorded with `error: "cancelled"`.
+- **Ping while busy.** `ping_isaac` does not wait for a call already running
+  on the instance; its `busy` field says one is. A synchronous script blocks
+  the stock socket and the bridge alike, so a ping during one can fail even
+  though the instance is up.
 - **Busy or hung?** `get_isaac_runtime_info` reports `bridge.busy`,
   `bridge.busy_since` and `bridge.current_action`.
 - **Circuit breaker.** A filtered or half-open bridge port would cost the full

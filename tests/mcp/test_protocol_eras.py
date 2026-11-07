@@ -293,14 +293,16 @@ def test_sessionless_http_clients_get_no_session_to_share(
     assert [payload["error_type"] for payload in refused] == ["SessionRequired"] * 3
     assert refused[0]["details"]["active_instance"] == "default"
     assert 'mode="legacy"' in refused[0]["details"]["hint"]
-    # Every call reaches the server's default instance as the one anonymous agent.
+    # Every call reaches the server's default instance as an anonymous agent,
+    # named (for budgets and records only) by its TCP peer; the in-process
+    # test transport gives every client the same one.
     assert [payload["address"] for payload in pings] == [DEFAULT.address] * 3
-    assert _agents(server) == [server_module._ANONYMOUS_AGENT] * 3
+    (peer,) = set(_agents(server))
+    assert re.fullmatch(rf"{server_module._ANONYMOUS_AGENT}@[\w.:]+:\d+", peer), peer
     assert server._session_routes == {}
-    # The refused session tools spend the shared anonymous budget too.
+    # The refused session tools spend that client's budget too.
     assert set(server._rate_limiters) == {
-        (server_module._ANONYMOUS_AGENT, tool)
-        for tool in ("ping_isaac", "*", *(name for name, _ in SESSION_TOOLS))
+        (peer, tool) for tool in ("ping_isaac", "*", *(name for name, _ in SESSION_TOOLS))
     }
     assert server.session_manager.get_all_sessions() == []
 

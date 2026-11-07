@@ -39,6 +39,7 @@ from typing import (
     cast,
 )
 
+import anyio
 from fastmcp import FastMCP
 from fastmcp.server.context import _current_context
 from fastmcp.tools import ToolResult
@@ -52,7 +53,7 @@ from .. import __version__ as _source_version
 from ..adapters import IsaacRuntimeAdapter, IsaacSocketClient
 from ..adapters.base import BackendAdapter
 from ..config import Settings, get_settings
-from ..logging import LoggerMixin, get_logger
+from ..logging import LoggerMixin, current_request_id, get_logger, note_call_outcome
 from ..resources import find_checkout_root, resource
 from ..utils.errors import exception_message, exception_type_name
 from ..utils.paths import PathPolicy, SandboxDenied, sandbox_error
@@ -180,6 +181,12 @@ _CONTEXT_NETWORK_TRANSPORTS: Tuple[str, ...] = ("streamable-http", "sse")
 # ``SimulMCPServer._request_is_anonymous``). Nothing tells such clients apart,
 # so they share this agent's rate-limit buckets and keep no per-client state.
 _ANONYMOUS_AGENT: str = "anonymous"
+
+# The HTTP header an anonymous client names itself in, for the logs only.
+_CLIENT_LABEL_HEADER: str = "x-simul-agent"
+
+# How long a cancelled Isaac call waits for the bridge to accept its interrupt.
+_INTERRUPT_TIMEOUT_SECONDS: float = 5.0
 
 # Rate-limit buckets kept before idle ones are swept. A bucket that has
 # refilled to its burst is indistinguishable from a new one, so dropping it
@@ -1030,8 +1037,50 @@ class SimulMCPServer(LoggerMixin):
             return default_agent_label(session_id)
         if self._get_request_context() is not None:
             # A request without a client identity; see _request_is_anonymous.
-            return _ANONYMOUS_AGENT
+            return self._anonymous_agent()
         return f"agent-{id(self):x}"
+
+    def _anonymous_agent(self) -> str:
+        """Name the client of a request without a client identity, for budgets and records only.
+
+        Over HTTP that is the TCP peer, ``anonymous@<host>:<port>``: assigned
+        by the network stack, not chosen by the client, and stable for as long
+        as the client keeps its connection open, so each client gets its own
+        rate-limit budget (three sessionless clients used to share one and be
+        refused half their calls). It is no security boundary: a client that
+        reconnects gets a new budget, as one opening a new session does, and
+        nothing per-client (an instance switch, a claim) is kept for it.
+
+        Returns:
+            The peer's name, or ``anonymous`` when there is no HTTP request.
+        """
+        try:
+            from fastmcp.server.dependencies import get_http_request
+
+            peer = get_http_request().client
+        except Exception:
+            return _ANONYMOUS_AGENT
+        if peer is None:
+            return _ANONYMOUS_AGENT
+        return f"{_ANONYMOUS_AGENT}@{peer.host}:{peer.port}"
+
+    def _client_label(self) -> Optional[str]:
+        """Return the accounting label an anonymous HTTP client sends in ``X-Simul-Agent``.
+
+        Recorded as the call's agent (``anonymous:<label>``) in the usage and
+        audit logs so an operator can tell clients apart; never used to decide
+        anything, since any client can send any label.
+        """
+        try:
+            from fastmcp.server.dependencies import get_http_request
+
+            raw = get_http_request().headers.get(_CLIENT_LABEL_HEADER)
+        except Exception:
+            return None
+        if not raw:
+            return None
+        label = "".join(c for c in str(raw) if c.isprintable() and not c.isspace())[:64]
+        return label or None
 
     def _bind_request_session(
         self,
@@ -1097,6 +1146,9 @@ class SimulMCPServer(LoggerMixin):
         touched Isaac adds no routing state.
         """
         session_id = self._get_request_session_id()
+        if session_id is None and self._get_request_context() is not None:
+            label = self._client_label()
+            return f"{_ANONYMOUS_AGENT}:{label}" if label else session_agent_id
         route = self._session_routes.get(session_id) if session_id is not None else None
         binding = route.bindings.get(route.active_instance) if route is not None else None
         return binding.agent_id if binding is not None else session_agent_id
@@ -1459,11 +1511,14 @@ class SimulMCPServer(LoggerMixin):
         a result, refusals and invalid input included, is rate limited,
         recorded exactly once and sent once.
 
-        Two exits return no result and record nothing: cancellation (the
-        client gave up while the call ran or while it waited for Isaac's
-        instance lock), and an exception raised by the admission hook itself,
-        which propagates to FastMCP. ``discard`` runs on every exit before
+        Two exits return no result: cancellation (the client gave up while the
+        call ran or while it waited for Isaac's instance lock), which is
+        recorded as ``cancelled`` (or ``cancelled_before_start``) and
+        re-raised, and an exception raised by the admission hook itself, which
+        propagates to FastMCP unrecorded. ``discard`` runs on every exit before
         ``call`` starts, a cancelled wait and an admission exception included.
+        Every record carries the call's request id, and the call's audit row
+        is told its status, ``error_type`` and agent (``note_call_outcome``).
 
         Args:
             tool_name: Registered tool name, for the rate limit, the logs and
@@ -1496,26 +1551,54 @@ class SimulMCPServer(LoggerMixin):
         # it, by its claim's label when the session holds one.
         agent_id = self._resolve_agent_id(None)
         call_started = False
+        entered = time.monotonic()
+        started: Optional[float] = None
 
         async def run(request: Optional[BaseModel]) -> Dict[str, Any]:
             nonlocal call_started
             call_started = True
             return await call(request)
 
-        def record(duration_ms: float, success: bool, error: Optional[str]) -> None:
+        def record(
+            duration_ms: float,
+            success: bool,
+            error: Optional[str],
+            *,
+            status: Optional[str] = None,
+            error_type: Optional[str] = None,
+            reason: Optional[str] = None,
+        ) -> None:
+            # One request id ties this row to the call's audit row, which this
+            # also tells how the call ended (the audit used to say "ok" for
+            # every call that did not raise).
+            recorded_agent = self._recorded_agent_id(agent_id)
             self.usage_tracker.record(
                 tool_name,
                 duration_ms,
                 success,
                 params=params,
                 error=error,
-                agent_id=self._recorded_agent_id(agent_id),
+                agent_id=recorded_agent,
                 script_sha256=script_sha256,
                 session=agent_id,
+                request_id=current_request_id(),
+            )
+            note_call_outcome(
+                status=status or ("ok" if success else "error"),
+                error_type=None if success else error_type,
+                agent_id=recorded_agent,
+                session=agent_id,
+                reason=reason,
             )
 
         def refuse(refusal: Refusal) -> ToolResult:
-            record(0.0, False, refusal.usage_error)
+            record(
+                0.0,
+                False,
+                refusal.usage_error,
+                error_type=refusal.payload.get("error_type"),
+                reason=refusal.usage_error,
+            )
             return self._as_text_result(refusal.payload)
 
         try:
@@ -1536,8 +1619,21 @@ class SimulMCPServer(LoggerMixin):
                     (time.monotonic() - started) * 1000,
                     payload.get("success") is not False and not error,
                     str(error) if error else None,
+                    error_type=payload.get("error_type"),
                 )
             return self._as_text_result(payload)
+        except asyncio.CancelledError:
+            # The client gave up. The call is recorded all the same; an Isaac
+            # call has already kept the instance until the engine finished
+            # (_exec_isaac), so the duration runs to then.
+            since = started if started is not None else entered
+            record(
+                (time.monotonic() - since) * 1000,
+                False,
+                "cancelled" if call_started else "cancelled_before_start",
+                status="cancelled",
+            )
+            raise
         finally:
             # One place for every way a call can end before it starts. A
             # cancelled wait for the instance lock raises CancelledError out
@@ -1758,10 +1854,27 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             The payload as one JSON content block, plus an image block when it
             carries one.
+
+        A call the client cancels keeps the instance until the engine is done
+        with it: cancelling the request only closes the socket, and Isaac Sim
+        goes on running the script, so releasing the lock then let the next
+        call in while the first was still being served. On a cancel the
+        bridge is asked to interrupt the script (``interrupt_isaac_script``),
+        the call is awaited to its end, bounded by the transport's own
+        timeout, and only then is the lock released and the cancellation
+        recorded and passed on.
         """
 
         async def call(_request: Optional[BaseModel]) -> Dict[str, Any]:
-            return await coro
+            if bypass_instance_lock:
+                return await coro
+            client = self._get_request_isaac_client()
+            task = asyncio.ensure_future(coro)
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await self._drain_cancelled_isaac_call(tool_name, task, client)
+                raise
 
         return await self._run_envelope(
             tool_name,
@@ -1771,6 +1884,41 @@ class SimulMCPServer(LoggerMixin):
             script_sha256=script_sha256,
             discard=coro.close,
         )
+
+    async def _drain_cancelled_isaac_call(
+        self, tool_name: str, task: "asyncio.Future[Dict[str, Any]]", client: Any
+    ) -> None:
+        """Wait, shielded from the cancellation, for a cancelled Isaac call to finish.
+
+        Asks the bridge to interrupt the running script first, so a coroutine
+        script stops at its next await instead of running to its end. The
+        wait is bounded by the client's own socket deadline; a further cancel
+        of the waiting request does not cut it short.
+        """
+        if task.done():
+            return
+        self.logger.info(
+            "%s was cancelled by the client; holding the Isaac instance until it ends", tool_name
+        )
+        with anyio.CancelScope(shield=True):
+            if getattr(client, "bridge_enabled", False):
+                try:
+                    await asyncio.wait_for(
+                        client.interrupt_bridge_script(), timeout=_INTERRUPT_TIMEOUT_SECONDS
+                    )
+                except Exception as exc:
+                    self.logger.debug("Could not interrupt the cancelled %s: %s", tool_name, exc)
+            while not task.done():
+                try:
+                    await asyncio.wait({task})
+                except asyncio.CancelledError:
+                    # A cancellation anyio's shield does not cover (a bare
+                    # task.cancel()); the engine is still busy, keep waiting.
+                    continue
+        if not task.cancelled() and task.exception() is not None:
+            self.logger.debug(
+                "The cancelled %s ended with %s", tool_name, type(task.exception()).__name__
+            )
 
     async def _exec_payload(
         self,
