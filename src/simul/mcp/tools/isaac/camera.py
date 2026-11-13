@@ -8,9 +8,11 @@ from ._shared import (
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
     MAX_RETAINED_CAPTURES,
+    TRAVERSAL_PREDICATE_CORE,
     XFORM_READ_CORE,
     FloatList,
     _compose_script,
+    _listing_predicate,
     _pyval,
 )
 from .._meta import tool_meta
@@ -122,12 +124,21 @@ class CameraMixin:
 
     @tool_meta(
         name="list_isaac_cameras",
-        description="List all camera prims in the current Isaac Sim stage.",
+        description=(
+            "List all camera prims in the current Isaac Sim stage. Looks inside "
+            "instanceable prims (a robot's sensor cameras; entries there carry "
+            "instance_proxy=true) unless include_instance_proxies=false; "
+            "include_inactive=true also lists deactivated cameras."
+        ),
         read_only=True,
         idempotent=True,
     )
     async def list_isaac_cameras(
-        self, max_results: int = 200, offset: int = 0
+        self,
+        max_results: int = 200,
+        offset: int = 0,
+        include_instance_proxies: bool = True,
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         """
         List all camera prims in the current Isaac Sim stage.
@@ -138,6 +149,11 @@ class CameraMixin:
                 applied_limit.
             offset: Number of cameras to skip before the page starts; pass
                 the previous page's next_offset to continue.
+            include_instance_proxies: Look inside instanceable prims, as the
+                other listings do; cameras there carry
+                ``instance_proxy: true``.
+            include_inactive: Also list deactivated cameras
+                (``active: false``).
 
         Returns:
             Dict with a page of cameras (path, focal length, projection), the
@@ -145,25 +161,34 @@ class CameraMixin:
         """
         max_results = max(1, min(max_results, 1000))
         offset = max(0, offset)
-        script = textwrap.dedent(f"""\
+        _predicate = _listing_predicate(include_instance_proxies, include_inactive)
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom
-
+            """,
+            TRAVERSAL_PREDICATE_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
                 cameras = []
-                for p in stage.Traverse():
+                for p in Usd.PrimRange(stage.GetPseudoRoot(), {_predicate}):
                     if p.IsA(UsdGeom.Camera):
                         cam = UsdGeom.Camera(p)
-                        cameras.append({{
+                        entry = {{
                             "path": str(p.GetPath()),
                             "name": p.GetName(),
                             "focal_length": cam.GetFocalLengthAttr().Get(),
                             "projection": cam.GetProjectionAttr().Get(),
-                        }})
+                        }}
+                        if p.IsInstanceProxy():
+                            entry["instance_proxy"] = True
+                        if not p.IsActive():
+                            entry["active"] = False
+                        cameras.append(entry)
                 active_cam = None
                 try:
                     import omni.kit.viewport.utility as vp_util
@@ -184,9 +209,12 @@ class CameraMixin:
                     "truncated": truncated,
                     "next_offset": offset + len(page) if truncated else None,
                     "active_camera": active_cam,
+                    "include_instance_proxies": {_pyval(bool(include_instance_proxies))},
+                    "include_inactive": {_pyval(bool(include_inactive))},
                     "cameras": page,
                 }}))
-        """)
+            """,
+        )
         return await self._execute_json_script(script)
 
     @tool_meta(

@@ -163,6 +163,24 @@ def _run_with_kit(
     return result
 
 
+def _kit_modules(
+    commands: Dict[str, Callable[..., Any]],
+) -> Tuple[Dict[str, Any], List[Tuple[str, Dict[str, Any]]]]:
+    """``omni.kit`` / ``omni.kit.commands`` stand-ins for ``stage_tools``, and the call log."""
+    calls: List[Tuple[str, Dict[str, Any]]] = []
+
+    def _execute(name: str, **kwargs: Any) -> Any:
+        calls.append((name, kwargs))
+        return commands[name](**kwargs)
+
+    kit = types.ModuleType("omni.kit")
+    kit.__path__ = []  # type: ignore[attr-defined]
+    kit_commands = types.ModuleType("omni.kit.commands")
+    kit_commands.execute = _execute  # type: ignore[attr-defined]
+    kit.commands = kit_commands  # type: ignore[attr-defined]
+    return {"omni.kit": kit, "omni.kit.commands": kit_commands}, calls
+
+
 # ---------------------------------------------------------------------------
 # delete_isaac_prim
 # ---------------------------------------------------------------------------
@@ -708,9 +726,7 @@ def test_moving_to_the_stage_root_joins_the_path(
 
 
 @pytest.mark.parametrize("keep", [True, False])
-def test_world_transform_is_kept_by_default(
-    keep: bool, capturing_tools: Tools, run_on_stage: Any
-) -> None:
+def test_world_transform_is_kept_by_default(keep: bool, stage_tools: Any) -> None:
     stage = _local_stage()
     UsdGeom.Xform.Define(stage, "/World/A").AddTranslateOp().Set(Gf.Vec3d(10, 0, 0))
     b = UsdGeom.Xform.Define(stage, "/World/B")
@@ -719,23 +735,22 @@ def test_world_transform_is_kept_by_default(
     box = UsdGeom.Cube.Define(stage, "/World/A/Box")
     box.AddTranslateOp().Set(Gf.Vec3d(1, 0, 0))
     before = box.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    tools, sent = stage_tools(stage)
 
-    result = _call(
-        capturing_tools,
-        run_on_stage,
-        stage,
-        "reparent_isaac_prim",
-        "/World/A/Box",
-        "/World/B",
-        keep_world_transform=keep,
+    result = asyncio.run(
+        tools.reparent_isaac_prim("/World/A/Box", "/World/B", keep_world_transform=keep)
     )
 
     moved = UsdGeom.Xformable(stage.GetPrimAtPath("/World/B/Box"))
     after = moved.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    assert result["success"] is True
     if keep:
         assert result["world_transform_kept"] is True
         assert Gf.IsClose(after, before, 1e-6)
+        # The transform core goes in a second script, keeping the move's small.
+        assert len(sent) == 2
     else:
+        assert len(sent) == 1
         assert result["world_transform_kept"] is None
         assert list(moved.GetLocalTransformation().ExtractTranslation()) == [
             1.0,
@@ -801,7 +816,7 @@ def test_moving_a_prim_under_itself_is_refused(
 
 
 def test_kit_move_is_followed_by_retargeting_and_says_what_undo_covers(
-    capturing_tools: Tools, monkeypatch: pytest.MonkeyPatch
+    stage_tools: Any,
 ) -> None:
     stage = _local_stage()
     UsdGeom.Scope.Define(stage, "/World/Looks")
@@ -823,12 +838,14 @@ def test_kit_move_is_followed_by_retargeting_and_says_what_undo_covers(
         )
         stage.GetRootLayer().Apply(edit)
 
-    tools, captured = capturing_tools
-    asyncio.run(tools.reparent_isaac_prim("/World/Looks/Red", "/World/Materials"))
-    result = _run_with_kit(captured[-1], stage, {"MovePrim": _move_prim}, monkeypatch)
+    modules, calls = _kit_modules({"MovePrim": _move_prim})
+    tools, _sent = stage_tools(stage, modules=modules)
+    result = asyncio.run(
+        tools.reparent_isaac_prim("/World/Looks/Red", "/World/Materials")
+    )
 
     assert result["method"] == "omni.kit.commands MovePrim"
-    assert result["_kit_kwargs"] == [
+    assert [kwargs for _name, kwargs in calls] == [
         {
             "path_from": "/World/Looks/Red",
             "path_to": "/World/Materials/Red",
@@ -1163,19 +1180,14 @@ def test_create_object_checks_vectors_before_sending(capturing_tools: Tools) -> 
     assert captured == []
 
 
-def test_create_object_step_that_raises_keeps_the_report(
-    capturing_tools: Tools, run_on_stage: Any
-) -> None:
+def test_create_object_step_that_raises_keeps_the_report(stage_tools: Any) -> None:
     stage = _local_stage()
+    tools, _sent = stage_tools(stage)
 
-    result = _call(
-        capturing_tools,
-        run_on_stage,
-        stage,
-        "create_isaac_object",
-        "/World/Obj",
-        rigid_body=True,
-        material_path="/World/Looks/bad name",
+    result = asyncio.run(
+        tools.create_isaac_object(
+            "/World/Obj", rigid_body=True, material_path="/World/Looks/bad name"
+        )
     )
 
     assert result["failed_step"] == "material"

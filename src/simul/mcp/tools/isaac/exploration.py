@@ -10,6 +10,7 @@ from ._shared import (
     TRAVERSAL_PREDICATE_CORE,
     FloatList,
     _compose_script,
+    _listing_predicate,
     _pyval,
 )
 from .._meta import DeprecatedAlias, SandboxedPath, tool_meta
@@ -126,13 +127,21 @@ class ExplorationMixin:
     @tool_meta(
         name="list_isaac_lights",
         description=(
-            "List all light prims in the scene with type, intensity, and color information."
+            "List all light prims in the scene with type, intensity, and color information. "
+            "Looks inside instanceable prims (lights there carry instance_proxy=true) "
+            "unless include_instance_proxies=false; include_inactive=true also lists "
+            "deactivated lights."
         ),
         read_only=True,
         idempotent=True,
     )
     async def list_isaac_lights(
-        self, root_path: str = "/", max_results: int = 200, offset: int = 0
+        self,
+        root_path: str = "/",
+        max_results: int = 200,
+        offset: int = 0,
+        include_instance_proxies: bool = True,
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         """
         List all light prims in the scene under a root path.
@@ -143,20 +152,26 @@ class ExplorationMixin:
                 to [1, 1000]; the effective cap is reported as applied_limit.
             offset: Number of lights to skip before the page starts; pass the
                 previous page's next_offset to continue.
+            include_instance_proxies: Look inside instanceable prims, as the
+                other listings do; lights there carry ``instance_proxy: true``.
+            include_inactive: Also list deactivated lights (``active: false``).
 
         Returns:
             Dict with a page of lights (type, intensity, color) and the total
             count.
         """
-        max_results = max(1, min(max_results, 1000))
         _root_path = _pyval(root_path)
         max_results = max(1, min(max_results, 1000))
         offset = max(0, offset)
-        script = textwrap.dedent(f"""\
+        _predicate = _listing_predicate(include_instance_proxies, include_inactive)
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import UsdLux, Usd
-
+            """,
+            TRAVERSAL_PREDICATE_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -169,7 +184,7 @@ class ExplorationMixin:
                     limit = {max_results}
                     lights = []
                     total = 0
-                    for p in Usd.PrimRange(root):
+                    for p in Usd.PrimRange(root, {_predicate}):
                         if not p.HasAPI(UsdLux.LightAPI):
                             continue
                         index = total
@@ -181,6 +196,10 @@ class ExplorationMixin:
                             "name": p.GetName(),
                             "type": p.GetTypeName(),
                         }}
+                        if p.IsInstanceProxy():
+                            info["instance_proxy"] = True
+                        if not p.IsActive():
+                            info["active"] = False
                         intensity = p.GetAttribute("inputs:intensity")
                         if intensity and intensity.Get() is not None:
                             info["intensity"] = float(intensity.Get())
@@ -204,9 +223,12 @@ class ExplorationMixin:
                         "applied_limit": limit,
                         "truncated": truncated,
                         "next_offset": offset + len(page) if truncated else None,
+                        "include_instance_proxies": {_pyval(bool(include_instance_proxies))},
+                        "include_inactive": {_pyval(bool(include_inactive))},
                         "lights": page,
                     }}))
-        """)
+            """,
+        )
         return await self._execute_json_script(script)
 
     async def get_isaac_light_info(self, prim_path: str) -> Dict[str, Any]:
@@ -688,23 +710,35 @@ class ExplorationMixin:
             "faces, meshes, lights, cameras, materials, xforms, and prim type counts. "
             "Counts prims the same way as get_isaac_scene_summary, which adds hierarchy "
             "depth, physics/animation flags and stage metadata but always covers the whole "
-            "stage."
+            "stage. Counts inside instanceable prims (where Isaac assets keep their meshes) "
+            "unless include_instance_proxies=false; include_inactive=true also counts "
+            "deactivated prims."
         ),
         read_only=True,
         idempotent=True,
     )
-    async def get_isaac_scene_stats(self, root_path: str = "/") -> Dict[str, Any]:
+    async def get_isaac_scene_stats(
+        self,
+        root_path: str = "/",
+        include_instance_proxies: bool = True,
+        include_inactive: bool = False,
+    ) -> Dict[str, Any]:
         """
         Get aggregate scene statistics: vertex/face counts, material usage.
 
         Args:
             root_path: USD prim path to compute stats under.
+            include_instance_proxies: Count inside instanceable prims, as
+                list_isaac_prims does; each instance's meshes count.
+            include_inactive: Also count deactivated prims.
 
         Returns:
             Dict with total_prims, total_vertices, total_faces, etc. Prims are
             counted the same way as get_isaac_scene_summary.
         """
         _root_path = _pyval(root_path)
+        _proxies = _pyval(bool(include_instance_proxies))
+        _inactive = _pyval(bool(include_inactive))
         script = COUNTED_PRIMS_HELPER + textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -727,19 +761,28 @@ class ExplorationMixin:
                     total_materials = 0
                     total_xforms = 0
                     type_counts = {{}}
-                    for p in _counted_prims(stage, {_root_path}):
+                    # Instances share their prototype's meshes: read each
+                    # prototype mesh once, however many instances show it.
+                    mesh_sizes = {{}}
+                    for p in _counted_prims(stage, {_root_path}, {_proxies}, {_inactive}):
                         total_prims += 1
                         tname = _prim_type_label(p)
                         type_counts[tname] = type_counts.get(tname, 0) + 1
                         if p.IsA(UsdGeom.Mesh):
                             total_meshes += 1
-                            mesh = UsdGeom.Mesh(p)
-                            pts = mesh.GetPointsAttr().Get()
-                            fcs = mesh.GetFaceVertexCountsAttr().Get()
-                            if pts:
-                                total_vertices += len(pts)
-                            if fcs:
-                                total_faces += len(fcs)
+                            source = p.GetPrimInPrototype() if p.IsInstanceProxy() else p
+                            key = str(source.GetPath()) if p.IsInstanceProxy() else None
+                            if key is None or key not in mesh_sizes:
+                                mesh = UsdGeom.Mesh(source)
+                                pts = mesh.GetPointsAttr().Get()
+                                fcs = mesh.GetFaceVertexCountsAttr().Get()
+                                sizes = (len(pts) if pts else 0, len(fcs) if fcs else 0)
+                                if key is not None:
+                                    mesh_sizes[key] = sizes
+                            else:
+                                sizes = mesh_sizes[key]
+                            total_vertices += sizes[0]
+                            total_faces += sizes[1]
                         elif p.IsA(UsdGeom.Camera):
                             total_cameras += 1
                         elif p.IsA(UsdGeom.Xform):
@@ -759,6 +802,8 @@ class ExplorationMixin:
                         "total_materials": total_materials,
                         "total_xforms": total_xforms,
                         "type_counts": dict(sorted(type_counts.items(), key=lambda x: -x[1])),
+                        "include_instance_proxies": {_proxies},
+                        "include_inactive": {_inactive},
                     }}))
         """)
         return await self._execute_json_script(script)
@@ -767,13 +812,17 @@ class ExplorationMixin:
         name="get_isaac_texture_dependencies",
         description=(
             "List all external texture files referenced by scene materials with their "
-            "referencing material paths."
+            "referencing material paths. Includes the materials inside instanceable "
+            "assets unless include_instance_proxies=false."
         ),
         read_only=True,
         idempotent=True,
     )
     async def get_isaac_texture_dependencies(
-        self, root_path: str = "/", max_results: int = DEFAULT_MAX_RESULTS
+        self,
+        root_path: str = "/",
+        max_results: int = DEFAULT_MAX_RESULTS,
+        include_instance_proxies: bool = True,
     ) -> Dict[str, Any]:
         """
         List all external texture files referenced by scene materials.
@@ -783,17 +832,23 @@ class ExplorationMixin:
             max_results: Maximum unique texture files to collect. The
                 traversal stops once the cap is reached and ``truncated``
                 is set.
+            include_instance_proxies: Look inside instanceable prims, as the
+                listings do; an instanced asset's materials are there.
 
         Returns:
             Dict with unique texture file paths and their referencing materials.
         """
         max_results = max(1, min(max_results, 1000))
         _root_path = _pyval(root_path)
-        script = textwrap.dedent(f"""\
+        _predicate = _listing_predicate(include_instance_proxies, False)
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Usd, UsdShade, Sdf
-
+            """,
+            TRAVERSAL_PREDICATE_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -809,7 +864,7 @@ class ExplorationMixin:
                     )
                     textures = {{}}
                     truncated = False
-                    for p in Usd.PrimRange(root):
+                    for p in Usd.PrimRange(root, {_predicate}):
                         if not p.IsA(UsdShade.Shader):
                             continue
                         shader = UsdShade.Shader(p)
@@ -840,12 +895,14 @@ class ExplorationMixin:
                         "root_path": {_root_path},
                         "unique_textures": len(textures),
                         "truncated": truncated,
+                        "include_instance_proxies": {_pyval(bool(include_instance_proxies))},
                         "textures": [
                             {{"path": k, "referenced_by": v}}
                             for k, v in sorted(textures.items())
                         ],
                     }}))
-        """)
+            """,
+        )
         return await self._execute_json_script(script)
 
     async def get_isaac_prim_variants(self, prim_path: str) -> Dict[str, Any]:
@@ -1220,7 +1277,9 @@ class ExplorationMixin:
             "such as Xform are matched only when prim_type names them. The search stops "
             "after max_results hits, so a truncated result holds the first matches in stage "
             "order, not the nearest overall: narrow root_path, max_depth or radius to see "
-            "the rest."
+            "the rest. Looks inside instanceable prims (the meshes of instanced robots and "
+            "props; matches there carry instance_proxy=true) unless "
+            "include_instance_proxies=false."
         ),
         read_only=True,
         idempotent=True,
@@ -1233,6 +1292,7 @@ class ExplorationMixin:
         root_path: str = "/",
         max_results: int = 100,
         max_depth: int = -1,
+        include_instance_proxies: bool = True,
     ) -> Dict[str, Any]:
         """
         Find prims whose bounding box center is within a given radius.
@@ -1257,6 +1317,9 @@ class ExplorationMixin:
             max_results: Maximum number of prims to return.
             max_depth: Maximum depth below root_path to descend (-1 for
                 unlimited). Deeper subtrees are pruned, not just hidden.
+            include_instance_proxies: Look inside instanceable prims, as the
+                listings do. Off, an instanced asset's geometry is invisible
+                here (an instance prim is an Xform, not a Boundable).
 
         Returns:
             Dict with matching prims sorted by distance from center.
@@ -1265,12 +1328,16 @@ class ExplorationMixin:
         _root_path = _pyval(root_path)
         _prim_type = _pyval(prim_type or None)
         _center = _pyval([float(c) for c in center])
-        script = textwrap.dedent(f"""\
+        _predicate = _listing_predicate(include_instance_proxies, False)
+        script = _compose_script(
+            """\
             import json
             import math
             import omni.usd
             from pxr import Usd, UsdGeom, Gf
-
+            """,
+            TRAVERSAL_PREDICATE_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -1290,7 +1357,7 @@ class ExplorationMixin:
                     xform_cache = UsdGeom.XformCache(time_code)
                     matches = []
                     truncated = False
-                    prim_iter = iter(Usd.PrimRange(root))
+                    prim_iter = iter(Usd.PrimRange(root, {_predicate}))
                     for p in prim_iter:
                         depth = len(str(p.GetPath()).rstrip("/").split("/")) - root_depth
                         if max_depth >= 0 and depth >= max_depth:
@@ -1336,21 +1403,26 @@ class ExplorationMixin:
                         if len(matches) >= max_results:
                             truncated = True
                             break
-                        matches.append({{
+                        match = {{
                             "path": str(p.GetPath()),
                             "name": p.GetName(),
                             "type": p.GetTypeName(),
                             "distance": round(dist, 4),
                             "center": [prim_center[0], prim_center[1], prim_center[2]],
-                        }})
+                        }}
+                        if p.IsInstanceProxy():
+                            match["instance_proxy"] = True
+                        matches.append(match)
                     matches.sort(key=lambda x: x["distance"])
                     print(json.dumps({{
                         "center": {_center},
                         "radius": radius,
                         "max_depth": max_depth,
+                        "include_instance_proxies": {_pyval(bool(include_instance_proxies))},
                         "count": len(matches),
                         "truncated": truncated,
                         "matches": matches,
                     }}))
-        """)
+            """,
+        )
         return await self._execute_json_script(script, annotations=("usd_readback",))

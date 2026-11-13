@@ -2,7 +2,7 @@
 
 import json
 import textwrap
-from typing import Annotated, Any, List
+from typing import Annotated, Any, List, Optional
 
 from pydantic import BeforeValidator
 
@@ -32,6 +32,74 @@ PROTECTED_CARB_SETTING_PREFIXES: tuple[str, ...] = (
 # (Isaac Sim's .kit files set settings.persistent = true) and apply to every
 # later session, not just this one.
 PERSISTENT_CARB_SETTING_PREFIX = "/persistent/"
+
+# The same namespaces as Carb paths. A write is refused when its key is one of
+# these, lies inside one, or is an ancestor of one (/exts, /, ...): Carb's
+# set(path, dict) replaces the whole subtree at path, so a write to /exts or
+# to /exts/khemoo.simul itself clears every key beneath it, the bridge's
+# require_auth and auth_token included.
+PROTECTED_CARB_NAMESPACES: tuple[str, ...] = tuple(
+    prefix.rstrip("/") for prefix in PROTECTED_CARB_SETTING_PREFIXES
+)
+PERSISTENT_CARB_NAMESPACE = PERSISTENT_CARB_SETTING_PREFIX.rstrip("/")
+
+# Settings of the Python Scripting Component (omni.kit.scripting on 5.x,
+# omni.behavior.scripting on 6.0), refused while script execution is off.
+# /app/scripting/ignoreWarningDialog=true makes Kit run the scripts attached
+# to an opened stage without asking (5.x script_manager.py _open_stage; Isaac
+# Sim 6.0.1's behaviors.py sets it "to enable behavior scripts").
+SCRIPTING_CARB_NAMESPACES: tuple[str, ...] = ("/app/scripting",)
+
+
+def normalize_carb_path(key: str) -> Optional[str]:
+    """Return a Carb key as an absolute path with empty segments dropped.
+
+    Args:
+        key: A settings key as a caller wrote it (``exts/a//b/``).
+
+    Returns:
+        ``/exts/a/b``, ``/`` for the root, or None when a segment is ``.`` or
+        ``..``, which Carb would not resolve the way a reader expects.
+    """
+    segments = [segment for segment in str(key).split("/") if segment]
+    if any(segment in (".", "..") for segment in segments):
+        return None
+    return "/" + "/".join(segments)
+
+
+def carb_write_paths(key: str, value: Any) -> Optional[List[str]]:
+    """List every Carb path a ``set(key, value)`` writes.
+
+    A dict value writes a subtree: each of its keys, recursively, below
+    ``key``. The key itself is listed too, since the subtree replaces
+    whatever was there.
+
+    Returns:
+        The normalized paths, or None when any of them is malformed.
+    """
+    root = normalize_carb_path(key)
+    if root is None:
+        return None
+    paths = [root]
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            child = carb_write_paths(root.rstrip("/") + "/" + str(child_key), child_value)
+            if child is None:
+                return None
+            paths.extend(child)
+    return paths
+
+
+def carb_path_touches(path: str, namespace: str) -> bool:
+    """Whether writing ``path`` changes something in ``namespace``.
+
+    True when ``path`` is the namespace, lies inside it, or is an ancestor of
+    it (a subtree write there replaces the namespace).
+    """
+    if path == "/":
+        return True
+    return path == namespace or path.startswith(namespace + "/") or namespace.startswith(path + "/")
+
 
 # Prim paths whose removal empties the scene rather than editing it.
 STAGE_ROOT_PATH = "/"
@@ -241,13 +309,36 @@ def _compose_script(*fragments: str) -> str:
     f-string template would indent only its first line, so each fragment is
     dedented on its own and the pieces are concatenated at column zero.
 
+    Full-line comments and blank lines are dropped on the way: they explain
+    the cores to whoever reads this module, but Isaac Sim 5.1's stock socket
+    takes at most 32 KiB per script, and the cores' comments alone were a
+    sixth of create_isaac_object's. Generated scripts hold no multi-line
+    string literals, the one place this would change behaviour.
+
     Args:
         *fragments: Source fragments, each indented however its literal is.
 
     Returns:
         The concatenated script.
     """
-    return "\n".join(textwrap.dedent(fragment) for fragment in fragments)
+    return "\n".join(_script_source(fragment) for fragment in fragments)
+
+
+def _script_source(fragment: str) -> str:
+    """Return ``fragment`` dedented, without full-line comments or blank lines.
+
+    Args:
+        fragment: Python source as written in a script core or template.
+
+    Returns:
+        The source as ``_compose_script`` embeds it.
+    """
+    kept = [
+        line
+        for line in textwrap.dedent(fragment).splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return "\n".join(kept) + "\n"
 
 
 # Traversal predicate for the listing tools. Isaac robot assets keep their
@@ -265,6 +356,25 @@ TRAVERSAL_PREDICATE_CORE = """\
             flags = Usd.PrimIsActive & Usd.PrimIsDefined & Usd.PrimIsLoaded & ~Usd.PrimIsAbstract
         return Usd.TraverseInstanceProxies(flags) if include_instance_proxies else flags
 """
+
+
+def _listing_predicate(include_instance_proxies: bool, include_inactive: bool) -> str:
+    """Return the script expression that builds a listing's traversal predicate.
+
+    The script must embed ``TRAVERSAL_PREDICATE_CORE``.
+
+    Args:
+        include_instance_proxies: Descend into instanceable prims.
+        include_inactive: Also visit deactivated prims.
+
+    Returns:
+        Python source for the predicate, e.g. ``_traversal_predicate(True, False)``.
+    """
+    return (
+        f"_traversal_predicate({_pyval(bool(include_instance_proxies))}, "
+        f"{_pyval(bool(include_inactive))})"
+    )
+
 
 # What the mass and rigid_body aspects say beside a null centre of mass.
 # MassAPI's fallback is (-inf, -inf, -inf), the normal state after
@@ -1041,7 +1151,32 @@ USD_READBACK_STALE_WARNING = (
     "isaacsim.core.experimental.prims on 6.0) with execute_isaac_script."
 )
 
-USD_READBACK_ANNOTATION = f'''\
+# Only velocity write-back off (/physics/updateVelocitiesToUsd false with
+# /physics/updateToUsd on): poses in USD follow the simulation, velocities don't.
+USD_VELOCITY_STALE_WARNING = (
+    "PhysX is not writing velocities back to USD (/physics/updateVelocitiesToUsd is "
+    "false), so the velocities read from USD here are the values from before play; "
+    "poses are current. Read velocities through a physics view (omni.physics.tensors, "
+    "or isaacsim.core.experimental.prims on 6.0) with execute_isaac_script."
+)
+
+
+def _usd_readback_annotation(reads_velocities: bool) -> str:
+    """Return the readback check for a tool that reads poses, and maybe velocities.
+
+    A write-back setting is off when it is set and falsy: Kit settings can
+    hold 0 as well as False, and an unset key means the default, which is on.
+    Poses are stale when /physics/updateToUsd is off; velocities also when
+    /physics/updateVelocitiesToUsd is. A pose-only reader is not flagged for
+    velocity write-back alone.
+
+    Args:
+        reads_velocities: The tool's result includes velocities read from USD.
+
+    Returns:
+        The annotation script.
+    """
+    return f'''\
 def _simul_annotate_usd_readback():
     try:
         import json
@@ -1059,7 +1194,11 @@ def _simul_annotate_usd_readback():
             fabric_enabled = bool(manager.is_extension_enabled("omni.physx.fabric"))
         except Exception:
             pass
-        stale = update_to_usd is False or update_velocities_to_usd is False
+        poses_stale = update_to_usd is not None and not update_to_usd
+        velocities_stale = poses_stale or (
+            update_velocities_to_usd is not None and not update_velocities_to_usd
+        )
+        stale = poses_stale or ({reads_velocities!r} and velocities_stale)
         if not stale and not fabric_enabled:
             return
         fields = {{
@@ -1067,13 +1206,15 @@ def _simul_annotate_usd_readback():
                 "update_to_usd": update_to_usd,
                 "update_velocities_to_usd": update_velocities_to_usd,
                 "physx_fabric_enabled": fabric_enabled,
+                "poses_stale": poses_stale,
+                "velocities_stale": velocities_stale,
                 "stale_under_fabric": stale,
             }},
         }}
         warnings = []
         if stale:
             fields["stale_under_fabric"] = True
-            warnings.append({USD_READBACK_STALE_WARNING!r})
+            warnings.append({USD_READBACK_STALE_WARNING!r} if poses_stale else {USD_VELOCITY_STALE_WARNING!r})
         print({ANNOTATION_MARKER!r} + json.dumps({{"fields": fields, "warnings": warnings}}))
     except Exception:
         pass
@@ -1083,15 +1224,26 @@ _simul_annotate_usd_readback()
 del _simul_annotate_usd_readback
 '''
 
+
+USD_READBACK_ANNOTATION = _usd_readback_annotation(reads_velocities=False)
+USD_VELOCITY_READBACK_ANNOTATION = _usd_readback_annotation(reads_velocities=True)
+
 # Isaac Sim's apps set physics.resetOnStop = true (base and full .kit files of
 # 5.1.0 and 6.0.1): stopping or resetting restores what the simulation moved to
-# its pre-play state. step_isaac_simulation leaves the timeline paused, so an
-# edit made then to a simulated prim is reverted by the next stop or reset.
+# its pre-play state. That reverts an edit made to a simulated prim while the
+# timeline is paused (step_isaac_simulation leaves it paused) or playing.
 PAUSED_EDIT_WARNING = (
     "The timeline is paused (step_isaac_simulation leaves it paused) and "
     "/physics/resetOnStop is on: stopping or resetting the simulation restores the "
     "prims it simulates to their pre-play state, which also reverts edits made now "
     "to those prims. Stop the simulation before editing to keep the edit."
+)
+
+PLAYING_EDIT_WARNING = (
+    "The timeline is playing and /physics/resetOnStop is on: stopping or resetting "
+    "the simulation restores the prims it simulates to their pre-play state, which "
+    "also reverts edits made now to those prims (and the simulation may move them "
+    "first). Stop the simulation before editing to keep the edit."
 )
 
 PAUSED_EDIT_ANNOTATION = f'''\
@@ -1101,11 +1253,16 @@ def _simul_annotate_paused_edit():
         import carb.settings
         import omni.timeline
         timeline = omni.timeline.get_timeline_interface()
-        if timeline.is_playing() or timeline.is_stopped():
+        if timeline.is_stopped():
             return
-        if carb.settings.get_settings().get("/physics/resetOnStop") is False:
+        reset_on_stop = carb.settings.get_settings().get("/physics/resetOnStop")
+        if reset_on_stop is not None and not reset_on_stop:
             return
-        note = {{"fields": {{"timeline_state": "paused"}}, "warnings": [{PAUSED_EDIT_WARNING!r}]}}
+        playing = timeline.is_playing()
+        note = {{
+            "fields": {{"timeline_state": "playing" if playing else "paused"}},
+            "warnings": [{PLAYING_EDIT_WARNING!r} if playing else {PAUSED_EDIT_WARNING!r}],
+        }}
         print({ANNOTATION_MARKER!r} + json.dumps(note))
     except Exception:
         pass
@@ -1117,5 +1274,6 @@ del _simul_annotate_paused_edit
 
 SCRIPT_ANNOTATIONS: dict[str, str] = {
     "usd_readback": USD_READBACK_ANNOTATION,
+    "usd_velocity_readback": USD_VELOCITY_READBACK_ANNOTATION,
     "paused_edit": PAUSED_EDIT_ANNOTATION,
 }

@@ -160,26 +160,21 @@ REFERENCE_ASSET_CORE = """\
             "notes": notes,
         }
 
-    def _physics_units(stage, root, units, apply):
+    def _physics_units(root, units, apply):
         # PhysX reads physics values in stage units whatever the transform
-        # does, so values authored in the asset's units are rescaled (or, when
-        # not applying, only counted) the way Kit's metrics assembler does.
+        # does. The tool's second script, which carries the units table,
+        # rescales (or, when not applying, only counts) the values in asset
+        # units; this records what it needs.
         length_ratio = units["scale_needed"] if units["scale_needed"] is not None else 1.0
         mass_ratio = units["mass_ratio"]
         if math.isclose(length_ratio, 1.0, rel_tol=1e-12) and math.isclose(mass_ratio, 1.0, rel_tol=1e-12):
-            return None
-        report = _physics_unit_correction(stage, root, length_ratio, mass_ratio, apply)
-        units["physics"] = report
-        if not apply and report["attribute_count"]:
-            units["notes"].append(
-                str(report["attribute_count"]) + " physics value(s) in asset units were not rescaled"
-            )
-        if report["uncorrected_count"]:
-            return (
-                str(report["uncorrected_count"]) + " physics value(s) in asset units could not be rescaled "
-                "(see units.physics.uncorrected); PhysX will read them in stage units."
-            )
-        return None
+            return
+        units["physics"] = {
+            "pending": str(root.GetPath()),
+            "applied": bool(apply),
+            "length_ratio": length_ratio,
+            "mass_ratio": mass_ratio,
+        }
 
     def _needs_correction(units):
         return units["scale_needed"] is not None or units["rotate_x_needed"] is not None
@@ -247,11 +242,33 @@ REFERENCE_ASSET_CORE = """\
 
     def _code_nodes_refusal(found):
         return _failure(
-            "The asset contains node(s) that run Python given as data ("
+            "The asset contains prim(s) that run Python: OmniGraph nodes that run code given "
+            "as data, or Python Scripting Components (OmniScriptingAPI / omni:scripting:scripts, "
+            "which Kit loads without asking once scripts are allowed) ("
             + ", ".join(found[:5]) + "). Script execution is disabled by "
             "security.allow_script_execution; nothing was changed.",
             "ScriptExecutionDisabled", None, script_capable_prims=found,
         )
+
+    def _unloaded_payloads_refusal(found):
+        return _failure(
+            "The asset contains payload(s) that are not loaded (" + ", ".join(found[:5])
+            + "), so what they would bring in, code included, cannot be checked. Script "
+            "execution is disabled by security.allow_script_execution; nothing was changed.",
+            "ScriptExecutionDisabled", None, unloaded_payload_prims=found,
+        )
+
+    def _guard_refusal(prim, guard):
+        # None when the referenced content may stay.
+        if not guard:
+            return None
+        found = _script_capable_prims_under(prim)
+        if found:
+            return _code_nodes_refusal(found)
+        unloaded = _unloaded_payload_prims_under(prim)
+        if unloaded:
+            return _unloaded_payloads_refusal(unloaded)
+        return None
 
     def _import_asset(stage, asset_path, requested, asset_prim_path, correct_units, guard):
         layer = Sdf.Layer.FindOrOpen(asset_path)
@@ -277,11 +294,11 @@ REFERENCE_ASSET_CORE = """\
         if _add_reference(holder, asset_path, root_path) != "added":
             stage.RemovePrim(created)
             return _composed_nothing(asset_path, root_path, root_name)
-        found = _script_capable_prims_under(holder) if guard else []
-        if found:
+        refusal = _guard_refusal(holder, guard)
+        if refusal is not None:
             stage.RemovePrim(created)
-            return _code_nodes_refusal(found)
-        physics_warning = _physics_units(stage, holder, units, correct_units)
+            return refusal
+        _physics_units(holder, units, correct_units)
         result = {
             "referenced_prim": root_path or "/" + root_name,
             "used_default_prim": root_path is None,
@@ -290,9 +307,8 @@ REFERENCE_ASSET_CORE = """\
             "child_count": len(holder.GetChildren()),
             "units": units,
         }
-        warnings = [text for text in (warning, physics_warning) if text is not None]
-        if warnings:
-            result["warning"] = " ".join(warnings)
+        if warning is not None:
+            result["warning"] = warning
         return result
 
     def _reference_on_prim(stage, prim_path, asset_path, asset_prim_path, correct_units, guard):
@@ -328,14 +344,18 @@ REFERENCE_ASSET_CORE = """\
         if status == "nothing":
             _roll_back()
             return _composed_nothing(asset_path, root_path, root_name)
-        found = _script_capable_prims_under(prim) if guard else []
-        if found:
+        refusal = _guard_refusal(prim, guard)
+        if refusal is not None:
             _roll_back()
-            return _code_nodes_refusal(found)
+            return refusal
         units = _metrics(stage, layer)
         declined = None
         mismatch = _needs_correction(units) or units["mass_ratio"] != 1.0
-        prior_physics = [name for name in prior_values if _unit_exponents(name, prim) not in (None, (0, 0))]
+        # By namespace: the units table travels in the second script only.
+        prior_physics = [
+            name for name in prior_values
+            if name.split(":")[0].startswith(("physics", "physx")) or name.split(":")[0] in ("drive", "limit", "state")
+        ]
         if correct_units and mismatch and (prior_children or prior_physics):
             held = []
             if prior_children:
@@ -381,7 +401,7 @@ REFERENCE_ASSET_CORE = """\
             units["notes"].append("mismatch reported, not corrected (correct_units=false)")
         if declined is not None:
             units["notes"].append(declined)
-        physics_warning = _physics_units(stage, prim, units, correct_units and declined is None)
+        _physics_units(prim, units, correct_units and declined is None)
         result = {
             "already_referenced": False,
             "referenced_prim": root_path or "/" + root_name,
@@ -392,7 +412,7 @@ REFERENCE_ASSET_CORE = """\
         }
         # The caller asked for the correction, so a refusal to apply it is
         # surfaced at the top level, not only inside units.notes.
-        warnings = [text for text in (warning, declined, physics_warning) if text is not None]
+        warnings = [text for text in (warning, declined) if text is not None]
         if warnings:
             result["warning"] = " ".join(warnings)
         return result
@@ -704,7 +724,8 @@ class StageAssetMixin:
             "xformOp:rotateX:unitsResolve and the asset is referenced on its child "
             "<target_path>/<asset root name>, reported as asset_root_path "
             "(correct_units=false only reports it). With security.allow_script_execution "
-            "off, an asset containing code-running OmniGraph nodes is refused. "
+            "off, an asset containing code-running OmniGraph nodes or Python Scripting "
+            "Components (OmniScriptingAPI), or payloads that are not loaded, is refused. "
             "OBJ/FBX/glTF need converting to USD first. "
             "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
@@ -760,7 +781,6 @@ class StageAssetMixin:
             """,
             OPEN_ASSET_CORE,
             script_guard_source(),
-            physics_units_source(),
             REFERENCE_ASSET_CORE,
             f"""\
             asset_path = {_asset_path}
@@ -796,7 +816,7 @@ class StageAssetMixin:
                 print(json.dumps(result))
             """,
         )
-        return await self._execute_json_script(script)
+        return await self._rescale_physics_values(await self._execute_json_script(script))
 
     @tool_meta(
         name="add_isaac_reference",
@@ -810,7 +830,8 @@ class StageAssetMixin:
             "physics values, other references or transform ops of its own (otherwise use "
             "import_isaac_asset, which wraps the reference). With "
             "security.allow_script_execution off, an asset containing code-running OmniGraph "
-            "nodes is refused. "
+            "nodes or Python Scripting Components (OmniScriptingAPI), or payloads that are not "
+            "loaded, is refused. "
             "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
         read_only=False,
@@ -863,7 +884,6 @@ class StageAssetMixin:
             """,
             OPEN_ASSET_CORE,
             script_guard_source(),
-            physics_units_source(),
             REFERENCE_ASSET_CORE,
             f"""\
             prim_path = {_pyval(prim_path)}
@@ -899,7 +919,75 @@ class StageAssetMixin:
                 print(json.dumps(result))
             """,
         )
-        return await self._execute_json_script(script)
+        return await self._rescale_physics_values(await self._execute_json_script(script))
+
+    async def _rescale_physics_values(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Run the physics-units pass an import or reference asked for.
+
+        The units table is a third of a script, so it travels in a second
+        script, sent only when the asset's units differ from the stage's.
+
+        Args:
+            result: The import or reference script's result. Its
+                ``units.physics`` holds ``pending`` (the prim to walk) when a
+                pass is due.
+
+        Returns:
+            ``result`` with ``units.physics`` replaced by the pass's report,
+            and a warning for values the pass could not rescale.
+        """
+        units = result.get("units") if result.get("success") else None
+        pending = units.get("physics") if isinstance(units, dict) else None
+        if not isinstance(pending, dict) or "pending" not in pending:
+            return result
+        root_path = pending.pop("pending")
+        apply = bool(pending["applied"])
+        script = _compose_script(
+            """\
+            import json
+            import omni.usd
+            from pxr import Usd, UsdPhysics
+            """,
+            physics_units_source(),
+            f"""\
+            root_path = {_pyval(root_path)}
+            length_ratio = {_pyval(float(pending["length_ratio"]))}
+            mass_ratio = {_pyval(float(pending["mass_ratio"]))}
+            apply = {_pyval(apply)}
+            """,
+            """\
+            stage = omni.usd.get_context().get_stage()
+            root = stage.GetPrimAtPath(root_path) if stage is not None else None
+            if root is None or not root.IsValid():
+                print(json.dumps({"error": "The referenced prim is gone: " + root_path}))
+            else:
+                print(json.dumps(_physics_unit_correction(stage, root, length_ratio, mass_ratio, apply)))
+            """,
+        )
+        report = await self._execute_json_script(script, timeout_seconds=self._heavy_script_timeout())
+        if not report.get("success"):
+            units["physics"] = dict(pending, applied=False, failure=report.get("error"))
+            warning = (
+                "The asset was referenced, but its physics values were not "
+                + ("rescaled" if apply else "counted") + " (" + str(report.get("error"))
+                + "); PhysX will read them in stage units."
+            )
+        else:
+            report.pop("success", None)
+            units["physics"] = report
+            warning = None
+            if not apply and report.get("attribute_count"):
+                units["notes"].append(
+                    f"{report['attribute_count']} physics value(s) in asset units were not rescaled"
+                )
+            if report.get("uncorrected_count"):
+                warning = (
+                    f"{report['uncorrected_count']} physics value(s) in asset units could not be "
+                    "rescaled (see units.physics.uncorrected); PhysX will read them in stage units."
+                )
+        if warning is not None:
+            result["warning"] = f"{result['warning']} {warning}" if result.get("warning") else warning
+        return result
 
 
 def _asset_prim_path_problem(asset_prim_path: Optional[str]) -> Optional[Dict[str, Any]]:

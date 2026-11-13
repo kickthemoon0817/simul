@@ -133,6 +133,7 @@ variable, so Blender must see the same `SIMUL_HOME` as the server (or set
 | `BLENDER__TOOL_SURFACE` | `full` | `thin` registers only the essentials in `THIN_BLENDER_TOOLS` (`--blender-tools` overrides) |
 | `UNREAL__MODE` | `endpoint` | `attached` uses the editor chosen by `simul unreal attach` |
 | `UNREAL__PASSPHRASE` | unset | Plaintext or MD5 hex for an editor set up with `--passphrase` |
+| `UNREAL__MAX_ACTORS` | `200` | Default `max_results` of `list_unreal_actors` and `simul unreal list-actors` |
 | `BLENDER__MODE` | `embedded` | `attached` uses the window chosen by `simul blender attach` |
 | `VIEWPORT__MAX_SIZE` | `2048` | Largest capture dimension |
 | `USD__ALLOWED_EXTENSIONS` | `[".usd",".usda",".usdc",".usdz"]` | Extensions the headless USD tools and `simul usd` commands open; load and validate share the list |
@@ -174,16 +175,39 @@ augmentation and condition nodes run their `*Script` inputs. Both
 - `connect_isaac_graph_nodes` refuses a connection into a code attribute or
   into a script-capable node.
 - `import_isaac_asset` and `add_isaac_reference` refuse an asset whose
-  composed content holds such a node.
+  composed content holds such a node or a Python Scripting Component (below),
+  or holds payloads that are not loaded, since the check cannot see inside
+  them.
 - `enable_isaac_extension` refuses `omni.graph.scriptnode`,
   `omni.kit.scripting`, `omni.warp` and any extension whose name has a word
-  starting with `script`.
+  starting with `script` (so 6.0's `omni.behavior.scripting.*` too).
+
+Isaac Sim's **Python Scripting Component** runs Python files attached to
+prims: a prim with the `OmniScriptingAPI` schema lists them in
+`omni:scripting:scripts`. Isaac Sim 5.1's full app enables
+`omni.kit.scripting`, and 6.0 enables `omni.behavior.scripting.bundle`,
+which reads the same attribute. Once a stage without scripts has been opened,
+the script manager allows scripts. Every later USD change that adds such a
+prim then loads its scripts with no prompt. Setting
+`/app/scripting/ignoreWarningDialog` also skips the prompt shown when a stage
+that has scripts is opened. With the switch off:
+
+- `import_isaac_asset`, `add_isaac_reference` and `duplicate_isaac_prim`
+  refuse content that holds a prim with `OmniScriptingAPI` or any
+  `omni:scripting:*` property;
+- `set_isaac_prim_attribute`, `set_isaac_graph_node_values` and
+  `create_isaac_prim` refuse `omni:scripting:*` attributes and the
+  `OmniScriptingAPI` name;
+- `set_isaac_carb_settings` refuses `/app/scripting` and its ancestors.
 
 Names are split into words at `.`, `:`, `_`, `-` and camelCase boundaries,
 so `inputs:codeStr` and `inputs:augmentationScript` count as code
 attributes while `inputs:usdTimecode` does not, and
-`omni.isaac.robot_description_editor` is not a script extension. The other
-`omni.warp` nodes, which run fixed kernels, stay usable.
+`omni.isaac.robot_description_editor` is not a script extension. A word that
+contains `script` anywhere (an all-lowercase third-party name such as
+`acme.nodes.runpythonscript` or `inputs:pythonscript`) also counts, unless
+the `script` belongs to an English word such as `description` or `transcript`.
+The other `omni.warp` nodes, which run fixed kernels, stay usable.
 
 The prim-editing tools apply the same check, since OmniGraph nodes are prims:
 `create_isaac_prim` refuses a code-running type and a code attribute or
@@ -192,10 +216,22 @@ refuses a code attribute, a code-running `node:type` value and any write to
 a code-running node, and `duplicate_isaac_prim` refuses a subtree that holds
 one.
 
-Routes this does not close: a stage opened with `open_isaac_stage` that
-already contains such a node, and nodes already on the stage, which run when
-the graph evaluates. Treat the switch as removing the agent's direct code
-tools, not as a sandbox for an untrusted stage.
+Routes this does not close:
+- A stage opened with `open_isaac_stage` that already contains code nodes or
+  scripting components. The Kit prompt guards those scripts, but a headless
+  editor has no one to answer it, and `ignoreWarningDialog` set at launch
+  removes it.
+- Nodes and scripts already on the stage, which run when the graph evaluates
+  or when Kit allows scripts.
+- An all-lowercase name that hides `code` rather than `script`
+  (`inputs:pythoncode`): matching that would also hit `timecode`, `barcode`
+  and `encode`.
+- 6.0's `omni.behavior.scripting` trust logic, whose source is not public;
+  the guard relies on the attribute and setting its Isaac Sim 6.0.1 callers
+  use.
+
+Treat the switch as removing the agent's direct code tools, not as a sandbox
+for an untrusted stage.
 
 The switch is the one that removes the agent-authored code tools. The
 Isaac bridge extension's `allow_unsafe_execution` setting (and

@@ -38,8 +38,10 @@ from simul.mcp.tools.isaac._base import merge_annotations, split_annotations
 from simul.mcp.tools.isaac._shared import (
     ANNOTATION_MARKER,
     PAUSED_EDIT_WARNING,
+    PLAYING_EDIT_WARNING,
     PROTECTED_CARB_SETTING_PREFIXES,
     USD_READBACK_STALE_WARNING,
+    USD_VELOCITY_STALE_WARNING,
 )
 from simul.mcp.tools.isaac_tools import IsaacTools
 
@@ -49,7 +51,9 @@ from simul.mcp.tools.isaac_tools import IsaacTools
 
 
 class _Timeline:
-    def __init__(self, state: str = "stopped", time: float = 0.0, dt: float = 1.0 / 60.0) -> None:
+    def __init__(
+        self, state: str = "stopped", time: float = 0.0, dt: float = 1.0 / 60.0
+    ) -> None:
         self.state = state
         self.time = time
         self.dt = dt
@@ -93,7 +97,9 @@ class _Selection:
 class _Kit:
     """The fake modules one script sees."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, stage: Optional[Usd.Stage] = None) -> None:
+    def __init__(
+        self, monkeypatch: pytest.MonkeyPatch, stage: Optional[Usd.Stage] = None
+    ) -> None:
         self.monkeypatch = monkeypatch
         self.stage = stage
         self.settings: Dict[str, Any] = {}
@@ -116,7 +122,9 @@ class _Kit:
             kit.timeline.update()
             await asyncio.sleep(0)
 
-        manager = types.SimpleNamespace(is_extension_enabled=lambda name: name in kit.enabled_extensions)
+        manager = types.SimpleNamespace(
+            is_extension_enabled=lambda name: name in kit.enabled_extensions
+        )
         app = types.SimpleNamespace(
             get_extension_manager=lambda: manager,
             next_update_async=next_update_async,
@@ -169,14 +177,19 @@ class _KitClient:
         try:
             # The code is a script IsaacTools just generated, run the way Kit
             # runs it (top-level await allowed); nothing external reaches it.
-            compiled = compile(code, "<isaac-script>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+            compiled = compile(
+                code, "<isaac-script>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
+            )
             with contextlib.redirect_stdout(stdout):
                 result = eval(compiled, {"__name__": "__isaac_script__"})
                 if result is not None:
                     await result
         except Exception as exc:  # noqa: BLE001 - reported like the transports do
             return ScriptResult(
-                success=False, output=stdout.getvalue(), error_name=type(exc).__name__, error_value=str(exc)
+                success=False,
+                output=stdout.getvalue(),
+                error_name=type(exc).__name__,
+                error_value=str(exc),
             )
         return ScriptResult(success=True, output=stdout.getvalue())
 
@@ -213,7 +226,9 @@ def _fabric_kit(monkeypatch: pytest.MonkeyPatch, state: str, **settings: Any) ->
     return kit
 
 
-def test_pose_read_under_fabric_is_flagged_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pose_read_under_fabric_is_flagged_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     kit = _fabric_kit(
         monkeypatch,
         "playing",
@@ -225,14 +240,22 @@ def test_pose_read_under_fabric_is_flagged_stale(monkeypatch: pytest.MonkeyPatch
     result = asyncio.run(tools.get_isaac_prim_transform("/World/Cube"))
 
     assert result["success"] is True
-    assert result["translation"] == [1.0, 2.0, 3.0]  # the pre-play value, still returned
+    assert result["translation"] == [
+        1.0,
+        2.0,
+        3.0,
+    ]  # the pre-play value, still returned
     assert result["stale_under_fabric"] is True
     assert result["usd_readback"]["physx_fabric_enabled"] is True
     assert USD_READBACK_STALE_WARNING in result["warnings"]
 
 
-def test_velocity_read_under_fabric_is_flagged_stale(monkeypatch: pytest.MonkeyPatch) -> None:
-    kit = _fabric_kit(monkeypatch, "paused", **{"/physics/updateVelocitiesToUsd": False})
+def test_velocity_read_under_fabric_is_flagged_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kit = _fabric_kit(
+        monkeypatch, "paused", **{"/physics/updateVelocitiesToUsd": False}
+    )
     tools, _ = _tools(kit)
 
     result = asyncio.run(tools.get_isaac_rigid_body_info("/World/Cube"))
@@ -240,13 +263,47 @@ def test_velocity_read_under_fabric_is_flagged_stale(monkeypatch: pytest.MonkeyP
     assert result["success"] is True
     assert result["stale_under_fabric"] is True
     assert result["usd_readback"]["update_velocities_to_usd"] is False
+    assert result["usd_readback"]["poses_stale"] is False
+    assert USD_VELOCITY_STALE_WARNING in result["warnings"]
+
+
+def test_velocity_write_back_alone_does_not_flag_a_pose_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Poses were flagged stale when only /physics/updateVelocitiesToUsd was off."""
+    kit = _fabric_kit(
+        monkeypatch, "playing", **{"/physics/updateVelocitiesToUsd": False}
+    )
+    tools, _ = _tools(kit)
+
+    result = asyncio.run(tools.get_isaac_prim_transform("/World/Cube"))
+
+    assert result["success"] is True
+    assert "stale_under_fabric" not in result
+    assert "warnings" not in result
+
+
+def test_a_write_back_setting_of_zero_counts_as_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check compared with ``is False``, so an int 0 read as on."""
+    kit = _fabric_kit(monkeypatch, "playing", **{"/physics/updateToUsd": 0})
+    tools, _ = _tools(kit)
+
+    result = asyncio.run(tools.get_isaac_prim_transform("/World/Cube"))
+
+    assert result["stale_under_fabric"] is True
+    assert USD_READBACK_STALE_WARNING in result["warnings"]
 
 
 @pytest.mark.parametrize(
     ("state", "settings"),
     [
         ("stopped", {"/physics/updateToUsd": False}),  # USD holds the authored state
-        ("playing", {"/physics/updateToUsd": True, "/physics/updateVelocitiesToUsd": True}),
+        (
+            "playing",
+            {"/physics/updateToUsd": True, "/physics/updateVelocitiesToUsd": True},
+        ),
         ("playing", {}),
     ],
 )
@@ -282,7 +339,9 @@ def test_every_pose_reader_carries_the_check(monkeypatch: pytest.MonkeyPatch) ->
         assert result.get("stale_under_fabric") is True, (name, result)
 
 
-def test_annotation_failures_never_fail_the_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_annotation_failures_never_fail_the_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     kit = _fabric_kit(monkeypatch, "playing")
 
     # carb.settings.get raising stands in for any failure inside the check.
@@ -314,7 +373,9 @@ def test_annotations_are_stripped_before_the_result_is_parsed() -> None:
     assert data["warnings"] == ["w"]
 
 
-def test_bridge_pose_actions_carry_the_same_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bridge_pose_actions_carry_the_same_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from khemoo.simul.protocol import BridgeRequest
     from khemoo.simul.service import BridgeCommandService, usd_readback_note
 
@@ -331,11 +392,21 @@ def test_bridge_pose_actions_carry_the_same_flag(monkeypatch: pytest.MonkeyPatch
     )
     detail = asyncio.run(
         service.dispatch(
-            BridgeRequest("2", "get_prim_detail", {"prim_path": "/World/Cube", "aspects": ["mesh", "rigid_body"]})
+            BridgeRequest(
+                "2",
+                "get_prim_detail",
+                {"prim_path": "/World/Cube", "aspects": ["mesh", "rigid_body"]},
+            )
         )
     )
     mesh_only = asyncio.run(
-        service.dispatch(BridgeRequest("3", "get_prim_detail", {"prim_path": "/World/Cube", "aspects": ["mesh"]}))
+        service.dispatch(
+            BridgeRequest(
+                "3",
+                "get_prim_detail",
+                {"prim_path": "/World/Cube", "aspects": ["mesh"]},
+            )
+        )
     )
 
     assert usd_readback_note()["stale_under_fabric"] is True
@@ -346,25 +417,81 @@ def test_bridge_pose_actions_carry_the_same_flag(monkeypatch: pytest.MonkeyPatch
     assert usd_readback_note() is None
 
 
+def test_bridge_flags_velocity_write_back_only_where_velocities_are_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from khemoo.simul.protocol import BridgeRequest
+    from khemoo.simul.service import BridgeCommandService
+
+    kit = _fabric_kit(monkeypatch, "playing", **{"/physics/updateVelocitiesToUsd": 0})
+    kit.install()
+    service = BridgeCommandService(
+        executor=types.SimpleNamespace(), allow_unsafe_execution=False  # type: ignore[arg-type]
+    )
+
+    transform = asyncio.run(
+        service.dispatch(
+            BridgeRequest("1", "get_prim_transform", {"prim_path": "/World/Cube"})
+        )
+    )
+    rigid_body = asyncio.run(
+        service.dispatch(
+            BridgeRequest(
+                "2",
+                "get_prim_detail",
+                {"prim_path": "/World/Cube", "aspects": ["rigid_body"]},
+            )
+        )
+    )
+
+    assert "stale_under_fabric" not in transform.payload
+    assert rigid_body.payload["stale_under_fabric"] is True
+    assert USD_VELOCITY_STALE_WARNING in rigid_body.payload["warnings"]
+
+
 # ---------------------------------------------------------------------------
 # F39: edits made while paused after a step are reverted by the next stop
 # ---------------------------------------------------------------------------
 
 
-def test_transform_edit_while_paused_warns_about_reset_on_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_transform_edit_while_paused_warns_about_reset_on_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     kit = _Kit(monkeypatch, _stage_with_cube())
     kit.timeline.state = "paused"
     kit.settings["/physics/resetOnStop"] = True
     tools, _ = _tools(kit)
 
-    result = asyncio.run(tools.set_isaac_prim_transform("/World/Cube", translation=[0.0, 0.0, 9.0]))
+    result = asyncio.run(
+        tools.set_isaac_prim_transform("/World/Cube", translation=[0.0, 0.0, 9.0])
+    )
 
     assert result["success"] is True
     assert result["timeline_state"] == "paused"
     assert PAUSED_EDIT_WARNING in result["warnings"]
 
 
-@pytest.mark.parametrize(("state", "reset_on_stop"), [("stopped", True), ("playing", True), ("paused", False)])
+def test_transform_edit_while_playing_warns_about_reset_on_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reset-on-stop also reverts an edit made during play; that one was silent."""
+    kit = _Kit(monkeypatch, _stage_with_cube())
+    kit.timeline.state = "playing"
+    kit.settings["/physics/resetOnStop"] = True
+    tools, _ = _tools(kit)
+
+    result = asyncio.run(
+        tools.set_isaac_prim_transform("/World/Cube", translation=[0.0, 0.0, 9.0])
+    )
+
+    assert result["success"] is True
+    assert result["timeline_state"] == "playing"
+    assert PLAYING_EDIT_WARNING in result["warnings"]
+
+
+@pytest.mark.parametrize(
+    ("state", "reset_on_stop"), [("stopped", True), ("paused", False), ("playing", 0)]
+)
 def test_no_paused_edit_warning_otherwise(
     monkeypatch: pytest.MonkeyPatch, state: str, reset_on_stop: bool
 ) -> None:
@@ -372,8 +499,11 @@ def test_no_paused_edit_warning_otherwise(
     kit.timeline.state = state
     kit.settings["/physics/resetOnStop"] = reset_on_stop
     tools, _ = _tools(kit)
+    # reset_on_stop=0 is off too: the check tests truthiness, not ``is False``.
 
-    result = asyncio.run(tools.set_isaac_prim_transform("/World/Cube", translation=[0.0, 0.0, 9.0]))
+    result = asyncio.run(
+        tools.set_isaac_prim_transform("/World/Cube", translation=[0.0, 0.0, 9.0])
+    )
 
     assert result["success"] is True
     assert "warnings" not in result
@@ -393,12 +523,19 @@ def test_step_description_documents_the_paused_timeline_and_reset_on_stop() -> N
 # ---------------------------------------------------------------------------
 
 
-def test_step_reports_frame_dt_and_physics_rates(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_step_reports_frame_dt_and_physics_rates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     stage = Usd.Stage.CreateInMemory()
     UsdPhysics.Scene.Define(stage, "/physicsScene")
     kit = _Kit(monkeypatch, stage)
     kit.timeline = _Timeline("stopped", dt=1.0 / 60.0)
-    kit.settings.update({"/app/runLoops/main/rateLimitEnabled": True, "/app/runLoops/main/rateLimitFrequency": 60})
+    kit.settings.update(
+        {
+            "/app/runLoops/main/rateLimitEnabled": True,
+            "/app/runLoops/main/rateLimitFrequency": 60,
+        }
+    )
     _install_fake_physx_schema(monkeypatch, rate=120.0)
     tools, client = _tools(kit)
 
@@ -425,7 +562,9 @@ def test_step_budget_scales_with_frames_and_is_capped() -> None:
     assert tools._step_budget(1000) == 110.0
 
 
-def test_step_sends_the_budget_to_the_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_step_sends_the_budget_to_the_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     kit = _Kit(monkeypatch, Usd.Stage.CreateInMemory())
     tools, client = _tools(kit)
 
@@ -436,7 +575,9 @@ def test_step_sends_the_budget_to_the_transport(monkeypatch: pytest.MonkeyPatch)
     assert "budget = 110.0" in client.calls[-1][0]
 
 
-def test_step_that_runs_out_of_budget_stops_paused_and_says_how_far(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_step_that_runs_out_of_budget_stops_paused_and_says_how_far(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     kit = _Kit(monkeypatch, Usd.Stage.CreateInMemory())
     tools, _ = _tools(kit)
     monkeypatch.setattr(tools, "_step_budget", lambda _n: 0.0)
@@ -449,7 +590,9 @@ def test_step_that_runs_out_of_budget_stops_paused_and_says_how_far(monkeypatch:
     assert kit.timeline.state == "paused"
 
 
-def test_bridge_step_reports_rates_and_honours_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bridge_step_reports_rates_and_honours_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from khemoo.simul import service as service_module
     from khemoo.simul.service import BridgeCommandService
 
@@ -466,7 +609,9 @@ def test_bridge_step_reports_rates_and_honours_the_budget(monkeypatch: pytest.Mo
     )
 
     full = asyncio.run(BridgeCommandService._step_timeline(timeline, app, 3))
-    cut = asyncio.run(BridgeCommandService._step_timeline(timeline, app, 3, budget_seconds=0.0))
+    cut = asyncio.run(
+        BridgeCommandService._step_timeline(timeline, app, 3, budget_seconds=0.0)
+    )
 
     assert full["steps"] == 3
     assert full["physics"]["physics_steps_per_frame"] == pytest.approx(4.0)
@@ -475,14 +620,18 @@ def test_bridge_step_reports_rates_and_honours_the_budget(monkeypatch: pytest.Mo
     assert "budget ran out" in cut["error"]
 
 
-def test_bridge_step_payload_carries_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bridge_step_payload_carries_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from unittest.mock import AsyncMock, MagicMock
 
     client = MagicMock()
     client.bridge_enabled = True
     client.fallback_to_vscode = True
     client.script_timeout_seconds = 29.0
-    client.bridge_request = AsyncMock(return_value={"status": "ok", "payload": {"steps": 1000}})
+    client.bridge_request = AsyncMock(
+        return_value={"status": "ok", "payload": {"steps": 1000}}
+    )
     tools = IsaacTools(client, settings=Settings())
 
     asyncio.run(tools.step_isaac_simulation(num_steps=1000))
@@ -554,7 +703,9 @@ class _Annotator:
         return self.data
 
 
-def _read_aovs_with(monkeypatch: pytest.MonkeyPatch, annotators: Dict[str, Any]) -> Dict[str, Any]:
+def _read_aovs_with(
+    monkeypatch: pytest.MonkeyPatch, annotators: Dict[str, Any]
+) -> Dict[str, Any]:
     kit = _Kit(monkeypatch)
 
     async def step_async(**_kwargs: Any) -> None:
@@ -564,7 +715,9 @@ def _read_aovs_with(monkeypatch: pytest.MonkeyPatch, annotators: Dict[str, Any])
     kit.module(
         "omni.replicator.core",
         create=types.SimpleNamespace(render_product=lambda *_a: rp),
-        AnnotatorRegistry=types.SimpleNamespace(get_annotator=lambda name: _Annotator(annotators[name])),
+        AnnotatorRegistry=types.SimpleNamespace(
+            get_annotator=lambda name: _Annotator(annotators[name])
+        ),
         orchestrator=types.SimpleNamespace(step_async=step_async),
     )
     kit.module("omni.replicator")
@@ -572,11 +725,19 @@ def _read_aovs_with(monkeypatch: pytest.MonkeyPatch, annotators: Dict[str, Any])
     return asyncio.run(tools.read_aovs(aov_names=list(annotators), num_frames=1))
 
 
-def test_dict_shaped_annotators_report_data_and_info(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dict_shaped_annotators_report_data_and_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     np = pytest.importorskip("numpy")
     boxes = np.zeros(
         2,
-        dtype=[("semanticId", "<u4"), ("x_min", "<i4"), ("y_min", "<i4"), ("x_max", "<i4"), ("y_max", "<i4")],
+        dtype=[
+            ("semanticId", "<u4"),
+            ("x_min", "<i4"),
+            ("y_min", "<i4"),
+            ("x_max", "<i4"),
+            ("y_max", "<i4"),
+        ],
     )
     boxes["x_max"] = [10, 30]
     semantic = np.zeros((4, 4, 1), dtype=np.uint32)
@@ -587,10 +748,18 @@ def test_dict_shaped_annotators_report_data_and_info(monkeypatch: pytest.MonkeyP
         {
             "semantic_segmentation": {
                 "data": semantic,
-                "info": {"idToLabels": {"0": {"class": "BACKGROUND"}, "1": {"class": "cube"}}},
+                "info": {
+                    "idToLabels": {"0": {"class": "BACKGROUND"}, "1": {"class": "cube"}}
+                },
             },
-            "bounding_box_2d_tight": {"data": boxes, "info": {"primPaths": ["/World/A", "/World/B"]}},
-            "pointcloud": {"data": np.ones((5, 3), dtype=np.float32), "info": {"pointRgb": np.zeros((5, 4))}},
+            "bounding_box_2d_tight": {
+                "data": boxes,
+                "info": {"primPaths": ["/World/A", "/World/B"]},
+            },
+            "pointcloud": {
+                "data": np.ones((5, 3), dtype=np.float32),
+                "info": {"pointRgb": np.zeros((5, 4))},
+            },
             "HdrColor": np.ones((2, 2, 4), dtype=np.float32),
         },
     )
@@ -606,15 +775,23 @@ def test_dict_shaped_annotators_report_data_and_info(monkeypatch: pytest.MonkeyP
     assert bbox["field_ranges"]["x_max"] == {"min": 10.0, "max": 30.0}
     assert bbox["info"]["primPaths"]["count"] == 2
     assert aovs["pointcloud"]["shape"] == [5, 3]
-    assert aovs["pointcloud"]["info"]["pointRgb"] == {"shape": [5, 4], "dtype": "float64"}
+    assert aovs["pointcloud"]["info"]["pointRgb"] == {
+        "shape": [5, 4],
+        "dtype": "float64",
+    }
     assert aovs["HdrColor"]["output"] == "array"
 
 
-def test_no_boxes_in_view_is_data_not_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_boxes_in_view_is_data_not_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     np = pytest.importorskip("numpy")
     empty = np.zeros(0, dtype=[("semanticId", "<u4"), ("x_min", "<i4")])
 
-    result = _read_aovs_with(monkeypatch, {"bounding_box_2d_loose": {"data": empty, "info": {"primPaths": []}}})
+    result = _read_aovs_with(
+        monkeypatch,
+        {"bounding_box_2d_loose": {"data": empty, "info": {"primPaths": []}}},
+    )
 
     assert result["success"] is True
     assert result["aovs"]["bounding_box_2d_loose"]["count"] == 0
@@ -623,7 +800,9 @@ def test_no_boxes_in_view_is_data_not_a_failure(monkeypatch: pytest.MonkeyPatch)
 def test_an_empty_dict_output_is_still_no_data(monkeypatch: pytest.MonkeyPatch) -> None:
     np = pytest.importorskip("numpy")
 
-    result = _read_aovs_with(monkeypatch, {"semantic_segmentation": {"data": np.zeros(0), "info": {}}})
+    result = _read_aovs_with(
+        monkeypatch, {"semantic_segmentation": {"data": np.zeros(0), "info": {}}}
+    )
 
     assert result["success"] is False
     assert result["failed_aovs"] == ["semantic_segmentation"]
@@ -642,7 +821,9 @@ def _focus_kit(monkeypatch: pytest.MonkeyPatch, framing: Optional[Any]) -> _Kit:
     translate.Set(Gf.Vec3d(0, 0, 50))
     kit = _Kit(monkeypatch, stage)
     kit.selection = _Selection(["/World/Other"])
-    viewport = types.SimpleNamespace(camera_path=Sdf.Path("/OmniverseKit_Persp"), resolution=(1280, 720))
+    viewport = types.SimpleNamespace(
+        camera_path=Sdf.Path("/OmniverseKit_Persp"), resolution=(1280, 720)
+    )
     attrs: Dict[str, Any] = {"get_active_viewport": lambda: viewport}
     if framing is not None:
         attrs["frame_viewport_selection"] = lambda: framing(kit, translate)
@@ -673,7 +854,9 @@ def test_focus_frames_through_the_module_function_and_restores_the_selection(
     assert kit.selection.get_selected_prim_paths() == ["/World/Other"]
 
 
-def test_focus_without_evidence_is_not_reported_as_focused(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_focus_without_evidence_is_not_reported_as_focused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     kit = _focus_kit(monkeypatch, lambda _kit, _translate: None)
     tools, _ = _tools(kit)
 
@@ -684,7 +867,9 @@ def test_focus_without_evidence_is_not_reported_as_focused(monkeypatch: pytest.M
     assert "warning" in result
 
 
-def test_focus_without_the_framing_function_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_focus_without_the_framing_function_is_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     kit = _focus_kit(monkeypatch, None)
     tools, _ = _tools(kit)
 
@@ -701,7 +886,10 @@ def test_focus_without_the_framing_function_is_an_error(monkeypatch: pytest.Monk
 
 
 def _raycast(
-    monkeypatch: pytest.MonkeyPatch, state: str, hit: Optional[Dict[str, Any]], direction: List[float]
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    hit: Optional[Dict[str, Any]],
+    direction: List[float],
 ) -> Tuple[Dict[str, Any], List[Any]]:
     kit = _Kit(monkeypatch)
     kit.timeline.state = state
@@ -714,10 +902,17 @@ def _raycast(
     query = types.SimpleNamespace(raycast_closest=raycast_closest)
     kit.module("omni.physx", get_physx_scene_query_interface=lambda: query)
     tools, _ = _tools(kit)
-    return asyncio.run(tools.raycast_isaac_scene([0.0, 0.0, 10.0], direction, max_distance=100.0)), calls
+    return (
+        asyncio.run(
+            tools.raycast_isaac_scene([0.0, 0.0, 10.0], direction, max_distance=100.0)
+        ),
+        calls,
+    )
 
 
-def test_raycast_normalizes_the_direction_and_returns_shape_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_raycast_normalizes_the_direction_and_returns_shape_and_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     hit = {
         "hit": True,
         "collision": "/World/Robot/base/collisions",
@@ -735,7 +930,9 @@ def test_raycast_normalizes_the_direction_and_returns_shape_and_body(monkeypatch
     assert result["prim_path"] == "/World/Robot/base/collisions"
 
 
-def test_a_miss_on_a_stopped_timeline_is_not_reported_as_no_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_miss_on_a_stopped_timeline_is_not_reported_as_no_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     result, _ = _raycast(monkeypatch, "stopped", None, [0.0, 0.0, -1.0])
 
     assert result["success"] is False
@@ -743,14 +940,18 @@ def test_a_miss_on_a_stopped_timeline_is_not_reported_as_no_hit(monkeypatch: pyt
     assert result["status"] == "simulation_not_running"
 
 
-def test_a_miss_while_simulating_is_a_plain_no_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_miss_while_simulating_is_a_plain_no_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     result, _ = _raycast(monkeypatch, "playing", None, [0.0, 0.0, -1.0])
 
     assert result["success"] is True
     assert result["hit"] is False and result["status"] == "no_hit"
 
 
-def test_a_zero_direction_is_refused_before_anything_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_zero_direction_is_refused_before_anything_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tools, client = _tools(_Kit(monkeypatch))
 
     result = asyncio.run(tools.raycast_isaac_scene([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]))
@@ -769,7 +970,11 @@ def test_runtime_info_reports_keys_that_exist(monkeypatch: pytest.MonkeyPatch) -
     UsdPhysics.Scene.Define(stage, "/World/physicsScene")
     kit = _Kit(monkeypatch, stage)
     kit.settings.update(
-        {"/physics/cudaDevice": 0, "/physics/updateToUsd": False, "/physics/resetOnStop": True}
+        {
+            "/physics/cudaDevice": 0,
+            "/physics/updateToUsd": False,
+            "/physics/resetOnStop": True,
+        }
     )
     kit.enabled_extensions.add("omni.physx.fabric")
     _install_fake_physx_schema(monkeypatch, rate=60.0)
@@ -815,7 +1020,9 @@ def test_runtime_info_description_drops_the_physics_stats_promise() -> None:
     assert "CUDA availability" not in description
 
 
-def test_render_vars_list_only_what_syntheticdata_has(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_render_vars_list_only_what_syntheticdata_has(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class SyntheticData:
         @staticmethod
         def get_registered_visualization_template_names() -> List[str]:
@@ -828,16 +1035,23 @@ def test_render_vars_list_only_what_syntheticdata_has(monkeypatch: pytest.Monkey
     result = asyncio.run(tools.list_render_vars())
 
     assert result["success"] is True
-    assert result["render_var_templates"] == ["LdrColorDisplay", "SemanticSegmentationDisplay"]
+    assert result["render_var_templates"] == [
+        "LdrColorDisplay",
+        "SemanticSegmentationDisplay",
+    ]
     assert "sensor_types" not in result
 
 
-def test_camera_info_reports_the_active_viewport_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_camera_info_reports_the_active_viewport_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.Camera.Define(stage, "/OmniverseKit_Persp")
     UsdGeom.Camera.Define(stage, "/World/Other")
     kit = _Kit(monkeypatch, stage)
-    viewport = types.SimpleNamespace(camera_path=Sdf.Path("/OmniverseKit_Persp"), resolution=(1920, 1080))
+    viewport = types.SimpleNamespace(
+        camera_path=Sdf.Path("/OmniverseKit_Persp"), resolution=(1920, 1080)
+    )
     kit.module("omni.kit.viewport")
     kit.module("omni.kit.viewport.utility", get_active_viewport=lambda: viewport)
     tools, _ = _tools(kit)
@@ -864,7 +1078,9 @@ def test_execute_script_description_says_the_namespace_is_shared() -> None:
     assert "shared namespace" in description
 
 
-def test_logs_read_this_instance_log_named_by_kit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_logs_read_this_instance_log_named_by_kit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     log = tmp_path / "kit_this_instance.log"
     log.write_text("2026-01-01T00:00:00Z [Error] [omni.physx] boom\n")
     kit = _Kit(monkeypatch)
@@ -879,7 +1095,9 @@ def test_logs_read_this_instance_log_named_by_kit(monkeypatch: pytest.MonkeyPatc
     assert result["entries"][0]["message"] == "boom"
 
 
-def test_logs_fallback_says_it_may_be_another_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_logs_fallback_says_it_may_be_another_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     logs = tmp_path / ".nvidia-omniverse" / "logs" / "Kit" / "app"
     logs.mkdir(parents=True)
     (logs / "kit_1.log").write_text("[Warning] [x] hi\n")
@@ -896,16 +1114,22 @@ def test_the_5x_transport_keys_are_protected() -> None:
     assert "/exts/isaacsim.code_editor.vscode/" in PROTECTED_CARB_SETTING_PREFIXES
 
 
-def test_persistent_writes_need_explicit_consent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_persistent_writes_need_explicit_consent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     kit = _Kit(monkeypatch)
     tools, client = _tools(kit)
 
-    refused = asyncio.run(tools.set_carb_settings({"/persistent/app/viewport/grid/enabled": False}))
+    refused = asyncio.run(
+        tools.set_carb_settings({"/persistent/app/viewport/grid/enabled": False})
+    )
     assert refused["error_type"] == "RefusedOperation"
     assert client.calls == []
 
     applied = asyncio.run(
-        tools.set_carb_settings({"/persistent/app/viewport/grid/enabled": False}, allow_persistent=True)
+        tools.set_carb_settings(
+            {"/persistent/app/viewport/grid/enabled": False}, allow_persistent=True
+        )
     )
     assert applied["success"] is True
     assert applied["persistent_keys"] == ["/persistent/app/viewport/grid/enabled"]

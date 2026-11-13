@@ -15,14 +15,29 @@ tool's input schema (`minimum`, `maximum`, `enum`), and a value outside them
 is refused with `ValidationError` before the tool runs.
 
 Results are strict JSON: a non-finite float is sent as the string
-`"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token. Each result
-is held to a 40 KB budget by trimming its largest top-level list, with
-`truncated` and a `truncation` notice. When that list is a page, its
-`next_offset` (and a `count` or `returned` that counted the page) are
-rewritten to match the items kept, so following `next_offset` skips
-nothing. Above a 400 KB hard limit the field carrying the excess is cut at
-any depth: a string becomes a `truncated_field` marker, and a list or
-mapping keeps its prefix and is named in `truncated_fields`.
+`"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token.
+
+Each result is held to a 40 KB budget, and a cut is always reported (`truncated`
+plus a notice).
+
+- **Paged tools.** A paged tool (one that takes an `offset` and returns
+  `next_offset`) has its page cut as a page. Every list the offset pages is
+  cut to the same number of entries, never fewer than one. Its `next_offset`
+  (and a `count` or `returned` that counted the page) is rewritten to continue
+  right after what was kept, and the `truncation` notice names the tool's own
+  offset and page-size parameters. Following `next_offset` therefore reaches
+  every entry once and always moves forward.
+- **Oversized entries.** An entry too large on its own is sent compacted to its
+  identifying and small fields (`truncated_item`, `dropped_keys`), so the next
+  page starts after it.
+- **Other lists.** Any other list cut to fit is listed in `truncated_fields` (or
+  in `truncation` when the tool does not page), with `next_offset: "unchanged"`
+  whenever the result is paged: its dropped entries will not come back on a
+  later page. The paged lists of each tool are declared in
+  `simul.mcp.paged_results`.
+- **Hard limit.** Above 400 KB, the field carrying the excess is cut at any
+  depth. A string becomes a `truncated_field` marker, and a list or mapping
+  keeps its prefix and is named in `truncated_fields`.
 
 ## Headless USD
 
@@ -326,7 +341,8 @@ Notes:
 - `get_isaac_prim_detail` reads one or more aspects of a prim per call:
   `info`, `transform`, `ancestors`, `relationships`, `variants`,
   `bounding_box`, `mesh`, `light`, `material`, `rigid_body`, `collision`,
-  `joint`, `mass`, `animation`.
+  `joint`, `mass`, `animation`. A missing prim fails the call
+  (`NotFoundError`) with or without the bridge.
 - Poses (the `transform` aspect, `info`'s transform, `get_isaac_camera_info`
   and the reply of `set_isaac_prim_transform`) are factored out of the
   composed matrix, so rotation and scale stay right under scaled parents and
@@ -343,7 +359,10 @@ Notes:
   is refused outright.
 - `set_isaac_prim_attribute` converts the JSON value to the attribute's type:
   quaternions (`xformOp:orient`, `physics:localRot0`) as `[w, x, y, z]`,
-  matrices as rows or a flat row-major list, arrays as lists.
+  matrices as rows or a flat row-major list, arrays as lists. A path written
+  to an `asset` or `asset[]` attribute goes through the file sandbox
+  (`security.allowed_paths`) like `create_isaac_light`'s `texture_file` and
+  is written resolved; one outside it is `SandboxError` and nothing is set.
 - `query_isaac_typed_prims` resolves `type_name` through the schema registry
   (`UsdPhysics.RevoluteJoint`, `PhysicsRevoluteJoint`,
   `UsdPhysics.RigidBodyAPI`, any `pxr` module) and refuses a name that
@@ -370,7 +389,9 @@ Notes:
   layer (Kit's `OmniverseKit_*` viewport cameras), which a deactivation would
   hide by writing into the scene's layer. `reparent_isaac_prim` keeps the
   world pose (`keep_world_transform=true`) and retargets relationships and
-  connections that point into the moved subtree. Removal and moves go
+  connections that point into the moved subtree; without Kit it also
+  retargets the edit target's internal references, payloads, inherits and
+  specializes (`retargeted`), as Kit's `MovePrim` does. Removal and moves go
   through Kit's undoable `DeletePrims` / `MovePrim` (`destructive=false`)
   when Kit is there; when Kit declines one, the tool reports
   `KIT_DECLINED` and changes nothing rather than editing the layer itself.
@@ -378,6 +399,17 @@ Notes:
   Refusals are typed: `error_type` is `NotFoundError`, `ValidationError` or
   `InvalidState`, and `details.code` names the case (`INSTANCE_PROXY`,
   `DEFINED_ELSEWHERE`, `DESTINATION_EXISTS`, `UNKNOWN_PRIM_TYPE`, ...).
+  Every other Isaac tool's script failures are typed by the condition as well:
+  - no open stage is `InvalidState`;
+  - a prim, root path, graph, camera or extension that isn't there is
+    `NotFoundError`;
+  - a prim of the wrong kind or missing an API is `ValidationError`;
+  - no viewport is `ViewportUnavailable`;
+  - a missing capability (PhysX scene query) is `UnsupportedOperation`;
+  - anything else Kit reports is `EngineError`.
+
+  A bridge script stopped at its timeout is `TimeoutError`, and a script too
+  large for the 5.1 stock socket is `PayloadTooLarge`.
 - The listings (`list_isaac_prims`, `search_isaac_prims`, `get_isaac_subtree`,
   `query_isaac_typed_prims`) descend into instanceable prims by default,
   where Isaac assets keep their meshes and colliders; entries there carry
@@ -386,6 +418,13 @@ Notes:
   `include_inactive=true` to also see deactivated prims (`active: false`).
   `list_isaac_physics_objects` counts instanced colliders too, and
   `get_isaac_subtree` takes `max_depth=-1` as unlimited.
+  `find_isaac_prims_in_area`, `get_isaac_scene_stats`,
+  `get_isaac_scene_summary`, `list_isaac_lights`, `list_isaac_cameras`,
+  `list_isaac_materials` and `get_isaac_texture_dependencies` take the same
+  `include_instance_proxies` (default true); the stats, summary and the
+  light, camera and material listings also take `include_inactive`. The
+  prim counts of the stats, the summary, `get_isaac_stage_info` and
+  `list_isaac_prims` agree, and none counts the pseudo-root.
 - `create_isaac_prim` refuses a type that isn't a concrete registered schema
   (`cube` gets a suggestion, `Cube`) and attributes the type's schema doesn't
   define; a value that can't be set removes the new prim again, with any
@@ -401,7 +440,9 @@ Notes:
   duplicating a subtree that holds one. They use the same predicates as the
   graph tools (`graph.py`).
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
-  mass and material in one call.
+  mass and material in one call. Its script embeds only the steps asked for;
+  the full set runs as two scripts (`round_trips: 2`) so each stays under
+  Isaac Sim 5.1's 32 KiB socket limit.
 - `create_isaac_physics_scene` derives a new scene's gravity from the stage:
   Earth gravity along the negative up axis, in stage units (981 on a
   centimetre stage); `gravity_magnitude` is taken in m/s^2. It refuses a prim
@@ -481,7 +522,9 @@ Notes:
   SimulationManager stops PhysX writing to USD (`/physics/updateToUsd` and
   `/physics/updateVelocitiesToUsd` false, `omni.physx.fabric` on). While the
   simulation runs, those results then carry `stale_under_fabric: true`,
-  `usd_readback` and a warning: the values are from before play. Read the
+  `usd_readback` and a warning: the values are from before play. Poses and
+  velocities are judged apart (`poses_stale`, `velocities_stale`), so a pose
+  read is not flagged when only the velocity write-back is off. Read the
   simulated state with `execute_isaac_script` through a physics view (see
   [isaac-sim.md](isaac-sim.md#reading-simulated-state)).
 - `step_isaac_simulation` advances N timeline frames. Each frame runs
@@ -492,7 +535,7 @@ Notes:
   restores simulated prims to their pre-play state. Edits made in between
   (`set_isaac_prim_transform`, `set_isaac_prim_attribute`,
   `create_isaac_object`) are reverted with them, so those tools add a
-  warning while paused.
+  warning while paused or playing (`timeline_state`).
 - `raycast_isaac_scene` normalizes the direction and returns both the
   collision shape hit (`collision_path`) and its body (`rigid_body_path`).
   PhysX holds colliders only once the simulation has started, so a miss on a
@@ -507,10 +550,20 @@ Notes:
 - `get_isaac_logs` reads this instance's log (Kit's `/log/file`). When Kit
   does not name it, the tool falls back to the newest Kit log and warns that
   it may be another process's.
-- `set_isaac_carb_settings` refuses the transport namespaces (bridge,
-  python_server, 5.x VS Code). It refuses `/persistent/` keys, which Kit saves
-  for later sessions, unless `allow_persistent=true`. `get_isaac_carb_settings`
-  reads `auth_token` values back as `***`.
+- `set_isaac_carb_settings` refuses any write that reaches the transport
+  namespaces (bridge, python_server, 5.x VS Code). That covers a key inside
+  one, the namespace itself, and an ancestor such as `/exts` or `/`, because
+  Carb's `set(path, dict)` replaces the whole subtree. Dict values are checked
+  key by key, and `.`/`..` segments are refused. With script execution off it
+  also refuses `/app/scripting`. It refuses `/persistent` keys, which Kit
+  saves for later sessions, unless `allow_persistent=true`.
+  `get_isaac_carb_settings` reads `auth_token` values back as `***`, and
+  `get_isaac_logs` redacts the python_server token that 6.0.1 logs at Info
+  level (`redacted_lines` counts the lines).
+- With script execution off, imports, references and duplicates that carry a
+  Python Scripting Component (`OmniScriptingAPI` / `omni:scripting:scripts`),
+  and imports with unloaded payloads, are refused. See
+  [configuration.md](configuration.md#script-execution).
 - `ping_isaac` does not wait for a call already running on the instance and
   reports `busy` when one is. A call the client cancels keeps the instance
   until Isaac Sim has finished it (the bridge is asked to interrupt it first);
@@ -598,6 +651,8 @@ Behaviour worth knowing:
   backends share:
   - `ConnectionError`: nothing answered at the Remote Control endpoint, or
     the editor closed the connection without answering (it may have crashed).
+    For a change, whether it ran is then unknown: check the editor's state
+    before retrying. `ping_unreal` reports one with this type too.
   - `TimeoutError`: no answer within `UNREAL__TIMEOUT`. A script or a change
     may still be running in the editor, and Remote Control cannot cancel it,
     so check the editor's state before retrying.
@@ -734,6 +789,96 @@ Behaviour worth knowing:
   `ValidationError` and the camera does not move. The reply is the camera
   read back, location and rotation, also for a group left unchanged; a camera
   that reads back other than what was set is a `CameraNotApplied`.
+- `set_unreal_actor_property` edits an actor in the level open in the editor,
+  or one of its components, by Unreal's property name (`Tags`, `bHidden`).
+  - **Target.** The target is resolved as the other actor tools resolve it,
+    among loaded objects only, and nothing is written for a refusal:
+    - an actor that is gone, of another map, loaded or not, or of the running
+      Play In Editor world is `NotFoundError`, as above;
+    - an asset, a class default object or a component of one, and a component
+      template are `ValidationError`, with `details.code`
+      `not_an_actor_or_component`, `class_default_object` or
+      `component_template`.
+  - **Containers.** An array, set or map is replaced whole, so `[]` empties
+    it. That includes struct arrays and properties Remote Control writes
+    through a setter, such as a MaterialBillboard's `Elements`. Remote
+    Control's own write only adds to a container: by index, or appended for a
+    setter. So the editor's Python API empties the container first, and a
+    container Python cannot replace is refused (`container_not_replaceable`).
+    The new contents must be a JSON array for an array or set and a JSON
+    object for a map, or the call is refused before anything is emptied
+    (`value_not_a_list`, `value_not_an_object`): Remote Control wrote what it
+    could of another shape, `5` into `Tags` as `['None']`.
+  - **The write.** Remote Control does the write, converting structs, enums by
+    name and objects by path. The whole write is one Remote Control batch, so
+    no editor tick and no other request runs between its parts: the undo
+    transaction opens and records the target and the components attached
+    below it, the container is emptied, Remote Control writes, a function call
+    makes Remote Control finish the write (Unreal's `PostEditChangeProperty`
+    runs only on the next call), and the editor compares what it holds with
+    what was written, then keeps the write or puts the previous value back.
+    The transaction closes inside the batch, so two calls at once are two
+    undo steps and one undo reverts exactly one of them. A write that stays
+    is one undo step and marks the level changed. Remote Control's own write
+    of a property with a setter (a light's `Intensity`, `Mobility`,
+    `StaticMesh`, `RelativeLocation`) records nothing: it used to leave no
+    undo step, so the next undo reverted the edit before it, and a save of
+    the changed packages skipped it. A setter that changes objects other than
+    its target and the components attached below it (its actor's other
+    components, other actors) records only those two. `value` is what Unreal
+    kept, for example materials trimmed to the mesh's slots.
+  - **A value that does not stick.** A value Unreal does not keep fails with
+    `PropertyNotApplied`, with `details.expected` and `details.actual`.
+    Examples are an object path that loads nothing (written as None), more
+    materials than slots, or an enum name Unreal does not have. The previous
+    value is then put back through the editor's Python API in the same
+    transaction, which is cancelled, so the call leaves no undo step;
+    `restored` says whether it held. A write Remote Control refuses (an
+    `EditConst` or protected property) is put back the same way and fails
+    with Remote Control's error type, `ValidationError`, and `restored`. The
+    level stays marked changed after a put-back: Unreal marks it while it
+    writes, and offers no way to clear a map package's flag. When the
+    editor's Python cannot read the property, nothing can be put back, and a
+    value that does not stick is reported with `restored: false`.
+  - **A lost answer.** When the batch's answer is lost, the call fails with
+    `ConnectionError`: the batch may have run, kept or put back, in the
+    editor. The reply's `value` is the property read again afterwards.
+  - **The reply.** It has `value`, `previous_value` and `applied`. `applied`
+    is `null`, with a `warning`, when Unreal will not read the property back,
+    or when the two values cannot be compared (an enum written as a number). A
+    struct written in part is compared on the fields given.
+- `describe_unreal_object` reads every property's current `value` in one more
+  request. `readable` is false, and `value` null, for the properties Remote
+  Control does not read: delegates, and protected properties without a getter.
+- `get_unreal_actor_thumbnail` returns the thumbnail Unreal stores, at most at
+  its stored size (256 x 256). It is scaled down to fit `width` x `height`
+  (1 to 1024), keeping its proportions.
+  - For an actor or component path, the tool shows the actor's Blueprint, or
+    else its static or skeletal mesh, and names that asset in `thumbnail_of`.
+  - An actor with neither, such as a light, and an asset without a stored
+    thumbnail (Unreal answers those with a class icon) fail with
+    `NotFoundError`.
+- `summarize_unreal_scene` counts by class, subclasses included:
+  - `lights`: Light actors (directional, point, spot, rect) and SkyLights.
+  - `cameras`: CameraActors, CineCameraActors included.
+  - `static_meshes`: StaticMeshActors.
+
+  A LightmassImportanceVolume or CameraBlockingVolume is neither a light nor a
+  camera.
+- `ping_unreal` and `unreal_health_check` tell a busy editor from a down one.
+  An editor that accepts the connection but does not answer in time is
+  running a script, loading or compiling. It is reported with `busy: true` and
+  `error_type: InstanceBusy`, still `reachable: false`, and
+  `list_unreal_instances` lists it with that reason. Both probe Remote Control
+  with `UNREAL__PING_TIMEOUT` (3 s by default), so a busy editor is reported
+  within that time; `unreal_health_check` retries only a refused connection,
+  from an editor still starting up, and gives its metadata script the full
+  `UNREAL__TIMEOUT`.
+- `call_unreal_actor_function` returns `return_value` as JSON (the function's
+  `ReturnValue`) and `outputs`, everything Remote Control returned, out
+  parameters included.
+- `list_unreal_actors` lists at most `max_results` actors, by default the
+  `unreal.max_actors` setting (`UNREAL__MAX_ACTORS`, 200).
 - Actor inspection, physics, materials and simulation start/stop/pause/resume
   use editor Python APIs. `control_unreal_simulation` `start` begins Simulate
   In Editor by default (`mode: "simulate"`: the level runs and its physics
