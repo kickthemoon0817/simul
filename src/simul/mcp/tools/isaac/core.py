@@ -99,11 +99,11 @@ class CoreToolsMixin:
             # place rather than discarding the rest of the answer.
             detail[aspect] = await method(prim_path)
             if detail[aspect].get("error") == missing:
-                # A missing prim fails every aspect alike. Answer the way the
-                # bridge's get_prim_detail does (its PrimNotFound, which the
-                # envelope maps onto NotFoundError), not with success: true
-                # and the same error in each aspect.
-                return ErrorResponse(error=missing, error_type="PrimNotFound").model_dump()
+                # A missing prim fails every aspect alike. Answer as the
+                # bridge's get_prim_detail does (its PrimNotFound reaches the
+                # client as NotFoundError), not with success: true and the
+                # same error in each aspect.
+                return ErrorResponse(error=missing, error_type="NotFoundError").model_dump()
         return _typed_aspect_failures(detail, requested)
 
     @tool_meta(

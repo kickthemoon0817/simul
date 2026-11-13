@@ -45,6 +45,8 @@ __all__ = [
 
 # Prim detail aspects whose values come from USD transforms or velocities.
 POSE_ASPECTS = frozenset({"info", "transform", "bounding_box", "rigid_body"})
+# The ones among them that report velocities.
+VELOCITY_ASPECTS = frozenset({"rigid_body"})
 
 # Isaac Sim's SimulationManager switches PhysX to Fabric for GPU physics:
 # enable_fabric() enables omni.physx.fabric and sets /physics/updateToUsd and
@@ -61,15 +63,34 @@ USD_READBACK_STALE_WARNING = (
     "isaacsim.core.experimental.prims on 6.0) with execute_isaac_script."
 )
 
+# Only velocity write-back off. Same wording as simul's USD_VELOCITY_STALE_WARNING.
+USD_VELOCITY_STALE_WARNING = (
+    "PhysX is not writing velocities back to USD (/physics/updateVelocitiesToUsd is "
+    "false), so the velocities read from USD here are the values from before play; "
+    "poses are current. Read velocities through a physics view (omni.physics.tensors, "
+    "or isaacsim.core.experimental.prims on 6.0) with execute_isaac_script."
+)
 
-def usd_readback_note() -> Optional[dict[str, Any]]:
+
+def _write_back_off(value: Any) -> bool:
+    """A Kit write-back setting is off when set and falsy (False or 0); unset means on."""
+    return value is not None and not value
+
+
+def usd_readback_note(reads_velocities: bool = True) -> Optional[dict[str, Any]]:
     """Describe whether USD poses and velocities lag the simulation right now.
 
     Returns:
         None while the timeline is stopped (USD then holds the authored state,
         which is the state) or when nothing points at Fabric; otherwise
         ``update_to_usd``, ``update_velocities_to_usd``,
-        ``physx_fabric_enabled`` and ``stale_under_fabric``. Never raises.
+        ``physx_fabric_enabled``, ``poses_stale``, ``velocities_stale`` and
+        ``stale_under_fabric`` (whether what the caller reads is stale: a
+        pose-only read is not flagged for velocity write-back alone). Never
+        raises.
+
+    Args:
+        reads_velocities: The caller's payload includes velocities.
     """
     try:
         import carb.settings
@@ -90,13 +111,17 @@ def usd_readback_note() -> Optional[dict[str, Any]]:
         fabric_enabled = bool(manager.is_extension_enabled("omni.physx.fabric"))
     except Exception:
         pass
-    stale = update_to_usd is False or update_velocities_to_usd is False
+    poses_stale = _write_back_off(update_to_usd)
+    velocities_stale = poses_stale or _write_back_off(update_velocities_to_usd)
+    stale = poses_stale or (reads_velocities and velocities_stale)
     if not stale and not fabric_enabled:
         return None
     return {
         "update_to_usd": update_to_usd,
         "update_velocities_to_usd": update_velocities_to_usd,
         "physx_fabric_enabled": fabric_enabled,
+        "poses_stale": poses_stale,
+        "velocities_stale": velocities_stale,
         "stale_under_fabric": stale,
     }
 
@@ -250,9 +275,9 @@ def _physics_rates(timeline: Any, frame_dt: Optional[float], time_delta: float) 
     return rates
 
 
-def _annotate_usd_readback(payload: dict[str, Any]) -> None:
+def _annotate_usd_readback(payload: dict[str, Any], reads_velocities: bool = False) -> None:
     """Flag a pose or velocity payload read while USD lags the simulation."""
-    note = usd_readback_note()
+    note = usd_readback_note(reads_velocities)
     if note is None:
         return
     payload.setdefault("usd_readback", note)
@@ -260,7 +285,9 @@ def _annotate_usd_readback(payload: dict[str, Any]) -> None:
         payload.setdefault("stale_under_fabric", True)
         warnings = payload.setdefault("warnings", [])
         if isinstance(warnings, list):
-            warnings.append(USD_READBACK_STALE_WARNING)
+            warnings.append(
+                USD_READBACK_STALE_WARNING if note["poses_stale"] else USD_VELOCITY_STALE_WARNING
+            )
 
 
 class BridgeCommandService:
@@ -712,7 +739,7 @@ class BridgeCommandService:
             detail["success"] = "error" not in detail
             payload[aspect] = detail
         if POSE_ASPECTS.intersection(aspects):
-            _annotate_usd_readback(payload)
+            _annotate_usd_readback(payload, bool(VELOCITY_ASPECTS.intersection(aspects)))
         return BridgeResponse.success(request.request_id, payload)
 
     def _handle_search_prims(self, request: BridgeRequest) -> BridgeResponse:

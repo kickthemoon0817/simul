@@ -692,6 +692,39 @@ class PrimEditMixin:
         """Whether writes that would plant code must be refused."""
         return not self.settings.security.allow_script_execution
 
+    def _asset_value_checks(self, value: Any) -> Dict[str, Dict[str, Any]]:
+        """Judge every string in ``value`` as a path, in case the attribute is an asset.
+
+        Only Kit knows the attribute's type, so each candidate is checked here
+        against the file sandbox and the script applies the verdict when the
+        attribute turns out to be asset-valued (``asset`` / ``asset[]``).
+
+        Args:
+            value: The JSON value about to be written.
+
+        Returns:
+            ``{string: {"path": authorized}}`` or ``{string: {"denial": envelope}}``
+            for each non-empty string in ``value`` (or in its top-level list).
+        """
+        items = value if isinstance(value, list) else [value]
+        checks: Dict[str, Dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, str) or not item or item in checks:
+                continue
+            denial = self._sandbox_denial(item)
+            if denial is None:
+                try:
+                    checks[item] = {"path": self._path_policy.authorize(item)}
+                    continue
+                except Exception:  # noqa: BLE001 - any refusal is a denial here
+                    denial = self._sandbox_denial(item) or {
+                        "success": False,
+                        "error": f"Refused by the file sandbox: {item}",
+                        "error_type": "SandboxError",
+                    }
+            checks[item] = {"denial": denial}
+        return checks
+
     def _script_write_refusal(
         self, attribute_name: str, value: Any
     ) -> Optional[Dict[str, Any]]:
@@ -1035,6 +1068,7 @@ class PrimEditMixin:
         _attr_name = _pyval(attribute_name)
         _val_str = _pyval(json.dumps(value))
         _guard = _pyval(self._script_guard)
+        _asset_checks = _pyval(self._asset_value_checks(value))
         script = _compose_script(
             """\
             import json
@@ -1079,8 +1113,34 @@ class PrimEditMixin:
                         val = json.loads({_val_str})
                         type_label = str(attr.GetTypeName())
                         failure = None
+                        to_set = val
+                        denial = None
+                        # An asset path is read by Kit (a texture, an HDRI): it
+                        # goes through the file sandbox, as create_isaac_light's
+                        # texture_file does, and is written as the resolved path.
+                        asset_checks = {_asset_checks}
+                        if attr.GetTypeName() in (Sdf.ValueTypeNames.Asset, Sdf.ValueTypeNames.AssetArray):
+                            items = val if isinstance(val, list) else [val]
+                            resolved = []
+                            for item in items:
+                                if item == "":
+                                    resolved.append(item)  # clears the asset
+                                    continue
+                                check = asset_checks.get(item) if isinstance(item, str) else None
+                                if check is None or "denial" in check:
+                                    # Unchecked counts as refused: fail closed.
+                                    denial = (check or {{}}).get("denial") or {{
+                                        "success": False,
+                                        "error": "Not an asset path the sandbox checked: " + repr(item),
+                                        "error_type": "SandboxError",
+                                    }}
+                                    break
+                                resolved.append(check["path"])
+                            to_set = resolved if isinstance(val, list) else resolved[0] if resolved else val
+                        if denial is not None:
+                            failure = denial.get("error") or "Refused by the file sandbox"
                         try:
-                            if not attr.Set(_coerce_attribute_value(attr, val)):
+                            if denial is None and not attr.Set(_coerce_attribute_value(attr, to_set)):
                                 failure = "USD refused the value"
                         except Exception as e:
                             # A Tf error reads "Error in '<function>' at line N
@@ -1088,7 +1148,9 @@ class PrimEditMixin:
                             text = str(e).strip()
                             failure = text.splitlines()[-1].split(" : ", 1)[-1].strip(" '") if text else ""
                             failure = failure or type(e).__name__
-                        if failure is not None:
+                        if denial is not None:
+                            print(json.dumps(denial))
+                        elif failure is not None:
                             print(json.dumps({{
                                 "error": "Failed to set " + {_attr_name} + " (" + type_label + "): " + failure,
                                 "error_type": "ValidationError",

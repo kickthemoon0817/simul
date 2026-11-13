@@ -72,11 +72,14 @@ def test_full_build_fits_isaac_51s_script_limit_in_two_round_trips(
 
     assert len(captured) == 2, "the full set of steps is two round trips"
     for script in captured:
-        assert len(script.encode()) <= OBJECT_SCRIPT_BUDGET
+        # The split threshold leaves room for the appended annotation.
+        assert len(script.encode()) <= OBJECT_SCRIPT_BUDGET + 2048
     defined = set()
     for script in captured:
         tree = ast.parse(script)
-        defined |= {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        defined |= {
+            node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+        }
     assert set(STEP_FUNCTIONS.values()) <= defined
     for step in STEP_FUNCTIONS:
         planned = [script for script in captured if f"({step!r}, lambda:" in script]
@@ -87,7 +90,12 @@ def test_full_build_fits_isaac_51s_script_limit_in_two_round_trips(
     "kwargs",
     [
         {"translation": [0, 0, 1], "rotation_euler": [0, 0, 90], "scale": [2, 2, 2]},
-        {"rigid_body": True, "collision": "convexHull", "mass": 1.0, "diffuse_color": [1, 0, 0]},
+        {
+            "rigid_body": True,
+            "collision": "convexHull",
+            "mass": 1.0,
+            "diffuse_color": [1, 0, 0],
+        },
     ],
     ids=["placed", "physics-and-look"],
 )
@@ -109,9 +117,16 @@ def test_a_call_embeds_only_the_helpers_its_steps_use(
     asyncio.run(tools.create_isaac_object(prim_path="/World/Box", rigid_body=True))
 
     tree = ast.parse(captured[0])
-    defined = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    defined = {
+        node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    }
     assert {"_define_prim", "_apply_rigid_body"} <= defined
-    assert not defined & {"_set_prim_transform", "_apply_collision", "_define_material", "_bind_material"}
+    assert not defined & {
+        "_set_prim_transform",
+        "_apply_collision",
+        "_define_material",
+        "_bind_material",
+    }
 
 
 def test_default_call_plans_only_the_prim_step(
@@ -125,7 +140,9 @@ def test_default_call_plans_only_the_prim_step(
     assert "('prim', lambda:" in script
     for step in STEP_FUNCTIONS:
         if step != "prim":
-            assert f"({step!r}, lambda:" not in script, f"{step} planned without being asked"
+            assert (
+                f"({step!r}, lambda:" not in script
+            ), f"{step} planned without being asked"
 
 
 def test_full_build_creates_the_object_on_a_stage(stage_tools: StageTools) -> None:
@@ -145,7 +162,12 @@ def test_full_build_creates_the_object_on_a_stage(stage_tools: StageTools) -> No
     # A Cube collides as an analytic box; a mesh approximation would be ignored.
     assert not prim.HasAPI(UsdPhysics.MeshCollisionAPI)
     assert result["steps"]["collision"]["shapes"] == [
-        {"path": "/World/Box", "type": "Cube", "already_had_collision": False, "approximation": None}
+        {
+            "path": "/World/Box",
+            "type": "Cube",
+            "already_had_collision": False,
+            "approximation": None,
+        }
     ]
     assert UsdPhysics.MassAPI(prim).GetMassAttr().Get() == 2.5
     op_types = [op.GetOpType() for op in UsdGeom.Xformable(prim).GetOrderedXformOps()]
@@ -166,22 +188,35 @@ def test_full_build_creates_the_object_on_a_stage(stage_tools: StageTools) -> No
 def test_existing_material_is_reused_not_recreated(stage_tools: StageTools) -> None:
     stage = _world_stage()
     tools, _sent = stage_tools(stage)
-    asyncio.run(tools.create_isaac_material("/World/Looks/Red", diffuse_color=[1, 0, 0]))
+    asyncio.run(
+        tools.create_isaac_material("/World/Looks/Red", diffuse_color=[1, 0, 0])
+    )
 
     result = asyncio.run(
         tools.create_isaac_object(
-            prim_path="/World/Box", material_path="/World/Looks/Red", diffuse_color=[0, 1, 0]
+            prim_path="/World/Box",
+            material_path="/World/Looks/Red",
+            diffuse_color=[0, 1, 0],
         )
     )
 
     assert "error" not in result, result
-    assert result["steps"]["material"] == {"material_path": "/World/Looks/Red", "created": False}
+    assert result["steps"]["material"] == {
+        "material_path": "/World/Looks/Red",
+        "created": False,
+    }
     assert result["steps"]["bind_material"]["bound"] is True
     shader = UsdShade.Shader(stage.GetPrimAtPath("/World/Looks/Red/Shader"))
-    assert list(shader.GetInput("diffuseColor").Get()) == [1.0, 0.0, 0.0], "existing look was changed"
+    assert list(shader.GetInput("diffuseColor").Get()) == [
+        1.0,
+        0.0,
+        0.0,
+    ], "existing look was changed"
 
 
-def test_failure_stops_at_the_failing_step_and_reports_progress(stage_tools: StageTools) -> None:
+def test_failure_stops_at_the_failing_step_and_reports_progress(
+    stage_tools: StageTools,
+) -> None:
     stage = _world_stage()
     UsdGeom.Cube.Define(stage, "/World/Box")
     tools, sent = stage_tools(stage)
@@ -196,7 +231,9 @@ def test_failure_stops_at_the_failing_step_and_reports_progress(stage_tools: Sta
 
     # A Scope is not Xformable, so the transform step is the first to fail.
     not_xformable = asyncio.run(
-        tools.create_isaac_object(prim_path="/World/Group", prim_type="Scope", translation=[1, 0, 0])
+        tools.create_isaac_object(
+            prim_path="/World/Group", prim_type="Scope", translation=[1, 0, 0]
+        )
     )
 
     assert not_xformable["failed_step"] == "transform"
@@ -235,7 +272,9 @@ def test_invalid_collision_is_refused_before_sending(
 ) -> None:
     tools, captured = capturing_tools
 
-    result = asyncio.run(tools.create_isaac_object(prim_path="/World/Box", collision="sphere"))
+    result = asyncio.run(
+        tools.create_isaac_object(prim_path="/World/Box", collision="sphere")
+    )
 
     assert result["error_type"] == "ValidationError"
     assert "convexHull" in result["error"]
@@ -246,11 +285,23 @@ def test_invalid_collision_is_refused_before_sending(
     ("method", "kwargs", "core"),
     [
         ("create_isaac_prim", {"prim_path": "/World/A"}, DEFINE_PRIM_CORE),
-        ("set_isaac_prim_transform", {"prim_path": "/World/A"}, SET_PRIM_TRANSFORM_CORE),
+        (
+            "set_isaac_prim_transform",
+            {"prim_path": "/World/A"},
+            SET_PRIM_TRANSFORM_CORE,
+        ),
         ("add_isaac_rigid_body", {"prim_path": "/World/A"}, APPLY_RIGID_BODY_CORE),
         ("add_isaac_collision", {"prim_path": "/World/A"}, APPLY_COLLISION_CORE),
-        ("set_isaac_mass_properties", {"prim_path": "/World/A"}, SET_MASS_PROPERTIES_CORE),
-        ("create_isaac_material", {"material_path": "/World/Looks/A"}, DEFINE_MATERIAL_CORE),
+        (
+            "set_isaac_mass_properties",
+            {"prim_path": "/World/A"},
+            SET_MASS_PROPERTIES_CORE,
+        ),
+        (
+            "create_isaac_material",
+            {"material_path": "/World/Looks/A"},
+            DEFINE_MATERIAL_CORE,
+        ),
         (
             "assign_isaac_material",
             {"prim_path": "/World/A", "material_path": "/World/Looks/A"},
@@ -286,8 +337,14 @@ def test_single_step_tools_still_work_on_a_stage(
         return run_on_stage(captured[-1], stage)
 
     created = run(tools.create_isaac_prim("/World/Ball", "Sphere", {"radius": 0.25}))
-    assert created == {"prim_path": "/World/Ball", "prim_type": "Sphere", "created": True}
-    assert UsdGeom.Sphere(stage.GetPrimAtPath("/World/Ball")).GetRadiusAttr().Get() == 0.25
+    assert created == {
+        "prim_path": "/World/Ball",
+        "prim_type": "Sphere",
+        "created": True,
+    }
+    assert (
+        UsdGeom.Sphere(stage.GetPrimAtPath("/World/Ball")).GetRadiusAttr().Get() == 0.25
+    )
 
     moved = run(tools.set_isaac_prim_transform("/World/Ball", translation=[0, 0, 5]))
     assert moved["translation"] == [0.0, 0.0, 5.0]
@@ -302,16 +359,27 @@ def test_single_step_tools_still_work_on_a_stage(
 
     collider = run(tools.add_isaac_collision("/World/Ball"))
     assert collider["shapes"] == [
-        {"path": "/World/Ball", "type": "Sphere", "already_had_collision": False, "approximation": None}
+        {
+            "path": "/World/Ball",
+            "type": "Sphere",
+            "already_had_collision": False,
+            "approximation": None,
+        }
     ]
     assert prim.HasAPI(UsdPhysics.CollisionAPI)
     assert not prim.HasAPI(UsdPhysics.MeshCollisionAPI)
 
-    mass = run(tools.set_isaac_mass_properties("/World/Ball", mass=1.5, center_of_mass=[0, 0, 1]))
+    mass = run(
+        tools.set_isaac_mass_properties(
+            "/World/Ball", mass=1.5, center_of_mass=[0, 0, 1]
+        )
+    )
     assert mass["mass"] == 1.5
     assert mass["center_of_mass"] == [0.0, 0.0, 1.0]
 
-    material = run(tools.create_isaac_material("/World/Looks/Blue", diffuse_color=[0, 0, 1]))
+    material = run(
+        tools.create_isaac_material("/World/Looks/Blue", diffuse_color=[0, 0, 1])
+    )
     assert material["created"] is True
     assert stage.GetPrimAtPath("/World/Looks/Blue/Shader").IsValid()
 

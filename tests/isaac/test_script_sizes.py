@@ -27,7 +27,8 @@ from simul.mcp.tools.isaac_tools import PRIM_DETAIL_ASPECTS, IsaacTools
 SCRIPT_BUDGET = 24 * 1024
 
 LONG = (
-    "/World/envs/env_4095/Robot_With_A_Long_Descriptive_Name/panda_link7/visuals/" + "x" * 400
+    "/World/envs/env_4095/Robot_With_A_Long_Descriptive_Name/panda_link7/visuals/"
+    + "x" * 400
 )
 TYP = "/World/Robot/link1"
 
@@ -45,7 +46,11 @@ TYPICAL: Dict[str, Dict[str, Any]] = {
         "mass": 1.0,
         "diffuse_color": [1, 0, 0],
     },
-    "create_isaac_prim": {"prim_path": TYP, "prim_type": "Cube", "attributes": {"size": 2.0}},
+    "create_isaac_prim": {
+        "prim_path": TYP,
+        "prim_type": "Cube",
+        "attributes": {"size": 2.0},
+    },
     "delete_isaac_prim": {"prim_path": TYP},
     "set_isaac_prim_transform": {
         "prim_path": TYP,
@@ -53,19 +58,30 @@ TYPICAL: Dict[str, Dict[str, Any]] = {
         "rotation_euler": [0, 0, 90],
     },
     "set_isaac_prim_visibility": {"prim_path": TYP, "visible": False},
-    "set_isaac_prim_attribute": {"prim_path": TYP, "attribute_name": "size", "value": 2.0},
+    "set_isaac_prim_attribute": {
+        "prim_path": TYP,
+        "attribute_name": "size",
+        "value": 2.0,
+    },
     "duplicate_isaac_prim": {"prim_path": TYP, "new_path": TYP + "_copy"},
     "reparent_isaac_prim": {"prim_path": TYP, "new_parent_path": "/World/Other"},
     "set_isaac_camera": {"position": [1, 2, 3], "target": [0, 0, 0]},
     "capture_isaac_viewport": {"inline": True},
     "focus_isaac_viewport": {"prim_path": TYP},
     "set_isaac_physics_material": {"prim_path": TYP, "static_friction": 0.8},
-    "configure_isaac_physics_scene": {"time_steps_per_second": 120, "solver_type": "TGS"},
+    "configure_isaac_physics_scene": {
+        "time_steps_per_second": 120,
+        "solver_type": "TGS",
+    },
     "add_isaac_rigid_body": {"prim_path": TYP},
     "add_isaac_collision": {"prim_path": TYP, "approximation": "convexHull"},
     "set_isaac_mass_properties": {"prim_path": TYP, "mass": 2.0},
     "set_isaac_joint_drive": {"joint_path": TYP + "/joint", "stiffness": 100.0},
-    "set_isaac_joint_limits": {"joint_path": TYP + "/joint", "lower": -90.0, "upper": 90.0},
+    "set_isaac_joint_limits": {
+        "joint_path": TYP + "/joint",
+        "lower": -90.0,
+        "upper": 90.0,
+    },
     "step_isaac_simulation": {"num_steps": 10},
     "create_isaac_material": {"material_path": "/World/Looks/M"},
     "assign_isaac_material": {"prim_path": TYP, "material_path": "/World/Looks/M"},
@@ -93,7 +109,10 @@ TYPICAL: Dict[str, Dict[str, Any]] = {
         "target_attr_path": "/World/ActionGraph/b.inputs:execIn",
     },
     "search_isaac_prims": {"query": "Mesh"},
-    "set_isaac_graph_node_values": {"node_path": "/World/ActionGraph/n", "values": {"inputs:x": 1}},
+    "set_isaac_graph_node_values": {
+        "node_path": "/World/ActionGraph/n",
+        "values": {"inputs:x": 1},
+    },
     "open_isaac_stage": {"file_path": "/tmp/a.usd"},
     "import_isaac_asset": {"asset_path": "/tmp/robot.usd"},
     "add_isaac_reference": {"prim_path": TYP, "reference_path": "/tmp/robot.usd"},
@@ -123,7 +142,9 @@ def _worst(name: str, typical: Dict[str, Any]) -> Dict[str, Any]:
     if name == "get_isaac_carb_settings":
         args["keys"] = ["/rtx/some/long/setting/key/%03d" % i for i in range(200)]
     if name == "set_isaac_carb_settings":
-        args["settings"] = {"/rtx/some/long/setting/key/%03d" % i: 1.0 for i in range(200)}
+        args["settings"] = {
+            "/rtx/some/long/setting/key/%03d" % i: 1.0 for i in range(200)
+        }
     if name == "set_isaac_graph_node_values":
         args["values"] = {"inputs:value_%03d" % i: [1.0, 2.0, 3.0] for i in range(100)}
     return args
@@ -132,8 +153,16 @@ def _worst(name: str, typical: Dict[str, Any]) -> Dict[str, Any]:
 def _tools(sent: List[str]) -> IsaacTools:
     def _respond(code: str, **_kwargs: Any) -> ScriptResult:
         sent.append(code)
-        if "dirty_layers" in code and "stage_url" in code and "save_stage_async" not in code:
-            payload = {"stage_url": "/tmp/x.usd", "dirty_layers": [], "timeline_stopped": True}
+        if (
+            "dirty_layers" in code
+            and "stage_url" in code
+            and "save_stage_async" not in code
+        ):
+            payload = {
+                "stage_url": "/tmp/x.usd",
+                "dirty_layers": [],
+                "timeline_stopped": True,
+            }
             return ScriptResult(success=True, output=json.dumps(payload))
         return ScriptResult(success=True, output=json.dumps({"ok": True}))
 
@@ -159,12 +188,20 @@ def _calls() -> List[Any]:
     for method_name, _function, meta in iter_tool_methods(IsaacTools):
         typical = TYPICAL.get(meta.name, {})
         calls.append(pytest.param(method_name, typical, id=meta.name + "-typical"))
-        calls.append(pytest.param(method_name, _worst(meta.name, typical), id=meta.name + "-worst"))
+        calls.append(
+            pytest.param(
+                method_name, _worst(meta.name, typical), id=meta.name + "-worst"
+            )
+        )
     # Aspect readers take the prim path positionally (the material reader
     # names it material_path); the script fallback runs one per aspect.
     for aspect, method_name in PRIM_DETAIL_ASPECTS.items():
-        calls.append(pytest.param(method_name, {"*": TYP}, id="aspect:" + aspect + "-typical"))
-        calls.append(pytest.param(method_name, {"*": LONG}, id="aspect:" + aspect + "-worst"))
+        calls.append(
+            pytest.param(method_name, {"*": TYP}, id="aspect:" + aspect + "-typical")
+        )
+        calls.append(
+            pytest.param(method_name, {"*": LONG}, id="aspect:" + aspect + "-worst")
+        )
     return calls
 
 
@@ -183,6 +220,6 @@ def test_every_script_fits_the_budget(method_name: str, kwargs: Dict[str, Any]) 
         asyncio.run(method(**kwargs))
 
     sizes = [len(script.encode("utf-8")) for script in sent]
-    assert all(size <= SCRIPT_BUDGET for size in sizes), (
-        f"{method_name} sent scripts of {sizes} bytes; the budget is {SCRIPT_BUDGET}"
-    )
+    assert all(
+        size <= SCRIPT_BUDGET for size in sizes
+    ), f"{method_name} sent scripts of {sizes} bytes; the budget is {SCRIPT_BUDGET}"

@@ -50,7 +50,9 @@ def capturing_tools() -> Tuple[IsaacTools, List[str]]:
 def run_on_stage(monkeypatch: pytest.MonkeyPatch) -> RunOnStage:
     """Run a generated script against a ``Usd.Stage`` and parse what it prints."""
 
-    def _run(script: str, stage: Any, selected_paths: List[str] | None = None) -> Dict[str, Any]:
+    def _run(
+        script: str, stage: Any, selected_paths: List[str] | None = None
+    ) -> Dict[str, Any]:
         selection = types.SimpleNamespace(
             get_selected_prim_paths=lambda: list(selected_paths or [])
         )
@@ -68,7 +70,10 @@ def run_on_stage(monkeypatch: pytest.MonkeyPatch) -> RunOnStage:
 
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            exec(compile(script, "<isaac-script>", "exec"), {"__name__": "__isaac_script__"})
+            exec(
+                compile(script, "<isaac-script>", "exec"),
+                {"__name__": "__isaac_script__"},
+            )
         return json.loads(stdout.getvalue())
 
     return _run
@@ -96,7 +101,9 @@ def stage_tools(monkeypatch: pytest.MonkeyPatch) -> StageTools:
         context = types.SimpleNamespace(
             get_stage=lambda: stage,
             get_stage_url=lambda: "anon:memory.usda",
-            get_selection=lambda: types.SimpleNamespace(get_selected_prim_paths=lambda: []),
+            get_selection=lambda: types.SimpleNamespace(
+                get_selected_prim_paths=lambda: []
+            ),
         )
         fake_usd = types.ModuleType("omni.usd")
         fake_usd.get_context = lambda: context  # type: ignore[attr-defined]
@@ -117,9 +124,14 @@ def stage_tools(monkeypatch: pytest.MonkeyPatch) -> StageTools:
             stdout = io.StringIO()
             try:
                 with contextlib.redirect_stdout(stdout):
-                    exec(compile(code, "<isaac-script>", "exec"), {"__name__": "__isaac_script__"})
+                    exec(
+                        compile(code, "<isaac-script>", "exec"),
+                        {"__name__": "__isaac_script__"},
+                    )
             except Exception as exc:  # noqa: BLE001 - reported the way Kit reports it
-                return ScriptResult(False, stdout.getvalue(), type(exc).__name__, str(exc))
+                return ScriptResult(
+                    False, stdout.getvalue(), type(exc).__name__, str(exc)
+                )
             return ScriptResult(True, stdout.getvalue())
 
         client = MagicMock()

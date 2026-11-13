@@ -307,6 +307,7 @@ def _listing_predicate(include_instance_proxies: bool, include_inactive: bool) -
         f"{_pyval(bool(include_inactive))})"
     )
 
+
 # What the mass and rigid_body aspects say beside a null centre of mass.
 # MassAPI's fallback is (-inf, -inf, -inf), the normal state after
 # set_isaac_mass_properties(mass=...); json.dumps spells it -Infinity, which
@@ -1065,7 +1066,32 @@ USD_READBACK_STALE_WARNING = (
     "isaacsim.core.experimental.prims on 6.0) with execute_isaac_script."
 )
 
-USD_READBACK_ANNOTATION = f'''\
+# Only velocity write-back off (/physics/updateVelocitiesToUsd false with
+# /physics/updateToUsd on): poses in USD follow the simulation, velocities don't.
+USD_VELOCITY_STALE_WARNING = (
+    "PhysX is not writing velocities back to USD (/physics/updateVelocitiesToUsd is "
+    "false), so the velocities read from USD here are the values from before play; "
+    "poses are current. Read velocities through a physics view (omni.physics.tensors, "
+    "or isaacsim.core.experimental.prims on 6.0) with execute_isaac_script."
+)
+
+
+def _usd_readback_annotation(reads_velocities: bool) -> str:
+    """Return the readback check for a tool that reads poses, and maybe velocities.
+
+    A write-back setting is off when it is set and falsy: Kit settings can
+    hold 0 as well as False, and an unset key means the default, which is on.
+    Poses are stale when /physics/updateToUsd is off; velocities also when
+    /physics/updateVelocitiesToUsd is. A pose-only reader is not flagged for
+    velocity write-back alone.
+
+    Args:
+        reads_velocities: The tool's result includes velocities read from USD.
+
+    Returns:
+        The annotation script.
+    """
+    return f'''\
 def _simul_annotate_usd_readback():
     try:
         import json
@@ -1083,7 +1109,11 @@ def _simul_annotate_usd_readback():
             fabric_enabled = bool(manager.is_extension_enabled("omni.physx.fabric"))
         except Exception:
             pass
-        stale = update_to_usd is False or update_velocities_to_usd is False
+        poses_stale = update_to_usd is not None and not update_to_usd
+        velocities_stale = poses_stale or (
+            update_velocities_to_usd is not None and not update_velocities_to_usd
+        )
+        stale = poses_stale or ({reads_velocities!r} and velocities_stale)
         if not stale and not fabric_enabled:
             return
         fields = {{
@@ -1091,13 +1121,15 @@ def _simul_annotate_usd_readback():
                 "update_to_usd": update_to_usd,
                 "update_velocities_to_usd": update_velocities_to_usd,
                 "physx_fabric_enabled": fabric_enabled,
+                "poses_stale": poses_stale,
+                "velocities_stale": velocities_stale,
                 "stale_under_fabric": stale,
             }},
         }}
         warnings = []
         if stale:
             fields["stale_under_fabric"] = True
-            warnings.append({USD_READBACK_STALE_WARNING!r})
+            warnings.append({USD_READBACK_STALE_WARNING!r} if poses_stale else {USD_VELOCITY_STALE_WARNING!r})
         print({ANNOTATION_MARKER!r} + json.dumps({{"fields": fields, "warnings": warnings}}))
     except Exception:
         pass
@@ -1107,15 +1139,26 @@ _simul_annotate_usd_readback()
 del _simul_annotate_usd_readback
 '''
 
+
+USD_READBACK_ANNOTATION = _usd_readback_annotation(reads_velocities=False)
+USD_VELOCITY_READBACK_ANNOTATION = _usd_readback_annotation(reads_velocities=True)
+
 # Isaac Sim's apps set physics.resetOnStop = true (base and full .kit files of
 # 5.1.0 and 6.0.1): stopping or resetting restores what the simulation moved to
-# its pre-play state. step_isaac_simulation leaves the timeline paused, so an
-# edit made then to a simulated prim is reverted by the next stop or reset.
+# its pre-play state. That reverts an edit made to a simulated prim while the
+# timeline is paused (step_isaac_simulation leaves it paused) or playing.
 PAUSED_EDIT_WARNING = (
     "The timeline is paused (step_isaac_simulation leaves it paused) and "
     "/physics/resetOnStop is on: stopping or resetting the simulation restores the "
     "prims it simulates to their pre-play state, which also reverts edits made now "
     "to those prims. Stop the simulation before editing to keep the edit."
+)
+
+PLAYING_EDIT_WARNING = (
+    "The timeline is playing and /physics/resetOnStop is on: stopping or resetting "
+    "the simulation restores the prims it simulates to their pre-play state, which "
+    "also reverts edits made now to those prims (and the simulation may move them "
+    "first). Stop the simulation before editing to keep the edit."
 )
 
 PAUSED_EDIT_ANNOTATION = f'''\
@@ -1125,11 +1168,16 @@ def _simul_annotate_paused_edit():
         import carb.settings
         import omni.timeline
         timeline = omni.timeline.get_timeline_interface()
-        if timeline.is_playing() or timeline.is_stopped():
+        if timeline.is_stopped():
             return
-        if carb.settings.get_settings().get("/physics/resetOnStop") is False:
+        reset_on_stop = carb.settings.get_settings().get("/physics/resetOnStop")
+        if reset_on_stop is not None and not reset_on_stop:
             return
-        note = {{"fields": {{"timeline_state": "paused"}}, "warnings": [{PAUSED_EDIT_WARNING!r}]}}
+        playing = timeline.is_playing()
+        note = {{
+            "fields": {{"timeline_state": "playing" if playing else "paused"}},
+            "warnings": [{PLAYING_EDIT_WARNING!r} if playing else {PAUSED_EDIT_WARNING!r}],
+        }}
         print({ANNOTATION_MARKER!r} + json.dumps(note))
     except Exception:
         pass
@@ -1141,5 +1189,6 @@ del _simul_annotate_paused_edit
 
 SCRIPT_ANNOTATIONS: dict[str, str] = {
     "usd_readback": USD_READBACK_ANNOTATION,
+    "usd_velocity_readback": USD_VELOCITY_READBACK_ANNOTATION,
     "paused_edit": PAUSED_EDIT_ANNOTATION,
 }

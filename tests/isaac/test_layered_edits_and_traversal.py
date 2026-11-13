@@ -840,7 +840,9 @@ def test_kit_move_is_followed_by_retargeting_and_says_what_undo_covers(
 
     modules, calls = _kit_modules({"MovePrim": _move_prim})
     tools, _sent = stage_tools(stage, modules=modules)
-    result = asyncio.run(tools.reparent_isaac_prim("/World/Looks/Red", "/World/Materials"))
+    result = asyncio.run(
+        tools.reparent_isaac_prim("/World/Looks/Red", "/World/Materials")
+    )
 
     assert result["method"] == "omni.kit.commands MovePrim"
     assert [kwargs for _name, kwargs in calls] == [

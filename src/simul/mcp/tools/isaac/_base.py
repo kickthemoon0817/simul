@@ -326,7 +326,8 @@ class IsaacScriptBase(LoggerMixin):
                 when None.
             annotations: Names from ``SCRIPT_ANNOTATIONS`` whose checks run
                 after the script and add fields and warnings to a successful
-                result ("usd_readback" for readers of poses and velocities,
+                result ("usd_readback" for readers of poses,
+                "usd_velocity_readback" for readers of velocities too,
                 "paused_edit" for edits).
 
         Returns:
