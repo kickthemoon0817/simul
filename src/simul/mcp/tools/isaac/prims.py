@@ -17,6 +17,7 @@ from ._shared import (
     FloatList,
     _compose_script,
     _pyval,
+    names_file_location,
 )
 from .._meta import tool_meta
 
@@ -1007,7 +1008,9 @@ class PrimEditMixin:
             "the real part first, matrices (xformOp:transform) as a list of rows or a flat "
             "row-major list, vectors as [x, y, z], arrays as lists of those. Writes the "
             "default (static) value; the reply warns when time samples hide it. A file path "
-            "for an asset attribute must be inside the read sandbox (security.allowed_paths). With "
+            "for an asset attribute must be inside the read sandbox (security.allowed_paths), "
+            "and on an OmniGraph node so must one for an input named like a file location, "
+            "as set_isaac_graph_node_values judges it. With "
             "script execution disabled, writes that would plant code are refused: "
             "code-carrying attributes (inputs:script*, inputs:codeStr, ...), a node:type "
             "that runs code, any attribute of such a node, and the Python Scripting "
@@ -1051,6 +1054,10 @@ class PrimEditMixin:
         _val_str = _pyval(json.dumps(value))
         _guard = _pyval(self._script_guard)
         _asset_checks = _pyval(self._asset_value_checks([value]))
+        # Applied only if the prim turns out to be a graph node (see the script).
+        _file_checks = _pyval(
+            self._asset_value_checks([value], write=True) if names_file_location(attribute_name) else None
+        )
         script = _compose_script(
             """\
             import json
@@ -1099,8 +1106,17 @@ class PrimEditMixin:
                         # An asset path is read by Kit (a texture, an HDRI): it
                         # goes through the file sandbox, as create_isaac_light's
                         # texture_file does, and is written as the resolved path.
-                        to_set, denial = _sandboxed_asset(attr.GetTypeName(), val, {_asset_checks})
+                        file_checks = {_file_checks}
+                        is_asset = attr.GetTypeName() in (Sdf.ValueTypeNames.Asset, Sdf.ValueTypeNames.AssetArray)
+                        if not is_asset and file_checks is not None and _node_type_of(prim):
+                            # A graph node input named like a file location
+                            # (IsaacReadFilePath's inputs:path) is judged as
+                            # set_isaac_graph_node_values judges it.
+                            to_set, denial = _sandboxed_items(val, file_checks, False)
+                        else:
+                            to_set, denial = _sandboxed_asset(attr.GetTypeName(), val, {_asset_checks})
                         if denial is not None:
+                            denial = _denied(denial, attribute={_attr_name}, prim_path={_prim_path})
                             failure = denial.get("error") or "Refused by the file sandbox"
                         try:
                             if denial is None and not attr.Set(_coerce_attribute_value(attr, to_set)):

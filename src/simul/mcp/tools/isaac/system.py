@@ -272,6 +272,15 @@ class SystemMixin:
                 if denial is not None:
                     return value, denial
             return resolved, None
+        if isinstance(value, list) and any(isinstance(item, dict) for item in value):
+            # An array of dicts (a registries list): each entry by its index.
+            entries = []
+            for index, item in enumerate(value):
+                entry, denial = self._sandboxed_carb_value(f"{key.rstrip('/')}/{index}", item)
+                if denial is not None:
+                    return value, denial
+                entries.append(entry)
+            return entries, None
         if not names_file_location(key):
             return value, None
         resolved_value, denial = self._sandboxed_location(key, value)
@@ -292,10 +301,11 @@ class SystemMixin:
             "subtree). With script execution disabled, /app/scripting (the Python Scripting "
             "Component's settings) is refused the same way. Keys under /persistent/ are saved "
             "to the user's Kit configuration and outlive this session, so they are refused "
-            "unless allow_persistent=true. A string for a key named like a file location "
-            "(/log/file, a ...Dir, ...Folder, ...Path or ...Url key; not a prim or camera path) "
-            "must be inside the file sandbox (security.allowed_paths), judged as a write, or "
-            "nothing is applied."
+            "unless allow_persistent=true. A string for a key whose last segment ends in file, "
+            "dir, folder, url or uri, or in a bare or file-qualified path (/log/file, "
+            "/app/exts/folders, an outputPath; not /log/fileLogLevel or a cameraPath), dict "
+            "and array-of-dict entries included, must be inside the file sandbox "
+            "(security.allowed_paths), judged as a write, or nothing is applied."
         ),
         read_only=False,
         destructive=True,

@@ -245,9 +245,7 @@ SET_MATERIAL_INPUT_CORE = """\
             if asset_denial is not None:
                 if created:
                     shader.GetPrim().RemoveProperty(shader_input.GetAttr().GetName())
-                denied = dict(asset_denial)
-                denied.update({"material_path": material_path, "property_name": name})
-                return denied
+                return _denied(asset_denial, material_path=material_path, property_name=name)
         try:
             coerced = _coerce(value, type_name)
         except ValueError as exc:

@@ -5,6 +5,7 @@ import re
 import textwrap
 from typing import Any, Dict, Optional
 
+from ....utils.paths import sandbox_error
 from ...schemas.common import ErrorResponse
 from ._shared import (
     ASSET_SANDBOX_CORE,
@@ -539,7 +540,9 @@ class OmniGraphMixin:
             "'/World/Graph/OnTick.outputs:tick' to '/World/Graph/Controller.inputs:execIn'. "
             "With security.allow_script_execution off, a connection into a code attribute "
             "(a name with a word starting with script or code) or into a script-capable node is refused: "
-            "it would rewrite the code that node runs."
+            "it would rewrite the code that node runs. While the file sandbox is on, a connection "
+            "into an input named like a file location (inputs:path, inputs:outputDir, ...) is "
+            "refused (SandboxError): a connected value never passes the sandbox."
         ),
         read_only=False,
         idempotent=True,
@@ -569,6 +572,18 @@ class OmniGraphMixin:
                 f"Refusing to connect into {target_attr_path!r}: a code attribute holds Python "
                 "the node runs, and a connection rewrites it.",
                 target=target_attr_path,
+            )
+        target_input = target_attr_path.rsplit(".", 1)[-1]
+        if self._path_policy.enabled and names_file_location(target_input):
+            # The value would come from another node at run time, where the
+            # file sandbox cannot see it.
+            return sandbox_error(
+                {"attribute": target_input, "target": target_attr_path, "source": source_attr_path},
+                error=(
+                    f"Refusing to connect into {target_attr_path!r}: the input names a file "
+                    "location, and a connected value never passes the file sandbox. Set it with "
+                    "set_isaac_graph_node_values instead. Nothing was connected."
+                ),
             )
         script = _compose_script(
             """\
@@ -616,9 +631,10 @@ class OmniGraphMixin:
             "(success=false) when any of them failed, with the ones that were set under "
             "'applied' and the failures under 'errors'. A file location goes through the file "
             "sandbox (security.allowed_paths) and nothing is set when one is outside it: a "
-            "string for an input named like one (inputs:path, inputs:outputDir, inputs:fileName, "
-            "...; not a prim path such as inputs:primPath), judged as a write, and a path for an "
-            "asset-typed input. With security.allow_script_execution "
+            "string for an input whose name ends in file, dir, folder, url or uri, or in a bare "
+            "or file-qualified path (inputs:path, inputs:usdPath, inputs:outputDir; not "
+            "inputs:robotPath), judged as a write, and a path for an asset-typed input. With "
+            "security.allow_script_execution "
             "off, code attributes (a name with a word starting with script or code) and any write to a "
             "script-capable node (ScriptNode, omni.warp.WarpKernel, ...) are refused."
         ),
@@ -701,7 +717,7 @@ class OmniGraphMixin:
                             usd_attr.GetTypeName(), values[attr_name], asset_checks
                         )
                         if denial is not None:
-                            denial = dict(denial, attribute=attr_name, node_path=node_path)
+                            denial = _denied(denial, attribute=attr_name, node_path=node_path)
                             break
             if node is None or not node.is_valid():
                 print(json.dumps({"error": "Node not found: " + node_path, "error_type": "NotFoundError"}))

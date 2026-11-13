@@ -550,59 +550,86 @@ COERCE_ATTRIBUTE_VALUE_CORE = """\
 # here, once the type is known. A string the server did not check, or any
 # other non-empty item, is refused: fail closed. Needs ``Sdf``.
 ASSET_SANDBOX_CORE = """\
-    def _sandboxed_asset(type_name, value, checks):
-        # Returns (value to write, SandboxError payload or None).
-        if type_name not in (Sdf.ValueTypeNames.Asset, Sdf.ValueTypeNames.AssetArray):
-            return value, None
+    def _sandboxed_items(value, checks, strict):
+        # Each non-empty string in value (or its list) becomes the path the
+        # server resolved for it; returns (value to write, SandboxError or
+        # None). strict refuses any other non-empty item too.
         items = value if isinstance(value, list) else [value]
         resolved = []
         for item in items:
-            if item == "":
-                resolved.append(item)  # clears the asset
+            if item == "" or (not strict and not isinstance(item, str)):
+                resolved.append(item)  # "" clears the value
                 continue
             check = (checks or {}).get(item) if isinstance(item, str) else None
             if check is None or "denial" in check:
                 return value, (check or {}).get("denial") or {
                     "success": False,
-                    "error": "Not an asset path the sandbox checked: " + repr(item),
+                    "error": "Not a path the sandbox checked: " + repr(item),
                     "error_type": "SandboxError",
+                    "details": {},
                 }
             resolved.append(check["path"])
         return (resolved if isinstance(value, list) else resolved[0]), None
+
+    def _sandboxed_asset(type_name, value, checks):
+        if type_name not in (Sdf.ValueTypeNames.Asset, Sdf.ValueTypeNames.AssetArray):
+            return value, None
+        return _sandboxed_items(value, checks, True)
+
+    def _denied(denial, **context):
+        # Where the refused value was going, under details as every route puts it.
+        denied = dict(denial)
+        denied["details"] = dict(denied.get("details") or {}, **context)
+        return denied
 """
 
-# Words that make a name (a Carb key's last segment, an OmniGraph input) say
-# it holds a file location. A prim path is not a file, so a name that also
-# says prim, camera or target is left alone.
-FILE_LOCATION_WORDS = frozenset(
+# A name (a Carb key's last segment, an OmniGraph input) holds a file location
+# when its last word says so: outputDir, /log/file, endpointUrl. "path" alone
+# also names prims (robotPath, renderProductPath), so it counts only bare
+# (inputs:path) or after a word that makes it a file (usdPath, outputPath).
+FILE_LOCATION_LAST_WORDS = frozenset(
     {
         "file", "files", "filename", "filenames", "filepath", "filepaths",
         "dir", "dirs", "directory", "directories", "folder", "folders",
-        "path", "paths", "url", "urls", "uri", "uris",
+        "url", "urls", "uri", "uris",
     }
 )
-PRIM_PATH_WORDS = frozenset({"prim", "prims", "camera", "cameras", "target", "targets"})
+FILE_PATH_QUALIFIERS = frozenset(
+    {
+        "file", "usd", "asset", "output", "save", "export", "import", "log", "dump",
+        "cache", "config", "data", "root", "search", "extra", "texture", "image",
+        "mesh", "model", "script", "dir", "folder", "directory", "temp", "tmp",
+    }
+)
 
 
 def names_file_location(name: str) -> bool:
     """Whether ``name`` says its value is a file, folder or URL.
 
     The last segment of a Carb key (``/log/file``) or an attribute name
-    (``inputs:outputDir``) is split into camelCase, ``_`` and ``-`` words.
+    (``inputs:outputDir``) is split into camelCase, ``_`` and ``-`` words and
+    only its last word is judged: one of ``FILE_LOCATION_LAST_WORDS``, a bare
+    ``path``/``paths``, a ``path`` after one of ``FILE_PATH_QUALIFIERS``, or
+    ``fileName``.
 
     Args:
         name: The key or attribute name.
 
     Returns:
-        True when a word is in ``FILE_LOCATION_WORDS`` and none is in
-        ``PRIM_PATH_WORDS``.
+        True when the name holds a file location.
     """
     last = re.split(r"[/:]", str(name).rstrip("/"))[-1]
-    words = {
-        word.lower()
-        for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", last)
-    }
-    return bool(words & FILE_LOCATION_WORDS) and not words & PRIM_PATH_WORDS
+    words = [word.lower() for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", last)]
+    if not words:
+        return False
+    *before, final = words
+    if final in FILE_LOCATION_LAST_WORDS:
+        return True
+    if final in ("path", "paths"):
+        return not before or before[-1] in FILE_PATH_QUALIFIERS
+    if final in ("name", "names"):
+        return bool(before) and before[-1] == "file"
+    return False
 
 
 DEFINE_PRIM_CORE = """\
@@ -666,11 +693,28 @@ DEFINE_PRIM_CORE = """\
             }
         # DefinePrim also defines any missing ancestors. Remember them, so a
         # failure removes everything this call made, not just the leaf.
+        # It also turns an over ancestor into a def: remember each one's
+        # specifier at the edit target (None: no spec there) to restore it.
         created_ancestors = []
+        specifiers = {}
+        target = stage.GetEditTarget()
         ancestor = Sdf.Path(prim_path).GetParentPath()
-        while not ancestor.IsAbsoluteRootPath() and not stage.GetPrimAtPath(ancestor).IsValid():
-            created_ancestors.insert(0, str(ancestor))
+        while not ancestor.IsAbsoluteRootPath():
+            existing_ancestor = stage.GetPrimAtPath(ancestor)
+            if not existing_ancestor.IsValid():
+                created_ancestors.insert(0, str(ancestor))
+            elif not existing_ancestor.IsDefined():
+                spec = target.GetPrimSpecForScenePath(ancestor)
+                specifiers[ancestor] = spec.specifier if spec else None
             ancestor = ancestor.GetParentPath()
+
+        def _undo_define():
+            stage.RemovePrim(created_ancestors[0] if created_ancestors else prim_path)
+            for path, specifier in specifiers.items():
+                spec = target.GetPrimSpecForScenePath(path)
+                if spec:
+                    spec.specifier = Sdf.SpecifierOver if specifier is None else specifier
+
         prim = stage.DefinePrim(prim_path, prim_type)
         if not prim.IsValid():
             return {
@@ -685,10 +729,8 @@ DEFINE_PRIM_CORE = """\
                 # An asset value is a file Kit reads: through the sandbox.
                 value, denial = _sandboxed_asset(attr.GetTypeName(), value, asset_checks)
             if denial is not None:
-                stage.RemovePrim(created_ancestors[0] if created_ancestors else prim_path)
-                denied = dict(denial)
-                denied.update({"attribute": name, "prim_path": prim_path, "created": False})
-                return denied
+                _undo_define()
+                return _denied(denial, attribute=name, prim_path=prim_path, created=False)
             try:
                 if not attr.IsValid():
                     raise ValueError("it is a relationship, not an attribute")
@@ -696,7 +738,7 @@ DEFINE_PRIM_CORE = """\
                     raise ValueError("USD refused the value")
             except Exception as exc:
                 # Leave nothing half-built behind a failure.
-                stage.RemovePrim(created_ancestors[0] if created_ancestors else prim_path)
+                _undo_define()
                 text = str(exc).strip()
                 message = text.splitlines()[-1].split(" : ", 1)[-1].strip(" '") if text else type(exc).__name__
                 return {

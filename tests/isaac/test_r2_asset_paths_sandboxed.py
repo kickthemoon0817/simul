@@ -76,6 +76,11 @@ class _Controller:
     """``og.Controller`` over one node, /World/Graph/Reader."""
 
     nodes: Dict[str, _Node] = {}
+    connections: List[Tuple[str, str]] = []
+
+    @classmethod
+    def connect(cls, source: str, target: str) -> None:
+        cls.connections.append((source, target))
 
     @classmethod
     def node(cls, path: str) -> _Node:
@@ -93,6 +98,7 @@ class _Controller:
 
 def _og_modules() -> Dict[str, types.ModuleType]:
     _Controller.nodes = {"/World/Graph/Reader": _Node("isaacsim.core.nodes.IsaacReadFilePath")}
+    _Controller.connections = []
     omni_graph = types.ModuleType("omni.graph")
     core = types.ModuleType("omni.graph.core")
     core.Controller = _Controller  # type: ignore[attr-defined]
@@ -112,8 +118,12 @@ def _stage() -> Usd.Stage:
     )
     prim = stage.DefinePrim("/World/Dome", "DomeLight")
     prim.CreateAttribute("textures", Sdf.ValueTypeNames.AssetArray)
-    node = stage.DefinePrim("/World/Graph/Reader")
+    node = stage.DefinePrim("/World/Graph/Reader", "OmniGraphNode")
+    node.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set("isaacsim.core.nodes.IsaacReadFilePath")
     node.CreateAttribute("inputs:texture", Sdf.ValueTypeNames.Asset)
+    node.CreateAttribute("inputs:path", Sdf.ValueTypeNames.String)
+    # Not a node: inputs:path here is data no node reads.
+    stage.DefinePrim("/World/Notes").CreateAttribute("inputs:path", Sdf.ValueTypeNames.String)
     return stage
 
 
@@ -246,16 +256,86 @@ def test_graph_file_inputs_go_through_the_sandbox(stage_tools: StageTools, tmp_p
     assert by_name["error_type"] == "SandboxError" and sent == []
     assert by_name["details"]["attribute"] == "inputs:path"
 
+    prim_paths = {
+        "inputs:primPath": "/World",
+        "inputs:robotPath": "/World/Franka",
+        "inputs:renderProductPath": "/Render/RenderProduct_Replicator",
+        "inputs:pathPattern": "*",
+    }
     inside = _run(tools.set_isaac_graph_node_values(
         "/World/Graph/Reader",
-        {"inputs:path": str(sandbox / "a.txt"), "inputs:texture": str(sandbox / "t.png"), "inputs:primPath": "/World"},
+        {"inputs:path": str(sandbox / "a.txt"), "inputs:texture": str(sandbox / "t.png"), **prim_paths},
     ))
     assert inside["success"] is True, inside
     assert _Controller.nodes["/World/Graph/Reader"].values == {
         "inputs:path": str((sandbox / "a.txt").resolve()),
         "inputs:texture": str((sandbox / "t.png").resolve()),
-        "inputs:primPath": "/World",
+        **prim_paths,
     }
+
+
+def test_a_node_input_set_as_a_prim_attribute_is_judged_the_same(stage_tools: StageTools, tmp_path: Path) -> None:
+    """set_isaac_prim_attribute on the node's prim is not a way around the graph tool."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    stage = _stage()
+    tools, _ = _tools(stage_tools, stage, sandbox)
+
+    refused = _run(tools.set_isaac_prim_attribute("/World/Graph/Reader", "inputs:path", "/etc/passwd"))
+    inside = _run(tools.set_isaac_prim_attribute("/World/Graph/Reader", "inputs:path", str(sandbox / "a.txt")))
+    data = _run(tools.set_isaac_prim_attribute("/World/Notes", "inputs:path", "/etc/passwd"))
+
+    assert refused["error_type"] == "SandboxError"
+    assert refused["details"]["attribute"] == "inputs:path"
+    assert inside["success"] is True
+    assert _texture(stage, "/World/Graph/Reader", "inputs:path") == str((sandbox / "a.txt").resolve())
+    assert data["success"] is True, "a prim that is not a node keeps plain data"
+
+
+def test_a_connection_into_a_file_input_is_refused_while_the_sandbox_is_on(
+    stage_tools: StageTools, tmp_path: Path
+) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    tools, sent = _tools(stage_tools, _stage(), sandbox)
+
+    refused = _run(tools.connect_isaac_graph_nodes(
+        "/World/Graph/Concat.outputs:value", "/World/Graph/Reader.inputs:path"
+    ))
+    other = _run(tools.connect_isaac_graph_nodes(
+        "/World/Graph/Concat.outputs:value", "/World/Graph/Reader.inputs:robotPath"
+    ))
+
+    assert refused["error_type"] == "SandboxError" and refused["details"]["attribute"] == "inputs:path"
+    assert len(sent) == 1, "only the robotPath connection is sent"
+    assert other["success"] is True
+    assert _Controller.connections == [("/World/Graph/Concat.outputs:value", "/World/Graph/Reader.inputs:robotPath")]
+
+    settings = Settings()
+    open_settings = settings.model_copy(
+        update={"security": settings.security.model_copy(update={"sandbox_enabled": False})}
+    )
+    unsandboxed, _ = stage_tools(_stage(), settings=open_settings, modules=_og_modules())
+    allowed = _run(unsandboxed.connect_isaac_graph_nodes(
+        "/World/Graph/Concat.outputs:value", "/World/Graph/Reader.inputs:path"
+    ))
+    assert allowed["success"] is True
+
+
+def test_a_refused_create_leaves_an_over_ancestor_an_over(stage_tools: StageTools, tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    stage = _stage()
+    stage.OverridePrim("/World/Over")
+    tools, _ = _tools(stage_tools, stage, sandbox)
+
+    result = _run(tools.create_isaac_prim("/World/Over/Sky", "DomeLight", {"inputs:texture:file": "/etc/x.hdr"}))
+
+    assert result["error_type"] == "SandboxError"
+    assert result["details"]["attribute"] == "inputs:texture:file" and result["details"]["created"] is False
+    over = stage.GetPrimAtPath("/World/Over")
+    assert over.GetSpecifier() == Sdf.SpecifierOver and not over.IsDefined()
+    assert not stage.GetPrimAtPath("/World/Over/Sky").IsValid()
 
 
 def test_carb_file_keys_are_checked_as_writes_and_resolved(stage_tools: StageTools, tmp_path: Path) -> None:
@@ -266,18 +346,24 @@ def test_carb_file_keys_are_checked_as_writes_and_resolved(stage_tools: StageToo
     nested = _run(tools.set_carb_settings({"/log": {"level": "info", "file": "/etc/x.log"}}))
     listed = _run(tools.set_carb_settings({"/app/exts/folders": [str(sandbox), "/opt/exts"]}))
     omniverse = _run(tools.set_carb_settings({"/app/captureDir": "omniverse://host/out"}))
-    assert [r["error_type"] for r in (nested, listed, omniverse)] == ["SandboxError"] * 3
+    registry = _run(tools.set_carb_settings({
+        "/exts/omni.kit.registry.nucleus/registries": [{"name": "evil", "url": "http://evil.example/exts"}]
+    }))
+    assert [r["error_type"] for r in (nested, listed, omniverse, registry)] == ["SandboxError"] * 4
     assert nested["details"]["setting"] == "/log/file"
+    assert registry["details"]["setting"] == "/exts/omni.kit.registry.nucleus/registries/0/url"
     assert sent == []
 
-    tools._client.execute.reset_mock()
     _run(tools.set_carb_settings({
         "/log/file": str(sandbox / "kit.log"),
+        "/log/fileLogLevel": "Verbose",
+        "/log/fileFlushLevel": "Verbose",
         "/rtx/rendermode": "PathTracing",
         "/app/viewport/defaultCameraPath": "/OmniverseKit_Persp",
     }))
     script = sent[-1]
     assert repr(str((sandbox / "kit.log").resolve())) in script
+    assert script.count("'Verbose'") == 2, "log levels are not file locations"
     assert "'PathTracing'" in script and "'/OmniverseKit_Persp'" in script
 
 
@@ -291,7 +377,15 @@ def test_carb_file_keys_are_checked_as_writes_and_resolved(stage_tools: StageToo
         ("inputs:outputDir", True),
         ("inputs:usdPath", True),
         ("/telemetry/endpointURL", True),
+        ("inputs:fileName", True),
+        ("/exts/omni.kit.registry.nucleus/registries/0/url", True),
         ("inputs:primPath", False),
+        ("inputs:robotPath", False),
+        ("inputs:renderProductPath", False),
+        ("inputs:pathPattern", False),
+        ("/log/fileLogLevel", False),
+        ("/log/fileFlushLevel", False),
+        ("inputs:topicName", False),
         ("/app/viewport/defaultCameraPath", False),
         ("inputs:targetPaths", False),
         ("/rtx/pathtracing/spp", False),

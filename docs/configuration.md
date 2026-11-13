@@ -348,12 +348,22 @@ around them:
   call carries and the script applies the verdict once the type is known. A
   value the server did not check is refused.
 - An OmniGraph input or Carb key named like a file location is judged as a
-  write, because Kit may read or write it. Examples are `inputs:path`,
-  `inputs:outputDir`, `/log/file` and `/app/exts/folders`. "Named like a
-  file location" means the last segment contains a word such as file, dir,
-  folder, path or url, and none of prim, camera or target.
+  write, because Kit may read or write it. Examples are `inputs:path`
+  (IsaacReadFilePath), `inputs:outputDir`, `inputs:usdPath`, `/log/file` and
+  `/app/exts/folders`. "Named like a file location" goes by the last word of
+  the last segment, split at camelCase and `_`:
+  - file, dir, folder, url or uri (singular or plural) counts;
+  - path counts only bare or after a file word such as usd, asset, output or
+    log;
+  - so `inputs:robotPath`, `inputs:renderProductPath`, `inputs:pathPattern`
+    and `/log/fileLogLevel` are not file locations.
+
   `set_isaac_graph_node_values` and `set_isaac_carb_settings` refuse such a
-  value outside the sandbox and set nothing.
+  value outside the sandbox and set nothing. Carb dict values and arrays of
+  dicts are judged entry by entry. `set_isaac_prim_attribute` applies the same
+  rule to an input of a graph node prim. While the sandbox is on,
+  `connect_isaac_graph_nodes` refuses a connection into such an input,
+  because a value that comes from another node at run time is never checked.
 
 A refused value is a `SandboxError`, and nothing is created or set.
 

@@ -499,9 +499,11 @@ Notes:
   timeline is playing or paused unless `allow_while_playing=true`.
 - `set_isaac_graph_node_values` fails when any attribute fails, still
   reporting what was set. A path for an asset-typed input, or a string for an
-  input named like a file location (`inputs:path`, `inputs:outputDir`), must
-  be inside the file sandbox; otherwise it is `SandboxError` and nothing is
-  set. With script execution disabled, the graph, import
+  input named like a file location (`inputs:path`, `inputs:outputDir`; not
+  `inputs:robotPath`), must be inside the file sandbox; otherwise it is
+  `SandboxError` and nothing is set. `set_isaac_prim_attribute` holds a graph
+  node's inputs to the same rule, and while the sandbox is on
+  `connect_isaac_graph_nodes` refuses a connection into such an input. With script execution disabled, the graph, import
   and extension tools refuse code-running nodes (ScriptNode,
   omni.warp.WarpKernel, Replicator script nodes), code attributes,
   connections into them and the script extensions
@@ -562,9 +564,10 @@ Notes:
   key by key, and `.`/`..` segments are refused. With script execution off it
   also refuses `/app/scripting`. It refuses `/persistent` keys, which Kit
   saves for later sessions, unless `allow_persistent=true`. A string for a
-  key named like a file location (`/log/file`, `/app/exts/folders`) must be
-  inside the file sandbox, judged as a write; otherwise the call is
-  `SandboxError` and nothing is applied.
+  key named like a file location (`/log/file`, `/app/exts/folders`; not
+  `/log/fileLogLevel`), in a dict or an array of dicts too, must be inside
+  the file sandbox, judged as a write; otherwise the call is `SandboxError`
+  and nothing is applied.
   `get_isaac_carb_settings` reads `auth_token` values back as `***`, and
   `get_isaac_logs` redacts the python_server token that 6.0.1 logs at Info
   level (`redacted_lines` counts the lines).
