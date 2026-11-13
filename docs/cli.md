@@ -89,8 +89,12 @@ and `Origin` headers against loopback, the bound address and
 `server.allowed_hosts` / `allowed_origins` (the DNS-rebinding defense), and
 requires `Authorization: Bearer <token>` when `SERVER__AUTH_TOKEN_FILE` is
 set. A non-loopback `server.host` without `--allow-public` exits 2 with
-`error_type: InsecureTransport` before anything listens. The banner prints the
-listener URL, the guard's host list and whether a token is required. See
+`error_type: InsecureTransport` before anything listens. A server that cannot
+listen exits 1: `error_type: AddressInUse` when another process holds
+`server.host:server.port`, `StartupError` for any other startup failure (the
+log line above it says why), with `details.host`, `port` and `transport`. The
+banner prints the listener URL, the guard's host list and whether a token is
+required. See
 [configuration.md](configuration.md#network-transports-http-and-sse).
 
 ```bash

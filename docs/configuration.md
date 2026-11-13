@@ -295,6 +295,13 @@ on the sessionless protocol share one session (see
 other settings here cannot come from a working-directory `.env`; see
 [Where settings come from](#where-settings-come-from).
 
+A request body over 4 MiB is refused by the MCP SDK with a plain HTTP 413
+before simul reads it, on HTTP and SSE alike: the client gets a transport
+error rather than a JSON envelope, and the call has no usage or audit row.
+The limit is the SDK's default, and FastMCP does not expose it. Pass a large
+script's data or a large mesh as a file inside the sandbox and send its path
+instead.
+
 ### File sandbox
 
 MCP tools that read or write files only accept paths under
@@ -556,7 +563,9 @@ it, rotated copies included, with `simul stats --reset`.
 before it ran) or `cancelled`, with `executed` as in the usage row; an
 exception that escaped the tool adds `error_class`. `request_id` matches the
 call's usage row and the `[request_id tool]` prefix of its lines in
-`simul.log`. Each field is cut at 128 characters.
+`simul.log`. A call to a tool that is not registered is named
+`<unknown tool>`, as in its usage row, with the name it gave in
+`extra.requested_tool`. Each field is cut at 128 characters.
 
 Every server on the machine writes the same `audit.jsonl` and `simul.log`.
 They rotate together: each record is written under a lock on

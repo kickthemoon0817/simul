@@ -76,6 +76,115 @@ def test_the_table_uses_the_isaac_runtime_constants() -> None:
     assert collision.values == _shared.COLLISION_APPROXIMATIONS
 
 
+def test_the_table_uses_the_isaac_render_and_solver_limits() -> None:
+    from simul.mcp.tools.isaac import physics, render
+
+    assert _constraints.ISAAC_MAX_AOV_RESOLUTION == render.MAX_AOV_RESOLUTION
+    assert _constraints.ISAAC_MAX_SOLVER_ITERATIONS == physics.MAX_SOLVER_ITERATIONS
+
+
+@pytest.mark.parametrize(
+    ("tool", "param", "minimum", "maximum"),
+    [
+        ("set_isaac_physics_material", "static_friction", 0, None),
+        ("set_isaac_physics_material", "dynamic_friction", 0, None),
+        ("set_isaac_physics_material", "restitution", 0, 1),
+        ("set_isaac_joint_drive", "stiffness", 0, None),
+        ("set_isaac_joint_drive", "damping", 0, None),
+        ("set_isaac_joint_drive", "max_force", 0, None),
+        ("configure_isaac_physics_scene", "time_steps_per_second", 1, None),
+        ("configure_isaac_physics_scene", "min_position_iterations", 1, 255),
+        ("configure_isaac_physics_scene", "max_velocity_iterations", 0, 255),
+    ],
+)
+def test_isaac_bounds_the_tools_check_are_in_the_schema(
+    schemas: Dict[str, Dict[str, Any]], tool: str, param: str, minimum: Any, maximum: Any
+) -> None:
+    """Refused by the tool's own check, so stated where a client reads it (round-2 m-2)."""
+    found = describe_constraints(_property(schemas, tool, param))
+    assert found.get("minimum") == minimum
+    assert found.get("maximum") == maximum
+
+
+def _array_branch(prop: Dict[str, Any]) -> Dict[str, Any]:
+    return next(node for node in [prop, *prop.get("anyOf", [])] if node.get("type") == "array")
+
+
+def test_list_item_bounds_are_in_the_schema(schemas: Dict[str, Dict[str, Any]]) -> None:
+    """Each item of a list carries its bounds; a resolution bounds each edge on its own."""
+    color = _array_branch(_property(schemas, "create_isaac_object", "diffuse_color"))
+    assert (color["items"]["minimum"], color["items"]["maximum"]) == (0, 1)
+    resolution = _array_branch(_property(schemas, "read_isaac_aovs", "resolution"))
+    assert [(item["minimum"], item["maximum"]) for item in resolution["prefixItems"]] == [(1, 3840), (1, 2160)]
+    assert resolution["minItems"] == resolution["maxItems"] == 2
+
+
+def _item_bounds(node: Dict[str, Any], defs: Dict[str, Any]) -> Dict[str, Any]:
+    """The bounds on a list's items, and on its items' items, keyed by depth."""
+    found: Dict[str, Any] = {}
+    stack: List[Tuple[Dict[str, Any], str]] = [(node, "")]
+    while stack:
+        current, depth = stack.pop()
+        if "$ref" in current:
+            current = defs[current["$ref"].rsplit("/", 1)[-1]]
+        stack.extend((option, depth) for option in current.get("anyOf", []))
+        items = current.get("items")
+        if isinstance(items, dict):
+            for key in ("minimum", "maximum"):
+                if key in items:
+                    found[f"{depth}items.{key}"] = items[key]
+            stack.append((items, f"{depth}items."))
+    return found
+
+
+def test_blender_request_model_item_bounds_reach_the_schema(schemas: Dict[str, Dict[str, Any]]) -> None:
+    """A colour's 0-1 channels, a face's vertex indices: the request model refuses them, the schema says so."""
+    from simul.mcp.registration._reg_blender import BLENDER_TOOLS
+
+    missing = []
+    checked = 0
+    for spec in BLENDER_TOOLS:
+        if spec.request is None or spec.name not in schemas:
+            continue
+        model_schema = spec.request.model_json_schema()
+        properties = schemas[spec.name]["properties"]
+        for name, prop in model_schema.get("properties", {}).items():
+            if name not in properties:
+                continue
+            wanted = _item_bounds(prop, model_schema.get("$defs", {}))
+            if not wanted:
+                continue
+            checked += 1
+            advertised = _item_bounds(properties[name], schemas[spec.name].get("$defs", {}))
+            if advertised != wanted:
+                missing.append((spec.name, name, wanted, advertised))
+    assert missing == []
+    assert checked >= 6
+
+
+def test_every_default_satisfies_its_own_schema(schemas: Dict[str, Dict[str, Any]]) -> None:
+    """``default: null`` beside an enum without null failed Draft 2020-12 (round-2 m-3)."""
+    jsonschema = pytest.importorskip("jsonschema")
+    failing = []
+    for tool, schema in sorted(schemas.items()):
+        for name, prop in schema.get("properties", {}).items():
+            if "default" not in prop:
+                continue
+            checked = {**prop, "$defs": schema.get("$defs", {})}
+            errors = list(jsonschema.Draft202012Validator(checked).iter_errors(prop["default"]))
+            if errors:
+                failing.append((tool, name, prop["default"], errors[0].message))
+    assert failing == []
+
+
+def test_advertised_choices_sit_on_the_value_not_beside_null(schemas: Dict[str, Dict[str, Any]]) -> None:
+    """An optional parameter whose tool takes any case lists its canonical spellings on the string."""
+    solver = _property(schemas, "configure_isaac_physics_scene", "solver_type")
+    assert "enum" not in solver
+    assert {"type": "string", "enum": ["TGS", "PGS"]} in solver["anyOf"]
+    assert {"type": "null"} in solver["anyOf"]
+
+
 def test_the_choice_lists_are_the_tools_own() -> None:
     """The choices the schema states are the ones the tool checks against."""
     from simul.mcp.tools.isaac import _shared, joints, physics
@@ -244,14 +353,12 @@ _CHOICE_PROSE = re.compile(
 )
 
 # Ranges or choices that are documented but deliberately not enforced: list
-# items (colors may be HDR, above 1; a resolution caps width and height
-# differently), a comma-separated list of checks; and prose that reads like a
-# choice list but is not one (file extensions, what a query matches).
+# items (these colors may be HDR, above 1), a comma-separated list of checks;
+# and prose that reads like a choice list but is not one (file extensions,
+# what a query matches).
 _PROSE_ONLY = {
     ("create_isaac_light", "color"),
     ("create_isaac_material", "diffuse_color"),
-    ("create_isaac_object", "diffuse_color"),
-    ("read_isaac_aovs", "resolution"),
     ("validate_simready_asset", "checks"),
     ("export_blender_file", "file_path"),
     ("export_simready_usd", "file_path"),
@@ -316,6 +423,13 @@ def _isaac_server(tmp_path: Path) -> server_module.SimulMCPServer:
         ("get_isaac_ui_window", {"window_title": "Stage", "max_depth": 100}, "max_depth"),
         ("create_isaac_light", {"prim_path": "/World/L", "light_type": "SpotLight"}, "light_type"),
         ("step_isaac_simulation", {"num_steps": 0}, "num_steps"),
+        ("set_isaac_joint_drive", {"joint_path": "/World/J", "stiffness": -1.0}, "stiffness"),
+        ("set_isaac_physics_material", {"prim_path": "/World/C", "static_friction": -0.1}, "static_friction"),
+        ("configure_isaac_physics_scene", {"time_steps_per_second": 0}, "time_steps_per_second"),
+        ("configure_isaac_physics_scene", {"max_position_iterations": 256}, "max_position_iterations"),
+        ("read_isaac_aovs", {"aov_names": ["HdrColor"], "resolution": [3840, 4000]}, "resolution.1"),
+        ("read_isaac_aovs", {"aov_names": ["HdrColor"], "resolution": [64, 64, 3]}, "resolution"),
+        ("create_isaac_object", {"prim_path": "/World/B", "diffuse_color": [2.0, 0.0, 0.0]}, "diffuse_color.0"),
     ],
 )
 def test_out_of_range_values_are_refused_not_clamped(

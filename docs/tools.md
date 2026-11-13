@@ -12,7 +12,14 @@ Every tool returns a JSON object. A failure is sent with MCP `isError: true`
 and carries `success: false`, an `error_type` and an `error` message; see
 [Errors](#errors) for the types. Parameter bounds and choices are in each
 tool's input schema (`minimum`, `maximum`, `enum`), and a value outside them
-is refused with `ValidationError` before the tool runs.
+is refused with `ValidationError` before the tool runs. A list's items carry
+their own bounds (`items`, or `prefixItems` where each position differs, as
+`read_isaac_aovs`'s `[width, height]` does), and every advertised `default`
+satisfies its own schema. A few choices are matched in any case by the tool
+(`configure_isaac_physics_scene`'s `solver_type` and `broadphase_type`,
+`import_blender_file`'s `file_format`, ...): the `enum` lists the canonical
+spelling, which is what a client that validates against the schema sends,
+and the tool also takes other cases.
 
 Results are strict JSON: a non-finite float is sent as the string
 `"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token.
@@ -2862,9 +2869,13 @@ Arguments that do not fit the input schema are refused before the tool runs,
 but through the same envelope as every other failure: the call spends a
 rate-limit token and is recorded in the usage log and the audit log. A call to
 a tool that is not registered is a `NotFoundError`, recorded and rate limited
-under `<unknown tool>` with the name it gave in the record's parameters. The
-audit row of every call states the envelope's outcome, `error_type` included
-(see [Audit log](configuration.md#audit-log)).
+under `<unknown tool>` with the name it gave in the record's parameters; its
+audit row names it `<unknown tool>` too, with the name given in
+`extra.requested_tool`. The audit row of every call states the envelope's
+outcome, `error_type` included (see [Audit log](configuration.md#audit-log)).
+A tool's own argument check (one the schema cannot state, such as a minimum
+above its maximum) names the parameter in `details.errors[].field` as the
+schema's refusals do.
 
 A call the client cancels may still have run: cancelling the request does not
 stop the engine. Its usage and audit rows say `cancelled` and `executed`:

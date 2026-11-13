@@ -326,6 +326,31 @@ def test_sigterm_runs_shutdown_and_exits_0(tmp_path: Path, transport: str) -> No
     assert "Simul 3D MCP Server shut down" in log.read_text()
 
 
+def test_a_busy_http_port_exits_1_with_the_json_envelope(tmp_path: Path) -> None:
+    """uvicorn exited 3 and --json printed nothing (round-2 audit m-6)."""
+    with socket.socket() as holder:
+        holder.bind(("127.0.0.1", 0))
+        holder.listen()
+        port = holder.getsockname()[1]
+        env = _subprocess_env(
+            tmp_path,
+            SIMUL_HOME=str(tmp_path / "state"),
+            SERVER__HOST="127.0.0.1",
+            SERVER__PORT=str(port),
+        )
+        proc = subprocess.run(
+            [sys.executable, "-m", "simul.cli.main", "--json", "server", "--transport", "http", "--backends", "usd"],
+            env=env, cwd=str(tmp_path), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+        )
+
+    assert proc.returncode == 1, proc.stderr
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert payload["success"] is False
+    assert payload["error_type"] == "AddressInUse"
+    assert payload["details"] == {"host": "127.0.0.1", "port": port, "transport": "http"}
+    assert f"127.0.0.1:{port}" in payload["error"]
+
+
 def _connects(port: int) -> bool:
     try:
         socket.create_connection(("127.0.0.1", port), timeout=0.2).close()

@@ -467,9 +467,15 @@ def _validation_errors(
 
 
 def _summarize_validation_errors(errors: List[Dict[str, Any]]) -> str:
-    """Join per-field errors into one message: ``field: message; ...``."""
+    """Join per-field errors into one message: ``field: message; ...``.
+
+    A message that already starts by naming its field (a tool's own check:
+    ``stiffness must be >= 0``) is not prefixed with it again.
+    """
     return "; ".join(
-        f"{error['field']}: {error['message']}" if error.get("field") else str(error["message"])
+        f"{error['field']}: {error['message']}"
+        if error.get("field") and error_types.field_named_by(str(error["message"])) != error["field"]
+        else str(error["message"])
         for error in errors
     )
 
@@ -1781,6 +1787,9 @@ class SimulMCPServer(LoggerMixin):
                     executed=executed,
                 )
                 note_call_outcome(
+                    # The name the call is recorded under: <unknown tool> for
+                    # a made-up one, as in the usage row.
+                    tool=tool_name,
                     status=status or ("ok" if success else "error"),
                     error_type=None if success else error_type,
                     agent_id=recorded_agent,

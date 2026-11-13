@@ -56,7 +56,7 @@ def test_a_long_script_with_a_bad_mode_is_echoed_by_size(tmp_path: Any) -> None:
     assert payload["error_type"] == "ValidationError"
     assert "Invalid mode 'Bogus'" in payload["error"]
     assert payload["details"] == {
-        "errors": [{"field": None, "message": payload["error"], "type": "value_error"}],
+        "errors": [{"field": "mode", "message": payload["error"], "type": "value_error"}],
         "input": {
             "code": LONG_SCRIPT[:SCRIPT_ECHO_CHARS],
             "code_bytes": len(LONG_SCRIPT),

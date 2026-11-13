@@ -12,6 +12,9 @@ from ._shared import (
 )
 from .._meta import DeprecatedAlias, tool_meta
 
+#: The largest AOV render product, [width, height].
+MAX_AOV_RESOLUTION = (3840, 2160)
+
 
 class RenderMixin:
     # ------------------------------------------------------------------
@@ -56,8 +59,8 @@ class RenderMixin:
                 list_isaac_aovs (e.g. ["HdrColor", "DirectDiffuse"]).
                 Maximum 16 entries.
             camera_path: Camera prim path for the render product.
-            resolution: [width, height] in pixels for the render product.
-                Defaults to [256, 256]. Max 3840x2160.
+            resolution: [width, height] in pixels for the render product:
+                width 1 to 3840, height 1 to 2160. Defaults to [256, 256].
             num_frames: Number of renderer update steps before reading.
                 Clamped to [1, 60].
 
@@ -72,10 +75,18 @@ class RenderMixin:
         if len(aov_names) > 16:
             return {"error": "aov_names must not exceed 16 entries", "error_type": "ValidationError"}
         num_frames = max(1, min(num_frames, 60))
-        res = resolution or [256, 256]
-        if len(res) != 2:
-            return {"error": "resolution must be [width, height]", "error_type": "ValidationError"}
-        res = [max(1, min(res[0], 3840)), max(1, min(res[1], 2160))]
+        res = list(resolution or [256, 256])
+        max_width, max_height = MAX_AOV_RESOLUTION
+        if len(res) != 2 or not (1 <= res[0] <= max_width and 1 <= res[1] <= max_height):
+            # Refused, not clamped: a clamped render product would answer for
+            # a resolution the caller did not ask for.
+            return {
+                "error": (
+                    f"resolution must be [width, height] with width 1 to {max_width} and "
+                    f"height 1 to {max_height}, got {resolution!r}"
+                ),
+                "error_type": "ValidationError",
+            }
 
         _aov_names = _pyval(aov_names)
         _camera = _pyval(camera_path)

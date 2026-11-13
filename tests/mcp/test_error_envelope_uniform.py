@@ -851,3 +851,36 @@ def test_the_usage_log_row_carries_the_session_label(tmp_path: Path) -> None:
     (row,) = [json.loads(line) for line in (tmp_path / "usage" / "tool_usage.jsonl").read_text().splitlines()]
     assert re.fullmatch(r"session-[0-9a-f]{12}", row["session"])
     assert "session" not in instance.usage_tracker.get_recent()[0]
+
+
+@pytest.mark.parametrize(
+    ("message", "field"),
+    [
+        ("stiffness must be >= 0, got -1.0", "stiffness"),
+        ("time_steps_per_second must be >= 1, got 0", "time_steps_per_second"),
+        ("scene_type must be one of room, corridor, warehouse, outdoor, got 'cave'", "scene_type"),
+        ("Invalid mode 'Bogus'. Must be one of ['EvaluateStatement']", "mode"),
+        ("min_position_iterations (5) exceeds max_position_iterations (2)", "min_position_iterations"),
+        ("aov_names must not exceed 16 entries", "aov_names"),
+        ("Pass at least one setting to configure.", None),
+        ("Invalid light_type", None),
+        ("ValueError: Attached window is not in Object Mode", None),
+        ('bpy_struct: attribute "x" is read-only', None),
+    ],
+)
+def test_a_tool_check_names_the_field_it_refused(message: str, field: Any) -> None:
+    """details.errors[].field names the parameter, as docs/tools.md promises (round-2 m-4)."""
+    payload = normalize_error_payload({"success": False, "error": message, "error_type": "ValidationError"})
+    assert payload["details"]["errors"][0]["field"] == field
+    assert error_types.field_named_by(message) == field
+
+
+def test_a_tool_check_over_mcp_names_its_field(tmp_path: Path) -> None:
+    """A check only the tool makes (a min above its max) reaches the client with the field."""
+    (result,) = _run(
+        _isaac_server(tmp_path),
+        [("configure_isaac_physics_scene", {"min_position_iterations": 9, "max_position_iterations": 2})],
+    )
+
+    (error,) = _json(result)["details"]["errors"]
+    assert error["field"] == "min_position_iterations"

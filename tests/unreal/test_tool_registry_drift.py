@@ -263,7 +263,7 @@ def test_invalid_input_reports_the_check_and_the_input(monkeypatch: pytest.Monke
         "error_type": "ValidationError",
         "details": {
             "errors": [
-                {"field": None, "message": "inline_max_size must be 0 or between 16 and 16384", "type": "value_error"}
+                {"field": "inline_max_size", "message": "inline_max_size must be 0 or between 16 and 16384", "type": "value_error"}
             ],
             "input": {
                 "resolution_x": 1920,

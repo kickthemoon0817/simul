@@ -69,12 +69,15 @@ def test_in_sandbox_path_passes_the_policy(
 
 def test_checked_path_is_the_used_path(
     session: blender_runtime.BlenderRuntimeSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A divergent-prefix path must reach Blender in its resolved form.
 
     ``~/../../tmp/simul-work/...`` resolves inside the sandbox, so the policy
     admits it — but to bpy the ``~`` is a literal path component anchored at
-    the server cwd. Whatever the policy checked is what must be used."""
+    the server cwd. Whatever the policy checked is what must be used. HOME is
+    pinned two levels deep, so the path means the same on every machine."""
+    monkeypatch.setenv("HOME", "/simul-test-home/user")
     result = session.save_blend_file("~/../../tmp/simul-work/out.blend")
     assert result["file_path"] == str(Path("/tmp/simul-work/out.blend").resolve())
 
