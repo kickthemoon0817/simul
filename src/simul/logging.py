@@ -242,9 +242,17 @@ class SharedRotatingFileHandler(logging.Handler):
       ``<file>.<YYYY-MM-DD>`` or, when that is taken, ``<file>.<YYYY-MM-DD>.<n>``;
 
     and copies older than ``backupCount`` days are deleted, as are the oldest
-    beyond ``maxBackups`` copies (when set). A lock another process holds for
-    longer than a second is skipped: the record is appended unrotated rather
-    than lost.
+    beyond ``maxBackups`` copies (when set).
+
+    Nothing about the lock or the rotation can lose a record: it is appended
+    unlocked and unrotated instead, with one warning on stderr, when the lock
+    cannot be had (``ENOLCK`` on an NFS home whose lock daemon is gone, a log
+    directory where the lock file cannot be created) or another process holds
+    it for longer than ``_LOCK_TIMEOUT_SECONDS`` (a stopped or debugged
+    process; the handlers of simul.log run on the server's event loop, so a
+    long wait would stall it). After either, locking is skipped for
+    ``_LOCK_BACKOFF_SECONDS``. A rotation that fails (a copy another program
+    holds open on Windows) is skipped the same way.
 
     Args:
         filename: The log file.
@@ -255,7 +263,8 @@ class SharedRotatingFileHandler(logging.Handler):
         encoding: Text encoding of the records.
     """
 
-    _LOCK_TIMEOUT_SECONDS = 1.0
+    _LOCK_TIMEOUT_SECONDS = 0.05
+    _LOCK_BACKOFF_SECONDS = 30.0
 
     def __init__(
         self,
@@ -276,6 +285,8 @@ class SharedRotatingFileHandler(logging.Handler):
         self.maxBackups = max(0, int(maxBackups))
         self.encoding = encoding or "utf-8"
         self.errors = errors
+        self._unlocked_until = 0.0
+        self._warned = False
         self._rotated_name = re.compile(
             re.escape(os.path.basename(self.baseFilename))
             + r"\.(\d{4}-\d{2}-\d{2})(?:\.(\d+))?$"
@@ -292,16 +303,44 @@ class SharedRotatingFileHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             data = (self.format(record) + "\n").encode(self.encoding, self.errors or "strict")
-            try:
-                with exclusive_file_lock(
-                    Path(self.baseFilename + ".lock"), timeout=self._LOCK_TIMEOUT_SECONDS
-                ):
-                    self._rotate(len(data))
-                    self._append(data)
-            except TimeoutError:
+            with contextlib.ExitStack() as held:
+                if self._lock(held):
+                    try:
+                        self._rotate(len(data))
+                    except OSError as exc:
+                        self._warn_once(f"could not rotate it ({exc}); appending to it as it is")
                 self._append(data)
         except Exception:
             self.handleError(record)
+
+    def _lock(self, held: contextlib.ExitStack) -> bool:
+        """Take the cross-process lock into ``held``; False when it cannot be had now."""
+        if time.monotonic() < self._unlocked_until:
+            return False
+        try:
+            held.enter_context(
+                exclusive_file_lock(
+                    Path(self.baseFilename + ".lock"), timeout=self._LOCK_TIMEOUT_SECONDS
+                )
+            )
+            return True
+        except TimeoutError:
+            reason = "another process holds its lock"
+        except OSError as exc:
+            reason = f"its lock is not available ({exc})"
+        self._unlocked_until = time.monotonic() + self._LOCK_BACKOFF_SECONDS
+        self._warn_once(f"{reason}; appending to it without the lock or rotation")
+        return False
+
+    def _warn_once(self, message: str) -> None:
+        """Say once on stderr that the file is written without its lock or rotation."""
+        if self._warned:
+            return
+        self._warned = True
+        try:
+            sys.stderr.write(f"simul: {self.baseFilename}: {message}\n")
+        except Exception:  # pragma: no cover - stderr closed
+            pass
 
     def _append(self, data: bytes) -> None:
         fd = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, LOG_FILE_MODE)

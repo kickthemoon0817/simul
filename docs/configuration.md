@@ -527,7 +527,11 @@ each process writing into the file it had open, so after the first midnight
 the other servers' rows went into the previous day's file and retention
 deleted them.) Dated copies older than `LOGGING__RETENTION_DAYS` days are
 deleted. `audit.jsonl` is also rotated at 10 MB within a day, and at most 30
-copies are kept.
+copies are kept. The lock and the rotation never cost a record: when the lock
+cannot be had (an NFS home without a lock daemon, a log directory where the
+lock file cannot be created) or another process holds it for more than
+50 ms, or a rotation fails, the record is appended to the file as it is,
+locking is skipped for 30 s, and one warning goes to stderr.
 
 Log files are private to the user: directories simul creates for them are
 0700 and every log, audit and usage file, rotated copies, lock files and

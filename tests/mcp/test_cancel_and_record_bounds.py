@@ -392,3 +392,101 @@ def test_the_audit_log_has_a_size_cap(tmp_path: Path) -> None:
     assert len(files) == 4
     assert all(p.stat().st_size <= 1000 for p in files)
     assert simul_logging.AUDIT_MAX_BYTES and simul_logging.AUDIT_MAX_BACKUPS
+
+
+# ---------------------------------------------------------------------------
+# The lock or the rotation failing never loses a record
+# ---------------------------------------------------------------------------
+
+
+def _handler(path: Path, **options: Any) -> simul_logging.SharedRotatingFileHandler:
+    handler = simul_logging.SharedRotatingFileHandler(str(path), **options)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    return handler
+
+
+def _emit(handler: logging.Handler, *messages: str) -> None:
+    for message in messages:
+        handler.emit(logging.LogRecord("x", logging.INFO, "x.py", 1, message, (), None))
+
+
+def test_a_lock_that_errors_is_skipped_with_one_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """flock failing with ENOLCK (an NFS home whose lock daemon is gone) dropped every record."""
+    import errno
+
+    def no_locks(lock_path: Path, timeout: float) -> Any:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(simul_logging, "exclusive_file_lock", no_locks)
+    handler = _handler(tmp_path / "simul.log")
+
+    _emit(handler, "one", "two", "three")
+
+    assert (tmp_path / "simul.log").read_text() == "one\ntwo\nthree\n"
+    err = capsys.readouterr().err
+    assert err.count("simul:") == 1 and "No locks available" in err
+    assert "Traceback" not in err
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.getuid() == 0, reason="POSIX directory modes")
+def test_a_writable_log_in_a_read_only_directory_is_still_written(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "audit.jsonl").write_text("")
+    os.chmod(logs, 0o555)
+    try:
+        handler = _handler(logs / "audit.jsonl")
+        _emit(handler, "a", "b", "c")
+    finally:
+        os.chmod(logs, 0o755)
+
+    assert (logs / "audit.jsonl").read_text() == "a\nb\nc\n"
+    assert "Traceback" not in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="flock")
+def test_a_stalled_lock_holder_costs_one_short_wait(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stopped process holding the lock used to cost 1 s per record, on the event loop."""
+    import fcntl
+
+    path = tmp_path / "simul.log"
+    holder = os.open(str(path) + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        handler = _handler(path)
+        started = time.monotonic()
+        _emit(handler, *[f"line {index}" for index in range(20)])
+        elapsed = time.monotonic() - started
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+
+    assert len(path.read_text().splitlines()) == 20
+    assert elapsed < 0.5, elapsed
+    assert capsys.readouterr().err.count("another process holds its lock") == 1
+
+
+def test_a_rotation_that_fails_still_writes_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows a copy another program holds open cannot be renamed; the record was dropped."""
+    path = tmp_path / "audit.jsonl"
+    path.write_text("yesterday\n")
+    yesterday = time.time() - 86400
+    os.utime(path, (yesterday, yesterday))
+
+    def held_open(source: Any, target: Any) -> None:
+        raise PermissionError(13, "The process cannot access the file")
+
+    monkeypatch.setattr(simul_logging.os, "replace", held_open)
+    handler = _handler(path, maxBytes=10)
+
+    _emit(handler, "today")
+
+    assert path.read_text() == "yesterday\ntoday\n"
