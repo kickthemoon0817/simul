@@ -189,8 +189,6 @@ def test_every_unreal_tool_calls_its_session_method_with_accepted_arguments(
     [
         ("import_unreal_usd", "import_usd"),
         ("export_unreal_usd", "export_usd"),
-        ("convert_to_simready", "convert_to_simready"),
-        ("validate_simready_asset", "validate_simready_asset"),
     ],
 )
 def test_usd_and_simready_wrappers_match_their_session_methods(

@@ -241,8 +241,14 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "kinematic": True,
         "make_movable": False,
         "allow_detach": True,
+        "component_name": "Part1",
     },
-    "set_unreal_collision": {"actor_path": ACTOR, "collision_preset": "OverlapAll", "collision_enabled": False},
+    "set_unreal_collision": {
+        "actor_path": ACTOR,
+        "collision_preset": "OverlapAll",
+        "collision_enabled": False,
+        "component_name": "Part1",
+    },
     "apply_unreal_force": {
         "actor_path": ACTOR,
         "force_x": 1.0,
@@ -254,6 +260,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "location_z": 6.0,
         "duration": 2.5,
         "units": "si",
+        "component_name": "Part1",
     },
     "set_unreal_physics_params": {
         "actor_path": ACTOR,
@@ -261,6 +268,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "linear_damping": 0.1,
         "angular_damping": 0.2,
         "enable_gravity": False,
+        "component_name": "Part1",
     },
     "setup_unreal_physics_bulk": {
         "actor_paths": f"{ACTOR}, {PARENT}",
@@ -304,16 +312,6 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "export_options": {"export_sublayers": True},
         "overwrite": True,
     },
-    "convert_to_simready": {
-        "usd_path": "/tmp/in.usd",
-        "output_path": "/tmp/out.usd",
-        "add_physics": False,
-        "add_collision": False,
-        "add_semantic_labels": False,
-        "target_up_axis": "Y",
-        "target_units": "centimeters",
-    },
-    "validate_simready_asset": {"usd_path": "/tmp/in.usd", "checks": "physics, ,scale"},
     "get_unreal_interchange_info": {},
     "batch_unreal_operations": {"operations": BATCH},
     "query_unreal_scene_graph": {
@@ -381,7 +379,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "keep_both_sides": True,
         "space": "local",
     },
-    "validate_unreal_mesh": {"mesh_path": MESH, "checks": "manifold,, normals "},
+    "validate_unreal_mesh": {"mesh_path": MESH, "checks": "manifold,, normals ", "weld": True},
     "convert_unreal_mesh_format": {
         "mesh_path": MESH,
         "target_format": "static_mesh",

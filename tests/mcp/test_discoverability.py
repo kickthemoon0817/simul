@@ -263,14 +263,17 @@ class TestRoutingRuleMatchesRegistry:
 
         assert not unclassifiable, "\n".join(unclassifiable)
 
-    def test_simready_tools_exist_on_both_sides(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Documents why the instructions single out the 'simready' family."""
+    def test_the_simready_tools_are_blender_s(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The 'simready' family has its own routing line. Unreal's two, which only
+        returned UnsupportedOperation, are no longer registered (round-2 audit R2B-12),
+        so on the full registry every one is Blender's."""
         instance = _make_full_server(monkeypatch)
-        descriptions = [
-            t.kwargs.get("description", "") for t in instance.mcp.tools if "simready" in t.name
-        ]
-        assert any("Blender" in desc for desc in descriptions)
-        assert any("Unreal" in desc for desc in descriptions)
+        simready = [t for t in instance.mcp.tools if "simready" in t.name]
+        assert simready
+        assert all("Blender" in t.kwargs.get("description", "") for t in simready)
+        assert "Tools containing 'simready' (SimReady asset helpers) belong to Blender;" in (
+            instance.mcp.instructions
+        )
 
 
 def _macos_default_server(
@@ -310,20 +313,20 @@ class TestSimReadyLine:
         assert [t.name for t in instance.mcp.tools if "simready" in t.name] == []
         assert "simready" not in instance.mcp.instructions.lower()
 
-    def test_the_full_unreal_surface_states_the_line_for_unreal_only(
+    def test_the_full_unreal_surface_has_no_simready_tool_or_line(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Round-2 audit R2B-12: Unreal's convert_to_simready and validate_simready_asset
+        only ever returned UnsupportedOperation, and their unprefixed names read as a
+        general SimReady capability; they are no longer registered."""
         instance = _macos_default_server(monkeypatch, "full")
 
-        assert "convert_to_simready" in instance.mcp.by_name
-        assert (
-            "Tools containing 'simready' (SimReady asset helpers) belong to Unreal;"
-            in instance.mcp.instructions
-        )
-        assert "Blender" not in instance.mcp.instructions
+        assert "import_unreal_usd" in instance.mcp.by_name
+        assert [t.name for t in instance.mcp.tools if "simready" in t.name] == []
+        assert "simready" not in instance.mcp.instructions.lower()
 
     @pytest.mark.parametrize("mode", ["legacy", "auto"])
-    @pytest.mark.parametrize(("surface", "simready"), [("thin", False), ("full", True)])
+    @pytest.mark.parametrize(("surface", "simready"), [("thin", False), ("full", False)])
     def test_the_client_receives_the_instructions_written_after_registration(
         self, monkeypatch: pytest.MonkeyPatch, surface: str, simready: bool, mode: str
     ) -> None:
@@ -349,9 +352,9 @@ class TestSimReadyLine:
     @pytest.mark.parametrize(
         ("blender_surface", "unreal_surface", "owners"),
         [
-            ("thin", "full", ["Unreal"]),
+            ("thin", "full", []),
             ("full", "thin", ["Blender"]),
-            ("full", "full", ["Blender", "Unreal"]),
+            ("full", "full", ["Blender"]),
         ],
     )
     def test_only_the_simready_line_routes_simready_tools(
@@ -385,10 +388,12 @@ class TestSimReadyLine:
 
         routing = instance.mcp.instructions.split("ROUTING")[1]
         claims = [line.strip() for line in routing.splitlines() if "'simready'" in line]
-        assert claims == [
+        expected = (
             "Tools containing 'simready' (SimReady asset helpers) belong to "
             f"{' or '.join(owners)}; each one's description names the runtime it targets."
-        ]
+        )
+        # Unreal registers no SimReady tool since round-2 audit R2B-12.
+        assert claims == ([expected] if owners else [])
 
 
 class TestCapabilitiesReport:

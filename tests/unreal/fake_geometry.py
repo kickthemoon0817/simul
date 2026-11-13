@@ -161,6 +161,7 @@ OPTION_STRUCTS: Dict[str, Dict[str, Any]] = {
     "DegenerateTriangleOptions": {"mode": "REPAIR_OR_DELETE", "min_triangle_area": 0.001,
                                   "min_edge_length": 0.0001},
     "SetStaticMeshCollisionOptions": {"mark_as_customized": True},
+    "WeldEdgesOptions": {"tolerance": 1e-06, "only_unique_pairs": True},
     "CreateNewStaticMeshAssetOptions": {"enable_collision": True, "enable_nanite": False,
                                         "nanite_settings": SimpleNamespace(enabled=False)},
     "CopyMeshToAssetOptions": {"apply_nanite_settings": False, "new_nanite_settings": None},
@@ -438,6 +439,7 @@ class FakeEditor:
         self.fail: Dict[str, str] = {}
         self.warn: Dict[str, str] = {}
         self.calls: List[Tuple[str, bool]] = []
+        self.weld_tolerances: List[float] = []
         self.arguments: Dict[str, Tuple[Any, ...]] = {}
         self.transactions: List[str] = []
         self.events: List[Tuple[Any, ...]] = []
@@ -670,6 +672,15 @@ class FakeEditor:
             mesh.stats["tris"] -= mesh.stats["degenerate"]
             return mesh
 
+        def weld_edges(mesh, options):
+            # A mesh split at its hard edges ("seams" open edges, "faces" pieces) is whole again.
+            editor.weld_tolerances.append(options.tolerance)
+            mesh.stats["open_edges"] -= mesh.stats.get("seams", 0)
+            mesh.stats["components"] = 1 if mesh.stats.get("seams") else mesh.stats["components"]
+            # Welding drops the merged vertices' IDs, leaving gaps (UE 5.7.4).
+            mesh.stats["vertex_gaps"] = True
+            return mesh
+
         def select_all(mesh, kind):
             return mesh, Selection(kind, mesh.stats["tris"], "all")
 
@@ -835,6 +846,7 @@ class FakeEditor:
             "GeometryScript_MeshRepair": SimpleNamespace(
                 split_mesh_bowties=gs("split_mesh_bowties", split_bowties),
                 repair_mesh_degenerate_geometry=gs("repair_mesh_degenerate_geometry", repair_degenerates),
+                weld_mesh_edges=gs("weld_mesh_edges", weld_edges),
             ),
             "GeometryScript_Remeshing": SimpleNamespace(apply_uniform_remesh=gs("apply_uniform_remesh", remesh)),
             "GeometryScript_UVs": SimpleNamespace(

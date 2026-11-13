@@ -150,6 +150,10 @@ PLUGIN_UNAVAILABLE = "PluginUnavailable"
 #: The Unreal body cannot simulate as asked; ``details.problems`` lists why.
 INCOMPATIBLE_BODY = "IncompatibleBody"
 
+#: The Unreal actor has no copy in the running simulation (spawned after it
+#: started, destroyed in it, or in a World Partition cell it has not streamed).
+NOT_IN_SIMULATION = "NotInSimulation"
+
 #: The Unreal editor exited while ``simul unreal setup`` waited for it.
 EDITOR_EXITED = "EditorExited"
 
@@ -238,6 +242,7 @@ DOMAIN_TYPES: Tuple[str, ...] = (
     SPAWN_ERROR,
     PLUGIN_UNAVAILABLE,
     INCOMPATIBLE_BODY,
+    NOT_IN_SIMULATION,
     EDITOR_EXITED,
     BRIDGE_UNAVAILABLE,
     BRIDGE_PROTOCOL_ERROR,
