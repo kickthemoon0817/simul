@@ -5,14 +5,24 @@ Instance discovery, routing, and session management for the Simul MCP server.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Dict, List, Optional
 
 from fastmcp.tools import ToolResult
+from pydantic import Field
 
 from .. import error_types
 from ..schemas.common import ErrorResponse
 from ..session_manager import ClaimStoreError, claim_is_orphaned
 from ._helpers import with_param_descriptions
+
+#: Longest agent label and purpose a claim takes. Both are shown to every
+#: client, and the label is kept in every usage and audit record of its
+#: session, so an unbounded one would make every later record that large.
+MAX_AGENT_LABEL_CHARS = 128
+MAX_PURPOSE_CHARS = 1000
+AgentLabel = Annotated[Optional[str], Field(max_length=MAX_AGENT_LABEL_CHARS)]
+Purpose = Annotated[str, Field(max_length=MAX_PURPOSE_CHARS)]
+OptionalPurpose = Annotated[Optional[str], Field(max_length=MAX_PURPOSE_CHARS)]
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -183,8 +193,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
     @with_param_descriptions()
     async def set_active_isaac_instance(
         instance_name: str,
-        purpose: Optional[str] = None,
-        agent_id: Optional[str] = None,
+        purpose: OptionalPurpose = None,
+        agent_id: AgentLabel = None,
     ) -> ToolResult:
         """
         Switch the active Isaac Sim instance and optionally register a session.
@@ -310,8 +320,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
     )
     @with_param_descriptions()
     async def claim_isaac_instance(
-        purpose: str,
-        agent_id: Optional[str] = None,
+        purpose: Purpose,
+        agent_id: AgentLabel = None,
     ) -> ToolResult:
         """
         Register a purpose on the current active instance.
@@ -396,7 +406,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
     )
     @with_param_descriptions()
     async def release_isaac_instance(
-        agent_id: Optional[str] = None,
+        agent_id: AgentLabel = None,
     ) -> ToolResult:
         """
         Release the current agent's session.

@@ -315,10 +315,12 @@ class TestSetupWarningsGoToStderr:
     ) -> None:
         from simul.logging import _ensure_log_directories
 
-        def refuse(self: Path, *args: object, **kwargs: object) -> None:
+        def refuse(*args: object, **kwargs: object) -> None:
             raise PermissionError("read-only filesystem")
 
+        # Log directories are created one level at a time, each 0700.
         monkeypatch.setattr(Path, "mkdir", refuse)
+        monkeypatch.setattr(os, "mkdir", refuse)
         config = {"handlers": {"file": {"filename": str(tmp_path / "missing" / "simul.log")}}}
 
         _ensure_log_directories(config)
