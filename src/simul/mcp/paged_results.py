@@ -14,8 +14,14 @@ rewrites paging fields only for what is declared. A result from a tool with no
 declaration is still cut to fit, but its ``next_offset`` is left alone and the
 cut is reported as one later pages will not repeat.
 
+A tool whose bulk is one mapping rather than a list (``get_prim_info``'s
+``attributes``, keyed by name) declares that mapping in ``BULK_FIELDS``. The
+budget then cuts it, to the entries that fit, before it looks at any list, so
+the small lists beside it (the prim's applied API schemas) are not emptied
+in its place.
+
 The envelope names the tool whose result is being sent (``tool_result``);
-the budget reads it with ``current_paging``.
+the budget reads it with ``current_paging`` and ``current_bulk``.
 """
 
 from __future__ import annotations
@@ -105,6 +111,30 @@ PAGED_RESULTS: Dict[str, PagedList] = {
     ),
 }
 
+
+@dataclass(frozen=True)
+class BulkField:
+    """The mapping that carries a tool's result, cut first when the result is too large.
+
+    Attributes:
+        field: The top-level key of the mapping (``"attributes"``).
+        hint: How to ask for the entries the cut leaves out, named in the
+            cut's record.
+    """
+
+    field: str
+    hint: str
+
+
+#: Tools whose result is mostly one mapping, by registered tool name.
+BULK_FIELDS: Dict[str, BulkField] = {
+    "get_prim_info": BulkField(
+        "attributes",
+        "Pass attribute_filter (glob patterns such as physics:* or xformOp:*) to read the "
+        "attributes left out, or a smaller array_preview to fit more of them.",
+    ),
+}
+
 _CURRENT_TOOL: ContextVar[Optional[str]] = ContextVar("simul_result_tool", default=None)
 
 
@@ -133,4 +163,25 @@ def current_paging() -> Optional[PagedList]:
     return paging_for(_CURRENT_TOOL.get())
 
 
-__all__ = ["PAGED_RESULTS", "PagedList", "current_paging", "current_tool", "paging_for", "tool_result"]
+def bulk_for(tool_name: Optional[str]) -> Optional[BulkField]:
+    """The bulk mapping ``tool_name`` declares, or None."""
+    return BULK_FIELDS.get(tool_name) if tool_name else None
+
+
+def current_bulk() -> Optional[BulkField]:
+    """The bulk mapping of the tool named by the enclosing ``tool_result``."""
+    return bulk_for(_CURRENT_TOOL.get())
+
+
+__all__ = [
+    "BULK_FIELDS",
+    "BulkField",
+    "PAGED_RESULTS",
+    "PagedList",
+    "bulk_for",
+    "current_bulk",
+    "current_paging",
+    "current_tool",
+    "paging_for",
+    "tool_result",
+]

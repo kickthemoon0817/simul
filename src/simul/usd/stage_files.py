@@ -49,6 +49,27 @@ EXPORT_FORMATS = (".usda", ".usdc", ".usd", ".usdz")
 Stamp = Optional[Tuple[int, int, int]]
 # A scheme such as omniverse:// or https:// ; a Windows drive letter is not one.
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")
+# This module's own file format arguments, as Sdf writes them into an identifier.
+_OWN_ARG = rf"(?:{STAGE_ARG}|{CHECK_ARG})=[^&:@'\"\s]*"
+_OWN_ARG_LATER = re.compile(rf"&{_OWN_ARG}")
+_OWN_ARG_FIRST = re.compile(rf"(?<=:SDF_FORMAT_ARGS:){_OWN_ARG}&")
+_OWN_ARG_ONLY = re.compile(rf":SDF_FORMAT_ARGS:{_OWN_ARG}")
+
+
+def public_identifier(text: str) -> str:
+    """``text`` with this module's file format arguments taken out of every layer identifier in it.
+
+    A private root layer's identifier is the file path plus
+    ``:SDF_FORMAT_ARGS:simul_stage=<hex>`` (a throwaway check copy's,
+    ``simul_check=<hex>``). Those are the session's bookkeeping, not part of
+    the file a caller named, so whatever a caller sees (a layer in a result,
+    a pxr message quoting one) names the file. Other format arguments stay.
+    """
+    if "SDF_FORMAT_ARGS" not in text:
+        return text
+    text = _OWN_ARG_LATER.sub("", text)
+    text = _OWN_ARG_FIRST.sub("", text)
+    return _OWN_ARG_ONLY.sub("", text)
 
 
 def open_private_root(identifier: str) -> Sdf.Layer:

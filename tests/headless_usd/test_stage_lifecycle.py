@@ -968,6 +968,41 @@ class TestValidationReadsTheDisk:
 
         assert len(calls) == 1 and [issue.code for issue in stale.issues] == ["OpenFailed"]
 
+    def test_the_fresh_process_lets_unreal_content_paths_through(self, session, tmp_path, monkeypatch) -> None:
+        """An Unreal export's /Engine/... material paths pass the sandbox in the child as in the server."""
+        (tmp_path / "Cube.usda").write_text(
+            '#usda 1.0\n(\n    defaultPrim = "Cube"\n)\ndef Xform "Cube"\n{\n    def Shader "UnrealShader"\n    {\n'
+            '        uniform token info:implementationSource = "sourceAsset"\n'
+            "        uniform asset info:unreal:sourceAsset = "
+            "@/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@\n    }\n}\n"
+        )
+        (tmp_path / "level.usda").write_text(
+            '#usda 1.0\n(\n    defaultPrim = "Root"\n    metersPerUnit = 0.01\n    upAxis = "Z"\n)\n'
+            'def Xform "Root"\n{\n    def "Cube" (\n        prepend references = @./Cube.usda@\n    )\n'
+            "    {\n    }\n}\n"
+        )
+        policy = PathPolicy(enabled=True, allowed_paths=[str(tmp_path)])
+        session.load_stage_or_raise(tmp_path / "level.usda", sandbox=CompositionSandbox(policy))
+        _touch_later(tmp_path / "Cube.usda")  # the held copy is now older than the file
+        real_run, runs = validation.subprocess.run, []
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            runs.append(args)
+            return real_run(*args, **kwargs)
+
+        monkeypatch.setattr(validation.subprocess, "run", spy)
+
+        report = validation.validate_usd_file(
+            str(tmp_path / "level.usda"),
+            Settings().usd,
+            sandbox=CompositionSandbox(policy),
+            layer_is_current=session.layer_is_current,
+        )
+
+        assert len(runs) == 1
+        assert report.is_valid, [(issue.code, issue.message) for issue in report.issues if issue.severity == "error"]
+        assert report.files and report.files[0] == str((tmp_path / "level.usda").resolve())
+
     def test_the_child_gets_the_sandbox_options(self, session, tmp_path, monkeypatch) -> None:
         import pickle
         import subprocess

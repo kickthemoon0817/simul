@@ -1,0 +1,62 @@
+name: Fresh dependencies
+
+# The CI workflow installs from uv.lock, but users install with
+# `uv tool install "git+https://github.com/kickthemoon0817/simul"` or
+# `pip install "git+…"`, which resolve the newest releases pyproject's
+# ranges allow. This workflow installs the same way, so an upstream release
+# that breaks simul inside those ranges fails here: typer 0.29 removed
+# Option(click_type=) and broke every fresh install of 0.1.12 while the
+# locked CI stayed green. The daily run catches releases between pushes.
+#
+# Security note: like ci.yml, this workflow interpolates only the
+# matrix-defined Python version into run: blocks, never user-controlled
+# fields.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: fresh-deps-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fresh-install:
+    name: Fresh install (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39  # v3.2.4
+
+      - name: Install without the lock file, as users do
+        run: |
+          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/fresh"
+          uv pip install --python "$RUNNER_TEMP/fresh/bin/python" ".[dev]"
+          uv pip list --python "$RUNNER_TEMP/fresh/bin/python"
+
+      - name: The CLI starts
+        run: |
+          "$RUNNER_TEMP/fresh/bin/simul" --json info
+
+      - name: Unit tests against the newest allowed dependencies
+        run: |
+          "$RUNNER_TEMP/fresh/bin/python" -m pytest tests/ --no-cov -q

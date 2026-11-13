@@ -1808,19 +1808,6 @@ def _outside_project_refusal(path: str, action: str, hint: str) -> Dict[str, Any
     }
 
 
-#: An Unreal object path as Unreal's USD exporter writes one into an asset-valued
-#: attribute: ``/Engine``, ``/Game`` or ``/Script``, folders, then
-#: ``<Name>.<Name>`` (a package and its asset of the same name).
-_UNREAL_OBJECT_PATH = re.compile(r"^/(?:Engine|Game|Script)(?:/[A-Za-z0-9_ -]+)*/([A-Za-z0-9_-]+)\.\1$")
-
-#: Suffixes that make ``<Name>.<Name>`` a file name rather than an object path.
-_FILE_SUFFIXES = frozenset(
-    {"usd", "usda", "usdc", "usdz", "png", "jpg", "jpeg", "exr", "tga", "tif", "tiff", "bmp", "hdr", "dds",
-     "tx", "psd", "mdl", "mtlx", "abc", "vdb", "obj", "fbx", "gltf", "glb", "bin", "json", "txt", "uasset",
-     "umap", "wav", "mp4", "mov"}
-)
-
-
 def _usd_import_options(options: Any) -> Tuple[Dict[str, Any], List[str]]:
     """The USD importer settings for ``options``, and what is wrong with them.
 
@@ -6455,27 +6442,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 },
             }
 
-    @staticmethod
-    def _names_unreal_content(entry: Dict[str, Any]) -> bool:
-        """Whether a path the composition check refused is an Unreal object path, which reads no file.
-
-        Unreal's USD exporter writes the source material of each mesh as an
-        asset-valued attribute holding a content path,
-        ``info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@``,
-        and its importer loads that object from the editor's content; it opens
-        no file by the name. Only such a value passes: an asset-valued
-        attribute (not a sublayer, reference, payload or clip) holding
-        ``/Engine``, ``/Game`` or ``/Script``, folders and
-        ``<Name>.<Name>``, where the suffix is no file extension
-        (``/Engine/x.usda`` stays a file), naming no file on disk.
-        """
-        if entry.get("kind") != "asset":
-            return False
-        match = _UNREAL_OBJECT_PATH.match(str(entry.get("asset_path", "")))
-        if match is None or match.group(1).lower() in _FILE_SUFFIXES:
-            return False
-        return not os.path.lexists(str(entry.get("location", "")))
-
     def _check_usd_composition(self, usd_path: str) -> None:
         """Refuse a USD file whose composition draws on files outside the sandbox.
 
@@ -6485,10 +6451,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         outside texture, and the editor read it. ``CompositionSandbox``
         walks the layers from the root the way composition finds them (every
         variant, value clips and asset-valued attributes too) before the file
-        reaches the editor; a refused file is never opened. A file pxr cannot
-        open here is refused too, since nothing then vouches for what it
-        names; a file the simul host does not have is left to the editor to
-        report.
+        reaches the editor; a refused file is never opened. An Unreal content
+        path Unreal's own exporter writes into an asset-valued attribute
+        (``info:unreal:sourceAsset = @/Engine/.../Name.Name@``) names an
+        editor object, not a file, and the sandbox lets it through
+        (``simul.usd.sandbox.is_unreal_content_path``), as the headless USD
+        tools do. A file pxr cannot open here is refused too, since nothing
+        then vouches for what it names; a file the simul host does not have
+        is left to the editor to report.
 
         Raises:
             SandboxDenied: With ``details.outside_sandbox`` (each path, its
@@ -6522,20 +6492,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         try:
             usd_sandbox.CompositionSandbox(self._path_policy).check_layers(layer)
         except SandboxDenied as exc:
-            entries = list(exc.details.get("outside_sandbox", []))
-            files = [entry for entry in entries if not self._names_unreal_content(entry)]
-            listed_all = exc.details.get("outside_count", len(entries)) == len(entries)
-            if not files and listed_all:
-                return  # only Unreal content paths, as in Unreal's own USD exports
-            if listed_all and len(files) < len(entries):
-                exc.details["outside_sandbox"] = files
-                exc.details["outside_count"] = len(files)
-                shown = ", ".join(entry["location"] for entry in files[:3])
-                more = f" and {len(files) - 3} more" if len(files) > 3 else ""
-                exc.error_message = (
-                    f"USD file {usd_path} draws on {len(files)} file(s) outside the sandbox: {shown}{more}"
-                )
-                exc.args = (exc.error_message,)
             exc.details["referenced_by"] = usd_path
             exc.details["references_outside"] = list(
                 dict.fromkeys(entry["location"] for entry in exc.details.get("outside_sandbox", []))
