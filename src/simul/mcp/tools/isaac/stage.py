@@ -968,7 +968,15 @@ class StageAssetMixin:
         report = await self._execute_json_script(script, timeout_seconds=self._heavy_script_timeout())
         if not report.get("success"):
             units["physics"] = dict(pending, applied=False, failure=report.get("error"))
-            if report.get("error_type") in (error_types.TIMEOUT_ERROR, error_types.CONNECTION_ERROR):
+            if not apply:
+                # A count-only pass (correct_units=False) writes nothing, so
+                # the values are in asset units whether or not it finished.
+                warning = (
+                    "The asset was referenced, but the physics-units count did not complete ("
+                    + str(report.get("error")) + "); its physics values were left in asset units, "
+                    "which PhysX reads as stage units, and how many there are is unknown."
+                )
+            elif report.get("error_type") in (error_types.TIMEOUT_ERROR, error_types.CONNECTION_ERROR):
                 # Kit runs a sent script to the end whether or not its reply
                 # arrives, so the values may yet be rescaled.
                 warning = (

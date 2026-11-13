@@ -136,6 +136,37 @@ def test_a_physics_pass_that_does_not_answer_may_still_finish() -> None:
     assert "may still finish in Kit" in result["warning"]
 
 
+@pytest.mark.parametrize("second", ["timeout", "error"])
+def test_a_count_only_pass_that_fails_says_the_values_stayed_in_asset_units(second: str) -> None:
+    """correct_units=False only counts: nothing is written whether or not it finishes."""
+    pending = {"pending": "/World/A/Robot", "applied": False, "length_ratio": 0.01, "mass_ratio": 1.0}
+    replies: List[Dict[str, Any]] = [{"imported": True, "units": {"notes": [], "physics": pending}}]
+    if second == "error":
+        replies.append({"error": "socket closed"})
+    tools, captured = _recording_tools(_settings(sandbox=False), replies)
+    if second == "timeout":
+        record = tools._client.execute.side_effect
+
+        def _second_times_out(code: str, **kwargs: Any) -> Any:
+            if captured:
+                captured.append(code)
+                raise TimeoutError("Isaac Sim did not answer in time")
+            return record(code, **kwargs)
+
+        tools._client.execute.side_effect = _second_times_out
+
+    result = asyncio.run(tools.add_isaac_reference(
+        prim_path="/World/A", reference_path="/tmp/simul-work/robot.usda", correct_units=False
+    ))
+
+    assert len(captured) == 2 and "apply = False" in captured[1]
+    assert result["units"]["physics"]["applied"] is False
+    assert "physics-units count did not complete" in result["warning"]
+    assert "left in asset units" in result["warning"]
+    assert "may still finish" not in result["warning"]
+    assert "may still be in asset units" not in result["warning"]
+
+
 def _value(stage: Usd.Stage, path: str, name: str) -> Any:
     return stage.GetPrimAtPath(path).GetAttribute(name).Get()
 
