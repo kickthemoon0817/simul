@@ -13,13 +13,14 @@ import time
 from typing import Any, Dict, Tuple
 
 import pytest
+
 from simul.adapters import _unreal_mesh_scripts as mesh_scripts
 from simul.adapters import unreal_runtime
 from simul.adapters._unreal_errors import UnrealTimeoutError
 from simul.adapters.unreal_runtime import UnrealRuntimeSession
 from simul.mcp.registration._reg_unreal import InvalidArgument, request_model_for, session_arguments
 from simul.mcp.registration._unreal_tools import UNREAL_TOOLS
-from tests.unreal.fake_geometry import LEVEL, LEVEL_PACKAGE, DynamicMesh, FakeEditor, level_editor
+from tests.unreal.fake_geometry import LEVEL, LEVEL_PACKAGE, DynamicMesh, FakeEditor, level_editor, transform
 
 BODY, BALL, BIG, CRATE, LIGHT = (LEVEL + name for name in ("Body", "Ball", "Big", "Crate", "Light"))
 
@@ -34,7 +35,11 @@ TOOLS: Dict[str, Tuple[str, Dict[str, Any], Any]] = {
     ),
     "compute_unreal_convex_hull": ("compute_convex_hull", {"mesh_path": BALL}, None),
     "decompose_unreal_convex_hull": ("decompose_convex_hull", {"mesh_path": BALL, "max_hulls": 3}, None),
-    "edit_unreal_mesh_topology": ("edit_mesh_topology", {"mesh_path": BODY, "operation": "extrude_faces"}, BODY),
+    "edit_unreal_mesh_topology": (
+        "edit_mesh_topology",
+        {"mesh_path": BODY, "operation": "extrude_faces", "face_selection": "normal:0,0,1"},
+        BODY,
+    ),
     "subdivide_unreal_mesh": ("subdivide_mesh", {"mesh_path": BODY, "level": 1}, BODY),
     "simplify_unreal_mesh": ("simplify_mesh", {"mesh_path": BALL, "target_percentage": 0.5}, BALL),
     "cut_unreal_mesh_plane": (
@@ -60,12 +65,12 @@ SPECS = {spec.name: spec for spec in UNREAL_TOOLS}
 
 def _session(editor: FakeEditor) -> UnrealRuntimeSession:
     session = UnrealRuntimeSession()
-    session.timeouts = []  # type: ignore[attr-defined]
 
     async def execute(code: str, mode: str = "ExecuteFile", timeout: Any = None) -> Dict[str, Any]:
         session.timeouts.append(timeout)  # type: ignore[attr-defined]
         return editor.run(code)
 
+    session.timeouts = []  # type: ignore[attr-defined]
     session._execute_python = execute  # type: ignore[method-assign]
     return session
 
@@ -107,7 +112,7 @@ def test_generate_spawns_in_one_transaction(editor: FakeEditor) -> None:
                     dimensions={"width": 200.0, "height": 100.0, "depth": 50.0}, location=[0, 100, 0])
     actor = editor.objects[payload["actor_path"]]
     assert editor.transactions == ["simul: generate mesh box"]
-    assert actor.location.y == 100
+    assert actor.get_actor_location().y == 100
     assert actor.dynamic_mesh_component.get_dynamic_mesh().stats["volume"] == 200 * 100 * 50
     assert (payload["triangle_count"], payload["vertex_count"]) == (12, 8)
 
@@ -184,9 +189,7 @@ def test_a_geometry_script_error_fails_the_tool_and_changes_nothing(editor: Fake
 
 @pytest.mark.parametrize("tool", ["compute_unreal_convex_hull", "decompose_unreal_convex_hull"])
 def test_a_failed_spawning_tool_spawns_nothing(editor: FakeEditor, tool: str) -> None:
-    function = {"compute_unreal_convex_hull": "compute_mesh_convex_hull",
-                "decompose_unreal_convex_hull": "compute_mesh_convex_decomposition"}[tool]
-    editor.fail[function] = "Hull Computation Failed"
+    editor.fail["generate_collision_from_mesh"] = "GenerateCollisionFromMesh: no shapes"
     payload = _call(editor, tool)
     assert (payload["success"], payload["error_type"]) == (False, "EngineError")
     assert editor.spawned == 0 and editor.transactions == []
@@ -308,9 +311,9 @@ def test_a_missing_uv_channel_is_refused(editor: FakeEditor) -> None:
 
 
 def test_hull_reports_volumes(editor: FakeEditor) -> None:
-    payload = _call(editor, "compute_unreal_convex_hull")
-    assert payload["volume_ratio"] == pytest.approx(1.25)
-    assert payload["hull_volume"] == pytest.approx(payload["source_volume"] * 1.25)
+    payload = _call(editor, "compute_unreal_convex_hull", mesh_path=BODY)
+    assert payload["volume_ratio"] == pytest.approx(1.1)
+    assert payload["hull_volume"] == pytest.approx(payload["source_volume"] * 1.1)
     editor.objects[BALL].dynamic_mesh_component.get_dynamic_mesh().stats["open_edges"] = 4
     open_source = _call(editor, "compute_unreal_convex_hull")
     assert open_source["source_volume"] is None and open_source["volume_ratio"] is None
@@ -327,6 +330,7 @@ def test_cut_reports_pieces_and_fill(editor: FakeEditor) -> None:
     filled = _call(editor, "cut_unreal_mesh_plane")
     assert filled["pieces"] == [BODY]
     assert filled["cut_faces_added"] == 6
+    assert filled["removed_triangle_count"] == 12
     unfilled = _call(level_editor(), "cut_unreal_mesh_plane", fill_holes=False)
     assert unfilled["cut_faces_added"] == 0
 
@@ -340,11 +344,10 @@ def test_validation_unwraps_out_parameter_tuples(editor: FakeEditor) -> None:
     """get_num_open_border_loops returns (count, ambiguous) on UE 5.6 and 5.7."""
     mesh = editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh()
     mesh.stats.update(open_edges=4, open_loops=1)
-    payload = _call(editor, "validate_unreal_mesh")
+    payload = _call(editor, "validate_unreal_mesh", checks=["closed"])
     assert payload["is_valid"] is False
-    assert payload["checks"] == {"watertight": False, "compact": True, "has_normals": True}
-    assert (payload["open_border_edges"], payload["open_border_loops"]) == (4, 1)
-    assert payload["issues"] == ["4 open border edges in 1 open border loops"]
+    assert payload["checks"] == {"closed": {"passed": False, "count": 4, "detail": "4 open border edges in 1 loops"}}
+    assert payload["issues"] == ["closed: 4 open border edges in 1 loops"]
 
 
 def test_conversion_places_a_copy_of_the_asset(editor: FakeEditor) -> None:
@@ -376,9 +379,7 @@ def test_conversion_to_a_static_mesh_is_refused_honestly(editor: FakeEditor) -> 
     ("tool", "overrides", "code"),
     [
         ("generate_unreal_mesh_primitive", {"primitive_type": "pyramid"}, "UNKNOWN_PRIMITIVE"),
-        # Refused as not implemented until a later change builds it, so not offered either.
-        ("generate_unreal_mesh_primitive", {"primitive_type": "torus"}, "UNKNOWN_PRIMITIVE"),
-        ("edit_unreal_mesh_topology", {"operation": "bogus_op"}, "UNKNOWN_OPERATION"),
+        ("edit_unreal_mesh_topology", {"operation": "loop_cut"}, "UNKNOWN_OPERATION"),
         ("convert_unreal_mesh_format", {"target_format": "fbx"}, "UNKNOWN_FORMAT"),
         ("compute_unreal_mesh_uv", {"method": "bogus"}, "UNKNOWN_UV_METHOD"),
     ],
@@ -389,7 +390,6 @@ def test_unknown_choices_are_refused_before_the_editor_is_asked(
     payload = _call(editor, tool, **overrides)
     assert (payload["success"], payload["error_type"]) == (False, "ValidationError")
     assert payload["details"]["code"] == code
-    assert "torus" not in payload["details"]["choices"]
     assert editor.calls == [] and editor.events == []
 
 
@@ -436,6 +436,416 @@ def test_scripts_bind_no_unreal_object_at_module_level(editor: FakeEditor, tool:
     assert leaked == set()
 
 
+# ---------------------------------------------------------------------------
+# What the tools compute (PR 2: B5, B6, B13, M8-M11)
+# ---------------------------------------------------------------------------
+
+
+def test_box_dimensions_follow_unreal_axes(editor: FakeEditor) -> None:
+    """height used to land on Y, so a 200 x 100 x 50 box came out 50 cm tall (M10)."""
+    payload = _call(editor, "generate_unreal_mesh_primitive",
+                    dimensions={"width": 200, "depth": 100, "height": 50})
+    args = editor.arguments["append_box"]
+    assert args[3:6] == (200.0, 100.0, 50.0)  # dimension_x, dimension_y, dimension_z
+    assert args[1].polygroup_mode == "PER_QUAD"
+    assert payload["dimensions"] == {"width": 200.0, "depth": 100.0, "height": 50.0}
+    assert (payload["bounds_min"], payload["bounds_max"]) == ([-100.0, -50.0, -25.0], [100.0, 50.0, 25.0])
+
+
+def test_capsule_and_torus_take_their_own_dimensions(editor: FakeEditor) -> None:
+    """hemisphere_height also set the step count, and torus always raised TypeError (M10)."""
+    _call(editor, "generate_unreal_mesh_primitive", primitive_type="capsule",
+          dimensions={"radius": 30, "length": 400}, segments=32)
+    args = editor.arguments["append_capsule"]
+    assert args[3:8] == (30.0, 400.0, 8, 32, 0)  # radius, line length, hemisphere, circle, segment steps
+    torus = _call(editor, "generate_unreal_mesh_primitive", primitive_type="torus",
+                  dimensions={"major_radius": 60, "minor_radius": 15})
+    args = editor.arguments["append_torus"]
+    assert args[4:8] == (60.0, 15.0, 32, 16)
+    assert torus["bounds_max"] == [75.0, 75.0, 15.0]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"primitive_type": "capsule", "dimensions": {"hemisphere_height": 50}}, "UNKNOWN_DIMENSION"),
+        ({"dimensions": {"width": 0}}, "INVALID_DIMENSION"),
+        ({"dimensions": {"width": -5}}, "INVALID_DIMENSION"),
+        ({"dimensions": {"width": "wide"}}, "INVALID_DIMENSION"),
+        ({"primitive_type": "cone", "dimensions": {"top_radius": 60}}, "INVALID_DIMENSION"),
+        ({"primitive_type": "torus", "dimensions": {"minor_radius": 80}}, "INVALID_DIMENSION"),
+        ({"segments": 2}, "INVALID_SEGMENTS"),
+        ({"segments": 513}, "INVALID_SEGMENTS"),
+    ],
+)
+def test_impossible_primitives_are_refused(editor: FakeEditor, overrides: Dict[str, Any], code: str) -> None:
+    """Zero and negative sizes were accepted, segments clamped silently and unbounded (M10)."""
+    payload = _call(editor, "generate_unreal_mesh_primitive", **overrides)
+    assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", code)
+    assert editor.calls == []
+
+
+def test_a_boolean_uses_both_world_transforms(editor: FakeEditor) -> None:
+    """Both meshes used identity transforms, so a cutter at the box's face carved its centre (B5)."""
+    editor.objects[BODY].transform = transform((0, 1000, 0), yaw=90, scale=(2, 1, 1))
+    editor.objects[BALL].transform = transform((100, 1000, 0))
+    payload = _call(editor, "apply_unreal_mesh_boolean", operation="difference")
+    target, target_xf, tool, tool_xf, operation, options = editor.arguments["apply_mesh_boolean"]
+    assert target_xf is editor.objects[BODY].transform and tool_xf is editor.objects[BALL].transform
+    assert options.output_transform_space == "TARGET_TRANSFORM_SPACE"
+    assert operation == "SUBTRACT"
+    assert (payload["operation"], payload["requested_operation"]) == ("subtract", "difference")
+    assert payload["result_volume"] < payload["previous_volume"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"operation": "xor"}, "UNKNOWN_OPERATION"),
+        ({"tool_mesh_path": BODY}, "SAME_ACTOR"),
+    ],
+)
+def test_a_boolean_never_falls_back_to_union(editor: FakeEditor, overrides: Dict[str, Any], code: str) -> None:
+    """An unknown operation used to run a union reported as asked (B5)."""
+    payload = _call(editor, "apply_unreal_mesh_boolean", **overrides)
+    assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", code)
+    assert ("apply_mesh_boolean", True) not in editor.calls
+
+
+def test_a_hull_actor_takes_the_source_transform_and_is_collision(editor: FakeEditor) -> None:
+    """It got the location only, no simplification and no collision shape (B6)."""
+    editor.objects[BALL].transform = transform((0, 2000, 0), yaw=90, scale=(2, 1, 1))
+    payload = _call(editor, "compute_unreal_convex_hull", max_faces=64)
+    hull = editor.objects[payload["hull_actor_path"]]
+    assert hull.get_actor_transform() is editor.objects[BALL].transform
+    options = editor.arguments["generate_collision_from_mesh"][1]
+    assert (options.method, options.max_convex_hulls_per_mesh, options.convex_hull_target_face_count) == (
+        "CONVEX_HULLS", 1, 64)
+    assert options.simplify_hulls is True and options.emit_transaction is False
+    assert not (options.auto_detect_spheres or options.auto_detect_boxes or options.auto_detect_capsules)
+    assert payload["collision"] == [{"actor_path": hull.path, "collision_shape_count": 1}]
+    assert editor.transactions == ["simul: convex hull of Ball"]
+
+
+def test_a_hull_can_be_the_source_collision(editor: FakeEditor) -> None:
+    payload = _call(editor, "compute_unreal_convex_hull", output="collision")
+    assert payload["hull_actor_path"] is None and editor.spawned == 0
+    assert payload["collision"] == [{"actor_path": BALL, "collision_shape_count": 1}]
+    assert BALL in editor.modified and len(editor.transactions) == 1
+    both = _call(level_editor(), "compute_unreal_convex_hull", output="both")
+    assert [c["actor_path"] for c in both["collision"]] == [both["hull_actor_path"], BALL]
+
+
+def test_new_collision_reaches_the_physics_at_once(editor: FakeEditor) -> None:
+    """After Redo a hull was in the BodySetup but traces missed it until the physics was rebuilt (#338 review)."""
+    _call(editor, "compute_unreal_convex_hull", output="collision")
+    collided = editor.events.index(("set_collision", BALL, 1))
+    assert ("update_collision", BALL, False) in editor.events[collided:]
+
+
+def test_an_exact_hull_is_not_simplified(editor: FakeEditor) -> None:
+    _call(editor, "compute_unreal_convex_hull", max_faces=0)
+    assert editor.arguments["generate_collision_from_mesh"][1].simplify_hulls is False
+
+
+def test_decomposition_maps_its_limits_and_detects_no_shapes(editor: FakeEditor) -> None:
+    """max_vertices_per_hull was passed as a face count, and spheres came back as a 100 cm cube (B6, M8)."""
+    payload = _call(editor, "decompose_unreal_convex_hull", max_hulls=5, max_vertices_per_hull=16,
+                    error_tolerance=2.5, min_part_thickness=0.5)
+    options = editor.arguments["generate_collision_from_mesh"][1]
+    assert options.max_convex_hulls_per_mesh == 5
+    assert options.convex_hull_target_face_count == 2 * 16 - 4
+    assert options.convex_decomposition_error_tolerance == 2.5
+    assert options.convex_decomposition_min_part_thickness == 0.5
+    assert not (options.auto_detect_spheres or options.auto_detect_boxes or options.auto_detect_capsules)
+    assert payload["hull_count"] == 5 == len(payload["hulls"])
+    assert payload["collision"][0]["collision_shape_count"] == 5
+
+
+def test_an_empty_decomposition_is_an_error(editor: FakeEditor) -> None:
+    editor.objects[BALL].dynamic_mesh_component.get_dynamic_mesh().stats["convex_parts"] = 0
+    payload = _call(editor, "decompose_unreal_convex_hull")
+    assert (payload["error_type"], payload["details"]["code"]) == ("EngineError", "EMPTY_RESULT")
+    assert editor.spawned == 0 and editor.transactions == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"max_hulls": 0}, "INVALID_LIMIT"),
+        ({"max_vertices_per_hull": 3}, "INVALID_LIMIT"),
+        ({"error_tolerance": -1.0}, "INVALID_LIMIT"),
+        ({"output": "asset"}, "UNKNOWN_OUTPUT"),
+    ],
+)
+def test_decomposition_limits_are_checked(editor: FakeEditor, overrides: Dict[str, Any], code: str) -> None:
+    payload = _call(editor, "decompose_unreal_convex_hull", **overrides)
+    assert payload["details"]["code"] == code and editor.calls == []
+
+
+def test_a_world_plane_is_cut_in_the_mesh_space(editor: FakeEditor) -> None:
+    """The plane was taken in mesh-local space, so a world plane through the actor cut nothing (B13)."""
+    editor.objects[BODY].transform = transform((100, 200, 300), yaw=90, scale=(2, 1, 1))
+    payload = _call(editor, "cut_unreal_mesh_plane", plane_origin=[100, 210, 300], plane_normal=[0, 1, 0])
+    # World +Y is the actor's +X once its 90-degree yaw is undone; X is scaled by 2.
+    assert payload["plane_origin_local"] == pytest.approx([5.0, 0.0, 0.0], abs=1e-9)
+    assert payload["plane_normal_local"] == pytest.approx([1.0, 0.0, 0.0], abs=1e-9)
+    local = _call(level_editor(), "cut_unreal_mesh_plane", plane_origin=[1, 2, 3], plane_normal=[0, 0, 1],
+                  space="local")
+    assert local["plane_origin_local"] == [1.0, 2.0, 3.0]
+
+
+def test_keep_both_sides_keeps_both_halves_in_one_transaction(editor: FakeEditor) -> None:
+    """keep_both_sides used to delete half the box anyway (B13)."""
+    payload = _call(editor, "cut_unreal_mesh_plane", keep_both_sides=True)
+    other = editor.objects[payload["pieces"][1]]
+    assert payload["pieces"][0] == BODY and other.label == "Body_Cut"
+    assert other.get_actor_transform() is editor.objects[BODY].transform
+    assert payload["removed_triangle_count"] is None and payload["piece_triangle_counts"] == [12, 12]
+    assert editor.transactions == ["simul: cut mesh"]
+
+
+def test_a_plane_that_misses_the_mesh_changes_nothing(editor: FakeEditor) -> None:
+    mesh = editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh()
+    mesh.stats["side_tris"] = {"back": 12, "front": 0}
+    payload = _call(editor, "cut_unreal_mesh_plane")
+    assert payload["details"]["code"] == "PLANE_MISSES_MESH"
+    assert editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh() is mesh and editor.transactions == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"plane_normal": [0, 0, 0]}, "INVALID_PLANE"),
+        ({"space": "screen"}, "UNKNOWN_SPACE"),
+    ],
+)
+def test_bad_planes_are_refused(editor: FakeEditor, overrides: Dict[str, Any], code: str) -> None:
+    assert _call(editor, "cut_unreal_mesh_plane", **overrides)["details"]["code"] == code
+
+
+def test_an_extrude_moves_the_selected_faces_along_their_normal(editor: FakeEditor) -> None:
+    """Every face used to be extruded straight up, giving two shells and zero volume (M9)."""
+    payload = _call(editor, "edit_unreal_mesh_topology", face_selection="normal:0,0,1,10", distance=25)
+    work, options, selection = editor.arguments["apply_mesh_linear_extrude_faces"]
+    assert selection.how == ("normal", (0.0, 0.0, 1.0), 10.0)
+    assert (options.distance, options.direction_mode) == (25.0, "AVERAGE_FACE_NORMAL")
+    assert (payload["faces_affected"], payload["edges_affected"]) == (2, None)
+    assert payload["face_selection"] == "normal:0,0,1,10"
+
+
+def test_an_inset_insets_each_selected_face(editor: FakeEditor) -> None:
+    payload = _call(editor, "edit_unreal_mesh_topology", operation="inset_faces",
+                    face_selection="box:-60,-60,40,60,60,60", offset=3)
+    work, options, selection = editor.arguments["apply_mesh_inset_outset_faces"]
+    assert selection.how == ("box", (-60.0, -60.0, 40.0), (60.0, 60.0, 60.0))
+    assert (options.distance, options.area_mode) == (3.0, "PER_POLYGROUP")
+    assert payload["faces_affected"] == 4 and payload["offset"] == 3.0
+
+
+@pytest.mark.parametrize(("selection", "mode", "edges"), [
+    ({"face_selection": None, "edge_selection": "sharp:30"}, "SELECTED_EDGES", 12),
+    ({"face_selection": None, "edge_selection": "polygroup"}, "ALL_POLYGROUP_EDGES", None),
+    ({"face_selection": "normal:0,0,1"}, "TRIANGLE_AREA", 4),
+])
+def test_a_bevel_bevels_what_was_selected(editor: FakeEditor, selection: Dict[str, Any], mode: str,
+                                          edges: Any) -> None:
+    """The bevel used an empty triangle selection and bevelled nothing (M9)."""
+    payload = _call(editor, "edit_unreal_mesh_topology", operation="bevel_edges", count=2, **selection)
+    work, chosen, used_mode, options = editor.arguments["apply_mesh_bevel_selection"]
+    assert used_mode == mode and options.subdivisions == 2 and options.bevel_distance == 5.0
+    assert payload["edges_affected"] == edges
+    if "sharp" in (selection.get("edge_selection") or ""):
+        assert chosen.how == ("sharp", 30.0)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"face_selection": None}, "SELECTION_REQUIRED"),
+        ({"operation": "bevel_edges", "face_selection": None}, "SELECTION_REQUIRED"),
+        ({"face_selection": "top"}, "INVALID_SELECTION"),
+        ({"face_selection": "normal:0,0,0"}, "INVALID_SELECTION"),
+        ({"face_selection": "box:1,1,1,0,0,0"}, "INVALID_SELECTION"),
+        ({"operation": "bevel_edges", "face_selection": None, "edge_selection": "round"}, "INVALID_SELECTION"),
+        ({"edge_selection": "sharp"}, "SELECTION_CONFLICT"),
+        ({"distance": 0.0}, "INVALID_DISTANCE"),
+        (
+            {"operation": "bevel_edges", "face_selection": None, "edge_selection": "polygroup", "count": 17},
+            "INVALID_COUNT",
+        ),
+    ],
+)
+def test_topology_inputs_are_checked(editor: FakeEditor, overrides: Dict[str, Any], code: str) -> None:
+    """loop_cut, scale_faces, selections and scale used to be accepted and ignored (M9)."""
+    payload = _call(editor, "edit_unreal_mesh_topology", **overrides)
+    assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", code)
+    assert editor.calls == []
+
+
+def test_an_empty_selection_changes_nothing(editor: FakeEditor) -> None:
+    mesh = editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh()
+    mesh.stats["facing"] = {(0.0, 0.0, -1.0): 0}
+    payload = _call(editor, "edit_unreal_mesh_topology", face_selection="normal:0,0,-1")
+    assert payload["details"]["code"] == "EMPTY_SELECTION" and editor.transactions == []
+
+
+@pytest.mark.parametrize(("scheme", "function"), [
+    ("catmull_clark", "apply_polygroup_catmull_clark_sub_d"),
+    ("loop", "apply_triangle_loop_sub_d"),
+    ("uniform", "apply_uniform_tessellation"),
+])
+def test_each_subdivision_scheme_runs_its_own_algorithm(editor: FakeEditor, scheme: str, function: str) -> None:
+    """loop, bilinear and bogus all ran uniform tessellation (M9)."""
+    payload = _call(editor, "subdivide_unreal_mesh", scheme=scheme, level=2)
+    assert editor.arguments[function][1] == 2
+    assert payload["scheme"] == scheme and payload["level"] == 2
+
+
+def test_catmull_clark_on_a_triangle_mesh_says_to_use_loop(editor: FakeEditor) -> None:
+    payload = _call(editor, "subdivide_unreal_mesh", mesh_path=BALL)
+    assert payload["error_type"] == "EngineError"
+    assert "scheme 'loop'" in payload["details"]["hint"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"level": 9}, "INVALID_LEVEL"),
+        ({"level": 0}, "INVALID_LEVEL"),
+        ({"scheme": "bilinear"}, "UNKNOWN_SCHEME"),
+    ],
+)
+def test_subdivision_inputs_are_checked(editor: FakeEditor, overrides: Dict[str, Any], code: str) -> None:
+    """Level 9 used to be clamped to 4 without a word (M9)."""
+    assert _call(editor, "subdivide_unreal_mesh", **overrides)["details"]["code"] == code
+
+
+def test_a_subdivision_too_large_is_refused_first(editor: FakeEditor) -> None:
+    payload = _call(editor, "subdivide_unreal_mesh", mesh_path=BIG, level=2, scheme="loop")
+    assert payload["details"]["code"] == "RESULT_TOO_LARGE"
+    assert (payload["details"]["triangle_count"], payload["details"]["predicted"]) == (318_400 * 16, True)
+    assert ("apply_triangle_loop_sub_d", True) not in editor.calls
+
+
+def test_simplify_to_a_fraction_and_to_a_tolerance(editor: FakeEditor) -> None:
+    """max_error was ignored, and target_percentage=50 was accepted and did nothing (M9)."""
+    fraction = _call(editor, "simplify_unreal_mesh", target_percentage=0.25)
+    assert editor.arguments["apply_simplify_to_triangle_count"][1] == 480
+    assert (fraction["method"], fraction["target_triangle_count"], fraction["result_triangles"]) == (
+        "triangle_count", 480, 480)
+    tolerance = _call(level_editor(), "simplify_unreal_mesh", target_percentage=None, max_error=0.5)
+    assert (tolerance["method"], tolerance["tolerance"]) == ("tolerance", 0.5)
+    assert tolerance["target_triangle_count"] is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"target_percentage": 50}, "INVALID_TARGET"),
+        ({"target_percentage": 0.5, "max_error": 1.0}, "CONFLICTING_TARGETS"),
+        ({"target_percentage": None, "target_triangle_count": 5000}, "NOTHING_TO_SIMPLIFY"),
+        ({"target_percentage": None, "max_error": -1.0}, "INVALID_TARGET"),
+    ],
+)
+def test_simplify_inputs_are_checked(editor: FakeEditor, overrides: Dict[str, Any], code: str) -> None:
+    payload = _call(editor, "simplify_unreal_mesh", **overrides)
+    assert payload["details"]["code"] == code
+    assert ("apply_simplify_to_triangle_count", True) not in editor.calls
+
+
+def test_remesh_keeps_the_triangle_count_by_default(editor: FakeEditor) -> None:
+    payload = _call(editor, "remesh_unreal_mesh", target_edge_length=None, smoothing_iterations=7)
+    options, uniform = editor.arguments["apply_uniform_remesh"][1:]
+    assert (uniform.target_type, uniform.target_triangle_count, options.remesh_iterations) == ("TRIANGLE_COUNT", 12, 7)
+    assert (payload["target_type"], payload["target_triangle_count"], payload["passes"]) == ("triangle_count", 12, 7)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"mode": "adaptive"}, "UNKNOWN_MODE"),
+        ({"target_triangle_count": 100}, "CONFLICTING_TARGETS"),
+        ({"target_edge_length": 0.001}, "RESULT_TOO_LARGE"),
+        ({"smoothing_iterations": 0}, "INVALID_PASSES"),
+    ],
+)
+def test_remesh_inputs_are_checked(editor: FakeEditor, overrides: Dict[str, Any], code: str) -> None:
+    """adaptive used to be accepted and ignored (M9)."""
+    assert _call(editor, "remesh_unreal_mesh", **overrides)["details"]["code"] == code
+
+
+@pytest.mark.parametrize(("method", "function"), [("xatlas", "repack_mesh_u_vs"),
+                                                  ("patch_builder", "auto_generate_patch_builder_mesh_u_vs")])
+def test_uv_islands_are_packed_with_the_padding_asked_for(editor: FakeEditor, method: str, function: str) -> None:
+    """island_padding was ignored (M9)."""
+    payload = _call(editor, "compute_unreal_mesh_uv", method=method, island_padding=4, texture_resolution=1024)
+    options = editor.arguments[function][2]
+    packing = options if method == "xatlas" else options.packing_options
+    assert packing.target_image_width == 256
+    assert (payload["island_padding"], payload["packing_resolution"]) == (4.0, 256)
+
+
+def test_a_clamped_packing_resolution_reports_the_padding_packed(editor: FakeEditor) -> None:
+    payload = _call(editor, "compute_unreal_mesh_uv", island_padding=0.1, texture_resolution=1024)
+    assert payload["packing_resolution"] == 4096 and payload["island_padding"] == 0.25
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"uv_channel": 8}, "INVALID_UV_CHANNEL"),
+        ({"island_padding": 0}, "INVALID_PADDING"),
+        ({"texture_resolution": 32}, "INVALID_RESOLUTION"),
+    ],
+)
+def test_uv_inputs_are_checked(editor: FakeEditor, overrides: Dict[str, Any], code: str) -> None:
+    assert _call(editor, "compute_unreal_mesh_uv", **overrides)["details"]["code"] == code
+
+
+def test_validation_runs_every_check_it_names(editor: FakeEditor) -> None:
+    """The description promised checks that did not exist, and checks was ignored (M11)."""
+    mesh = editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh()
+    mesh.stats.update(bowties=2, degenerate=3, volume=-5.0, unset_uvs=True, vertex_gaps=True)
+    payload = _call(editor, "validate_unreal_mesh")
+    checks = payload["checks"]
+    assert list(checks) == list(mesh_scripts.VALIDATION_CHECKS)
+    assert checks["closed"] == {"passed": True, "count": 0, "detail": "no open border edges"}
+    assert (checks["manifold"]["passed"], checks["manifold"]["count"]) == (False, 2)
+    assert (checks["degenerate_triangles"]["passed"], checks["degenerate_triangles"]["count"]) == (False, 3)
+    assert checks["orientation"]["passed"] is False and "inside out" in checks["orientation"]["detail"]
+    assert checks["compact"]["passed"] is False
+    assert checks["uvs"]["passed"] is False and "without UVs" in checks["uvs"]["detail"]
+    assert payload["is_valid"] is False and len(payload["issues"]) == 5
+    # The checks ran on copies; the mesh is as it was.
+    assert editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh() is mesh and mesh.stats["verts"] == 8
+
+
+def test_validation_runs_only_the_checks_asked_for(editor: FakeEditor) -> None:
+    payload = _call(editor, "validate_unreal_mesh", checks=["normals", "closed"])
+    assert list(payload["checks"]) == ["closed", "normals"] and payload["is_valid"] is True
+    assert editor.calls == []
+    refused = _call(editor, "validate_unreal_mesh", checks=["self_intersection"])
+    assert refused["details"]["code"] == "UNKNOWN_CHECK"
+
+
+def test_an_open_mesh_has_no_orientation_to_check(editor: FakeEditor) -> None:
+    editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh().stats.update(open_edges=4, open_loops=1)
+    payload = _call(editor, "validate_unreal_mesh", checks=["orientation"])
+    assert payload["checks"]["orientation"]["passed"] is True and payload["volume"] is None
+
+
+def test_destructive_and_idempotent_hints_are_consistent() -> None:
+    """Hull and decomposition disagreed; each mesh tool's hints now say what it does."""
+    hints = {name: (SPECS[name].read_only, SPECS[name].destructive, SPECS[name].idempotent) for name in TOOLS}
+    assert hints["validate_unreal_mesh"] == (True, False, True)
+    assert hints["generate_unreal_mesh_primitive"] == (False, False, False)
+    assert hints["compute_unreal_convex_hull"] == hints["decompose_unreal_convex_hull"] == (False, True, False)
+    for name in ("apply_unreal_mesh_boolean", "edit_unreal_mesh_topology", "subdivide_unreal_mesh",
+                 "simplify_unreal_mesh", "cut_unreal_mesh_plane", "remesh_unreal_mesh", "compute_unreal_mesh_uv"):
+        assert hints[name] == (False, True, False), name
+
+
 # -- the time budget ----------------------------------------------------------------
 
 
@@ -457,8 +867,8 @@ def test_a_result_past_the_time_budget_is_discarded(editor: FakeEditor, tool: st
 
 def test_a_result_past_this_hosts_deadline_is_discarded(editor: FakeEditor) -> None:
     """A script that waited in the editor's queue has used up the caller's wait before it starts."""
-    script = mesh_scripts.mesh_script(mesh_scripts.SIMPLIFY, {"mesh": BODY, "target_triangle_count": 6,
-                                      "target_percentage": None}, budget_s=100.0, deadline=time.time() - 1)
+    args = {"mesh": BODY, "target_triangle_count": 6, "target_percentage": None, "max_error": None}
+    script = mesh_scripts.mesh_script(mesh_scripts.SIMPLIFY, args, budget_s=100.0, deadline=time.time() - 1)
     editor.run(script)
     assert editor.transactions == []
     assert '"error_type": "TimeoutError"' in str(editor.run(script))
