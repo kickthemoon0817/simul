@@ -29,7 +29,7 @@ the ZIP. Restart Blender before attaching again so all loaded bridge modules
 use the new version; Simul does not restart the editor automatically. A server
 and an add-on that speak different bridge protocols refuse each other with the
 `install-bridge` fix instead of misreading a call (`error_type:
-"ProtocolMismatch"`); protocol 5 is the first that records agent edits as undo
+"BridgeProtocolError"`); protocol 5 is the first that records agent edits as undo
 steps, and protocol 13 the first whose requests start with their token.
 
 ## Select and verify the target
@@ -56,7 +56,7 @@ One whose Blender took the connection but did not answer within 2 seconds is
 `InstanceBusy` (a long script, render or modal dialog holds its main thread;
 attach again once it is free), one that refused the connection is
 `AttachmentStale`, and one whose add-on speaks another bridge protocol is
-`ProtocolMismatch`, with the `install-bridge` fix; `instances` marks such an
+`BridgeProtocolError`, with the `install-bridge` fix; `instances` marks such an
 instance `protocol_mismatch: true`. Attaching without an `instance_id` reports
 a busy or mismatched instance the same way when no other one answers.
 
@@ -381,11 +381,12 @@ replaces a refused or unauthenticated one, so connections that never send a
 token cannot keep Simul's calls out. Waiting requests are held as their bytes
 and decoded one at a time, when their turn comes, and the bytes held across
 all connections are bounded at 64 MiB: a request that would go over is refused
-with `error_type: "BridgeBusy"` (`details.executed: false`), which Simul
-retries while its timeout allows. Refusals of a request the bridge did not
-read (`BridgeBusy`, `RequestTooLarge`, `RequestTimeout`, `InvalidRequest`, a
-protocol mismatch, a wrong token) carry `request_id: null` and
-`details.code`.
+with `error_type: "InstanceBusy"` (`details.code: "bridge_busy"`,
+`details.executed: false`), which Simul retries while its timeout allows.
+Refusals of a request the bridge did not read carry `request_id: null` and
+`details.code`: `InstanceBusy`, `PayloadTooLarge`, `TimeoutError` (too slow to
+arrive), `BridgeProtocolError` (another protocol, or not JSON) and
+`AuthenticationError` (a wrong token).
 
 The add-on acknowledges a call's start on its connection before running it, and
 runs nothing it has not acknowledged (its discovery record lists the

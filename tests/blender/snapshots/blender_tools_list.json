@@ -41,7 +41,9 @@
       "play_blender_animation",
       "insert_blender_keyframe",
       "delete_blender_keyframe",
+      "set_blender_pose_bone_transform",
       "get_blender_keyframes",
+      "insert_blender_keyframes",
       "setup_blender_rigid_body",
       "add_blender_force_field",
       "get_blender_force_field_info",
@@ -49,6 +51,7 @@
       "get_blender_constraint_info",
       "get_blender_physics_state",
       "get_blender_object_trajectory",
+      "get_blender_trajectories",
       "bake_blender_simulation",
       "free_blender_bake",
       "get_blender_rigid_body_world",
@@ -115,7 +118,9 @@
       "play_blender_animation",
       "insert_blender_keyframe",
       "delete_blender_keyframe",
+      "set_blender_pose_bone_transform",
       "get_blender_keyframes",
+      "insert_blender_keyframes",
       "setup_blender_rigid_body",
       "add_blender_force_field",
       "get_blender_force_field_info",
@@ -123,6 +128,7 @@
       "get_blender_constraint_info",
       "get_blender_physics_state",
       "get_blender_object_trajectory",
+      "get_blender_trajectories",
       "bake_blender_simulation",
       "free_blender_bake",
       "get_blender_rigid_body_world",
@@ -189,7 +195,9 @@
       "play_blender_animation",
       "insert_blender_keyframe",
       "delete_blender_keyframe",
+      "set_blender_pose_bone_transform",
       "get_blender_keyframes",
+      "insert_blender_keyframes",
       "setup_blender_rigid_body",
       "add_blender_force_field",
       "get_blender_force_field_info",
@@ -197,6 +205,7 @@
       "get_blender_constraint_info",
       "get_blender_physics_state",
       "get_blender_object_trajectory",
+      "get_blender_trajectories",
       "bake_blender_simulation",
       "free_blender_bake",
       "get_blender_rigid_body_world",
@@ -312,10 +321,17 @@
             "description": "Optional collection name filter."
           },
           "include_hidden": {"default": false, "description": "Include hidden objects when true.", "type": "boolean"},
-          "max_items": {"default": 200, "description": "Maximum number of objects to return.", "type": "integer"},
+          "max_items": {
+            "default": 200,
+            "description": "Maximum number of objects to return.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
           "offset": {
             "default": 0,
             "description": "How many matching objects to skip, as next_offset gives it.",
+            "minimum": 0,
             "type": "integer"
           }
         }
@@ -387,10 +403,17 @@
             "default": null,
             "description": "Blender object type filter (MESH, LIGHT, etc.), in any case."
           },
-          "max_results": {"default": 50, "description": "Maximum number of results.", "type": "integer"},
+          "max_results": {
+            "default": 50,
+            "description": "Maximum number of results.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
           "offset": {
             "default": 0,
             "description": "How many matching objects to skip, as next_offset gives it.",
+            "minimum": 0,
             "type": "integer"
           }
         }
@@ -415,7 +438,13 @@
         "additionalProperties": false,
         "properties": {
           "material_name": {"description": "Name of the Blender material.", "type": "string"},
-          "max_nodes": {"default": 50, "description": "Most nodes to list.", "type": "integer"}
+          "max_nodes": {
+            "default": 50,
+            "description": "Most nodes to list.",
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          }
         },
         "required": ["material_name"]
       },
@@ -450,11 +479,15 @@
           "bounds_min": {
             "description": "Minimum corner of the box as [x, y, z] in scene units (Blender is Z-up).",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           },
           "bounds_max": {
             "description": "Maximum corner of the box as [x, y, z] in scene units.",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           }
         },
@@ -474,14 +507,24 @@
           "width": {
             "default": 512,
             "description": "Maximum image width in pixels. A viewport capture, or a render through a temporary camera aligned to the 3D View, keeps the view's aspect ratio inside width x height; other renders are exactly width x height.",
+            "maximum": 4096,
+            "minimum": 64,
             "type": "integer"
           },
           "height": {
             "default": 512,
             "description": "Maximum image height in pixels; see width.",
+            "maximum": 4096,
+            "minimum": 64,
             "type": "integer"
           },
-          "jpeg_quality": {"default": 85, "description": "JPEG compression quality (1-100).", "type": "integer"},
+          "jpeg_quality": {
+            "default": 85,
+            "description": "JPEG compression quality (1-100).",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
           "method": {
             "default": "auto",
             "description": "\"viewport\": the 3D View as the user sees it (view angle, shading, overlays, Edit Mode, unsaved changes); attached mode only. \"render\": a render through the scene camera, or through a temporary camera when the scene has none (aligned to the 3D View when attached, framing the visible objects otherwise), removed afterwards. \"auto\" (default): \"viewport\" when attached, \"render\" in embedded mode.",
@@ -519,11 +562,15 @@
           "location": {
             "description": "World-space camera location [x, y, z].",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           },
           "rotation_euler": {
             "description": "World-space camera rotation [rx, ry, rz] in radians, as an XYZ Euler.",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           },
           "camera_name": {
@@ -567,6 +614,8 @@
           "distance_factor": {
             "default": 1.0,
             "description": "Multiple of the framing distance (of ortho_scale for an orthographic camera): 1.0 fits the object's bounding sphere in the frame with 5% to spare, 2.0 shows the object at half that size, and below 1.0 crops it.",
+            "maximum": 20.0,
+            "minimum": 0.5,
             "type": "number"
           },
           "camera_name": {
@@ -601,18 +650,33 @@
             "description": "Last frame to capture (inclusive); not before start_frame.",
             "type": "integer"
           },
-          "step": {"default": 1, "description": "Frame step between captures.", "type": "integer"},
+          "step": {
+            "default": 1,
+            "description": "Frame step between captures.",
+            "minimum": 1,
+            "type": "integer"
+          },
           "width": {
             "default": 512,
             "description": "Maximum image width, as for capture_blender_viewport.",
+            "maximum": 4096,
+            "minimum": 64,
             "type": "integer"
           },
           "height": {
             "default": 512,
             "description": "Maximum image height, as for capture_blender_viewport.",
+            "maximum": 4096,
+            "minimum": 64,
             "type": "integer"
           },
-          "jpeg_quality": {"default": 85, "description": "JPEG compression quality.", "type": "integer"},
+          "jpeg_quality": {
+            "default": 85,
+            "description": "JPEG compression quality.",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
           "agent_id": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
@@ -637,6 +701,8 @@
           "max_frames": {
             "default": 50,
             "description": "Most frames captured by this call, 1 to 100.",
+            "maximum": 100,
+            "minimum": 1,
             "type": "integer"
           }
         },
@@ -663,18 +729,24 @@
             "default": [0.0, 0.0, 0.0],
             "description": "Initial location [x, y, z].",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           },
           "rotation_euler": {
             "default": [0.0, 0.0, 0.0],
             "description": "Initial rotation [rx, ry, rz] radians.",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           },
           "scale": {
             "default": [1.0, 1.0, 1.0],
             "description": "Initial scale [sx, sy, sz].",
             "items": {"type": "number"},
+            "maxItems": 3,
+            "minItems": 3,
             "type": "array"
           }
         },
@@ -736,22 +808,34 @@
         "properties": {
           "object_name": {"description": "Object to transform.", "type": "string"},
           "location": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "New location [x, y, z] relative to the parent, or None to keep current."
           },
           "rotation_euler": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "New rotation as XYZ Euler angles [rx, ry, rz] in radians, converted to the object's rotation_mode; None to keep current."
           },
           "scale": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "New scale [sx, sy, sz] or None to keep current."
           },
           "rotation_quaternion": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 4, "minItems": 4, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "New rotation as a quaternion [w, x, y, z], normalized and converted to the object's rotation_mode; instead of rotation_euler."
           }
@@ -825,12 +909,12 @@
             "description": "RGB or RGBA in [0, 1]; the alpha becomes the Principled Alpha, and below 1 the material renders blended."
           },
           "metallic": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"maximum": 1, "minimum": 0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Metallic value 0-1."
           },
           "roughness": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"maximum": 1, "minimum": 0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Roughness value 0-1."
           },
@@ -955,7 +1039,7 @@
         "properties": {
           "light_name": {"description": "Light object name.", "type": "string"},
           "energy": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"minimum": 0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Light power in watts (irradiance in W/m² for SUN), >= 0."
           },
@@ -970,17 +1054,20 @@
             "description": "Enable shadow casting."
           },
           "spot_size": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [
+              {"maximum": 3.1415927410125732, "minimum": 0.01745329238474369, "type": "number"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Spot cone angle in radians, 1 degree to pi (SPOT)."
           },
           "spot_blend": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"maximum": 1, "minimum": 0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Spot edge softness 0-1 (SPOT)."
           },
           "shadow_soft_size": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"minimum": 0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Light radius for soft shadows, >= 0 (POINT, SPOT)."
           },
@@ -990,17 +1077,17 @@
             "description": "Change the light to POINT, SUN, SPOT or AREA first."
           },
           "angle": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"maximum": 3.1415927410125732, "minimum": 0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Sun's angular diameter in radians, 0 to pi (SUN)."
           },
           "size": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"minimum": 0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Area light size, >= 0 (AREA; its width for RECTANGLE and ELLIPSE)."
           },
           "size_y": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"minimum": 0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Area light height, >= 0 (AREA with shape RECTANGLE or ELLIPSE)."
           },
@@ -1035,7 +1122,7 @@
         },
         "required": ["file_path"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "save_blender_file": {
@@ -1065,10 +1152,16 @@
         "additionalProperties": false,
         "properties": {
           "file_path": {"description": "Absolute path to the file.", "type": "string"},
-          "file_format": {"description": "One of OBJ, FBX, GLTF, USD, STL, PLY.", "type": "string"},
+          "file_format": {
+            "description": "One of OBJ, FBX, GLTF, USD, STL, PLY.",
+            "enum": ["OBJ", "FBX", "GLTF", "USD", "STL", "PLY"],
+            "type": "string"
+          },
           "scale": {
             "default": 1.0,
             "description": "Uniform scale applied to the imported objects about the world origin (1.0 keeps them as the file has them). OBJ, FBX, STL and PLY pass it to Blender's importer as global_scale. For glTF and USD the imported root objects' location and scale are multiplied by it: Blender's glTF importer has no such option, and Blender 5.0.1's USD importer ignored its own for a USD file Blender wrote. Keys or a Transform Cache constraint on such a root's transform take over again at the next frame change, and warning names those roots.",
+            "exclusiveMinimum": 0.0,
+            "maximum": 1000000.0,
             "type": "number"
           }
         },
@@ -1089,19 +1182,23 @@
             "description": "Path to export to, ending in .obj, .fbx, .glb or .gltf, .usd/.usda/.usdc/.usdz, .stl or .ply for the format.",
             "type": "string"
           },
-          "file_format": {"description": "One of OBJ, FBX, GLTF, USD, STL, PLY.", "type": "string"},
+          "file_format": {
+            "description": "One of OBJ, FBX, GLTF, USD, STL, PLY.",
+            "enum": ["OBJ", "FBX", "GLTF", "USD", "STL", "PLY"],
+            "type": "string"
+          },
           "selected_only": {
             "default": false,
             "description": "Export only the selected objects; an error when none is selected.",
             "type": "boolean"
           },
           "object_names": {
-            "anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [{"items": {"type": "string"}, "minItems": 1, "type": "array"}, {"type": "null"}],
             "default": null,
             "description": "Export exactly these objects (children are not added). They are selected for the export and the previous selection is restored afterwards. Not with selected_only or collection_name."
           },
           "collection_name": {
-            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
             "default": null,
             "description": "Export the objects of this collection and its child collections that are in the view layer, the same way."
           },
@@ -1144,7 +1241,7 @@
             "description": "The axis written as up, together with axis_forward."
           },
           "global_scale": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"exclusiveMinimum": 0.0, "maximum": 1000000.0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "FBX, OBJ, STL and PLY: scale factor applied to the exported data (default 1.0)."
           },
@@ -1154,7 +1251,7 @@
             "description": "USD: the stage's up axis, Y (Blender rotates the scene from Z-up to Y-up) or Z (default, Blender's own)."
           },
           "meters_per_unit": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"maximum": 1000.0, "minimum": 0.0001, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "USD: the stage's metersPerUnit (default 1.0); Blender scales the root so objects keep their size. Blender 4.4 and later."
           },
@@ -1171,7 +1268,7 @@
         },
         "required": ["file_path", "file_format"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_file_info": {
@@ -1189,7 +1286,14 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"frame": {"description": "Frame number to set.", "type": "integer"}},
+        "properties": {
+          "frame": {
+            "description": "Frame number to set, within -1048574..1048574 (Blender's limits).",
+            "maximum": 1048574,
+            "minimum": -1048574,
+            "type": "integer"
+          }
+        },
         "required": ["frame"]
       },
       "annotations": {"readOnlyHint": false, "idempotentHint": true},
@@ -1198,7 +1302,7 @@
     "get_blender_frame": {
       "name": "get_blender_frame",
       "title": "Get Blender Frame",
-      "description": "Get the current frame and animation range.",
+      "description": "Get the current frame, the animation range and the frame rate (fps / fps_base).",
       "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
@@ -1206,13 +1310,23 @@
     "set_blender_frame_range": {
       "name": "set_blender_frame_range",
       "title": "Set Blender Frame Range",
-      "description": "Set the animation frame range. An unbaked rigid-body cache follows it; a baked one keeps its range, with a warning.",
+      "description": "Set the animation frame range; start may equal end for a one-frame range. An unbaked rigid-body cache follows it; a baked one keeps its range, with a warning.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "frame_start": {"description": "Start frame of the animation range.", "type": "integer"},
-          "frame_end": {"description": "End frame of the animation range.", "type": "integer"}
+          "frame_start": {
+            "description": "Start frame of the animation range, 0..1048574.",
+            "maximum": 1048574,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "frame_end": {
+            "description": "End frame of the animation range, 0..1048574; may equal frame_start for a one-frame range.",
+            "maximum": 1048574,
+            "minimum": 0,
+            "type": "integer"
+          }
         },
         "required": ["frame_start", "frame_end"]
       },
@@ -1222,36 +1336,73 @@
     "play_blender_animation": {
       "name": "play_blender_animation",
       "title": "Play Blender Animation",
-      "description": "Control animation playback (play, stop, reverse).",
+      "description": "Play, reverse, pause or stop animation playback; repeating a call changes nothing more. pause keeps the current frame, stop returns to the frame playback started from. Needs Blender's event loop: refused in background mode.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "action": {
             "default": "play",
-            "description": "One of 'play', 'stop', or 'reverse'.",
+            "description": "play (forward), reverse, pause (stop on the current frame) or stop (stop and return to the frame playback started from).",
+            "enum": ["play", "reverse", "pause", "stop"],
             "type": "string"
           }
         }
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "insert_blender_keyframe": {
       "name": "insert_blender_keyframe",
       "title": "Insert Blender Keyframe",
-      "description": "Insert a keyframe on an object property.",
+      "description": "Insert a keyframe on an object property: its current value, or value; optionally the interpolation and key type.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Name of the object.", "type": "string"},
           "data_path": {
-            "description": "Property data path (e.g. 'location', 'rotation_euler').",
+            "description": "Property data path (e.g. 'location', 'rotation_euler', 'pose.bones[\"Bone\"].rotation_quaternion', '[\"custom\"]').",
             "type": "string"
           },
           "frame": {"description": "Frame number for the keyframe.", "type": "integer"},
-          "index": {"default": -1, "description": "Array index (-1 for all channels).", "type": "integer"}
+          "index": {"default": -1, "description": "Array index (-1 for all channels).", "type": "integer"},
+          "value": {
+            "anyOf": [{"type": "number"}, {"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "Value to key instead of the current one: one number for a single channel (index >= 0, or a property that is not an array), otherwise one number per element, such as [x, y, z] for location. The keyed channels then show what their F-curves give at the current frame; every other channel keeps its value."
+          },
+          "interpolation": {
+            "anyOf": [
+              {
+                "enum": [
+                  "CONSTANT",
+                  "LINEAR",
+                  "BEZIER",
+                  "SINE",
+                  "QUAD",
+                  "CUBIC",
+                  "QUART",
+                  "QUINT",
+                  "EXPO",
+                  "CIRC",
+                  "BACK",
+                  "BOUNCE",
+                  "ELASTIC"
+                ],
+                "type": "string"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "Interpolation from this key to the next (CONSTANT, LINEAR, BEZIER, SINE, QUAD, CUBIC, QUART, QUINT, EXPO, CIRC, BACK, BOUNCE or ELASTIC); None leaves Blender's choice: the previous key's on a curve that already has two keys, else the preference (Bezier by default)."
+          },
+          "keyframe_type": {
+            "default": "KEYFRAME",
+            "description": "Blender's key type: KEYFRAME, BREAKDOWN, MOVING_HOLD, EXTREME, JITTER or GENERATED.",
+            "enum": ["KEYFRAME", "BREAKDOWN", "MOVING_HOLD", "EXTREME", "JITTER", "GENERATED"],
+            "type": "string"
+          }
         },
         "required": ["object_name", "data_path", "frame"]
       },
@@ -1276,20 +1427,181 @@
         },
         "required": ["object_name", "data_path", "frame"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "set_blender_pose_bone_transform": {
+      "name": "set_blender_pose_bone_transform",
+      "title": "Set Blender Pose Bone Transform",
+      "description": "Set a pose bone's own location, rotation and/or scale (its pose relative to the rest position); the rotation is written in the bone's rotation mode.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "The armature object.", "type": "string"},
+          "bone_name": {"description": "Its pose bone.", "type": "string"},
+          "location": {
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "New location [x, y, z] relative to the rest position, or None to keep it."
+          },
+          "rotation_euler": {
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "New rotation as XYZ Euler angles [rx, ry, rz] in radians, converted to the bone's rotation_mode; None to keep it."
+          },
+          "rotation_quaternion": {
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 4, "minItems": 4, "type": "array"},
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "New rotation as a quaternion [w, x, y, z], normalized and converted to the bone's rotation_mode; instead of rotation_euler."
+          },
+          "scale": {
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "New scale [sx, sy, sz], or None to keep it."
+          }
+        },
+        "required": ["object_name", "bone_name"]
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_keyframes": {
       "name": "get_blender_keyframes",
       "title": "Get Blender Keyframes",
-      "description": "Get keyframe summary for an object.",
+      "description": "List an object's keyed channels a page at a time, filtered by data_path or bone_name, optionally with every key's value, interpolation and handles; next_offset (and next_key_offset) continue a page that stops early.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"object_name": {"description": "Name of the object.", "type": "string"}},
+        "properties": {
+          "object_name": {"description": "Name of the object.", "type": "string"},
+          "data_path": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Only this property's channels: its data path, such as 'location' or 'pose.bones[\"Bone\"].rotation_quaternion', or with bone_name the bone's property, such as 'rotation_quaternion'."
+          },
+          "bone_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Only the channels of this pose bone of an armature."
+          },
+          "include_keys": {
+            "default": false,
+            "description": "Also return each key: frame, value, interpolation and key type, plus the handles of a Bezier key and the easing of an eased one.",
+            "type": "boolean"
+          },
+          "offset": {
+            "default": 0,
+            "description": "Index of the first channel to return, among those the filters keep: the previous page's next_offset.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "key_offset": {
+            "default": 0,
+            "description": "With include_keys, index of the first key of that first channel: the previous page's next_key_offset.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "limit": {
+            "anyOf": [{"minimum": 1, "type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Most channels to return; None returns as many as fit."
+          }
+        },
         "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "insert_blender_keyframes": {
+      "name": "insert_blender_keyframes",
+      "title": "Insert Blender Keyframes",
+      "description": "Insert many keyframes in one call: for each property, a value per frame (up to 10 000 keys), with an optional interpolation and key type.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "Name of the object.", "type": "string"},
+          "channels": {
+            "description": "Up to 10 000 keys in all, as entries with data_path, index (-1, the default, for every element), frames (more than 0.01 apart on any one channel, as Blender keeps one key for keys closer than that), and values: one per frame, a number for one channel (index >= 0, or a property that is not an array), else one number per element. The keyed channels then show what their F-curves give at the current frame; every other channel keeps its value.",
+            "items": {
+              "description": "The keys to insert on one property: a value per frame.",
+              "properties": {
+                "data_path": {
+                  "description": "Property data path, as for insert_blender_keyframe",
+                  "type": "string"
+                },
+                "index": {
+                  "default": -1,
+                  "description": "Array index (-1 for all elements)",
+                  "type": "integer"
+                },
+                "frames": {
+                  "description": "Frames to key, each once and more than 0.01 apart, since Blender keeps one key for keys closer than that",
+                  "items": {"type": "number"},
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "values": {
+                  "description": "One value per frame: a number for one channel, else one number per element",
+                  "items": {"anyOf": [{"type": "number"}, {"items": {"type": "number"}, "type": "array"}]},
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "required": ["data_path", "frames", "values"],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "interpolation": {
+            "anyOf": [
+              {
+                "enum": [
+                  "CONSTANT",
+                  "LINEAR",
+                  "BEZIER",
+                  "SINE",
+                  "QUAD",
+                  "CUBIC",
+                  "QUART",
+                  "QUINT",
+                  "EXPO",
+                  "CIRC",
+                  "BACK",
+                  "BOUNCE",
+                  "ELASTIC"
+                ],
+                "type": "string"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "Interpolation of every inserted key, as for insert_keyframe; None leaves Blender's choice."
+          },
+          "keyframe_type": {
+            "default": "KEYFRAME",
+            "description": "Blender's key type of every inserted key.",
+            "enum": ["KEYFRAME", "BREAKDOWN", "MOVING_HOLD", "EXTREME", "JITTER", "GENERATED"],
+            "type": "string"
+          }
+        },
+        "required": ["object_name", "channels"]
+      },
+      "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "setup_blender_rigid_body": {
@@ -1406,7 +1718,10 @@
           },
           "strength": {"default": 1.0, "description": "Field strength.", "type": "number"},
           "location": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "World-space XYZ location; the world origin when omitted."
           },
@@ -1416,7 +1731,10 @@
             "description": "Optional name for the field object."
           },
           "direction": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "World-space direction of the field's local +Z axis."
           },
@@ -1488,7 +1806,10 @@
           "object1_name": {"description": "First constrained rigid body.", "type": "string"},
           "object2_name": {"description": "Second constrained rigid body.", "type": "string"},
           "location": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "World-space pivot; midway between the two objects' origins when omitted."
           },
@@ -1498,7 +1819,10 @@
             "type": "boolean"
           },
           "axis": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "World-space direction of the constraint's axis: the hinge axis (local Z) for HINGE, the slide or motor axis (local X) for SLIDER, PISTON and MOTOR, local Z for the other types. Omitted, the empty is unrotated: a HINGE turns about world Z (a door, not a pendulum) and a SLIDER moves along world X."
           },
@@ -1597,19 +1921,153 @@
     "get_blender_object_trajectory": {
       "name": "get_blender_object_trajectory",
       "title": "Get Blender Object Trajectory",
-      "description": "Sample object position over a frame range.",
+      "description": "Sample the world pose of an object, or of an armature's bone, over a frame range, a page at a time (next_offset continues). Not read-only: it steps the scene through the frames (frame-change handlers run, an unbaked rigid-body cache fills, more than 200 000 bodies x frames only with max_simulated_frames) and restores the current frame afterwards.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "object_name": {"description": "Name of the object to track.", "type": "string"},
+          "object_name": {
+            "description": "Name of the object to track (an armature for bone_name).",
+            "type": "string"
+          },
           "start_frame": {"description": "First frame of trajectory.", "type": "integer"},
-          "end_frame": {"description": "Last frame of trajectory (inclusive).", "type": "integer"},
-          "step": {"default": 1, "description": "Frame step size.", "type": "integer"}
+          "end_frame": {
+            "description": "Last frame of trajectory (inclusive); not before start_frame.",
+            "type": "integer"
+          },
+          "step": {
+            "default": 1,
+            "description": "Frames between samples; at least 1.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "bone_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Track this pose bone of the armature instead of the object."
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "time",
+                    "location",
+                    "rotation_euler",
+                    "rotation_quaternion",
+                    "local_rotation",
+                    "velocity"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "What each sample reports besides its frame: any of time, location, rotation_euler, rotation_quaternion, local_rotation and velocity; None reports all. Fewer fields fit more samples a page."
+          },
+          "offset": {
+            "default": 0,
+            "description": "Index of the first sample to return (the previous page's next_offset); the samples are start_frame, start_frame + step, ...",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "limit": {
+            "anyOf": [{"minimum": 1, "type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Most samples to return; None returns as many as fit."
+          },
+          "max_simulated_frames": {
+            "anyOf": [{"minimum": 0, "type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Most frames of unbaked rigid-body simulation the call may step through; the page ends before a sample that needs more. None allows up to 200 000 bodies times frames, and a request whose first sample needs more is refused."
+          }
         },
         "required": ["object_name", "start_frame", "end_frame"]
       },
-      "annotations": {"readOnlyHint": true, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "get_blender_trajectories": {
+      "name": "get_blender_trajectories",
+      "title": "Get Blender Trajectories",
+      "description": "Sample several objects and bones over one frame range in one pass, each as get_blender_object_trajectory samples one; the same paging and side effects.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "targets": {
+            "description": "1 to 32 entries, each an object_name and, for a bone of an armature, its bone_name. Targets whose names and one sample each take more than one reply holds (long non-ASCII names) are refused, with how many of them fit.",
+            "items": {
+              "description": "An object, or a pose bone of an armature, to sample.",
+              "properties": {
+                "object_name": {"description": "Name of the object (an armature for a bone)", "type": "string"},
+                "bone_name": {
+                  "anyOf": [{"type": "string"}, {"type": "null"}],
+                  "default": null,
+                  "description": "Pose bone of the armature"
+                }
+              },
+              "required": ["object_name"],
+              "type": "object"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": "array"
+          },
+          "start_frame": {"description": "First frame of trajectory.", "type": "integer"},
+          "end_frame": {
+            "description": "Last frame of trajectory (inclusive); not before start_frame.",
+            "type": "integer"
+          },
+          "step": {
+            "default": 1,
+            "description": "Frames between samples; at least 1.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "time",
+                    "location",
+                    "rotation_euler",
+                    "rotation_quaternion",
+                    "local_rotation",
+                    "velocity"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "What each sample reports besides its frame, as for get_object_trajectory; None reports all."
+          },
+          "offset": {
+            "default": 0,
+            "description": "Index of the first sample to return (the previous page's next_offset).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "limit": {
+            "anyOf": [{"minimum": 1, "type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Most samples per target to return; None returns as many as fit."
+          },
+          "max_simulated_frames": {
+            "anyOf": [{"minimum": 0, "type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Most frames of unbaked rigid-body simulation the call may step through, as for get_object_trajectory; None allows up to 200 000 bodies times frames."
+          }
+        },
+        "required": ["targets", "start_frame", "end_frame"]
+      },
+      "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "bake_blender_simulation": {
@@ -1620,8 +2078,18 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "frame_start": {"description": "First frame to bake.", "type": "integer"},
-          "frame_end": {"description": "Last frame to bake; after frame_start.", "type": "integer"},
+          "frame_start": {
+            "description": "First frame to bake.",
+            "maximum": 1048574,
+            "minimum": -1048574,
+            "type": "integer"
+          },
+          "frame_end": {
+            "description": "Last frame to bake; after frame_start.",
+            "maximum": 1048574,
+            "minimum": 1,
+            "type": "integer"
+          },
           "scope": {
             "default": "rigid_body",
             "description": "rigid_body bakes the rigid-body world's cache only (stepping each frame, then marking the cache baked), leaving cloth and other caches as they are; all frees and bakes every point cache in the scene, as Blender's Bake All Dynamics does: rigid bodies, cloth, soft bodies and dynamic paint over frame_start-frame_end, particle systems over the range their emission settings give.",
@@ -1680,7 +2148,10 @@
             "description": "Run the simulation; a disabled world leaves bodies at their own transforms."
           },
           "gravity": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Scene gravity [x, y, z] in m/s^2, shared with cloth, soft bodies and particles; Blender's default is [0, 0, -9.81]."
           },
@@ -1710,12 +2181,12 @@
             "description": "Reduce extra velocity from penetration recovery."
           },
           "cache_frame_start": {
-            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "anyOf": [{"maximum": 1048574, "minimum": -1048574, "type": "integer"}, {"type": "null"}],
             "default": null,
             "description": "First simulated frame."
           },
           "cache_frame_end": {
-            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "anyOf": [{"maximum": 1048574, "minimum": 1, "type": "integer"}, {"type": "null"}],
             "default": null,
             "description": "Last simulated frame; after cache_frame_start."
           }
@@ -1732,15 +2203,17 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "script": {"description": "Python source code to execute.", "type": "string"},
+          "script": {"description": "Python source code to execute.", "minLength": 1, "type": "string"},
           "timeout": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"minimum": 0.1, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Maximum wall-clock seconds to wait for the script; ``None`` waits for it to finish. In attached mode the wait, time spent behind other calls included, is also capped by BLENDER__CONNECTION_TIMEOUT. A script that started by then returns timed_out=true and keeps running; one still waiting behind other calls never runs and fails with TimeoutError (details.executed false)."
           },
           "max_output_chars": {
             "default": 32000,
             "description": "Most characters of printed output to return, 1 to 100000 (default 32000). Longer output is cut to its first max_output_chars characters with output_truncated=true and output_total_chars set. Output that JSON escapes heavily (non-ASCII text, control characters) is cut earlier, at 300000 bytes of JSON, so the prefix always arrives. Write larger results to a file and return its path instead.",
+            "maximum": 100000,
+            "minimum": 1,
             "type": "integer"
           }
         },
@@ -1757,7 +2230,7 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "name": {"description": "Desired object name.", "type": "string"},
+          "name": {"description": "Desired object name.", "minLength": 1, "type": "string"},
           "vertices": {
             "description": "Vertex positions, each exactly [x, y, z] finite numbers.",
             "items": {"items": {"type": "number"}, "type": "array"},
@@ -1801,12 +2274,12 @@
         "properties": {
           "object_name": {"description": "Mesh object whose data to clean.", "type": "string"},
           "merge_distance": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"exclusiveMinimum": 0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Merge vertices within this distance; None skips it."
           },
           "dissolve_degenerate_distance": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "anyOf": [{"exclusiveMinimum": 0, "type": "number"}, {"type": "null"}],
             "default": null,
             "description": "Dissolve edges and faces smaller than this; None skips it."
           },
@@ -1837,23 +2310,28 @@
             "type": "string"
           },
           "uv_map_name": {
-            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "anyOf": [{"maxLength": 63, "minLength": 1, "type": "string"}, {"type": "null"}],
             "default": null,
             "description": "UV map to write; the active one (or a new UVMap) if omitted."
           },
           "angle_limit": {
             "default": 1.1519173063162575,
             "description": "SMART_PROJECT: island angle in radians, above 0 to pi/2.",
+            "exclusiveMinimum": 0,
+            "maximum": 1.5707963267948966,
             "type": "number"
           },
           "island_margin": {
             "default": 0.0,
             "description": "SMART_PROJECT: space between islands, 0-1.",
+            "maximum": 1,
+            "minimum": 0,
             "type": "number"
           },
           "cube_size": {
             "default": 1.0,
             "description": "CUBE_PROJECT: size of the projection cube, above 0.",
+            "exclusiveMinimum": 0,
             "type": "number"
           }
         },
@@ -2087,7 +2565,7 @@
         "additionalProperties": false,
         "properties": {
           "object_names": {
-            "anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [{"items": {"type": "string"}, "minItems": 1, "type": "array"}, {"type": "null"}],
             "default": null,
             "description": "Objects to check, each with its descendants unless include_children is false. Null checks the scene's objects that are visible in renders. An empty list is refused."
           },
@@ -2134,10 +2612,17 @@
             "enum": ["all", "error", "warning"],
             "type": "string"
           },
-          "offset": {"default": 0, "description": "Index of the first issue returned.", "type": "integer"},
+          "offset": {
+            "default": 0,
+            "description": "Index of the first issue returned.",
+            "minimum": 0,
+            "type": "integer"
+          },
           "limit": {
             "default": 50,
             "description": "Most issues returned (1 to 500); next_offset gives the next page.",
+            "maximum": 500,
+            "minimum": 1,
             "type": "integer"
           }
         }
@@ -2155,7 +2640,7 @@
         "properties": {
           "file_path": {"description": "Output .usd, .usda, .usdc or .usdz path.", "type": "string"},
           "object_names": {
-            "anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [{"items": {"type": "string"}, "minItems": 1, "type": "array"}, {"type": "null"}],
             "default": null,
             "description": "Objects to export, each with its descendants unless include_children is false; listed objects are exported even when hidden. Null exports the scene's objects that are visible in renders. An empty list is refused."
           },
@@ -2210,7 +2695,7 @@
         },
         "required": ["file_path"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "setup_simready_hierarchy": {
@@ -2228,6 +2713,7 @@
           "child_names": {
             "description": "Existing objects to put under the root.",
             "items": {"type": "string"},
+            "minItems": 1,
             "type": "array"
           },
           "semantic": {

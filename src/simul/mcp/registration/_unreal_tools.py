@@ -420,11 +420,18 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "Execute arbitrary Python code inside the Unreal Engine editor. "
             "Use for operations not covered by other tools. The code runs via "
             "PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return "
-            "structured data. UE 5.7 hazard: do not leave a reference to an "
+            "structured data. Each call starts in a fresh namespace with unreal "
+            "imported, and every name it binds is discarded when it ends, returned "
+            "or raised: nothing carries over to the next call (pass values back in "
+            "as code), and a callback it registers must import what it uses inside "
+            "itself. Never keep an unreal package or world, or an object that refers to "
+            "one, in sys.modules, a module attribute or a registered callback: the next "
+            "map change aborts the editor. UE 5.7 hazard: do not leave a reference to an "
             "unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, "
             "unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) "
-            "in a reference cycle; a later garbage collection, including the editor's "
-            "own on autosave, crashes the editor. Call them inline. "
+            "in a reference cycle (a class attribute or a method's default argument puts "
+            "it in one); a later garbage collection, including the editor's own on "
+            "autosave, crashes the editor. Call them inline. "
             "For granular CLI operations see: simul unreal --help"
         ),
         response=UnrealExecuteScriptResponse,
@@ -771,6 +778,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealGetThumbnailResponse,
         read_only=True,
+        idempotent=True,
         method="get_actor_thumbnail",
         params=(
             ToolParam("asset_path", str, description="Full asset path."),
@@ -831,6 +839,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealFocusActorResponse,
         read_only=False,
+        idempotent=True,
         method="focus_on_actor",
         params=(
             ToolParam("actor_path", str, description="Full actor path to focus on."),
@@ -906,6 +915,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealDeleteActorResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="delete_actor",
         params=(ToolParam("actor_path", str, description="Full actor path, as list_unreal_actors reports it."),),
@@ -993,6 +1003,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealSetActorParentResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="set_actor_parent",
         params=(
@@ -1466,6 +1477,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealExportUsdResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="export_usd",
         params=(
@@ -1555,7 +1567,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Execute several Remote Control requests in one HTTP call, in order. Each result is "
             "Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has "
-            "error and error_type. Operations without a RequestId are numbered for you."
+            "error and error_type. Operations without a RequestId are numbered for you. Python run "
+            "through PythonScriptLibrary gets a fresh namespace per call, as in execute_unreal_script; "
+            "an ExecuteConsoleCommand of a py command is refused (ValidationError)."
         ),
         response=UnrealBatchOperationsResponse,
         read_only=False,

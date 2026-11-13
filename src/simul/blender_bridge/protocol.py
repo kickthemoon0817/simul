@@ -61,7 +61,7 @@ ACK_GRACE_SECONDS = 0.5
 _RETRY_FIRST_PAUSE = 0.05
 _RETRY_MAX_PAUSE = 0.5
 #: The refusal a bridge holding too much request data sends before reading a request.
-BRIDGE_BUSY = "BridgeBusy"
+BRIDGE_BUSY = "InstanceBusy"
 
 
 def request_prefix(token: str) -> bytes:
@@ -83,10 +83,19 @@ def protocol_mismatch_message(addon: Any, server: Any) -> str:
     )
 
 
-class ProtocolMismatch(ValueError):
-    """The add-on speaks another bridge protocol; the message says how to rebuild it."""
+class BridgeProtocolError(ValueError):
+    """The bridge endpoint or its reply does not follow this protocol.
 
-    error_type = "ProtocolMismatch"
+    Another protocol version, an endpoint file that is not this machine's
+    bridge, a reply that is malformed or answers another request. Not the
+    caller's input, though a ValueError as before: ``error_type`` names it.
+    """
+
+    error_type = "BridgeProtocolError"
+
+
+class ProtocolMismatch(BridgeProtocolError):
+    """The add-on speaks another bridge protocol; the message says how to rebuild it."""
 
 
 class BridgeRemoteError(RuntimeError):
@@ -105,6 +114,8 @@ class BridgeRemoteError(RuntimeError):
 
 class MessageTooLarge(ValueError):
     """A bridge message over MAX_MESSAGE_BYTES, which neither side reads."""
+
+    error_type = "PayloadTooLarge"
 
     def __init__(self, size: int, hint: str = "") -> None:
         super().__init__(
@@ -186,7 +197,7 @@ class _Lines:
             raise ConnectionError("Blender bridge closed without a response")
         self.buffer.extend(chunk)
         if len(self.buffer) > MAX_MESSAGE_BYTES:
-            raise ValueError("Blender bridge response exceeds 32 MiB")
+            raise BridgeProtocolError("Blender bridge response exceeds 32 MiB")
         return True
 
 
@@ -213,7 +224,7 @@ class BridgeWire:
 
         Against an add-on with START_ACK, a connection that ends before the
         start acknowledgement (the bridge was holding too many connections, or
-        restarted) is retried until ``timeout`` runs out, and so is a BridgeBusy
+        restarted) is retried until ``timeout`` runs out, and so is a bridge_busy
         refusal, which the bridge sends before reading a request. A request that
         was not sent whole is retried against any add-on, since the bridge runs
         only complete requests. Nothing else is retried: an operation whose
@@ -232,12 +243,12 @@ class BridgeWire:
                 protocol_mismatch_message(endpoint.get("protocol"), PROTOCOL_VERSION)
             )
         if endpoint.get("host") != "127.0.0.1":
-            raise ValueError("Unsupported Blender bridge endpoint")
+            raise BridgeProtocolError("Unsupported Blender bridge endpoint")
         if not isinstance(endpoint.get("token"), str) or not endpoint["token"]:
-            raise ValueError("Missing Blender bridge authentication token")
+            raise BridgeProtocolError("Missing Blender bridge authentication token")
         port = endpoint.get("port")
         if type(port) is not int or not 1 <= port <= 65535:
-            raise ValueError("Invalid Blender bridge port")
+            raise BridgeProtocolError("Invalid Blender bridge port")
         acknowledged = START_ACK in (endpoint.get("capabilities") or ())
         # Protocol and token first: the add-on authenticates on those bytes alone.
         request = {"protocol": PROTOCOL_VERSION, "token": endpoint["token"], **payload}
@@ -267,17 +278,18 @@ class BridgeWire:
                     isinstance(response, dict)
                     and response.get("request_id") is None
                     and response.get("error_type") == BRIDGE_BUSY
+                    and (response.get("details") or {}).get("code") == "bridge_busy"
                 )
                 if not busy or deadline - time.monotonic() <= pause:
                     break
             time.sleep(pause)
             pause = min(pause * 2, _RETRY_MAX_PAUSE)
         if not isinstance(response, dict):
-            raise ValueError("Invalid Blender bridge response")
+            raise BridgeProtocolError("Invalid Blender bridge response")
         # The bridge refuses a request it cannot parse before it knows its id.
         unread = response.get("request_id") is None and response.get("success") is False
         if response.get("request_id") != payload.get("request_id") and not unread:
-            raise ValueError("Blender bridge response identity mismatch")
+            raise BridgeProtocolError("Blender bridge response identity mismatch")
         if response.get("success") is not True:
             raise BridgeRemoteError(
                 response.get("error", "Blender bridge request failed"),
@@ -286,7 +298,7 @@ class BridgeWire:
             )
         result = response["result"]
         if not isinstance(result, dict):
-            raise ValueError("Invalid Blender bridge result")
+            raise BridgeProtocolError("Invalid Blender bridge result")
         return result
 
     @staticmethod
@@ -330,12 +342,12 @@ class BridgeWire:
                         # deadline.
                         grace = max(deadline, time.monotonic()) + ACK_GRACE_SECONDS
                         line = lines.next(grace)
-                        if line is not None and _is_ack(json.loads(line)):
+                        if line is not None and _is_ack(_decode(line)):
                             started, started_at = True, time.monotonic()
                             line = lines.next(grace)
                     if line is None:
                         raise timed_out("Blender bridge response deadline exceeded")
-                    response = json.loads(line)
+                    response = _decode(line)
                     if not _is_ack(response):
                         return response
                     if not started:
@@ -350,6 +362,14 @@ class BridgeWire:
             raise BridgeConnectionLost(
                 f"Blender bridge connection ended before the reply ({exc})", executed()
             ) from exc
+
+
+def _decode(line: bytes) -> Any:
+    """Decode one line of the bridge's reply."""
+    try:
+        return json.loads(line)
+    except ValueError as exc:
+        raise BridgeProtocolError(f"Undecodable Blender bridge response: {exc}") from exc
 
 
 def _is_ack(message: Any) -> bool:

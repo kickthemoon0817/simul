@@ -3,6 +3,11 @@
 Set SIMUL_UNREAL_REVIEW_LIVE=1 and UNREAL__PORT for a scratch project set up
 by simul unreal setup. USD round-trip additionally requires USDImporter enabled.
 Never point this opt-in tier at an editor with user work.
+
+A test saves only the packages it made, never Save All: a broad save writes
+any engine or plugin package dirty in the session into the shared engine
+install (tests/unreal/test_no_broad_editor_saves.py enforces it). A test that
+opens a scratch level reopens the map it started on and deletes the level.
 """
 
 import asyncio
@@ -150,6 +155,35 @@ async def transaction(client, command):
     assert not result.get("error"), result
 
 
+async def current_map(client):
+    """The editor world's package, to come back to after a test opens a scratch level."""
+    result = await client._execute_json_script(
+        "import unreal, json\nprint(json.dumps({'map': unreal.get_editor_subsystem("
+        "unreal.UnrealEditorSubsystem).get_editor_world().get_outermost().get_name()}))"
+    )
+    assert not result.get("error"), result
+    return result["map"]
+
+
+async def leave_scratch_level(client, started_on, scratch):
+    """Reopen the map the test started on, then delete the scratch level asset.
+
+    A map never saved (``/Temp/Untitled_N``, a disposable editor's startup map)
+    cannot be reopened, so a new blank map takes its place. Unsaved changes in
+    the scratch level are discarded, and nothing else is saved.
+    """
+    await client._execute_json_script(f"""
+import unreal, json
+utils = unreal.EditorLoadingAndSavingUtils
+if {started_on!r}.startswith("/Temp/"):
+    utils.new_blank_map(False)
+else:
+    utils.load_map({started_on!r})
+deleted = unreal.EditorAssetLibrary.delete_asset({scratch!r})
+print(json.dumps({{'deleted': bool(deleted)}}))
+""")
+
+
 def simulation_path(path):
     """The actor's path in the running simulation's world (UEDPIE_0_<map>)."""
     package, _, rest = path.partition(".")
@@ -170,6 +204,7 @@ def test_physics_edits_are_undoable_saved_and_simulate():
     async def run():
         client = session()
         level = "/Game/SimulReview_Physics_" + uuid.uuid4().hex[:8]
+        started_on = await current_map(client)
         try:
             made = await client._execute_json_script(f"""
 import unreal, json
@@ -218,12 +253,14 @@ print(json.dumps({{'saved': bool(les.save_current_level())}}))
             assert [p["code"] for p in refused["details"]["problems"]] == ["NO_PHYSICS_COLLISION"], refused
             assert (await physics_state(client, sensor))["actors"][sensor]["simulate"] is False
 
-            # Saving the test's own map writes the edits, and they survive a reload.
-            # Never Save All here: an earlier import in the same editor can leave
-            # engine or plugin content dirty, and Save All writes it into the
+            # Saving the map writes the edits, and they survive a reload. Only
+            # the test's own map is saved: Save All (save_dirty_packages) also
+            # writes any engine or plugin package dirty in the session into the
             # shared engine install.
             reloaded = await client._execute_json_script(f"""
 import unreal, json
+world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+assert world.get_outermost().get_name() == {level!r}, world.get_outermost().get_name()
 ok = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).save_current_level()
 unreal.EditorLoadingAndSavingUtils.load_map({level!r})
 print(json.dumps({{'saved': bool(ok)}}))
@@ -252,6 +289,7 @@ print(json.dumps({{'saved': bool(ok)}}))
             assert second["actors"][copies[1]]["collision"] == "NO_COLLISION", second
         finally:
             await client.control_simulation("stop")
+            await leave_scratch_level(client, started_on, level)
             await client.close()
 
     asyncio.run(run())

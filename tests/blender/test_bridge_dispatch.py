@@ -129,9 +129,15 @@ def test_stale_addon_endpoint_is_refused_before_connecting(protocol: int) -> Non
     before 5 records agent edits as no undo step, so open_blend_file would
     discard them unasked. The version check names the fix instead.
     """
+    from simul.blender_bridge.protocol import BridgeProtocolError
+    from simul.mcp.error_types import classify_exception
+
     endpoint = {"protocol": protocol, "host": "127.0.0.1", "port": 1, "token": "t"}
-    with pytest.raises(ValueError, match="protocol mismatch.*install-bridge"):
+    with pytest.raises(BridgeProtocolError, match="protocol mismatch.*install-bridge") as caught:
         BridgeWire.request(endpoint, {"request_id": "r"}, 0.1)
+    # A ValueError still, but the bridge's failure, not the caller's input.
+    assert isinstance(caught.value, ValueError)
+    assert classify_exception(caught.value) == "BridgeProtocolError"
 
 
 def test_unencodable_result_still_gets_a_reply(
@@ -617,6 +623,9 @@ def test_every_operation_is_classified_for_undo(bridge_module: Any) -> None:
             assert spec.operation in {
                 "control_ui",
                 "export_file",
+                # Step through frames and fill caches, but restore the frame.
+                "get_object_trajectory",
+                "get_trajectories",
                 "open_blend_file",
                 "play_animation",
                 "save_blend_file",
@@ -778,7 +787,7 @@ def test_a_refused_request_does_not_hold_up_the_next(wire: Any) -> None:
     refused = wire.send("get_frame", "bad", token="wrong")
     accepted = wire.send("get_frame", "good")
     wire.poll()
-    assert wire.lines(refused)[0]["error_type"] == "PermissionError"
+    assert wire.lines(refused)[0]["error_type"] == "AuthenticationError"
     assert wire.lines(accepted)[0]["success"] is True
 
 
@@ -867,7 +876,7 @@ def test_an_authenticated_request_that_never_ends_is_refused_at_its_deadline(
     _trickle(wire, clock, client, request[len(wire.bridge._prefix) + 5 : -1], 3.0)
     [reply] = wire.lines(client)
 
-    assert reply["error_type"] == "RequestTimeout"
+    assert reply["error_type"] == "TimeoutError"
     assert reply["details"] == {"code": "request_timeout", "executed": False}
     assert _QueueSession.calls == []
 
@@ -904,9 +913,9 @@ def test_an_idle_connection_is_dropped(wire: Any, monkeypatch: pytest.MonkeyPatc
 @pytest.mark.parametrize(
     ("data", "error_type", "code"),
     [
-        (b'{"request_id": "r1", "token": "', "ValueError", "protocol_mismatch"),
-        (b'{"protocol": 3, "token": "', "ValueError", "protocol_mismatch"),
-        (None, "PermissionError", "unauthenticated"),
+        (b'{"request_id": "r1", "token": "', "BridgeProtocolError", "protocol_mismatch"),
+        (b'{"protocol": 3, "token": "', "BridgeProtocolError", "protocol_mismatch"),
+        (None, "AuthenticationError", "unauthenticated"),
     ],
     ids=["older-client", "other-protocol", "wrong-token"],
 )
@@ -965,7 +974,7 @@ def test_request_data_past_the_budget_is_refused_as_busy(
     [busy] = wire.lines(second)
 
     assert busy["request_id"] is None
-    assert busy["error_type"] == "BridgeBusy"
+    assert busy["error_type"] == "InstanceBusy"
     assert busy["details"] == {"code": "bridge_busy", "executed": False}
     # Alone, a request may use the whole budget: the first one completes.
     first.sendall(b"\n")
@@ -1006,7 +1015,7 @@ def test_a_request_over_the_cap_gets_a_refusal_it_can_read(
 
     assert reply["request_id"] is None
     assert reply["success"] is False
-    assert reply["error_type"] == "RequestTooLarge"
+    assert reply["error_type"] == "PayloadTooLarge"
     assert "not executed" in reply["error"]
     assert reply["details"] == {"code": "request_too_large", "limit_bytes": 1000, "executed": False}
     assert _QueueSession.calls == []
@@ -1027,7 +1036,7 @@ def test_an_unparsable_request_gets_a_refusal_and_the_bridge_keeps_polling(
     wire.poll(2)
     [reply] = wire.lines(client)
 
-    assert reply["error_type"] == "InvalidRequest"
+    assert reply["error_type"] == "BridgeProtocolError"
     assert reply["details"] == {"code": "invalid_request", "executed": False}
     assert _QueueSession.calls == []
 
@@ -1163,6 +1172,74 @@ def test_a_request_whose_deadline_passed_while_it_waited_never_runs(
     assert "no operation was performed" in refused["error"]
     assert refused["details"] == {"executed": False}
     assert _QueueSession.calls == ["slow"]
+
+
+def test_stopping_the_bridge_removes_the_playback_handlers(
+    bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """play_blender_animation's handlers are persistent: they outlived the add-on."""
+    removed: list = []
+    monkeypatch.setattr(
+        bridge_module, "stop_watching_playback", lambda: removed.append(True)
+    )
+    bpy = sys.modules["bpy"]
+    bpy.app.timers = SimpleNamespace(is_registered=lambda timer: False)  # type: ignore[attr-defined]
+    bpy.app.handlers.load_post = []  # type: ignore[attr-defined]
+
+    _bridge(bridge_module, tmp_path).stop()
+
+    assert removed == [True]
+
+
+# ---------------------------------------------------------------------------
+# A declared error type survives the bridge
+# ---------------------------------------------------------------------------
+
+
+def test_a_missing_object_reaches_the_server_as_not_found(
+    bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The add-on relayed the class name, so a missing object read as ValueError."""
+    from simul.adapters.blender_runtime import NotFoundError
+    from simul.blender_bridge.protocol import BridgeRemoteError
+    from simul.mcp.error_types import exception_fields
+
+    class Session:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def get_frame(self) -> Dict[str, Any]:
+            raise NotFoundError("Object not found: Cube", "object_not_found", object_name="Cube")
+
+    monkeypatch.setattr(bridge_module, "BlenderRuntimeSession", Session)
+    bridge = _bridge(bridge_module, tmp_path)
+    reply = bridge.dispatch(_operation_request(bridge, tmp_path, "get_frame"))
+
+    assert reply["success"] is False
+    assert reply["error_type"] == "NotFoundError"
+    remote = BridgeRemoteError(reply["error"], reply["error_type"], reply["details"])
+    assert exception_fields(remote) == {
+        "error_type": "NotFoundError",
+        "details": {"code": "object_not_found", "object_name": "Cube"},
+    }
+
+
+def test_a_disabled_script_is_script_execution_disabled_over_the_bridge(
+    bridge_module: Any, tmp_path: Path
+) -> None:
+    bridge = _bridge(bridge_module, tmp_path)
+    reply = bridge.dispatch(
+        _operation_request(
+            bridge,
+            tmp_path,
+            "execute_script",
+            kwargs={"script": "print(1)"},
+            allow_script_execution=False,
+        )
+    )
+
+    assert reply["success"] is False
+    assert reply["error_type"] == "ScriptExecutionDisabled"
 
 
 def test_a_declared_error_type_reaches_the_reply(

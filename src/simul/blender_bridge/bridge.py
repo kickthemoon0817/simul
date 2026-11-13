@@ -25,8 +25,8 @@ from typing import Any, Callable, Optional
 import bpy
 from bpy.app.handlers import persistent
 
-from ..adapters.blender_runtime import BlenderRuntimeSession
-from ..utils.errors import exception_message, exception_type_name
+from ..adapters.blender_runtime import BlenderRuntimeSession, stop_watching_playback
+from ..utils.errors import ScriptExecutionDisabled, exception_message, exception_type_name
 from ..utils.paths import PathPolicy, state_dir
 from .agent_control import reset_ui
 from .agent_cursor import cursors, hide_annotations, observations
@@ -53,7 +53,7 @@ AUTH_SECONDS = 2.0
 #: Seconds (of polling) an authenticated client has to send its whole request.
 REQUEST_SECONDS = 60.0
 #: Request bytes held across all connections, read or waiting their turn. A
-#: request that would go over it is refused with BridgeBusy, which its client
+#: request that would go over it is refused as InstanceBusy (bridge_busy), which its client
 #: retries, unless no other connection holds any.
 BUFFER_BUDGET = 2 * MAX_MESSAGE_BYTES
 #: Seconds a connection may go without sending or reading a byte while the
@@ -94,6 +94,7 @@ UNDO_STEPS: dict[str, str] = {
     "free_bake": "free_blender_bake",
     "import_file": "import_blender_file",
     "insert_keyframe": "insert_blender_keyframe",
+    "insert_keyframes": "insert_blender_keyframes",
     "remove_modifier": "remove_blender_modifier",
     "set_camera_view": "set_blender_camera_view",
     # Blender records frame changes as undo steps too.
@@ -104,6 +105,7 @@ UNDO_STEPS: dict[str, str] = {
     "set_object_mode": "set_blender_object_mode",
     "set_object_parent": "set_blender_object_parent",
     "set_object_transform": "set_blender_object_transform",
+    "set_pose_bone_transform": "set_blender_pose_bone_transform",
     "set_rigid_body_world": "set_blender_rigid_body_world",
     "setup_rigid_body": "setup_blender_rigid_body",
     "setup_simready_hierarchy": "setup_simready_hierarchy",
@@ -134,6 +136,7 @@ NO_UNDO_STEP = frozenset(
         "get_object_trajectory",
         "get_physics_state",
         "get_rigid_body_world",
+        "get_trajectories",
         "get_runtime_info",
         "get_simready_metadata",
         "get_viewport_info",
@@ -303,6 +306,8 @@ class BlenderBridge:
             self.listener.close()
             self.listener = None
         self.discovery_path.unlink(missing_ok=True)
+        # play_blender_animation's playback handlers are persistent.
+        stop_watching_playback()
 
     def poll(self) -> float | None:
         """Accept, read and answer requests from Blender's main-thread timer.
@@ -407,7 +412,7 @@ class BlenderBridge:
             if pending.authenticated:
                 self._refuse(
                     pending,
-                    "RequestTimeout",
+                    "TimeoutError",
                     f"Blender bridge request took longer than {REQUEST_SECONDS:g} s to "
                     "arrive; it was not executed.",
                     {"code": "request_timeout"},
@@ -472,7 +477,7 @@ class BlenderBridge:
         head = b'{"protocol": '
         if not head.startswith(data[: len(head)]):
             return (
-                "ValueError",
+                "BridgeProtocolError",
                 protocol_mismatch_message(
                     PROTOCOL_VERSION, f"older than {PROTOCOL_VERSION}, which sends the token last"
                 ),
@@ -483,16 +488,16 @@ class BlenderBridge:
             if len(version) == 2 or len(version[0]) > 6:
                 if version[0] != str(PROTOCOL_VERSION).encode():
                     return (
-                        "ValueError",
+                        "BridgeProtocolError",
                         protocol_mismatch_message(PROTOCOL_VERSION, version[0].decode("ascii", "replace")),
                         {"code": "protocol_mismatch"},
                     )
         if len(data) < len(self._prefix):
             if b"\n" in pending.incoming:
-                return ("PermissionError", "Blender bridge authentication failed", {"code": "unauthenticated"})
+                return ("AuthenticationError", "Blender bridge authentication failed", {"code": "unauthenticated"})
             return None
         if not secrets.compare_digest(data, self._prefix):
-            return ("PermissionError", "Blender bridge authentication failed", {"code": "unauthenticated"})
+            return ("AuthenticationError", "Blender bridge authentication failed", {"code": "unauthenticated"})
         return True
 
     def _complete(self, pending: PendingConnection) -> None:
@@ -522,8 +527,8 @@ class BlenderBridge:
             reply: dict[str, Any] = {
                 "request_id": None,
                 "success": False,
-                "error": "InvalidRequest: Blender bridge request is not valid JSON; it was not executed.",
-                "error_type": "InvalidRequest",
+                "error": "BridgeProtocolError: Blender bridge request is not valid JSON; it was not executed.",
+                "error_type": "BridgeProtocolError",
                 "details": {"code": "invalid_request", "executed": False},
             }
         else:
@@ -617,7 +622,7 @@ class BlenderBridge:
         limit = MAX_MESSAGE_BYTES // 2**20
         self._refuse(
             pending,
-            "RequestTooLarge",
+            "PayloadTooLarge",
             f"Blender bridge request exceeds {limit} MiB, the most the bridge reads per "
             "call; it was not executed. Send less per call, for example a large mesh as "
             "several objects.",
@@ -793,7 +798,7 @@ class BlenderBridge:
         if method == "execute_script" and not request.get(
             "allow_script_execution", False
         ):
-            raise PermissionError("Script execution is disabled")
+            raise ScriptExecutionDisabled("Script execution is disabled")
         policy = dict(request["path_policy"])
         policy["project_root"] = Path(policy["project_root"])
         session = BlenderRuntimeSession(

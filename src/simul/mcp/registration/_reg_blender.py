@@ -50,7 +50,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 from ...adapters.blender_runtime import BlenderRuntimeSession
 from ...tool_surfaces import THIN_BLENDER_TOOLS
-from ...utils.errors import exception_type_name
+from .. import error_types
 from ..schemas.blender import (
     LISTING_JSON_BYTES_MAX,
     SCRIPT_OUTPUT_CHARS_DEFAULT,
@@ -59,6 +59,9 @@ from ..schemas.blender import (
     SEQUENCE_FRAMES_DEFAULT,
     SEQUENCE_FRAMES_MAX,
     SEQUENCE_TIME_BUDGET_SECONDS,
+    AdvertisedFrame,
+    AdvertisedFrameStep,
+    AdvertisedSceneFrame,
     BlenderAddConstraintRequest,
     BlenderAddConstraintResponse,
     BlenderAddForceFieldRequest,
@@ -122,6 +125,8 @@ from ..schemas.blender import (
     BlenderGetKeyframesResponse,
     BlenderGetPhysicsStateRequest,
     BlenderGetPhysicsStateResponse,
+    BlenderGetTrajectoriesRequest,
+    BlenderGetTrajectoriesResponse,
     BlenderGetTrajectoryRequest,
     BlenderGetTrajectoryResponse,
     BlenderImportFileRequest,
@@ -129,6 +134,11 @@ from ..schemas.blender import (
     BlenderInfoResponse,
     BlenderInsertKeyframeRequest,
     BlenderInsertKeyframeResponse,
+    BlenderInsertKeyframesRequest,
+    BlenderInsertKeyframesResponse,
+    BlenderKeyframeChannelData,
+    BlenderKeyframeInterpolation,
+    BlenderKeyframeType,
     BlenderMaterialInfoRequest,
     BlenderMaterialInfoResponse,
     BlenderMeshInfoRequest,
@@ -140,6 +150,7 @@ from ..schemas.blender import (
     BlenderOpenFileResponse,
     BlenderPlayAnimationRequest,
     BlenderPlayAnimationResponse,
+    BlenderPlaybackAction,
     BlenderRemoveModifierResponse,
     BlenderRigidBodyWorldResponse,
     BlenderSaveFileRequest,
@@ -161,6 +172,8 @@ from ..schemas.blender import (
     BlenderSetObjectModeResponse,
     BlenderSetParentRequest,
     BlenderSetParentResponse,
+    BlenderSetPoseBoneTransformRequest,
+    BlenderSetPoseBoneTransformResponse,
     BlenderSetRigidBodyWorldRequest,
     BlenderSetTransformRequest,
     BlenderSetTransformResponse,
@@ -168,6 +181,8 @@ from ..schemas.blender import (
     BlenderSetupRigidBodyResponse,
     BlenderSpringAxis,
     BlenderSpringSettings,
+    BlenderTrajectoryField,
+    BlenderTrajectoryTarget,
     BlenderUVUnwrapRequest,
     BlenderUVUnwrapResponse,
     BlenderViewportInfoResponse,
@@ -197,6 +212,7 @@ from ..schemas.simready import (
     SimReadyValidateRequest,
     SimReadyValidateResponse,
 )
+from ._constraints import from_request_model
 from ._helpers import surface_tool, with_param_descriptions
 
 if TYPE_CHECKING:
@@ -228,9 +244,10 @@ READ_ONLY = Hints(read_only=True, idempotent=True)
 ADDITIVE = Hints(read_only=False, idempotent=False)
 #: Changes the view, frame or attachment target; repeating the call changes nothing more.
 IDEMPOTENT = Hints(read_only=False, idempotent=True)
-#: Overwrites state; repeating the call changes nothing more.
+#: Overwrites or deletes named state or files (a delete, a save, an export to a
+#: path); repeating the call changes nothing more.
 OVERWRITING = Hints(read_only=False, idempotent=True, destructive=True)
-#: Deletes or replaces state or files, or runs arbitrary code.
+#: Replaces state in a way that repeating compounds, or runs arbitrary code.
 DESTRUCTIVE = Hints(read_only=False, idempotent=False, destructive=True)
 
 # Marks a Param field that keeps what the operation's signature declares.
@@ -379,9 +396,14 @@ async def _exec(
 
 
 def _session_value(value: Any) -> Any:
-    """What the session receives for a validated field: nested models as plain dicts."""
+    """What the session receives for a validated field: nested models, also in a list, as plain dicts.
+
+    The attached add-on receives the arguments as JSON, which has no models.
+    """
     if isinstance(value, BaseModel):
         return value.model_dump(exclude_none=True)
+    if isinstance(value, list):
+        return [_session_value(item) for item in value]
     return value
 
 
@@ -401,6 +423,8 @@ def _advertised_parameters(
             default = override.default_from(settings)
         elif default is _FROM_OPERATION:
             default = parameter.default
+        # The schema states the bounds and choices the request model enforces.
+        annotation = from_request_model(spec.request, name, annotation)
         parameters.append(parameter.replace(annotation=annotation, default=default))
     return parameters
 
@@ -560,7 +584,7 @@ def _attach(server: "SimulMCPServer", request: Any) -> Dict[str, Any]:
         return {
             "success": False,
             "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
-            "error_type": "ValueError",
+            "error_type": "UnsupportedOperation",
         }
     from ...adapters.blender_connection import BlenderAttachments
 
@@ -570,13 +594,14 @@ def _attach(server: "SimulMCPServer", request: Any) -> Dict[str, Any]:
     except (ValueError, RuntimeError) as exc:
         # List the candidates so the agent can choose without a shell; the
         # refusal may have listed them already.
-        details = dict(getattr(exc, "details", None) or {})
+        fields = error_types.exception_fields(exc)
+        details = dict(fields["details"] or {})
         if "instances" not in details:
             details["instances"] = attachments.instances()
         return {
             "success": False,
             "error": str(exc),
-            "error_type": exception_type_name(exc),
+            "error_type": fields["error_type"],
             "details": details,
         }
 
@@ -1144,7 +1169,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "every agent edit counts, as each is an undo step); save them first with "
             "save_blender_file, or pass discard_unsaved=true to discard them."
         ),
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="open_blend_file",
         request=BlenderOpenFileRequest,
         response=BlenderOpenFileResponse,
@@ -1191,7 +1216,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "not replaced unless overwrite_companion_files, and files_written lists every "
             "file written."
         ),
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="export_file",
         request=BlenderExportFileRequest,
         response=BlenderExportFileResponse,
@@ -1212,12 +1237,13 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         description="Set the current animation frame.",
         hints=IDEMPOTENT,
         operation="set_frame",
+        params={"frame": Param(AdvertisedFrame)},
         request=BlenderSetFrameRequest,
         response=BlenderSetFrameResponse,
     ),
     BlenderTool(
         name="get_blender_frame",
-        description="Get the current frame and animation range.",
+        description="Get the current frame, the animation range and the frame rate (fps / fps_base).",
         hints=READ_ONLY,
         operation="get_frame",
         response=BlenderGetFrameResponse,
@@ -1225,45 +1251,102 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="set_blender_frame_range",
         description=(
-            "Set the animation frame range. An unbaked rigid-body cache follows it; "
-            "a baked one keeps its range, with a warning."
+            "Set the animation frame range; start may equal end for a one-frame "
+            "range. An unbaked rigid-body cache follows it; a baked one keeps its "
+            "range, with a warning."
         ),
         hints=OVERWRITING,
         operation="set_frame_range",
+        params={
+            "frame_start": Param(AdvertisedSceneFrame),
+            "frame_end": Param(AdvertisedSceneFrame),
+        },
         request=BlenderSetFrameRangeRequest,
         response=BlenderSetFrameRangeResponse,
     ),
     BlenderTool(
         name="play_blender_animation",
-        description="Control animation playback (play, stop, reverse).",
-        hints=ADDITIVE,
+        description=(
+            "Play, reverse, pause or stop animation playback; repeating a call changes "
+            "nothing more. pause keeps the current frame, stop returns to the frame "
+            "playback started from. Needs Blender's event loop: refused in background mode."
+        ),
+        hints=IDEMPOTENT,
         operation="play_animation",
+        params={"action": Param(BlenderPlaybackAction)},
         request=BlenderPlayAnimationRequest,
         response=BlenderPlayAnimationResponse,
     ),
     BlenderTool(
         name="insert_blender_keyframe",
-        description="Insert a keyframe on an object property.",
+        description=(
+            "Insert a keyframe on an object property: its current value, or value; "
+            "optionally the interpolation and key type."
+        ),
         hints=ADDITIVE,
         operation="insert_keyframe",
+        params={
+            "interpolation": Param(Optional[BlenderKeyframeInterpolation]),
+            "keyframe_type": Param(BlenderKeyframeType),
+        },
         request=BlenderInsertKeyframeRequest,
         response=BlenderInsertKeyframeResponse,
+        added_params=("value", "interpolation", "keyframe_type"),
     ),
     BlenderTool(
         name="delete_blender_keyframe",
         description="Delete a keyframe from an object property.",
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="delete_keyframe",
         request=BlenderDeleteKeyframeRequest,
         response=BlenderDeleteKeyframeResponse,
     ),
     BlenderTool(
+        name="set_blender_pose_bone_transform",
+        description=(
+            "Set a pose bone's own location, rotation and/or scale (its pose relative to "
+            "the rest position); the rotation is written in the bone's rotation mode."
+        ),
+        hints=OVERWRITING,
+        operation="set_pose_bone_transform",
+        request=BlenderSetPoseBoneTransformRequest,
+        response=BlenderSetPoseBoneTransformResponse,
+    ),
+    BlenderTool(
         name="get_blender_keyframes",
-        description="Get keyframe summary for an object.",
+        description=(
+            "List an object's keyed channels a page at a time, filtered by data_path or "
+            "bone_name, optionally with every key's value, interpolation and handles; "
+            "next_offset (and next_key_offset) continue a page that stops early."
+        ),
         hints=READ_ONLY,
         operation="get_keyframes",
         request=BlenderGetKeyframesRequest,
         response=BlenderGetKeyframesResponse,
+        added_params=(
+            "data_path",
+            "bone_name",
+            "include_keys",
+            "offset",
+            "key_offset",
+            "limit",
+        ),
+    ),
+    BlenderTool(
+        name="insert_blender_keyframes",
+        description=(
+            "Insert many keyframes in one call: for each property, a value per frame "
+            "(up to 10 000 keys), with an optional interpolation and key type."
+        ),
+        hints=ADDITIVE,
+        operation="insert_keyframes",
+        request=BlenderInsertKeyframesRequest,
+        response=BlenderInsertKeyframesResponse,
+        params={
+            "channels": Param(List[BlenderKeyframeChannelData]),
+            "interpolation": Param(Optional[BlenderKeyframeInterpolation]),
+            "keyframe_type": Param(BlenderKeyframeType),
+        },
     ),
     # -- Physics and simulation ----------------------------------------------
     BlenderTool(
@@ -1377,11 +1460,39 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_object_trajectory",
-        description="Sample object position over a frame range.",
-        hints=READ_ONLY,
+        description=(
+            "Sample the world pose of an object, or of an armature's bone, over a frame "
+            "range, a page at a time (next_offset continues). Not read-only: it steps "
+            "the scene through the frames (frame-change handlers run, an unbaked "
+            "rigid-body cache fills, more than 200 000 bodies x frames only with "
+            "max_simulated_frames) and restores the current frame afterwards."
+        ),
+        hints=IDEMPOTENT,
         operation="get_object_trajectory",
+        params={
+            "step": Param(AdvertisedFrameStep),
+            "fields": Param(Optional[List[BlenderTrajectoryField]]),
+        },
         request=BlenderGetTrajectoryRequest,
         response=BlenderGetTrajectoryResponse,
+        added_params=("bone_name", "fields", "offset", "limit", "max_simulated_frames"),
+    ),
+    BlenderTool(
+        name="get_blender_trajectories",
+        description=(
+            "Sample several objects and bones over one frame range in one pass, each "
+            "as get_blender_object_trajectory samples one; the same paging and side "
+            "effects."
+        ),
+        hints=IDEMPOTENT,
+        operation="get_trajectories",
+        request=BlenderGetTrajectoriesRequest,
+        response=BlenderGetTrajectoriesResponse,
+        params={
+            "targets": Param(List[BlenderTrajectoryTarget]),
+            "step": Param(AdvertisedFrameStep),
+            "fields": Param(Optional[List[BlenderTrajectoryField]]),
+        },
     ),
     BlenderTool(
         name="bake_blender_simulation",
@@ -1587,7 +1698,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Refuses when validation finds errors; skip_checks leaves a check out, force=true "
             "ignores every error. Returns each object's prim path."
         ),
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="export_simready_usd",
         request=SimReadyExportRequest,
         response=SimReadyExportResponse,

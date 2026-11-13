@@ -115,7 +115,7 @@ class CompoundMixin:
                     f"Invalid collision {collision!r}. Must be one of: "
                     f"{', '.join(COLLISION_APPROXIMATIONS)}"
                 ),
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         # Checked before anything is sent: a two-element translation used to
         # raise inside the script after the prim existed, losing the steps
@@ -129,7 +129,7 @@ class CompoundMixin:
             if vector is not None and len(vector) != 3:
                 return ErrorResponse(
                     error=f"{label} must have 3 components; got {len(vector)}. Nothing was created.",
-                    error_type="ValueError",
+                    error_type="ValidationError",
                 ).model_dump()
         if material_path is None and diffuse_color is not None:
             parent, _, name = prim_path.rpartition("/")

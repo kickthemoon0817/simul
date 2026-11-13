@@ -682,9 +682,14 @@ def test_attach_existing_gui_and_refuse_changed_targets(
                 searched = tool("search_blender_objects", name_pattern=pattern)
                 assert searched["success"] is True and searched["total"] == 0, searched
                 assert time.monotonic() - started < 5, pattern
-            refused = tool("search_blender_objects", name_pattern=r"(.*).*.*.*\1x")
-            assert refused["error_type"] == "ValidationError", refused
-            assert refused["details"]["code"] == "regex_backtracking"
+            # Re-review: (?=.*.*.*.*\d) went to re and froze Blender for 2.16 s
+            # on one 128-character name.
+            for pattern in (r"(.*).*.*.*\1x", r"(?=.*.*.*.*\d)"):
+                started = time.monotonic()
+                refused = tool("search_blender_objects", name_pattern=pattern)
+                assert refused["error_type"] == "ValidationError", refused
+                assert refused["details"]["code"] == "regex_backtracking"
+                assert time.monotonic() - started < 5, pattern
             client.execute_script(
                 "for o in [o for o in bpy.data.objects if o.name.startswith('LongAssetName_')]:\n"
                 "    bpy.data.objects.remove(o)\n"
@@ -1016,7 +1021,7 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             )["position"] == [0.3, 0.7]
             manager.detach()
             assert process.poll() is None
-            with pytest.raises(RuntimeError, match="No Blender window attached"):
+            with pytest.raises(ConnectionError, match="No Blender window attached"):
                 client.get_runtime_info()
             # B1-02: the agent's edits count as unsaved, so the user's quit asks
             # to save them instead of closing Blender at once.
@@ -1144,11 +1149,11 @@ def test_recover_from_file_loads_context_loss_and_exit(
             )
             assert grid["success"] is True, grid
             assert call("delete_blender_object", object_name="BigGrid")["success"] is True
-            # A refusal keeps its class across the bridge. A camera is refused
+            # A refusal keeps its type across the bridge. A camera is refused
             # before Blender's operator runs, which only said "poll() failed",
             # and it leaves no rigid body world behind.
             no_mesh = call("setup_blender_rigid_body", object_name="Camera")
-            assert no_mesh["error_type"] == "ValueError", no_mesh
+            assert no_mesh["error_type"] == "ValidationError", no_mesh
             assert "need a mesh object, and 'Camera' is a CAMERA" in no_mesh["error"]
             world = call("get_blender_rigid_body_world")
             assert world["success"] is True and world["exists"] is False, world
@@ -1201,7 +1206,7 @@ def test_recover_from_file_loads_context_loss_and_exit(
                 frame=10,
             )
             assert missing["success"] is False, missing
-            assert missing["error_type"] == "ValueError", missing
+            assert missing["error_type"] == "ValidationError", missing
             keys = call("get_blender_keyframes", object_name="Ball")
             assert [c["keyframe_count"] for c in keys["channels"]] == [1, 1, 1], keys
             # Another object animated by the same action, through its own slot.

@@ -673,7 +673,7 @@ def exec_script(
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Execute Python code inside Unreal Engine."""
+    """Execute Python code inside Unreal Engine, in a fresh namespace discarded when it ends."""
     from simul.adapters.unreal_runtime import UNREAL_EXEC_MODES
 
     if mode not in UNREAL_EXEC_MODES:

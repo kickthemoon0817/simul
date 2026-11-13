@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional
 from ..blender_bridge.protocol import BridgeFiles, BridgeRemoteError, BridgeWire, ProtocolMismatch
 from ..config import Settings
 from ..utils.discovery import DiscoveryDir
+from ..utils.errors import ScriptExecutionDisabled
 from ..utils.paths import PathPolicy, SandboxDenied
 from .blender_runtime import BlenderRuntimeSession, add_context_hint
 
@@ -69,7 +70,7 @@ class InstanceBusy(AttachmentError):
 class InstanceProtocolMismatch(AttachmentError):
     """The Blender instance runs an add-on built for another bridge protocol."""
 
-    error_type = "ProtocolMismatch"
+    error_type = "BridgeProtocolError"
 
 
 class BlenderRequestTimeout(TimeoutError):
@@ -187,6 +188,16 @@ def _script_timed_out(
     }
 
 
+class NoBlenderBridge(AttachmentError):
+    """No GUI Blender with the bridge add-on answers: there is nothing to attach to.
+
+    A RuntimeError like the rest of the family; its ``error_type`` is the
+    ``ConnectionError`` of an engine that is not reachable.
+    """
+
+    error_type = "ConnectionError"
+
+
 class BlenderConnection:
     """Session-compatible proxy pinned to a verified process, document and window."""
 
@@ -204,7 +215,7 @@ class BlenderConnection:
             timeout = self.settings.blender.connection_timeout
             if method == "execute_script":
                 if not self.settings.security.allow_script_execution:
-                    raise PermissionError("Script execution is disabled")
+                    raise ScriptExecutionDisabled("Script execution is disabled")
                 requested_timeout = arguments.arguments.get("timeout")
                 if requested_timeout is not None:
                     timeout = min(timeout, float(requested_timeout))
@@ -213,7 +224,9 @@ class BlenderConnection:
                     Path(self.settings.blender.attachment_path).expanduser()
                 )
             except FileNotFoundError as exc:
-                raise RuntimeError(
+                # Nothing to connect to yet: a ConnectionError, not the
+                # FileNotFoundError of the attachment file.
+                raise ConnectionError(
                     "No Blender window attached; run simul blender instances, then simul blender attach"
                 ) from exc
             policy = PathPolicy.from_settings(self.settings)
@@ -430,7 +443,7 @@ class BlenderAttachments:
             outdated = [entry for entry in entries if entry.get("protocol_mismatch")]
             if outdated:
                 raise self._mismatch(outdated[0], entries)
-            raise RuntimeError(
+            raise NoBlenderBridge(
                 "No matching GUI Blender bridge. Enable the Simul Blender Bridge add-on in the existing window."
             )
         if len(live) != 1:
@@ -529,7 +542,7 @@ class BlenderAttachments:
             latest["document_id"] != info["document_id"]
             or selected not in latest["windows"]
         ):
-            raise RuntimeError(
+            raise AttachmentTargetChanged(
                 "Blender changed while attaching; inspect instances and attach again"
             )
         target = {"document_id": info["document_id"], **selected}
