@@ -602,3 +602,65 @@ def test_a_misconfigured_client_reads_the_bridge_as_the_raw_flavour() -> None:
 
     assert protocol == "vscode"
     assert result.success is True and ran == ["print('pong')"]
+
+
+# ---------------------------------------------------------------------------
+# Error typing (aligned with simul.mcp.error_types after #329)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("No stage is currently open", "InvalidState"),
+        ("Prim not found: /World/X", "NotFoundError"),
+        ("Root path not found: /Wrold", "NotFoundError"),
+        ("No camera found in scene", "NotFoundError"),
+        ("No physics scene on the stage", "NotFoundError"),
+        ("Prim is not Xformable: /World/L", "ValidationError"),
+        ("Prim does not have MassAPI: /World/B", "ValidationError"),
+        ("Not a valid Camera prim: /World/C", "ValidationError"),
+        ("Prim already exists at /World/M", "InvalidState"),
+        ("No active viewport found", "ViewportUnavailable"),
+        ("Viewport capture failed - file not created", "CaptureError"),
+        ("PhysX scene query not available. Is physics enabled?", "UnsupportedOperation"),
+        ("Failed to open stage: bad file", "EngineError"),
+    ],
+)
+def test_untyped_script_failures_get_a_type_from_the_vocabulary(message: str, expected: str) -> None:
+    from simul.mcp import error_types
+
+    tools, _ = _recording_tools(_settings(), outputs=[{"error": message}])
+
+    result = asyncio.run(tools._execute_json_script("print('x')"))
+
+    assert result["success"] is False
+    assert result["error_type"] == expected
+    assert error_types.is_known(result["error_type"])
+
+
+def test_a_script_that_types_its_own_failure_keeps_the_type() -> None:
+    tools, _ = _recording_tools(
+        _settings(), outputs=[{"error": "Prim not found: /x", "error_type": "RefusedOperation"}]
+    )
+
+    result = asyncio.run(tools._execute_json_script("print('x')"))
+
+    assert result["error_type"] == "RefusedOperation"
+
+
+def test_transport_failures_use_the_vocabulary() -> None:
+    from simul.adapters.isaac_socket_client import ScriptResult
+    from simul.mcp.tools.isaac._base import IsaacScriptBase
+
+    bridge_timeout = ScriptResult(
+        success=False, output="", error_name="ScriptInterrupted",
+        error_value="Script timed out after 29s and was interrupted", transport="bridge", transport_failure=True,
+    )
+    too_large = ScriptResult(
+        success=False, output="", error_name="ScriptTooLargeForSocket", error_value="too big",
+        transport="vscode", transport_failure=True,
+    )
+
+    assert IsaacScriptBase._script_failure(bridge_timeout)["error_type"] == "TimeoutError"
+    assert IsaacScriptBase._script_failure(too_large)["error_type"] == "PayloadTooLarge"

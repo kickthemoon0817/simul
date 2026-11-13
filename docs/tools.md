@@ -378,6 +378,17 @@ Notes:
   Refusals are typed: `error_type` is `NotFoundError`, `ValidationError` or
   `InvalidState`, and `details.code` names the case (`INSTANCE_PROXY`,
   `DEFINED_ELSEWHERE`, `DESTINATION_EXISTS`, `UNKNOWN_PRIM_TYPE`, ...).
+  Every other Isaac tool's script failures are typed by the condition as well:
+  - no open stage is `InvalidState`;
+  - a prim, root path, graph, camera or extension that isn't there is
+    `NotFoundError`;
+  - a prim of the wrong kind or missing an API is `ValidationError`;
+  - no viewport is `ViewportUnavailable`;
+  - a missing capability (PhysX scene query) is `UnsupportedOperation`;
+  - anything else Kit reports is `EngineError`.
+
+  A bridge script stopped at its timeout is `TimeoutError`, and a script too
+  large for the 5.1 stock socket is `PayloadTooLarge`.
 - The listings (`list_isaac_prims`, `search_isaac_prims`, `get_isaac_subtree`,
   `query_isaac_typed_prims`) descend into instanceable prims by default,
   where Isaac assets keep their meshes and colliders; entries there carry
