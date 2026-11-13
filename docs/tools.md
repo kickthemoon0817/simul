@@ -251,7 +251,10 @@ source paths.
   a warning; a `primvars:` name such as `primvars:displayColor` without
   one, since descendants inherit it). Plain names (`axis`, `size`, `type`,
   `camera`) and `inputs:` / `outputs:` names are not typed by prim types:
-  they stay custom attributes, typed by `attribute_types` or the value.
+  they stay custom attributes, typed by `attribute_types` or the value. On a
+  Shader, Material or NodeGraph no schema types `inputs:` / `outputs:` (the
+  shading node does), so a light API's `inputs:color` or `inputs:intensity`
+  is typed and warned about only on other prims.
 - **Values** are converted to the attribute's type: JSON numbers widen
   (`45` into a `float`, ints into a `double3`), an integer type refuses a
   fraction, vectors are lists (`[x, y, z]`), quaternions are `[w, x, y, z]`

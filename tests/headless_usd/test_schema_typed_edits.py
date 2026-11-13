@@ -31,6 +31,7 @@ from simul.adapters.headless_usd import HeadlessUSDSession  # noqa: E402
 from simul.usd import coerce, editing, schema_properties  # noqa: E402
 from simul.usd.editing import USDEditError  # noqa: E402
 from simul.usd.mesh_ops import get_mesh_statistics  # noqa: E402
+from simul.usd.pxr_errors import bound_material_path  # noqa: E402
 from simul.usd.reader import describe_prim  # noqa: E402
 from simul.usd.search import list_subtree  # noqa: E402
 
@@ -205,6 +206,17 @@ class TestRelationshipNamesAreRefused:
             "/W/Looks/Mat"
         )
 
+    def test_api_relationship_authored_as_an_attribute_names_the_api(self, session, scene) -> None:
+        stage = scene["stage"]
+        skinned = UsdGeom.Cube.Define(stage, "/World/Skinned").GetPrim()
+        skinned.ApplyAPI("SkelBindingAPI")
+        skinned.CreateAttribute("skel:skeleton", Sdf.ValueTypeNames.String).Set("/World/Skel")
+
+        error = _refusal(session.update_prim_attributes, scene["id"], "/World/Skinned", {"skel:skeleton": "/X"})
+
+        reason = error.details["problems"][0]["reason"]
+        assert "declared by its applied SkelBindingAPI" in reason and "Cube" not in reason
+
     def test_schema_relationship_authored_as_an_attribute_is_refused(self, tmp_path, session) -> None:
         stage_id = session.load_stage(str(_build_malformed(tmp_path)))
         before = session.get_stage(stage_id).GetRootLayer().ExportToString()
@@ -244,6 +256,23 @@ class TestReadsSurviveMalformedProperties:
         assert warning["location"]["prim_path"] == path
         assert warning["location"]["layer"].endswith("malformed.usda")
         assert "SDF_FORMAT_ARGS" not in warning["location"]["layer"]
+
+    def test_fallback_searches_the_chain_for_the_purpose_first(self, stage) -> None:
+        # As pxr resolves it: an ancestor's physics binding beats the prim's own all-purpose one.
+        UsdShade.Material.Define(stage, "/W/Looks/Phys")
+        top = UsdGeom.Xform.Define(stage, "/W/Group/Top").GetPrim()
+        UsdShade.MaterialBindingAPI.Apply(top).Bind(
+            UsdShade.Material(stage.GetPrimAtPath("/W/Looks/Phys")), materialPurpose="physics"
+        )
+        leaf = UsdGeom.Cube.Define(stage, "/W/Group/Top/Leaf").GetPrim()
+        UsdShade.MaterialBindingAPI.Apply(leaf).Bind(UsdShade.Material(stage.GetPrimAtPath("/W/Looks/Mat")))
+        problems: list = []
+
+        physics = bound_material_path(leaf, "physics", problems)
+        visual = bound_material_path(leaf, "", problems)
+
+        assert (physics, visual) == ("/W/Looks/Phys", "/W/Looks/Mat")
+        assert len(problems) == 2
 
     def test_own_binding_survives_a_malformed_ancestor(self, stage) -> None:
         own = UsdGeom.Cube.Define(stage, "/W/Group/Bound").GetPrim()
@@ -412,13 +441,40 @@ class TestSchemaTypedAttributes:
         assert result["created_attributes"] == {"primvars:displayColor": "color3f[]"}
         assert result["warnings"] == []
 
-    def test_shader_inputs_are_not_typed_by_light_schemas(self, session, scene) -> None:
-        result = session.update_prim_attributes(
-            scene["id"], "/World/Looks/Steel/Surface", {"inputs:radius": 2}
-        )
+    @pytest.mark.parametrize(
+        "path, attributes, attribute_types, created",
+        [
+            ("/World/Looks/Steel/Surface", {"inputs:radius": 2}, {}, {"inputs:radius": "int"}),
+            ("/World/Looks/Steel/Surface", {"inputs:intensity": 2.0}, {}, {"inputs:intensity": "float"}),
+            (
+                "/World/Looks/Steel/Surface",
+                {"inputs:color": [1, 0, 0]},
+                {"inputs:color": "float3"},
+                {"inputs:color": "float3"},
+            ),
+            ("/World/Looks/Steel/Surface", {"inputs:shadow:enable": "on"}, {}, {"inputs:shadow:enable": "string"}),
+            ("/World/Looks/Steel", {"inputs:color": [1.0, 0.0, 0.0, 1.0]}, {}, {"inputs:color": "float4"}),
+        ],
+    )
+    def test_shading_node_parameters_are_not_typed_by_light_schemas(
+        self, session, scene, path, attributes, attribute_types, created
+    ) -> None:
+        result = session.update_prim_attributes(scene["id"], path, attributes, attribute_types=attribute_types)
 
-        assert result["created_attributes"] == {"inputs:radius": "int"}
+        assert result["created_attributes"] == created
         assert result["warnings"] == []
+
+    def test_create_shader_parameters_are_not_typed_by_light_schemas(self, session, scene) -> None:
+        result = session.create_prim(scene["id"], "/World/Looks/Steel/Tex", "Shader", {"inputs:intensity": 1.0})
+
+        assert result["created_attributes"] == {"inputs:intensity": "float"}
+        assert result["warnings"] == []
+
+    def test_light_parameters_keep_the_light_type_off_shading_nodes(self, session, scene) -> None:
+        result = session.update_prim_attributes(scene["id"], "/World/Group", {"inputs:color": [1, 0, 0]})
+
+        assert result["created_attributes"] == {"inputs:color": "color3f"}
+        assert "LightAPI" in result["warnings"][0]["message"]
 
     def test_prim_type_attribute_warns_without_an_api(self, session, scene) -> None:
         result = session.update_prim_attributes(scene["id"], "/World/Group", {"physics:axis": "Y"})
@@ -447,6 +503,14 @@ class TestSchemaTypedAttributes:
         assert drive.api_schemas == ("PhysicsDriveAPI:linear",)
         assert includes.relationship and includes.api_schemas == ("CollectionAPI:things",)
         assert schema_properties.lookup("custom:anything") is None
+
+    def test_api_template_wins_over_a_prim_types_built_in_instance(self) -> None:
+        # PhysicsCollisionGroup declares collection:colliders:* as a built-in CollectionAPI instance.
+        includes = schema_properties.lookup("collection:colliders:includes")
+        rule = schema_properties.lookup("collection:colliders:expansionRule")
+
+        assert includes.relationship and includes.api_schemas == ("CollectionAPI:colliders",)
+        assert includes.prim_types == () and rule.declared_by() == "CollectionAPI:colliders"
 
 
 class TestValueClips:

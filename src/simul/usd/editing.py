@@ -83,6 +83,9 @@ _EXTRA_PRIM_FIELDS = frozenset(
 
 _ROOT = Sdf.Path.absoluteRootPath
 _XFORMABLE_TYPE = Tf.Type.FindByName("UsdGeomXformable")
+# Shading nodes: their inputs:/outputs: are typed by the node (Sdr), not by a light API.
+_SHADING_NODE_TYPES = tuple(Tf.Type.FindByName(name) for name in ("UsdShadeShader", "UsdShadeNodeGraph"))
+_NODE_NAMESPACES = ("inputs:", "outputs:")
 
 
 class USDEditError(Exception):
@@ -514,9 +517,11 @@ class _Planner:
         xformable: bool,
         edit_layer: Optional[Sdf.Layer] = None,
         prim_path: Optional[Sdf.Path] = None,
+        shading_node: bool = False,
     ) -> None:
         self.prim = prim
         self.definition = definition
+        self.shading_node = shading_node
         self.prim_path = prim_path if prim_path is not None else (prim.GetPath() if prim is not None else _ROOT)
         self.attributes = attributes
         self.time_code = time_code
@@ -589,10 +594,13 @@ class _Planner:
             layer = _attribute_spec_layer(relationship) if relationship else None
             if layer is not None:
                 # The prim's own schema makes it a relationship, and pxr refuses the attribute spec.
-                owner = f"this prim's type, {prim.GetTypeName()}" if prim.GetTypeName() else None
+                owner = _declaring_schema(prim, name) if prim is not None else None
                 raise _Problem(_relationship_refusal(name, None, layer, owner), RELATIONSHIP_NOT_EDITABLE)
             return _plan_relationship(name, value)
-        declared = schema_properties.lookup(name)
+        if self.shading_node and name.startswith(_NODE_NAMESPACES):
+            declared = None  # a shader or node graph parameter, which no light schema types
+        else:
+            declared = schema_properties.lookup(name)
         if declared is not None and declared.relationship:
             if not attribute:
                 raise _Problem(_relationship_refusal(name, declared, None), RELATIONSHIP_NOT_EDITABLE)
@@ -815,6 +823,26 @@ class _Planner:
                 )
 
 
+def _declaring_schema(prim: Usd.Prim, name: str) -> Optional[str]:
+    """Name the schema of ``prim`` that declares property ``name``: its type or an applied API."""
+    registry = Usd.SchemaRegistry()
+    type_name = prim.GetTypeName()
+    definition = registry.FindConcretePrimDefinition(type_name) if type_name else None
+    if definition is not None and definition.GetPropertyDefinition(name):
+        return f"this prim's type, {type_name}"
+    for applied in prim.GetAppliedSchemas():
+        api, instance = Usd.SchemaRegistry.GetTypeNameAndInstance(applied)
+        api_definition = registry.FindAppliedAPIPrimDefinition(api)
+        if api_definition is None:
+            continue
+        names = api_definition.GetPropertyNames()
+        if instance:
+            names = [Usd.SchemaRegistry.MakeMultipleApplyNameInstance(template, instance) for template in names]
+        if name in names:
+            return f"its applied {applied}"
+    return None
+
+
 def _attribute_spec_layer(prop: Usd.Property) -> Optional[str]:
     """The layer holding the strongest attribute spec for ``prop``, or None when no layer has one."""
     for spec in prop.GetPropertyStack():
@@ -867,6 +895,7 @@ def plan_writes(
     time_code: Optional[float] = None,
     xformable: bool = False,
     edit_layer: Optional[Sdf.Layer] = None,
+    shading_node: bool = False,
 ) -> List[PlannedWrite]:
     """Validate and type every requested change without writing anything.
 
@@ -901,6 +930,9 @@ def plan_writes(
         edit_layer: The layer the writes go to; a time sample is refused
             for an attribute whose animation a weaker layer or value clips
             hold.
+        shading_node: The prim is (or will be) a Shader or NodeGraph
+            (Material): its ``inputs:`` and ``outputs:`` are parameters
+            the node types, so no schema lookup types them.
 
     Returns:
         The planned writes: properties in request order, then metadata.
@@ -923,7 +955,7 @@ def plan_writes(
             ) from None
     attributes = attributes or {}
     planner = _Planner(
-        prim, definition, attributes, attribute_types or {}, time_code, xformable, edit_layer, prim_path
+        prim, definition, attributes, attribute_types or {}, time_code, xformable, edit_layer, prim_path, shading_node
     )
     writes = planner.plan()
     if planner.problems:
@@ -1140,6 +1172,11 @@ def _rolled_back(action: str, path: Sdf.Path, failure: _WriteFailure) -> USDEdit
 # ---------------------------------------------------------------------------
 
 
+def _is_shading_node(tf_type: Tf.Type) -> bool:
+    """Whether a prim type is a Shader or a NodeGraph (Material derives from NodeGraph)."""
+    return any(tf_type.IsA(node_type) for node_type in _SHADING_NODE_TYPES)
+
+
 def _check_creatable_under(stage: Usd.Stage, path: Sdf.Path) -> None:
     """Refuse a new prim beneath an instance or an inactive prim."""
     ancestor = path.GetParentPath()
@@ -1236,6 +1273,7 @@ def create_prim(
         time_code=time_code,
         xformable=Usd.SchemaRegistry.GetTypeFromName(prim_type).IsA(_XFORMABLE_TYPE),
         edit_layer=_edit_layer(stage),
+        shading_node=_is_shading_node(Usd.SchemaRegistry.GetTypeFromName(prim_type)),
     )
     journal = EditJournal(_edit_layer(stage), path)
     try:
@@ -1301,6 +1339,7 @@ def update_prim(
         time_code=time_code,
         xformable=prim.IsA(UsdGeom.Xformable),
         edit_layer=_edit_layer(stage),
+        shading_node=_is_shading_node(Usd.SchemaRegistry.GetTypeFromName(prim.GetTypeName())),
     )
     if writes:
         journal = EditJournal(_edit_layer(stage), path)

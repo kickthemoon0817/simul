@@ -15,7 +15,7 @@ of the prim is still reported.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ._pxr import Sdf, Tf, Usd, UsdShade
 from .validation import ValidationIssue
@@ -130,38 +130,35 @@ def relationship_targets(rel: Usd.Relationship, problems: List[Dict[str, Any]]) 
         return None
 
 
-def _direct_binding(prim: Usd.Prim, purposes: Sequence[str]) -> Optional[str]:
-    """The material ``prim`` itself binds for the first of ``purposes`` it binds, or None.
+def _direct_binding(prim: Usd.Prim, purpose: str) -> Optional[str]:
+    """The material ``prim`` itself binds for ``purpose``, or None.
 
     A binding pxr cannot read on this prim counts as none.
     """
-    api = UsdShade.MaterialBindingAPI(prim)
-    for purpose in purposes:
-        try:
-            material = api.GetDirectBinding(purpose).GetMaterial()
-        except Tf.ErrorException:
-            continue
-        if material:
-            return material.GetPath().pathString
-    return None
+    try:
+        material = UsdShade.MaterialBindingAPI(prim).GetDirectBinding(purpose).GetMaterial()
+    except Tf.ErrorException:
+        return None
+    return material.GetPath().pathString if material else None
 
 
 def _nearest_readable_binding(prim: Usd.Prim, purpose: str) -> Optional[str]:
     """The nearest direct binding on ``prim`` or an ancestor that pxr can read.
 
     The fallback when ``ComputeBoundMaterial`` fails on a malformed binding
-    somewhere up the chain: a prim's own valid binding still counts. A
-    purpose-specific binding is preferred to the all-purpose one at each
-    level, as USD resolves them; binding strength and collection bindings are
-    not considered.
+    somewhere up the chain: a prim's own valid binding still counts. As USD
+    resolves them, the whole chain is searched for the purpose-specific
+    binding before the all-purpose one; binding strength and collection
+    bindings are not considered.
     """
     purposes = [purpose, UsdShade.Tokens.allPurpose] if purpose else [UsdShade.Tokens.allPurpose]
-    current = prim
-    while current and not current.IsPseudoRoot():
-        material = _direct_binding(current, purposes)
-        if material:
-            return material
-        current = current.GetParent()
+    for wanted in purposes:
+        current = prim
+        while current and not current.IsPseudoRoot():
+            material = _direct_binding(current, wanted)
+            if material:
+                return material
+            current = current.GetParent()
     return None
 
 

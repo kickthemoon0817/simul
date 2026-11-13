@@ -207,7 +207,9 @@ def lookup(name: str) -> Optional[SchemaProperty]:
     """
     if is_material_binding_name(name):
         return SchemaProperty(name, (Declaration(_MATERIAL_BINDING_API, True, True),))
-    declarations = tuple(_index()[0].get(name) or _template_matches(name))
+    # A built-in instance a prim type declares (PhysicsCollisionGroup's collection:colliders:*)
+    # also matches its API template (CollectionAPI:colliders), which then wins.
+    declarations = tuple(_index()[0].get(name, ())) + tuple(_template_matches(name))
     apis = tuple(declaration for declaration in declarations if declaration.api)
     if apis:
         declarations = apis
