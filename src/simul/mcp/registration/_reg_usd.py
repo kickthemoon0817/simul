@@ -57,6 +57,7 @@ from ..schemas.usd import (
 )
 from ...logging import get_logger
 from ...usd import stage_files
+from ...usd.pxr_errors import PxrError, is_pxr_error
 from ...usd.sandbox import CompositionSandbox
 from ...usd.validation import (
     INFO,
@@ -116,6 +117,20 @@ def _edit_error(tool_name: str, exc: "USDEditError") -> Dict[str, Any]:
     return ErrorResponse(
         error=exc.message, error_type=exc.error_type, details=exc.details or None
     ).model_dump()
+
+
+def _pxr_errors_cleaned(tool_name: str, work: Callable[[], Any]) -> Any:
+    """Run ``work``, turning a pxr error into a ``PxrError`` that carries pxr's reason only.
+
+    pxr's own text names C++ functions and the paths of the machine that built
+    it; the envelope reports the reason, as ``EngineError``.
+    """
+    try:
+        return work()
+    except Exception as exc:
+        if is_pxr_error(exc):
+            raise PxrError(tool_name, exc) from exc
+        raise
 
 
 def _at(result: Dict[str, Any]) -> str:
@@ -197,11 +212,14 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 except USDEditError:
                     written = None  # the work reports it
 
-            def run() -> Any:
+            def act() -> Any:
                 if acting_for is None:
                     return work(session)
                 with acting_for(owner, alive):
                     return work(session)
+
+            def run() -> Any:
+                return _pxr_errors_cleaned(tool_name, act)
 
             return await scheduler.run(
                 tool_name, run, stage_key=stage_id, writes=writes, file_key=written
@@ -469,7 +487,10 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "and its first array_preview elements, so a large mesh stays small; "
             "use get_mesh_info for geometry statistics. Attributes past the result "
             "budget are cut, the leading ones kept, and truncated_fields says where; "
-            "narrow with attribute_filter to read the rest."
+            "narrow with attribute_filter to read the rest. A property pxr cannot read "
+            "(a material:binding or physics:body0 authored as an attribute) is named "
+            "in warnings instead of failing the call; the binding falls back to the "
+            "nearest one pxr can read."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -554,7 +575,11 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "are lists, quaternions [w, x, y, z], matrices lists of rows, assets path "
             "strings); xformOp:<type> entries create transform ops and add them to "
             "xformOpOrder; attribute_types names the type of a new custom attribute. "
-            "The attribute keys active, instanceable and kind set prim metadata."
+            "The attribute keys active, instanceable and kind set prim metadata. "
+            "Relationship names the type does not define (material:binding, "
+            "skel:skeleton) are refused (RelationshipNotEditable); an attribute of an "
+            "API schema the type lacks takes the schema's type with an "
+            "UnappliedSchemaAttribute warning."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=False, destructive=True
@@ -631,6 +656,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 changed=result["changed"],
                 created_attributes=result["created_attributes"] or None,
                 time_code=result["time_code"],
+                warnings=result.get("warnings") or None,
             ).model_dump()
 
         return await server._exec_backend(
@@ -657,9 +683,18 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "changed and the error lists each rejected key with its reason. Values take "
             "the attribute's type (JSON numbers widen, vectors are lists, quaternions "
             "[w, x, y, z], matrices lists of rows, assets path strings); a new "
-            "xformOp:<type> creates the transform op and adds it to xformOpOrder. An "
-            "animated attribute needs time_code, since a default value is hidden by its "
-            "time samples. Refuses instance proxies (prims inside an instanceable prim)."
+            "xformOp:<type> creates the transform op and adds it to xformOpOrder. "
+            'Floats also take "Infinity", "-Infinity" and "NaN"; a finite value the '
+            "type cannot hold is refused. A relationship the prim does not already "
+            "have (material:binding, physics:body0, skel:skeleton) is refused with "
+            "UnsupportedOperation (RelationshipNotEditable), never written as an "
+            "attribute. An attribute of an API schema the prim lacks (physics:mass, "
+            "drive:angular:physics:stiffness) takes the schema's type and returns an "
+            "UnappliedSchemaAttribute warning naming the API to apply; plain names such "
+            "as axis or camera stay custom attributes. An animated attribute "
+            "needs time_code, since a default value is hidden by its time samples; a "
+            "sample is refused where a weaker layer or value clips hold the animation. "
+            "Refuses instance proxies (prims inside an instanceable prim)."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False, destructive=True
@@ -688,7 +723,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 an existing attribute keeps its type
             time_code: Write the values as time samples at this time code; required
                 for attributes that already have time samples, refused for uniform
-                attributes, relationships and metadata
+                attributes, relationships, metadata and attributes animated by a weaker
+                layer or value clips
 
         Returns:
             Action confirmation or error
@@ -724,6 +760,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 changed=result["changed"],
                 created_attributes=result["created_attributes"] or None,
                 time_code=result["time_code"],
+                warnings=result.get("warnings") or None,
             ).model_dump()
 
         return await server._exec_backend(
@@ -827,7 +864,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "comes back measured: false at the default time, with its "
             "sampled_time_range and a note: pass a time_code in that range. A closed "
             "mesh with flipped faces reports consistently_oriented: false and no "
-            "volume. A prim that is not a Mesh is an InvalidAssetType error."
+            "volume. A prim that is not a Mesh is an InvalidAssetType error. A "
+            "material binding pxr cannot resolve falls back to the nearest direct "
+            "binding pxr can read and is named in warnings."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False

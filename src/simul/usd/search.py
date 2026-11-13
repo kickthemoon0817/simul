@@ -20,6 +20,7 @@ import re
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from ._pxr import Usd
+from .pxr_errors import relationship_targets
 from .values import describe_attribute
 
 SEARCH_TYPES = ("by_name", "by_path", "by_type", "by_api_schema")
@@ -220,12 +221,17 @@ def _authored_properties(prim: Usd.Prim, array_preview: int, patterns: Optional[
         for attr in prim.GetAuthoredAttributes()
         if wanted(attr.GetName())
     }
-    relationships = {
-        rel.GetName(): [target.pathString for target in rel.GetTargets()]
-        for rel in prim.GetAuthoredRelationships()
-        if wanted(rel.GetName())
-    }
-    return {"attributes": attributes, "relationships": relationships}
+    problems: List[Dict[str, Any]] = []
+    relationships = {}
+    for rel in prim.GetAuthoredRelationships():
+        if wanted(rel.GetName()):
+            targets = relationship_targets(rel, problems)
+            if targets is not None:
+                relationships[rel.GetName()] = targets
+    properties: Dict[str, Any] = {"attributes": attributes, "relationships": relationships}
+    if problems:
+        properties["warnings"] = problems
+    return properties
 
 
 def list_subtree(

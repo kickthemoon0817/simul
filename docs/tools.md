@@ -82,7 +82,14 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   An array attribute carries its `length` and first `array_preview`
   elements (default 16, up to 10000), so a million-point mesh costs a few
   KB; `attribute_filter` takes glob patterns, `time_code` reads animated
-  values.
+  values. A property pxr cannot read, such as a `material:binding` or
+  `physics:body0` a file authors as an attribute where USD expects a
+  relationship, does not fail the read: a relationship pxr cannot read is
+  left out, a material binding falls back to the nearest direct binding pxr
+  can read (the prim's own, then its ancestors'), and `warnings` names the
+  property and its layer (`UnreadableProperty`, `location.layer`). `get_mesh_info` and
+  `get_prim_subtree` (per prim, with `include_properties`) report such
+  properties the same way.
 - **Traversal and counts.** Every listing walks the composed stage with one
   rule: active, defined, loaded, non-abstract prims, plus the instance
   proxies inside instanceable prims. So `load_usd_file`'s `total_prims`,
@@ -253,7 +260,9 @@ Edit errors use the same types as the lookups above. Invalid input is a
 that fails after the checks passed is an
 `EngineError` with `details.rolled_back: true`. A refusal that an explicit flag
 overrides is a `RefusedOperation` naming the flag in `details.override`, and
-an edit USD cannot express is an `UnsupportedOperation`.
+an edit USD cannot express is an `UnsupportedOperation`. Any other pxr error
+is an `EngineError` carrying pxr's reason, without its C++ function names and
+source paths.
 
 - **Paths** must be absolute prim paths (`/World/Box`). A relative path, a
   property path (`/World/Box.size`), a trailing `/` or an invalid prim name
@@ -273,12 +282,45 @@ an edit USD cannot express is an `UnsupportedOperation`.
   prim metadata through USD's API; other metadata keys are refused rather
   than written as attributes. One error (`details.code: InvalidAttribute`)
   lists every rejected key with its reason in `details.problems`.
+- **Relationships the prim does not have** are not editable here. A new
+  name that an API schema, or for a namespaced name a prim type, declares a
+  relationship (`physics:body0` on a prim that is not a joint,
+  `skel:skeleton`, `physics:filteredPairs`, `collection:<name>:includes`,
+  and every `material:binding` name, including `material:binding:physics`)
+  is refused: written as an attribute, pxr could no longer read it. So is a
+  relationship a layer authors as an attribute where pxr refuses it (the
+  prim's own schema declares the relationship, or it is a
+  `material:binding`); the reason names that layer. The problem carries
+  `code: RelationshipNotEditable`; when every rejected key is such a
+  relationship the error is an `UnsupportedOperation` with that
+  `details.code`.
+- **Attributes of a schema the prim lacks** take the schema's type, not one
+  guessed from the value: `physics:mass` without `PhysicsMassAPI` is a
+  `float`, `drive:angular:physics:stiffness` without
+  `PhysicsDriveAPI:angular` a `float` (any multiple-apply instance name
+  matches its template), with the schema's allowed tokens and variability.
+  The edit succeeds with an `UnappliedSchemaAttribute` entry in `warnings`
+  naming the API to apply, since USD and simulators ignore the value until
+  it is applied; no simul tool applies API schemas yet. A prim type's
+  declaration types only a namespaced name (`physics:axis` on an Xform, with
+  a warning; a `primvars:` name such as `primvars:displayColor` without
+  one, since descendants inherit it). Plain names (`axis`, `size`, `type`,
+  `camera`) and `inputs:` / `outputs:` names are not typed by prim types:
+  they stay custom attributes, typed by `attribute_types` or the value. On a
+  Shader, Material or NodeGraph no schema types `inputs:` / `outputs:` (the
+  shading node does), so a light API's `inputs:color` or `inputs:intensity`
+  is typed and warned about only on other prims.
 - **Values** are converted to the attribute's type: JSON numbers widen
   (`45` into a `float`, ints into a `double3`), an integer type refuses a
   fraction, vectors are lists (`[x, y, z]`), quaternions are `[w, x, y, z]`
   with the real part first, matrices are a list of rows or the flat
   row-major list, assets are path strings, and arrays are lists of their
-  element's form.
+  element's form. A `float`, `double` or `half` (alone or inside a vector,
+  quaternion or matrix) also takes `"Infinity"`, `"-Infinity"` and `"NaN"`,
+  as the reads report them, so an unlimited joint limit round-trips; a
+  `timecode` stays finite. A finite number its precision cannot hold
+  (`1e39` for a `float`, `70000` for a `half`) is refused rather than
+  stored as infinity.
 - **Transform ops**: a new `xformOp:<type>[:<suffix>]` (`translate`,
   `scale`, `rotateX`..`rotateZYX`, `orient`, `transform`) is created with the
   op's value type (`double3` translate, `float3` scale, `quatf` orient,
@@ -298,7 +340,9 @@ an edit USD cannot express is an `UnsupportedOperation`.
   `time_code`. A sample is also refused when the attribute's animation comes
   from a weaker layer (a sublayer or a referenced asset): USD takes all of an
   attribute's samples from the strongest layer that has any, so one sample
-  in the root layer would replace that whole animation.
+  in the root layer would replace that whole animation. The same holds for
+  value clips: a sample is refused when the attribute's value at that time
+  comes from clips, since an authored sample outranks every clip.
 - **`delete_prim`** refuses `/`, and the stage's default prim unless
   `allow_root_delete=true`. It also refuses a prim the delete cannot remove
   because opinions outside the root layer keep it alive: a sublayer defines
