@@ -22,7 +22,7 @@ from typing import Any
 import bpy
 from bpy.app.handlers import persistent
 
-from ..adapters.blender_runtime import BlenderRuntimeSession
+from ..adapters.blender_runtime import BlenderRuntimeSession, stop_watching_playback
 from ..utils.errors import exception_message
 from ..utils.paths import PathPolicy, state_dir
 from .agent_control import reset_ui
@@ -228,6 +228,8 @@ class BlenderBridge:
             self.listener.close()
             self.listener = None
         self.discovery_path.unlink(missing_ok=True)
+        # play_blender_animation's playback handlers are persistent.
+        stop_watching_playback()
 
     def poll(self) -> float | None:
         """Read and execute bounded requests from Blender's main-thread timer."""

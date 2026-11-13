@@ -7,6 +7,7 @@ optional `bpy` Python module.
 
 from __future__ import annotations
 
+import ast
 import base64
 import difflib
 import io
@@ -18,6 +19,7 @@ import os
 import re
 import secrets
 import shutil
+import struct
 import tempfile
 import time
 import uuid
@@ -36,6 +38,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Union,
     overload,
 )
 
@@ -1016,6 +1019,192 @@ def action_fcurves(
 def _channel_name(data_path: str, index: int) -> str:
     """Name a keyframed property, or one element of it, as ``location[2]``."""
     return data_path if index < 0 else f"{data_path}[{index}]"
+
+
+# Blender's frame limits (MAXFRAME, MINAFRAME and MINFRAME in
+# DNA_scene_types.h): the current frame may be negative, a scene's frame range
+# may not. Blender clamps an assignment outside them without saying so: on
+# 5.0.1 frame_end = 2_000_000 left 1_048_574 and frame_start = -5 left 0.
+FRAME_LIMIT = 1_048_574
+SCENE_FRAME_MIN = 0
+
+
+def _check_frame(name: str, value: int, minimum: int) -> None:
+    """Refuse a frame Blender would clamp to another one."""
+    if not minimum <= value <= FRAME_LIMIT:
+        raise ValueError(
+            f"{name} ({value}) is outside Blender's range {minimum}..{FRAME_LIMIT}; "
+            "Blender would clamp it to the nearest end"
+        )
+
+
+def scene_fps(scene: Any) -> float:
+    """Frames per second as Blender plays them: ``render.fps / render.fps_base``.
+
+    NTSC rates keep the integer in ``fps`` and the divisor in ``fps_base``:
+    29.97 fps is 30 / 1.001.
+    """
+    return float(scene.render.fps) / float(scene.render.fps_base)
+
+
+#: What play_blender_animation accepts.
+PLAYBACK_ACTIONS = ("play", "reverse", "pause", "stop")
+
+# The playback play_animation started: its direction and the frame it started
+# from. Blender keeps neither where Python can read them (the screen's
+# animation timer data is not in RNA), and screen.animation_play toggles
+# playback instead of starting it. Whatever else starts or stops playback (the
+# user, a script) clears this through the animation_playback_pre and
+# animation_playback_post handlers, so a direction recorded here is never
+# stale.
+_playback: Dict[str, Any] = {}
+
+
+def _forget_playback(*_args: Any) -> None:
+    """A playback handler: whoever started or stopped playback, the record is void."""
+    _playback.clear()
+
+
+def _watch_playback() -> None:
+    """Have every playback start and stop clear ``_playback``, from now on."""
+    blender_module: Any = bpy
+    handlers = blender_module.app.handlers
+    # Persistent, so loading a file keeps the handlers.
+    handler = handlers.persistent(_forget_playback)
+    for name in ("animation_playback_pre", "animation_playback_post"):
+        hooks = getattr(handlers, name)
+        if handler in hooks:
+            continue
+        # A reloaded add-on defines the function anew; drop the old copy.
+        for stale in [
+            hook
+            for hook in hooks
+            if getattr(hook, "__module__", None) == __name__
+            and getattr(hook, "__name__", None) == _forget_playback.__name__
+        ]:
+            hooks.remove(stale)
+        hooks.append(handler)
+
+
+def stop_watching_playback() -> None:
+    """Remove the playback handlers ``_watch_playback`` added, and forget the record.
+
+    The handlers are persistent, so they outlive a file load; the add-on's
+    unregister calls this so they do not outlive the add-on.
+    """
+    _playback.clear()
+    if not BLENDER_AVAILABLE:
+        return
+    blender_module: Any = bpy
+    handlers = blender_module.app.handlers
+    for name in ("animation_playback_pre", "animation_playback_post"):
+        hooks = getattr(handlers, name)
+        for hook in [
+            hook
+            for hook in hooks
+            if hook is _forget_playback
+            or (
+                getattr(hook, "__module__", None) == __name__
+                and getattr(hook, "__name__", None) == _forget_playback.__name__
+            )
+        ]:
+            hooks.remove(hook)
+
+
+#: Keyframe.interpolation values; None keeps Blender's preference (Bezier by default).
+KEYFRAME_INTERPOLATIONS = (
+    "CONSTANT",
+    "LINEAR",
+    "BEZIER",
+    "SINE",
+    "QUAD",
+    "CUBIC",
+    "QUART",
+    "QUINT",
+    "EXPO",
+    "CIRC",
+    "BACK",
+    "BOUNCE",
+    "ELASTIC",
+)
+#: keyframe_insert's keytype values.
+KEYFRAME_TYPES = (
+    "KEYFRAME",
+    "BREAKDOWN",
+    "MOVING_HOLD",
+    "EXTREME",
+    "JITTER",
+    "GENERATED",
+)
+
+# The last step of a data path: a custom property (["name"]) or an attribute.
+_CUSTOM_PROPERTY_STEP = re.compile(
+    r"(?P<owner>.*)\[(?P<key>\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*')\]"
+)
+_ATTRIBUTE_STEP = re.compile(r"(?:(?P<owner>.+)\.)?(?P<name>[A-Za-z_]\w*)")
+
+
+def _property_owner(id_data: Any, data_path: str) -> Tuple[Any, str, bool]:
+    """Split ``data_path`` into the struct holding the property, its name and
+    whether it is a custom property: ``pose.bones["J1"].location`` is the pose
+    bone J1 and ``location``, ``["mass"]`` the ID itself and ``mass``.
+
+    Raises:
+        ValueError: When the path does not name a property of ``id_data``.
+    """
+    custom = _CUSTOM_PROPERTY_STEP.fullmatch(data_path)
+    attribute = None if custom else _ATTRIBUTE_STEP.fullmatch(data_path)
+    if custom is not None:
+        owner_path, name = custom["owner"], str(ast.literal_eval(custom["key"]))
+    elif attribute is not None:
+        owner_path, name = attribute["owner"] or "", attribute["name"]
+    else:
+        raise ValueError(f"'{data_path}' does not end in a property name")
+    owner = id_data.path_resolve(owner_path) if owner_path else id_data
+    if custom is not None:
+        if name not in owner.keys():
+            raise ValueError(f"'{data_path}': no custom property '{name}'")
+    elif not hasattr(owner, name):
+        raise ValueError(f"'{data_path}': no property '{name}'")
+    return owner, name, custom is not None
+
+
+def _like(current: Any, value: float) -> Any:
+    """``value`` as the property's element type: a bool or int property takes a whole number."""
+    if isinstance(current, (bool, int)):
+        if not float(value).is_integer():
+            raise ValueError(f"{value} is not a whole number, as the property needs")
+        return int(value)
+    return float(value)
+
+
+def _as_animated(current: Any, value: float) -> Any:
+    """An F-curve's value as Blender's animation writes it to a property holding ``current``.
+
+    Blender evaluates the F-curve of a boolean or integer property to whole
+    numbers (on 5.0.1 one keyed 1 and 8 gave 3.0 between them), so the
+    conversion is exact.
+    """
+    if isinstance(current, bool):
+        return bool(round(value))
+    if isinstance(current, int):
+        return int(round(value))
+    return float(value)
+
+
+# Blender replaces a key this close to a new one instead of adding another
+# (BEZT_BINARYSEARCH_THRESH), comparing the 32-bit frames: on Blender 5.0.1 a
+# key inserted at 11.005 replaced the one at 11 and stayed at frame 11.
+KEY_MERGE_DISTANCE = 0.01
+
+
+def _float32(value: float) -> float:
+    return float(struct.unpack("<f", struct.pack("<f", value))[0])
+
+
+def _same_key_frame(first: float, second: float) -> bool:
+    """Whether Blender keeps one key, not two, for keys on these frames of one channel."""
+    return abs(_float32(first) - _float32(second)) <= _float32(KEY_MERGE_DISTANCE)
 
 
 # -- Files an import reads besides the one named (B1-20) ---------------------
@@ -5536,11 +5725,12 @@ class BlenderRuntimeSession:
         Set the current animation frame.
 
         Args:
-            frame: Frame number to set.
+            frame: Frame number to set, within -1048574..1048574 (Blender's limits).
 
         Returns:
             Dict with success status and frame number.
         """
+        _check_frame("frame", frame, -FRAME_LIMIT)
         blender_module: Any = bpy
         blender_module.context.scene.frame_set(frame)
         return {"frame": blender_module.context.scene.frame_current}
@@ -5550,7 +5740,9 @@ class BlenderRuntimeSession:
         Get the current frame number and animation range.
 
         Returns:
-            Dict with current_frame, frame_start, frame_end, fps.
+            Dict with current_frame, frame_start, frame_end, fps (frames per
+            second as Blender plays them, ``render.fps / render.fps_base``) and
+            fps_base.
         """
         blender_module: Any = bpy
         scene = blender_module.context.scene
@@ -5558,7 +5750,8 @@ class BlenderRuntimeSession:
             "current_frame": scene.frame_current,
             "frame_start": scene.frame_start,
             "frame_end": scene.frame_end,
-            "fps": float(scene.render.fps),
+            "fps": scene_fps(scene),
+            "fps_base": float(scene.render.fps_base),
         }
 
     def set_frame_range(self, frame_start: int, frame_end: int) -> Dict[str, Any]:
@@ -5570,19 +5763,24 @@ class BlenderRuntimeSession:
         range and the warning says what part of the scene range it leaves out.
 
         Args:
-            frame_start: Start frame of the animation range.
-            frame_end: End frame of the animation range.
+            frame_start: Start frame of the animation range, 0..1048574.
+            frame_end: End frame of the animation range, 0..1048574; may equal
+                frame_start for a one-frame range.
 
         Returns:
             Dict with the frame range that was set, rigid_body_cache and warning.
         """
-        if frame_start >= frame_end:
+        if frame_start > frame_end:
             raise ValueError(
-                f"frame_start ({frame_start}) must be less than "
+                f"frame_start ({frame_start}) must not be after "
                 f"frame_end ({frame_end})"
             )
+        _check_frame("frame_start", frame_start, SCENE_FRAME_MIN)
+        _check_frame("frame_end", frame_end, SCENE_FRAME_MIN)
         blender_module: Any = bpy
         scene = blender_module.context.scene
+        # Start first: Blender moves frame_end up to a frame_start set past it,
+        # and frame_end is then set to its own value.
         scene.frame_start = frame_start
         scene.frame_end = frame_end
         # An unbaked rigid-body cache follows the scene range (bodies froze at
@@ -5597,38 +5795,97 @@ class BlenderRuntimeSession:
 
     def play_animation(self, action: str = "play") -> Dict[str, Any]:
         """
-        Control animation playback.
+        Play, reverse, pause or stop animation playback; repeating a call changes nothing more.
+
+        ``play`` and ``reverse`` start playback in that direction, or turn it
+        around, and leave playback that already runs that way alone
+        (``screen.animation_play`` on its own toggles playback). ``pause``
+        stops it on the current frame; ``stop`` stops it and returns to the
+        frame playback started from, as Esc does in Blender. Playback needs
+        Blender's event loop to advance frames, so in background mode
+        (``blender -b`` or the ``bpy`` module) ``play`` and ``reverse`` are
+        refused rather than reported as playing on a frame that never moves.
 
         Args:
-            action: One of 'play', 'stop', or 'reverse'.
+            action: play (forward), reverse, pause (stop on the current frame) or
+                stop (stop and return to the frame playback started from).
 
         Returns:
-            Dict with action performed and playback state.
+            Dict with action, is_playing, direction ('forward' or 'reverse',
+            None when not playing), changed (whether the call changed playback)
+            and frame (the current frame afterwards).
         """
-        valid_actions = ("play", "stop", "reverse")
-        if action not in valid_actions:
+        if action not in PLAYBACK_ACTIONS:
             raise ValueError(
-                f"Invalid action '{action}'. Must be one of {valid_actions}"
+                f"Invalid action '{action}'. Must be one of {PLAYBACK_ACTIONS}"
             )
         blender_module: Any = bpy
+        scene = blender_module.context.scene
         screen = blender_module.context.screen
+        _watch_playback()
+        # Without a screen nothing plays: there is no animation timer to run.
+        playing = screen is not None and bool(screen.is_animation_playing)
+        if not playing:
+            _playback.clear()
+        # Read before stopping: the playback handlers clear the record.
+        direction = _playback.get("direction") if playing else None
+        start_frame = _playback.get("start_frame")
+        screen_ops = blender_module.ops.screen
 
-        if action == "stop":
-            if screen.is_animation_playing:
-                blender_module.ops.screen.animation_cancel(restore_frame=False)
+        if action in ("pause", "stop"):
+            if playing:
+                restore = action == "stop"
+                # A record names the frame this tool started from, also after it
+                # turned playback around (a restart in Blender). Without one,
+                # Blender's own start frame is the one Esc returns to.
+                screen_ops.animation_cancel(
+                    restore_frame=restore and start_frame is None
+                )
+                if restore and start_frame is not None:
+                    scene.frame_set(start_frame)
+            _playback.clear()
             return {
-                "action": "stop",
+                "action": action,
                 "is_playing": False,
+                "direction": None,
+                "changed": playing,
+                "frame": scene.frame_current,
             }
 
-        if action == "reverse":
-            blender_module.ops.screen.animation_play(reverse=True)
+        wanted = "reverse" if action == "reverse" else "forward"
+        if blender_module.app.background:
+            raise RuntimeError(
+                "Blender is running in background mode (blender -b or the bpy "
+                "module), where no event loop advances frames, so playback cannot "
+                "run; step the timeline with set_blender_frame, or sample frames "
+                "with get_blender_object_trajectory"
+            )
+        if screen is None:
+            raise RuntimeError(
+                "No Blender screen in this context, so playback has no timer to run"
+            )
+        if playing and direction == wanted:
+            return {
+                "action": action,
+                "is_playing": True,
+                "direction": wanted,
+                "changed": False,
+                "frame": scene.frame_current,
+            }
+        if playing:
+            # Running the other way, or started elsewhere in a direction nothing
+            # reports: Blender can only turn playback around by restarting it.
+            screen_ops.animation_cancel(restore_frame=False)
         else:
-            blender_module.ops.screen.animation_play()
-
+            start_frame = scene.frame_current
+        screen_ops.animation_play(reverse=wanted == "reverse")
+        _playback.update(direction=wanted, start_frame=start_frame)
         return {
             "action": action,
-            "is_playing": screen.is_animation_playing,
+            "is_playing": bool(screen.is_animation_playing),
+            "direction": wanted,
+            "changed": True,
+            "frame": scene.frame_current,
         }
 
     def insert_keyframe(
@@ -5637,32 +5894,91 @@ class BlenderRuntimeSession:
         data_path: str,
         frame: int,
         index: int = -1,
+        value: Optional[Union[float, List[float]]] = None,
+        interpolation: Optional[str] = None,
+        keyframe_type: str = "KEYFRAME",
     ) -> Dict[str, Any]:
         """
         Insert a keyframe on an object property at a given frame.
 
+        Without ``value`` Blender keys the property's current value, as the I
+        key does: set it first (set_blender_object_transform, for instance).
+        With ``value`` that value is keyed, and each channel keyed then shows
+        what its F-curve gives at the current frame: the keyed value on that
+        frame or where the key is the channel's only one. A GUI Blender showed
+        a first key at once and a later one only at the next frame change, and
+        background Blender neither. Only the keyed channels are written: every
+        other channel, an unkeyed edit on it included, keeps its value, as
+        Blender's own keying leaves it.
+
         Args:
             object_name: Name of the object.
-            data_path: Property data path (e.g. 'location', 'rotation_euler').
+            data_path: Property data path (e.g. 'location', 'rotation_euler',
+                'pose.bones["Bone"].rotation_quaternion', '["custom"]').
             frame: Frame number for the keyframe.
             index: Array index (-1 for all channels).
+            value: Value to key instead of the current one: one number for a
+                single channel (index >= 0, or a property that is not an array),
+                otherwise one number per element, such as [x, y, z] for location.
+                The keyed channels then show what their F-curves give at the
+                current frame; every other channel keeps its value.
+            interpolation: Interpolation from this key to the next (CONSTANT,
+                LINEAR, BEZIER, SINE, QUAD, CUBIC, QUART, QUINT, EXPO, CIRC, BACK,
+                BOUNCE or ELASTIC); None leaves Blender's choice: the previous
+                key's on a curve that already has two keys, else the preference
+                (Bezier by default).
+            keyframe_type: Blender's key type: KEYFRAME, BREAKDOWN, MOVING_HOLD,
+                EXTREME, JITTER or GENERATED.
 
         Returns:
-            Dict confirming the keyframe insertion.
+            Dict with object_name, data_path, frame, value_source ('given' or
+            'current') and keyframes: per keyed channel its array_index, value,
+            interpolation and keyframe_type as Blender stored them; and a
+            warning when the keys are not on that frame of the action (NLA
+            tweak mode) or the keyed channels keep their values until a frame
+            change (an object whose NLA tracks Blender blends).
 
         Raises:
             RuntimeError: When Blender inserted no keyframe: on an F-curve that
                 is locked, sampled or overridden by an F-modifier, or one its
                 NLA setup cannot remap a value to.
+            ValueError: When ``value`` does not fit the property, or
+                ``interpolation`` or ``keyframe_type`` is not one Blender has.
         """
+        if interpolation is not None and interpolation not in KEYFRAME_INTERPOLATIONS:
+            raise ValueError(
+                f"Invalid interpolation '{interpolation}'. Must be one of "
+                f"{KEYFRAME_INTERPOLATIONS}"
+            )
+        if keyframe_type not in KEYFRAME_TYPES:
+            raise ValueError(
+                f"Invalid keyframe_type '{keyframe_type}'. Must be one of {KEYFRAME_TYPES}"
+            )
         obj = self._get_object_or_raise(object_name)
-        # Blender reports refused keys by returning False, not by raising. On
-        # Blender 5.0.1 it refused a locked F-curve (or one in a locked group),
-        # a sampled one and one under an Envelope modifier, and, with "Due to
-        # the NLA stack setup", a key on an action at zero influence over an NLA
-        # strip or blended by Multiply over a strip that holds 0. With index -1
-        # it keys the channels it can and returns True.
-        if not obj.keyframe_insert(data_path, index=index, frame=frame):
+        restore = (
+            None
+            if value is None
+            else self._write_property(obj, data_path, index, value)
+        )
+        inserted = False
+        try:
+            # Blender reports refused keys by returning False, not by raising.
+            # On Blender 5.0.1 it refused a locked F-curve (or one in a locked
+            # group), a sampled one and one under an Envelope modifier, and,
+            # with "Due to the NLA stack setup", a key on an action at zero
+            # influence over an NLA strip or blended by Multiply over a strip
+            # that holds 0. With index -1 it keys the channels it can and
+            # returns True.
+            inserted = obj.keyframe_insert(
+                data_path, index=index, frame=frame, keytype=keyframe_type
+            )
+        finally:
+            # Keying the value through the property applies the NLA remapping
+            # keyframe_insert does. Restoring it leaves nothing changed when
+            # Blender refused the key.
+            if restore is not None:
+                restore()
+        if not inserted:
             raise RuntimeError(
                 f"Blender inserted no keyframe on '{object_name}' "
                 f"{_channel_name(data_path, index)} at frame {frame}; it refuses "
@@ -5671,11 +5987,190 @@ class BlenderRuntimeSession:
                 "onto the active action, such as an action at zero influence or "
                 "one blended over NLA strips in a way that cannot be inverted"
             )
-        return {
+        keys = self._keys_on_frame(obj, data_path, index, frame)
+        result: Dict[str, Any] = {
             "object_name": object_name,
             "data_path": data_path,
             "frame": frame,
+            "value_source": "current" if value is None else "given",
+            "keyframes": [],
         }
+        for fcurve, key in keys:
+            if interpolation is not None:
+                key.interpolation = interpolation
+            result["keyframes"].append(
+                {
+                    "array_index": fcurve.array_index,
+                    "value": float(key.co[1]),
+                    "interpolation": key.interpolation,
+                    "keyframe_type": key.type,
+                }
+            )
+        warnings = []
+        if not keys:
+            # In NLA tweak mode Blender maps the frame into the tweaked strip's
+            # own time, so the key is not on this frame of the action.
+            warnings.append(
+                f"Blender reported the key inserted, but the object's action has no "
+                f"key on {_channel_name(data_path, index)} at frame {frame} (in NLA "
+                "tweak mode keys land at the strip's own frame); "
+                + (
+                    "its interpolation was left as Blender set it"
+                    if interpolation is not None
+                    else "get_blender_keyframes lists the keyed channels"
+                )
+            )
+        if value is not None:
+            # After the interpolation is set: it shapes the curve after the key.
+            shown = self._show_keyed_channels(obj, [fcurve for fcurve, _key in keys])
+            if shown is not None:
+                warnings.append(shown)
+        if warnings:
+            result["warning"] = "; ".join(warnings)
+        return result
+
+    def _write_property(
+        self, obj: Any, data_path: str, index: int, value: Union[float, List[float]]
+    ) -> Callable[[], None]:
+        """Write ``value`` to the keyed property; return what writes the old value back.
+
+        Raises:
+            ValueError: When the path names no property, or the value does not
+                fit it: one number per keyed element.
+        """
+        owner, name, custom = _property_owner(obj, data_path)
+
+        def read() -> Any:
+            return owner[name] if custom else getattr(owner, name)
+
+        def write(new: Any) -> None:
+            if custom:
+                owner[name] = new
+            else:
+                setattr(owner, name, new)
+
+        current = read()
+        if isinstance(current, str):
+            raise ValueError(f"'{data_path}' is a text property, which has no keyframes")
+        try:
+            length: Optional[int] = len(current)
+        except TypeError:
+            length = None
+        channel = _channel_name(data_path, index)
+        if index >= 0:
+            if length is None:
+                raise ValueError(f"'{data_path}' is not an array; key it with index -1")
+            if not index < length:
+                raise ValueError(
+                    f"index {index} is out of range: '{data_path}' has {length} elements"
+                )
+            if isinstance(value, list):
+                raise ValueError(f"{channel} is one channel: pass one number as value")
+            old_element = current[index]
+            current[index] = _like(old_element, value)
+
+            def restore_element() -> None:
+                read()[index] = old_element
+
+            return restore_element
+        if length is None:
+            if isinstance(value, list):
+                raise ValueError(f"'{data_path}' is not an array: pass one number as value")
+            old = current
+            write(_like(old, value))
+            return lambda: write(old)
+        if not isinstance(value, list) or len(value) != length:
+            raise ValueError(
+                f"'{data_path}' has {length} elements: pass {length} numbers as value, "
+                "or one number with an index"
+            )
+        old_values = list(current)
+        write([_like(old, new) for old, new in zip(old_values, value)])
+        return lambda: write(old_values)
+
+    @staticmethod
+    def _show_keyed_channels(obj: Any, fcurves: List[Any]) -> Optional[str]:
+        """Write what each keyed F-curve gives at the current frame to its channel alone.
+
+        Keying a given value writes it, keys it and writes the old value back,
+        which the channel shows until Blender next evaluates the animation.
+        Evaluating the object's whole animation would also put every other
+        animated channel back to its F-curve, discarding unkeyed edits that
+        Blender's own keying keeps, so each keyed channel gets its own
+        F-curve's value at the scene's current time, as Blender's animation
+        writes it. A muted F-curve and a driven channel are left as they are,
+        as Blender's animation leaves them.
+
+        Args:
+            obj: The keyed object.
+            fcurves: The F-curves of the keyed channels.
+
+        Returns:
+            A warning when the object's NLA tracks blend its action, which
+            Blender works out only on a frame change, so the keyed channels
+            keep their values until then; else None.
+        """
+        anim_data = obj.animation_data
+        if anim_data is None or not fcurves:
+            return None
+        if anim_data.use_nla and len(anim_data.nla_tracks):
+            return (
+                f"'{obj.name}' has NLA tracks, which Blender blends with its action "
+                "on a frame change, so the keyed channels keep the values they had "
+                "until then"
+            )
+        blender_module: Any = bpy
+        scene = blender_module.context.scene
+        # The time Blender evaluates the animation at (BKE_scene_ctime_get): the
+        # frame and subframe, scaled by the render's time remapping. On 5.0.1,
+        # frame 5 under frame_map_old 100 and frame_map_new 200 evaluated 2.5.
+        render = scene.render
+        time = (
+            (scene.frame_current + scene.frame_subframe)
+            * render.frame_map_old
+            / render.frame_map_new
+        )
+        driven = {(driver.data_path, driver.array_index) for driver in anim_data.drivers}
+        for fcurve in fcurves:
+            group = fcurve.group
+            if fcurve.mute or (group is not None and group.mute):
+                continue
+            if (fcurve.data_path, fcurve.array_index) in driven:
+                continue
+            value = fcurve.evaluate(time)
+            owner, name, custom = _property_owner(obj, fcurve.data_path)
+            current = owner[name] if custom else getattr(owner, name)
+            try:
+                len(current)
+            except TypeError:
+                new = _as_animated(current, value)
+                if custom:
+                    owner[name] = new
+                else:
+                    setattr(owner, name, new)
+            else:
+                element = fcurve.array_index
+                current[element] = _as_animated(current[element], value)
+        return None
+
+    def _keys_on_frame(
+        self, obj: Any, data_path: str, index: int, frame: float
+    ) -> List[Tuple[Any, Any]]:
+        """The (F-curve, keyframe) pairs of the property's channels keyed on ``frame``.
+
+        A key Blender inserted next to an existing one replaced it and kept its
+        frame, so the key nearest ``frame`` within Blender's merge distance.
+        """
+        pairs = []
+        for fcurve in action_fcurves(obj.animation_data, self._blender_version) or []:
+            if fcurve.data_path != data_path or index not in (-1, fcurve.array_index):
+                continue
+            near = [
+                key for key in fcurve.keyframe_points if _same_key_frame(key.co[0], frame)
+            ]
+            if near:
+                pairs.append((fcurve, min(near, key=lambda key: abs(key.co[0] - frame))))
+        return sorted(pairs, key=lambda pair: pair[0].array_index)
 
     def delete_keyframe(
         self,
@@ -5745,7 +6240,9 @@ class BlenderRuntimeSession:
             kps = fcurve.keyframe_points
             if len(kps) == 0:
                 continue
-            frames = [int(kp.co[0]) for kp in kps]
+            # Keys can sit between frames (an import, a scaled action, or a
+            # script's keyframe_points.insert): -0.5 is not frame 0.
+            frames = [float(kp.co[0]) for kp in kps]
             channels.append(
                 {
                     "data_path": fcurve.data_path,
@@ -6401,37 +6898,62 @@ class BlenderRuntimeSession:
         step: int = 1,
     ) -> Dict[str, Any]:
         """
-        Record object world position and rotation across a frame range.
+        Record an object's world pose across a frame range, then restore the current frame.
 
         Samples the evaluated world matrix, so parenting, constraints and
         rigid-body simulation are reflected (``obj.location`` is none of these).
+        Each sample is a frame change, so the call is not read-only: frame-change
+        handlers run, an unbaked rigid-body world is stepped through every frame
+        from its cache start (filling its cache), and the frame and subframe
+        current before the call are set again afterwards.
 
         Args:
             object_name: Name of the object to track.
             start_frame: First frame of trajectory.
-            end_frame: Last frame of trajectory (inclusive).
-            step: Frame step size.
+            end_frame: Last frame of trajectory (inclusive); not before start_frame.
+            step: Frames between samples; at least 1.
 
         Returns:
-            Dict with object_name, point_count, points list.
+            Dict with object_name, rotation_mode (the object's), euler_order
+            (of rotation_euler), fps (render.fps / render.fps_base),
+            time_origin_frame (the scene's frame_start), point_count and points.
+            Each point has frame; time, the seconds since time_origin_frame;
+            the world location; rotation_euler, the world rotation in
+            euler_order, each sample the equivalent nearest the previous one
+            (the first nearest the object's own Euler rotation), so it stays
+            continuous while the object turns less than half a turn between
+            samples; rotation_quaternion, the world rotation (w, x, y, z), its
+            sign kept continuous; local_rotation, the object's own rotation
+            channels as rotation_mode stores them, unwrapped; and velocity,
+            the change in world location since the previous sample per second,
+            None for the first.
         """
+        if step < 1:
+            raise ValueError(f"step must be at least 1, got {step}")
+        if start_frame > end_frame:
+            raise ValueError(
+                f"start_frame ({start_frame}) must not be after end_frame ({end_frame})"
+            )
         blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
         scene = blender_module.context.scene
         original_frame: int = scene.frame_current
-        fps: float = float(scene.render.fps)
+        original_subframe: float = scene.frame_subframe
+        fps = scene_fps(scene)
+        time_origin: int = scene.frame_start
+        rotation_mode: str = obj.rotation_mode
+        euler_order = rotation_mode if len(rotation_mode) == 3 else "XYZ"
 
         points: List[Dict[str, Any]] = []
-        prev_location: Optional[List[float]] = None
-        sampled = set(range(start_frame, end_frame + 1, max(step, 1)))
+        previous: Optional[Dict[str, Any]] = None
+        sampled = set(range(start_frame, end_frame + 1, step))
         # An unbaked rigid-body world only advances one frame at a time from
         # its cache start; jumping straight to a sample frame leaves bodies
         # at rest. Walk every frame from there and sample the requested ones.
-        walk: range = range(start_frame, end_frame + 1, max(step, 1))
+        walk: range = range(start_frame, end_frame + 1, step)
         rigidbody_world = getattr(scene, "rigidbody_world", None)
         if (
-            sampled
-            and rigidbody_world is not None
+            rigidbody_world is not None
             and getattr(rigidbody_world, "enabled", True)
             and not rigidbody_world.point_cache.is_baked
         ):
@@ -6443,32 +6965,93 @@ class BlenderRuntimeSession:
                 scene.frame_set(frame)
                 if frame not in sampled:
                     continue
-                loc, rot = self._world_pose(obj)
-                time_sec = frame / fps
-
-                velocity: Optional[List[float]] = None
-                if prev_location is not None and step > 0:
-                    dt = step / fps
-                    if dt > 0:
-                        velocity = [(loc[i] - prev_location[i]) / dt for i in range(3)]
-
-                points.append(
-                    {
-                        "frame": frame,
-                        "time": time_sec,
-                        "location": loc,
-                        "rotation_euler": rot,
-                        "velocity": velocity,
-                    }
+                point = self._trajectory_sample(obj, euler_order, previous)
+                point["frame"] = frame
+                point["time"] = (frame - time_origin) / fps
+                point["velocity"] = (
+                    None
+                    if previous is None
+                    else [
+                        (now - before) * fps / step
+                        for now, before in zip(point["location"], previous["location"])
+                    ]
                 )
-                prev_location = loc
+                previous = point
+                points.append(point)
         finally:
-            scene.frame_set(original_frame)
+            scene.frame_set(original_frame, subframe=original_subframe)
 
         return {
             "object_name": object_name,
+            "rotation_mode": rotation_mode,
+            "euler_order": euler_order,
+            "fps": fps,
+            "time_origin_frame": time_origin,
             "point_count": len(points),
-            "points": points,
+            "points": [
+                {
+                    key: point[key]
+                    for key in (
+                        "frame",
+                        "time",
+                        "location",
+                        "rotation_euler",
+                        "rotation_quaternion",
+                        "local_rotation",
+                        "velocity",
+                    )
+                }
+                for point in points
+            ],
+        }
+
+    @staticmethod
+    def _trajectory_sample(
+        obj: Any, euler_order: str, previous: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """The evaluated world pose and own rotation channels of ``obj`` at this frame.
+
+        ``previous`` is the sample before, whose rotations keep this one's
+        continuous; the Euler before the first is the object's own rotation.
+        """
+        blender_module: Any = bpy
+        depsgraph = blender_module.context.evaluated_depsgraph_get()
+        evaluated = obj.evaluated_get(depsgraph)
+        matrix = evaluated.matrix_world
+        mode = obj.rotation_mode
+        if mode == "QUATERNION":
+            local = evaluated.rotation_quaternion
+        elif mode == "AXIS_ANGLE":
+            local = evaluated.rotation_axis_angle
+        else:
+            local = evaluated.rotation_euler
+        if previous is not None:
+            compatible = previous["_euler"]
+        elif len(mode) == 3:
+            compatible = _mathutils().Euler(tuple(local), euler_order)
+        else:
+            compatible = None
+        # The rotation nearest the matrix, as get_object_info reads it: a
+        # turned child of a parent with non-uniform scale has a sheared matrix,
+        # from which to_euler and to_quaternion read different rotations.
+        nearest = _nearest_rotation([[float(v) for v in row][:3] for row in matrix][:3])
+        rotation = matrix if nearest is None else _mathutils().Matrix(nearest)
+        euler = (
+            rotation.to_euler(euler_order)
+            if compatible is None
+            else rotation.to_euler(euler_order, compatible)
+        )
+        quaternion = [float(v) for v in rotation.to_quaternion()]
+        if previous is not None and (
+            sum(a * b for a, b in zip(quaternion, previous["rotation_quaternion"])) < 0
+        ):
+            quaternion = [-v for v in quaternion]
+        return {
+            "location": [float(v) for v in matrix.translation],
+            "rotation_euler": [float(v) for v in euler],
+            "rotation_quaternion": quaternion,
+            "local_rotation": [float(v) for v in local],
+            "_euler": euler,
         }
 
     def bake_simulation(
