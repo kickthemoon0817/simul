@@ -1108,7 +1108,11 @@ class PrimEditMixin:
                         # texture_file does, and is written as the resolved path.
                         file_checks = {_file_checks}
                         is_asset = attr.GetTypeName() in (Sdf.ValueTypeNames.Asset, Sdf.ValueTypeNames.AssetArray)
-                        if not is_asset and file_checks is not None and _node_type_of(prim):
+                        # A graph node by what this tool cannot change: its
+                        # type, or a node:type attribute at all (its value
+                        # can be cleared through this very tool).
+                        is_node = prim.GetTypeName() == "OmniGraphNode" or prim.GetAttribute("node:type").IsValid()
+                        if not is_asset and file_checks is not None and is_node:
                             # A graph node input named like a file location
                             # (IsaacReadFilePath's inputs:path) is judged as
                             # set_isaac_graph_node_values judges it.

@@ -254,7 +254,8 @@ class SystemMixin:
         """Pass the file locations in a Carb write through the write sandbox.
 
         A dict value writes a subtree, so each of its keys is judged by its
-        own full path.
+        own full path, and each element of a list by its index. An index
+        segment (``/app/exts/folders/0``) is judged by the name before it.
 
         Args:
             key: The Carb path written.
@@ -263,25 +264,20 @@ class SystemMixin:
         Returns:
             ``(value to write, None)``, or ``(value, SandboxError payload)``.
         """
-        if isinstance(value, dict):
-            resolved: Dict[str, Any] = {}
-            for child_key, child_value in value.items():
-                resolved[child_key], denial = self._sandboxed_carb_value(
+        if isinstance(value, (dict, list)):
+            items = value.items() if isinstance(value, dict) else enumerate(value)
+            entries: Dict[Any, Any] = {}
+            for child_key, child_value in items:
+                entries[child_key], denial = self._sandboxed_carb_value(
                     key.rstrip("/") + "/" + str(child_key), child_value
                 )
                 if denial is not None:
                     return value, denial
-            return resolved, None
-        if isinstance(value, list) and any(isinstance(item, dict) for item in value):
-            # An array of dicts (a registries list): each entry by its index.
-            entries = []
-            for index, item in enumerate(value):
-                entry, denial = self._sandboxed_carb_value(f"{key.rstrip('/')}/{index}", item)
-                if denial is not None:
-                    return value, denial
-                entries.append(entry)
-            return entries, None
-        if not names_file_location(key):
+            return (entries if isinstance(value, dict) else list(entries.values())), None
+        segments = key.rstrip("/").split("/")
+        while len(segments) > 1 and segments[-1].isdigit():
+            segments.pop()
+        if not names_file_location("/".join(segments)):
             return value, None
         resolved_value, denial = self._sandboxed_location(key, value)
         if denial is not None:
@@ -304,7 +300,8 @@ class SystemMixin:
             "unless allow_persistent=true. A string for a key whose last segment ends in file, "
             "dir, folder, url or uri, or in a bare or file-qualified path (/log/file, "
             "/app/exts/folders, an outputPath; not /log/fileLogLevel or a cameraPath), dict "
-            "and array-of-dict entries included, must be inside the file sandbox "
+            "entries and list elements included (an index key such as /app/exts/folders/0 by "
+            "the name before it), must be inside the file sandbox "
             "(security.allowed_paths), judged as a write, or nothing is applied."
         ),
         read_only=False,

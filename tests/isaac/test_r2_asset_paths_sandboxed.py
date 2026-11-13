@@ -292,6 +292,24 @@ def test_a_node_input_set_as_a_prim_attribute_is_judged_the_same(stage_tools: St
     assert data["success"] is True, "a prim that is not a node keeps plain data"
 
 
+def test_clearing_node_type_does_not_switch_the_node_check_off(stage_tools: StageTools, tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    stage = _stage()
+    untyped = stage.DefinePrim("/World/Graph/Untyped", "OmniGraphNode")
+    untyped.CreateAttribute("inputs:path", Sdf.ValueTypeNames.String)
+    tools, _ = _tools(stage_tools, stage, sandbox)
+
+    cleared = _run(tools.set_isaac_prim_attribute("/World/Graph/Reader", "node:type", ""))
+    after_clear = _run(tools.set_isaac_prim_attribute("/World/Graph/Reader", "inputs:path", "/etc/passwd"))
+    by_type = _run(tools.set_isaac_prim_attribute("/World/Graph/Untyped", "inputs:path", "/etc/passwd"))
+
+    assert cleared["success"] is True
+    assert after_clear["error_type"] == "SandboxError"
+    assert by_type["error_type"] == "SandboxError", "an OmniGraphNode prim is a node without node:type"
+    assert not _texture(stage, "/World/Graph/Reader", "inputs:path")
+
+
 def test_a_connection_into_a_file_input_is_refused_while_the_sandbox_is_on(
     stage_tools: StageTools, tmp_path: Path
 ) -> None:
@@ -349,10 +367,18 @@ def test_carb_file_keys_are_checked_as_writes_and_resolved(stage_tools: StageToo
     registry = _run(tools.set_carb_settings({
         "/exts/omni.kit.registry.nucleus/registries": [{"name": "evil", "url": "http://evil.example/exts"}]
     }))
-    assert [r["error_type"] for r in (nested, listed, omniverse, registry)] == ["SandboxError"] * 4
+    by_index = _run(tools.set_carb_settings({"/app/exts/folders/0": "/opt/evil"}))
+    mixed = _run(tools.set_carb_settings({"/app/exts/folders": [{"x": 1}, "/opt/evil"]}))
+    index_child = _run(tools.set_carb_settings({"/app/exts/folders": {"0": "/opt/evil"}}))
+    refused = (nested, listed, omniverse, registry, by_index, mixed, index_child)
+    assert [r["error_type"] for r in refused] == ["SandboxError"] * len(refused)
     assert nested["details"]["setting"] == "/log/file"
     assert registry["details"]["setting"] == "/exts/omni.kit.registry.nucleus/registries/0/url"
+    assert mixed["details"]["setting"] == "/app/exts/folders/1"
     assert sent == []
+
+    _run(tools.set_carb_settings({"/app/exts/folders/0": str(sandbox), "/rtx/post/lut/2": "x"}))
+    assert repr(str(sandbox.resolve())) in sent[-1] and "'x'" in sent[-1]
 
     _run(tools.set_carb_settings({
         "/log/file": str(sandbox / "kit.log"),
@@ -381,6 +407,8 @@ def test_carb_file_keys_are_checked_as_writes_and_resolved(stage_tools: StageToo
         ("/exts/omni.kit.registry.nucleus/registries/0/url", True),
         ("inputs:primPath", False),
         ("inputs:robotPath", False),
+        ("inputs:meshPath", False),
+        ("inputs:rootPath", False),
         ("inputs:renderProductPath", False),
         ("inputs:pathPattern", False),
         ("/log/fileLogLevel", False),

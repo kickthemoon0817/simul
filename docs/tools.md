@@ -565,7 +565,7 @@ Notes:
   also refuses `/app/scripting`. It refuses `/persistent` keys, which Kit
   saves for later sessions, unless `allow_persistent=true`. A string for a
   key named like a file location (`/log/file`, `/app/exts/folders`; not
-  `/log/fileLogLevel`), in a dict or an array of dicts too, must be inside
+  `/log/fileLogLevel`), in a dict, a list or by list index too, must be inside
   the file sandbox, judged as a write; otherwise the call is `SandboxError`
   and nothing is applied.
   `get_isaac_carb_settings` reads `auth_token` values back as `***`, and

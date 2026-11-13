@@ -359,9 +359,12 @@ around them:
     and `/log/fileLogLevel` are not file locations.
 
   `set_isaac_graph_node_values` and `set_isaac_carb_settings` refuse such a
-  value outside the sandbox and set nothing. Carb dict values and arrays of
-  dicts are judged entry by entry. `set_isaac_prim_attribute` applies the same
-  rule to an input of a graph node prim. While the sandbox is on,
+  value outside the sandbox and set nothing. Carb dict entries and list
+  elements are judged one by one, and an index key such as
+  `/app/exts/folders/0` by the name before the index.
+  `set_isaac_prim_attribute` applies the same rule to an input of a graph
+  node prim (an `OmniGraphNode` or any prim with a `node:type` attribute,
+  whatever its value). While the sandbox is on,
   `connect_isaac_graph_nodes` refuses a connection into such an input,
   because a value that comes from another node at run time is never checked.
 

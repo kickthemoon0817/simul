@@ -597,8 +597,8 @@ FILE_LOCATION_LAST_WORDS = frozenset(
 FILE_PATH_QUALIFIERS = frozenset(
     {
         "file", "usd", "asset", "output", "save", "export", "import", "log", "dump",
-        "cache", "config", "data", "root", "search", "extra", "texture", "image",
-        "mesh", "model", "script", "dir", "folder", "directory", "temp", "tmp",
+        "cache", "config", "data", "search", "extra", "texture", "image",
+        "model", "script", "dir", "folder", "directory", "temp", "tmp",
     }
 )
 
