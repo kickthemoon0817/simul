@@ -1217,13 +1217,50 @@ Behaviour worth knowing:
     (restart an editor that was already running). Without it every mesh tool
     returns `error_type: "UnsupportedOperation"` with `details.code:
     "GEOMETRY_SCRIPTING_DISABLED"` and a hint naming setup.
-  - They take the path of a DynamicMeshActor in the level open in the editor,
-    found without loading a map. A path that names nothing is `NotFoundError`.
-    A StaticMeshActor (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh
-    asset path (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose
-    `details.hint` names `convert_unreal_mesh_format`, which places an
-    editable DynamicMeshActor copy of a StaticMesh asset in the level; any
-    other actor is `"NO_DYNAMIC_MESH"`.
+  - They take the path of an actor in the level open in the editor, found
+    without loading a map, or of an asset. A path that names nothing is
+    `NotFoundError`. `validate_unreal_mesh`, `compute_unreal_convex_hull` and
+    `decompose_unreal_convex_hull` read a DynamicMeshActor, a StaticMeshActor
+    or a StaticMesh asset (its first LOD, copied into a transient
+    DynamicMesh; the reply's `source_kind` says which). The tools that edit a
+    mesh in place take a DynamicMeshActor only: a StaticMeshActor
+    (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh asset path
+    (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose `details.hint` names
+    `convert_unreal_mesh_format`; any other actor is `"NO_DYNAMIC_MESH"`.
+  - `convert_unreal_mesh_format` moves meshes between the two kinds.
+    `dynamic_mesh` places a DynamicMeshActor copy of a StaticMesh asset (at
+    `location`) or of a StaticMeshActor (at its transform), with its
+    materials; `replace_actor` removes the StaticMeshActor in the same
+    transaction. `static_mesh` writes a DynamicMeshActor's mesh into a
+    StaticMesh asset: `asset_path` (default `/Game/Generated/SM_<label>`, the
+    label's ASCII letters and digits joined by underscores) must
+    be under `/Game` (anything else, `/Engine` or a plugin's content, is
+    `SandboxError` `"OUTSIDE_GAME_CONTENT"`); an existing StaticMesh is
+    refused (`"ASSET_EXISTS"`) unless `overwrite`, which replaces its mesh and
+    keeps its references; the component's materials go to its slots; its
+    simple collision is the component's, a convex hull or none (`collision`,
+    `auto` by default); `nanite` enables Nanite; `save` (default true) saves
+    that asset's package and nothing else, and the reply names the `.uasset`
+    written. With Nanite the asset's `triangle_count` and `vertex_count` are the
+    mesh written, which Nanite renders, and `fallback_triangle_count` and
+    `fallback_vertex_count` its fallback mesh (LOD 0: 316 triangles for a
+    1,920-triangle sphere). `replace_actor` swaps the DynamicMeshActor for a
+    StaticMeshActor at its transform, in one undoable transaction. Writing the
+    asset, new or overwritten, with its materials and collision, is not
+    undoable: Unreal records no undo step for a new asset, so simul records
+    none for the rest of the write either (its collision used to be an Undo
+    step of its own, and one Undo dropped it from the asset). Unreal's USD exporter
+    writes a DynamicMeshActor as an empty Xform, without its mesh, so convert
+    with `replace_actor` before exporting a mesh made with these tools; the
+    reply's `hint` says so when the DynamicMeshActor was left in place.
+  - A hull or decomposition with `output` `collision` or `both` on a
+    StaticMesh source sets the StaticMesh asset's simple collision (every
+    actor using it shares it), only for an asset under `/Game`, in one
+    undoable transaction; `save` saves that asset. Undo restores the asset's
+    collision, but Unreal does not rebuild the physics of the actors already
+    placed with it: until the level is reloaded they keep colliding with the
+    hull (a line trace still hits it). Save before such an edit, or set the
+    collision again rather than undo it.
   - Every GeometryScript call is checked after it returns. GeometryScript
     reports most failures that way and otherwise leaves the mesh as it was
     (Catmull-Clark on a mesh without quad polygroups returned with the
@@ -1267,6 +1304,50 @@ Behaviour worth knowing:
     `method` names the one that ran; `xatlas` on a larger mesh is refused with
     `details.code: "MESH_TOO_LARGE_FOR_XATLAS"`. A `uv_channel` the mesh does
     not have is refused (`"UV_CHANNEL_MISSING"`).
+  - Positions are where the actors are in the level. `apply_unreal_mesh_boolean`
+    combines both meshes at their actors' world transforms (location,
+    rotation, scale) and writes the result in the target's local space.
+    `cut_unreal_mesh_plane` takes its plane in world space unless `space` is
+    `local`, removes the half the normal points into (or keeps it as a second
+    actor with `keep_both_sides`), reports the plane in the mesh's space, and
+    refuses a plane that misses the mesh (`"PLANE_MISSES_MESH"`). The hull,
+    decomposition and cut actors take the source's whole transform. Face
+    selections of `edit_unreal_mesh_topology` (`normal:x,y,z[,angle]`,
+    `box:...`, `all`) are in the mesh's local space.
+  - `compute_unreal_convex_hull` and `decompose_unreal_convex_hull` produce
+    simple collision: `output` `actor` (default) spawns a DynamicMeshActor
+    whose mesh and simple collision are the hull or pieces, `collision`
+    replaces the source's simple collision, `both` does both, in one
+    transaction (Undo restores the collision Unreal uses, the component's
+    BodySetup included). Unreal rebuilds the physics of neither: after an Undo
+    or Redo a line trace still meets the shapes from before it (Redo of a hull
+    put the shape back, and traces missed it) until a mesh tool next touches
+    the actor, which rebuilds its collision. The hull is simplified to `max_faces` triangles
+    (250; 0 keeps the exact hull, 84,064 triangles for a 130,048-triangle
+    sphere). The decomposition is Unreal's own (GeometryScript's collision
+    generation, not V-HACD), with its sphere, box and capsule detection off:
+    left on, a sphere or capsule source came back as "Hull Computation Failed"
+    and a 100 cm cube. `max_vertices_per_hull` limits each piece (as 2V - 4
+    triangles); `error_tolerance` and `min_part_thickness` are passed on;
+    `volume_ratio` says how much of a closed source the pieces cover.
+  - `generate_unreal_mesh_primitive` takes each type's dimensions by name in
+    Unreal's axes (box `width` X, `depth` Y, `height` Z; capsule `radius` and
+    `length`, its straight part; torus `major_radius`, `minor_radius`), refuses
+    unknown names and sizes that are not above 0, and gives primitives quad
+    polygroups, so Catmull-Clark subdivides them. `segments` is 3 to 512.
+  - Options are implemented or refused, never ignored: `subdivide_unreal_mesh`
+    runs Catmull-Clark, Loop or uniform tessellation (levels 1 to 4; a result
+    over 2,000,000 triangles is refused); `simplify_unreal_mesh` takes one of a
+    triangle count, a fraction below 1 or `max_error` (a tolerance in cm);
+    `remesh_unreal_mesh` is uniform only and keeps the triangle count by
+    default; `compute_unreal_mesh_uv` packs islands `island_padding` texels
+    apart at `texture_resolution`; `edit_unreal_mesh_topology` needs a
+    selection and reports `faces_affected` and `edges_affected`.
+  - `validate_unreal_mesh` runs the checks named in `checks` (all by
+    default): `closed`, `manifold` (bowtie vertices), `degenerate_triangles`,
+    `orientation` (a closed mesh encloses a positive volume), `compact`,
+    `normals` and `uvs`, each with `passed`, `count` and `detail`. It does not
+    look for self-intersections.
   - A mesh script runs under an HTTP timeout of at least 300 s, whatever
     `UNREAL__TIMEOUT` says, since a GeometryScript call cannot be cancelled.
     The slowest operations on a 2M-triangle mesh took 83 to 109 s (a
@@ -1397,6 +1478,15 @@ Behaviour worth knowing:
   captures, saves, exports, playback and editor-only `control_blender_ui`
   actions record no step. Details:
   [blender-attachment.md](blender-attachment.md#undo-and-unsaved-changes).
+- In attached mode calls sent together wait their turn on Blender's main thread
+  instead of failing. When one gets no answer, its error (`TimeoutError` or
+  `ConnectionError`) says in `details.executed` whether it ran: `false` is safe
+  to retry. A bridge holding 64 MiB of requests refuses another with
+  `InstanceBusy` (`details.code: "bridge_busy"`) before reading it, and Simul
+  retries that while its timeout allows. A script past its own timeout reports `timed_out: true`, as in
+  embedded mode. Requests up to 32 MiB of JSON are read however long they take
+  to arrive. Details:
+  [blender-attachment.md](blender-attachment.md#concurrent-calls-timeouts-and-large-requests).
 - `open_blender_file` refuses with `UnsavedChangesError` while the open file has
   unsaved changes; save them with `save_blender_file`, or pass
   `discard_unsaved: true`. Headless (embedded) Blender does not track unsaved
@@ -2227,11 +2317,29 @@ Behaviour worth knowing:
   the pose is the simulation's result for the frame, and `warning` explains
   when it is not. An add-on built before this report answers without these
   fields, and the server returns them as `null`.
-- `search_blender_objects` refuses a `name_pattern` that repeats a group holding
-  a quantifier or alternatives, such as `(\w+)+`: Python's regex search
-  backtracks, and on a long object name such a pattern runs for hours on
-  Blender's main thread. `get_unreal_actor_by_semantic_label` refuses the same
-  patterns in regex mode.
+- `search_blender_objects` searches a `name_pattern` that Python's `re`
+  could backtrack on for long, such as `(\w+)+`, `.*.*.*x` or
+  `.*left.*front.*wheel.*joint`, with a Thompson-NFA simulation instead, whose
+  time grows linearly with the name, so Blender's main thread cannot freeze on
+  it. Which patterns `re` may search is bounded in `simul.utils.regex_guard`:
+  every quantifier, optional element and alternative is a choice, quantifiers
+  that can divide the same characters between them multiply each other's
+  choices (through quantifiers that can match nothing and optional groups too),
+  and an unanchored search adds one for where it starts. What a lookaround
+  holds is counted where the search reaches it, as if the pattern went on into
+  it there, since `re` matches it again on every arrival. The steps are counted
+  for a 255-character name, Blender 5's limit. A pattern that also needs a
+  back-reference, an atomic group, a possessive quantifier, a conditional or a
+  lookaround that itself backtracks for long (`(?=.*.*.*\d)`), which the
+  linear-time search lacks, is refused with `error_type: "ValidationError"`
+  and `details.code: "regex_backtracking"`. A pattern with more than 32
+  quantifiers in a row goes to the linear-time search without being bounded,
+  and one over 512 characters is refused with `details.code:
+  "pattern_too_long"`.
+  `get_unreal_actor_by_semantic_label` searches tags in the editor with `re`
+  and `re.IGNORECASE`, so in regex mode it refuses the patterns that bound does
+  not allow for a 1023-character tag under IGNORECASE (`.*.*x`, `A*a*x`,
+  `\w*(?=\w*\d)`), with the same error; contains mode takes any label.
 - `execute_blender_script` returns the first `max_output_chars` characters of
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a
@@ -2294,7 +2402,7 @@ script the bridge stopped at its timeout (`TimeoutError`).
 | `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
 | `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
 | `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a non-domain exception, a reply that does not parse or does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
-| `InstanceBusy` | The Isaac instance is serving another call | Retry shortly |
+| `InstanceBusy` | The Isaac instance is serving another call; a Blender instance is busy (`attach_blender_window`) or its bridge holds as many waiting requests as it takes (`bridge_busy`) | Retry shortly |
 | `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
 
 Domain types of the server:

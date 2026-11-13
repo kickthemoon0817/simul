@@ -412,9 +412,13 @@ class BlenderSearchObjectsRequest(BaseModel):
 
     name_pattern: Optional[str] = Field(
         None,
+        max_length=512,
         description=(
-            "Python regular expression searched for in each object name; one that "
-            "repeats a group holding a quantifier or alternatives is refused"
+            "Python regular expression searched for in each object name; one that Python's "
+            "re could backtrack on for long, such as (\\w+)+ or .*.*.*x, is searched in "
+            "linear time instead, and refused only when it also needs a back-reference, "
+            "an atomic group, a possessive quantifier, a conditional or a lookaround that "
+            "backtracks itself, as in (?=.*.*.*\\d)"
         ),
     )
     object_type: Optional[str] = Field(
@@ -3673,8 +3677,9 @@ class BlenderExecuteScriptResponse(BaseModel):
     timed_out: bool = Field(
         False,
         description=(
-            "True when the script exceeded its timeout; it keeps running on a "
-            "background thread and its output is discarded"
+            "True when the script exceeded its timeout; it keeps running (on a "
+            "background thread in embedded mode, on Blender's main thread in attached "
+            "mode) and its output is discarded"
         ),
     )
 

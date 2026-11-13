@@ -166,7 +166,7 @@ async def test_render_setting_cannot_be_used_as_console_dispatch(name, value):
     [
         ("compute_convex_hull", {}),
         ("decompose_convex_hull", {}),
-        ("edit_mesh_topology", {"operation": "extrude_faces"}),
+        ("edit_mesh_topology", {"operation": "extrude_faces", "face_selection": "all"}),
         ("subdivide_mesh", {}),
         ("simplify_mesh", {}),
         ("cut_mesh_plane", {"plane_origin": [0, 0, 0], "plane_normal": [0, 0, 1]}),
@@ -206,10 +206,8 @@ async def test_generated_mesh_paths_are_data_not_python(method, kwargs):
 async def test_mesh_dimension_strings_cannot_inject_python():
     session = UnrealRuntimeSession()
     session._execute_python = AsyncMock()
-    with pytest.raises(ValueError):
-        await session.generate_mesh_primitive(
-            "box", dimensions={"width": "1); review_injected();#"}
-        )
+    refused = await session.generate_mesh_primitive("box", dimensions={"width": "1); review_injected();#"})
+    assert (refused["error_type"], refused["details"]["code"]) == ("ValidationError", "INVALID_DIMENSION")
     session._execute_python.assert_not_called()
 
 
