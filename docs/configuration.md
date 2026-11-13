@@ -209,6 +209,13 @@ contains `script` anywhere (an all-lowercase third-party name such as
 the `script` belongs to an English word such as `description` or `transcript`.
 The other `omni.warp` nodes, which run fixed kernels, stay usable.
 
+The prim-editing tools apply the same check, since OmniGraph nodes are prims:
+`create_isaac_prim` refuses a code-running type and a code attribute or
+code-running `node:type` among its attributes, `set_isaac_prim_attribute`
+refuses a code attribute, a code-running `node:type` value and any write to
+a code-running node, and `duplicate_isaac_prim` refuses a subtree that holds
+one.
+
 Routes this does not close:
 - A stage opened with `open_isaac_stage` that already contains code nodes or
   scripting components. The Kit prompt guards those scripts, but a headless

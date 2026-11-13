@@ -454,14 +454,19 @@ Notes:
   writes them.
 - `add_isaac_collision` applies CollisionAPI to the geometry at and under
   `prim_path` (an asset root's meshes, not the root Xform, which would make no
-  shape), puts `approximation` on meshes only, and lists the shapes.
+  shape), puts `approximation` on meshes only, and lists the shapes. Going
+  down a tree it skips render-purpose (visual-only) and guide geometry unless
+  `all_purposes=true`.
   `set_isaac_physics_material` binds a MaterialAPI material to the colliders
   at or under `prim_path` with purpose `physics`, leaving the visual binding
   alone, and lists them in `bound_to`.
 - The joint tools are USD-level (UsdPhysics DriveAPI, LimitAPI,
-  ArticulationRootAPI). `list_isaac_articulations` orders each
-  articulation's joints depth first from the root body; PhysX's DOF indices
-  need not follow that order. Angular drive targets and revolute limits are in
+  ArticulationRootAPI). `list_isaac_articulations` lists each
+  articulation's joints depth first from the root body (`tree_index`) and
+  gives each joint's `dof_index` in Isaac Sim's DOF order (breadth first from
+  the root link, fixed joints dropped, as Isaac Sim 6.0.1's USD articulation
+  backend computes it), plus `dof_paths` in that order; it pages with
+  `max_results` / `offset`. Angular drive targets and revolute limits are in
   degrees. In the joint aspect, an infinite value ("no limit",
   "unbreakable") is null with a `<key>_note`, since JSON has no infinity.
 - `set_isaac_material_property` types a new input the way the shader declares
@@ -477,7 +482,16 @@ Notes:
   `xformOp:scale:unitsResolve` and `xformOp:rotateX:unitsResolve` and
   referencing the asset on its child `<target_path>/<asset root name>`
   (`asset_root_path`), so the asset root's own transform is converted too.
-  A failed import removes every prim it created.
+  Physics values in the asset's units (prismatic limits, drive targets and
+  gains, density, mass, inertia, velocities, contact offsets) are rescaled in
+  the importing layer with the exponents of Kit's
+  `pxr.PhysicsSchemaTools.units_db`, as Kit's metrics assembler does for its
+  own reference commands; `units.physics` lists what was scaled and what could
+  not be (values inside instances). A failed import removes every prim it
+  created. `add_isaac_reference(correct_units=true)` declines the correction,
+  with a warning, on a prim that already had children, physics values, other
+  references or transform ops: those are in the stage's units and would be
+  converted along with the asset.
 - `save_isaac_stage` checks an in-place save's files against the write
   sandbox, needs `overwrite=true` for URL targets, and refuses while the
   timeline is playing or paused unless `allow_while_playing=true`.

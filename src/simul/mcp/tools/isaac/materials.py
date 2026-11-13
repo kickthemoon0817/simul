@@ -67,6 +67,12 @@ OMNIPBR_INPUTS: Dict[str, str] = {
     "detail_texture_scale": "Float2",
 }
 
+# The shader types create_isaac_material builds, keyed by lower-case name.
+MATERIAL_SHADER_TYPES: Dict[str, str] = {
+    "usdpreviewsurface": "UsdPreviewSurface",
+    "omnipbr": "OmniPBR",
+}
+
 USD_PREVIEW_SURFACE_INPUTS: Dict[str, str] = {
     "diffuseColor": "Color3f",
     "emissiveColor": "Color3f",
@@ -86,7 +92,8 @@ USD_PREVIEW_SURFACE_INPUTS: Dict[str, str] = {
 }
 
 # Sets one surface-shader input with the value converted to the input's type.
-# Defines _set_material_input(stage, material_path, name, value, allow_unknown).
+# Defines _set_material_input(stage, material_path, name, value, allow_unknown,
+# asset_value, asset_denial).
 SET_MATERIAL_INPUT_CORE = """\
     import difflib
 
@@ -167,7 +174,7 @@ SET_MATERIAL_INPUT_CORE = """\
             return [float(c) for c in value]
         return value
 
-    def _set_material_input(stage, material_path, name, value, allow_unknown):
+    def _set_material_input(stage, material_path, name, value, allow_unknown, asset_value=None, asset_denial=None):
         prim = stage.GetPrimAtPath(material_path)
         if not prim.IsValid() or not prim.IsA(UsdShade.Material):
             return {"error": "Material not found: " + material_path, "error_type": "NotFoundError"}
@@ -228,6 +235,18 @@ SET_MATERIAL_INPUT_CORE = """\
             shader_input = shader.CreateInput(name, getattr(Sdf.ValueTypeNames, type_name))
             created = True
             type_name = str(shader_input.GetTypeName())
+        if type_name.lower() == "asset" and isinstance(value, str):
+            # A file the renderer will read is checked against the read
+            # sandbox, as create_isaac_light checks its texture_file; the
+            # path written is the one the check resolved.
+            if asset_denial is not None:
+                if created:
+                    shader.GetPrim().RemoveProperty(shader_input.GetAttr().GetName())
+                denied = dict(asset_denial)
+                denied.update({"material_path": material_path, "property_name": name})
+                return denied
+            if asset_value is not None:
+                value = asset_value
         try:
             coerced = _coerce(value, type_name)
         except ValueError as exc:
@@ -480,7 +499,8 @@ class MaterialsMixin:
             "UsdPreviewSurface type (texture paths become assets, flags bools, enums ints). "
             "A name that is not an input of a known shader is refused with suggestions "
             "(OmniPBR roughness is reflection_roughness_constant, color "
-            "diffuse_color_constant, texture diffuse_texture). Returns the input's type and "
+            "diffuse_color_constant, texture diffuse_texture). A file path for an asset input "
+            "must be inside the read sandbox (security.allowed_paths). Returns the input's type and "
             "the value read back."
         ),
         read_only=False,
@@ -518,6 +538,15 @@ class MaterialsMixin:
         """
         if not property_name or not property_name.strip():
             return ErrorResponse(error="property_name is empty", error_type="ValidationError").model_dump()
+        # Whether a string is a file path depends on the input's type, which
+        # only Isaac knows, so both outcomes go along and the script uses the
+        # one that applies: the denial for an asset input, else the value.
+        asset_value: Optional[str] = None
+        asset_denial: Optional[Dict[str, Any]] = None
+        if isinstance(value, str) and value:
+            asset_denial = self._sandbox_denial(value)
+            if asset_denial is None:
+                asset_value = self._path_policy.authorize(value)
         script = _compose_script(
             """\
             import json
@@ -535,7 +564,7 @@ class MaterialsMixin:
                 value = json.loads({_pyval(json.dumps(value))})
                 print(json.dumps(_set_material_input(
                     stage, {_pyval(material_path)}, {_pyval(property_name.strip())}, value,
-                    {_pyval(bool(allow_unknown_input))}
+                    {_pyval(bool(allow_unknown_input))}, {_pyval(asset_value)}, {_pyval(asset_denial)}
                 )))
             """,
         )
@@ -544,9 +573,10 @@ class MaterialsMixin:
     @tool_meta(
         name="create_isaac_material",
         description=(
-            "Create a new material with a surface shader. Supports UsdPreviewSurface "
-            "(portable) and OmniPBR (NVIDIA MDL). Set diffuse color, roughness, metallic, "
-            "and opacity. After creation, use assign_isaac_material to bind it to prims."
+            "Create a new material with a surface shader: shader_type UsdPreviewSurface "
+            "(portable) or OmniPBR (NVIDIA MDL), in any case; any other type is refused. Set "
+            "diffuse color, roughness, metallic, and opacity. After creation, use "
+            "assign_isaac_material to bind it to prims."
         ),
         read_only=False,
     )
@@ -571,10 +601,22 @@ class MaterialsMixin:
             opacity: Opacity 0-1.
 
         Returns:
-            Dict confirming the material and shader were created.
+            Dict confirming the material and shader were created, or a
+            ValidationError for a shader type other than the two supported.
         """
+        canonical = MATERIAL_SHADER_TYPES.get((shader_type or "").strip().lower())
+        if canonical is None:
+            return ErrorResponse(
+                error=(
+                    f"Unsupported shader_type {shader_type!r}; use one of "
+                    + ", ".join(sorted(set(MATERIAL_SHADER_TYPES.values())))
+                    + " (any case). Other MDL shaders need execute_isaac_script."
+                ),
+                error_type="ValidationError",
+                details={"code": "UNSUPPORTED_SHADER_TYPE"},
+            ).model_dump()
         _mat_path = _pyval(material_path)
-        _shader_type = _pyval(shader_type)
+        _shader_type = _pyval(canonical)
         _color = _pyval([float(c) for c in (diffuse_color or [0.8, 0.8, 0.8])])
         script = _compose_script(
             """\

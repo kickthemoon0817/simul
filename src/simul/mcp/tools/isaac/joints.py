@@ -104,7 +104,7 @@ READ_JOINT_CORE = """\
 
 # Articulation discovery. Defines _list_articulations(stage, root, limit).
 LIST_ARTICULATIONS_CORE = """\
-    def _list_articulations(stage, root, limit):
+    def _list_articulations(stage, root, limit, offset=0):
         predicate = Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)
 
         def _rigid_body_of(path):
@@ -212,9 +212,17 @@ LIST_ARTICULATIONS_CORE = """\
 
             if root_body is not None:
                 _walk(root_body)
+            dof_paths, dof_types = _isaac_dofs(root_prim)
+            dof_index = {path: index for index, path in enumerate(dof_paths)}
             joints = []
             for index, (path, parent, child) in enumerate(ordered):
-                entry = {"index": index, "parent_body": parent, "child_body": child}
+                entry = {
+                    "tree_index": index,
+                    "dof_index": dof_index.get(path),
+                    "dof_type": dof_types.get(path),
+                    "parent_body": parent,
+                    "child_body": child,
+                }
                 entry.update(_read_joint(stage.GetPrimAtPath(path)))
                 joints.append(entry)
             touched = set(bodies)
@@ -231,6 +239,8 @@ LIST_ARTICULATIONS_CORE = """\
                 "bodies": bodies,
                 "joint_count": len(joints),
                 "joints": joints,
+                "dof_count": len(dof_paths),
+                "dof_paths": dof_paths,
                 "excluded_joints": excluded_here,
                 "loop_closure_joints": loop_closures,
                 "world_joints": world_joints,
@@ -239,14 +249,129 @@ LIST_ARTICULATIONS_CORE = """\
         roots = [
             p for p in Usd.PrimRange(root, predicate) if p.HasAPI(UsdPhysics.ArticulationRootAPI)
         ]
-        page = [_articulation(p) for p in roots[:limit]]
+        page = [_articulation(p) for p in roots[offset:offset + limit]]
+        truncated = offset + len(page) < len(roots)
         return {
             "root_path": str(root.GetPath()),
             "articulation_count": len(roots),
+            "offset": offset,
             "applied_limit": limit,
-            "truncated": len(roots) > limit,
+            "truncated": truncated,
+            "next_offset": offset + len(page) if truncated else None,
             "articulations": page,
         }
+"""
+
+# The DOF order Isaac Sim assigns an articulation, as its USD articulation
+# backend computes it (Isaac Sim 6.0.1,
+# isaacsim.core.experimental.prims/python/impl/_usd_articulation.py:
+# _get_root_link_prim, _collect_candidate_joints, _walk_connected_articulation,
+# _discover_dofs): breadth first from the root link over the joints under the
+# articulation's scope (nested articulations excluded), fixed joints and
+# joints without a drivable axis dropped. Defines _isaac_dofs(root_prim) ->
+# (dof paths in order, {path: "rotation" | "translation"}).
+ISAAC_DOF_ORDER_CORE = """\
+    from collections import deque as _dof_deque
+
+    def _isaac_dofs(root_prim):
+        stage = root_prim.GetStage()
+        root_path = str(root_prim.GetPath())
+        scope = root_prim
+        if root_prim.IsA(UsdPhysics.Joint) and root_prim.GetParent().IsValid():
+            scope = root_prim.GetParent()
+
+        def _target(prim, name):
+            rel = prim.GetRelationship(name)
+            targets = rel.GetTargets() if rel else []
+            if not targets:
+                return None
+            target = targets[0]
+            if not target.IsAbsolutePath():
+                target = target.MakeAbsolutePath(prim.GetPath())
+            return target.pathString
+
+        def _bodies(joint):
+            return _target(joint, "physics:body0"), _target(joint, "physics:body1")
+
+        root_link = None
+        if root_prim.IsA(UsdPhysics.Joint):
+            for body_path in _bodies(root_prim):
+                if body_path and stage.GetPrimAtPath(body_path).IsValid():
+                    root_link = stage.GetPrimAtPath(body_path)
+                    break
+        if root_link is None and root_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            root_link = root_prim
+        if root_link is None:
+            root_link = next((p for p in Usd.PrimRange(scope) if p.HasAPI(UsdPhysics.RigidBodyAPI)), None)
+        if root_link is None:
+            return [], {}
+
+        def _foreign(prim):
+            current = prim
+            while current.IsValid():
+                if current.HasAPI(UsdPhysics.ArticulationRootAPI) and str(current.GetPath()) != root_path:
+                    return True
+                if current.GetPath() == scope.GetPath():
+                    return False
+                current = current.GetParent()
+            return False
+
+        by_body = {}
+        for prim in Usd.PrimRange(scope):
+            if prim.IsA(UsdPhysics.Joint) and not _foreign(prim):
+                for slot, body_path in enumerate(_bodies(prim)):
+                    if body_path:
+                        by_body.setdefault(body_path, []).append((prim, slot))
+
+        joint_paths = []
+        seen_links = set()
+        seen_joints = set()
+        queue = _dof_deque([root_link])
+        while queue:
+            link = queue.popleft()
+            if not link.IsValid():
+                continue
+            link_path = str(link.GetPath())
+            if link_path in seen_links:
+                continue
+            seen_links.add(link_path)
+            for joint, slot in by_body.get(link_path, []):
+                joint_path = str(joint.GetPath())
+                if joint_path not in seen_joints:
+                    seen_joints.add(joint_path)
+                    joint_paths.append(joint_path)
+                other = _bodies(joint)[1 - slot]
+                if other and other not in seen_links and stage.GetPrimAtPath(other).IsValid():
+                    queue.append(stage.GetPrimAtPath(other))
+        if root_path not in seen_joints and root_prim.IsA(UsdPhysics.Joint):
+            joint_paths.append(root_path)
+
+        dof_paths = []
+        dof_types = {}
+        for joint_path in joint_paths:
+            joint = stage.GetPrimAtPath(joint_path)
+            if not joint.IsValid() or joint.IsA(UsdPhysics.FixedJoint):
+                continue
+            kind = None
+            if joint.IsA(UsdPhysics.RevoluteJoint) or joint.IsA(UsdPhysics.SphericalJoint):
+                kind = "rotation"
+            elif joint.IsA(UsdPhysics.PrismaticJoint):
+                kind = "translation"
+            else:
+                # A generic joint counts by its first drive attribute only.
+                for attr in joint.GetAttributes():
+                    name = attr.GetName()
+                    if not name.startswith("drive:"):
+                        continue
+                    if name.startswith("drive:linear:"):
+                        kind = "translation"
+                    elif name.startswith("drive:angular:"):
+                        kind = "rotation"
+                    break
+            if kind is not None:
+                dof_paths.append(joint_path)
+                dof_types[joint_path] = kind
+        return dof_paths, dof_types
 """
 
 # Joint writers. Define _set_joint_drive(...) and _set_joint_limits(...);
@@ -397,18 +522,19 @@ class JointsMixin:
         name="list_isaac_articulations",
         description=(
             "Find articulations (prims with ArticulationRootAPI) under root_path and list each "
-            "one's joints in kinematic order, depth first from the root body: index, joint "
-            "type, body0/body1, parent and child body, axis, limits and drives (stiffness, "
-            "damping, targets, max force). Also reports the bodies in the same order, whether "
-            "the base is fixed to the world, and joints excluded from the articulation or "
-            "closing a loop. USD-level: the order is the tree walk over the stage, which "
-            "PhysX's DOF indices need not match."
+            "one's joints in kinematic order, depth first from the root body (tree_index), "
+            "with dof_index, the position of the joint's DOF in Isaac Sim's articulation DOF "
+            "order (breadth first from the root link, fixed joints dropped; null for joints "
+            "without a DOF), joint type, body0/body1, parent and child body, axis, limits and "
+            "drives (stiffness, damping, targets, max force). Each articulation also lists "
+            "dof_paths in DOF order, the bodies, whether the base is fixed to the world, and "
+            "joints excluded from it or closing a loop. Paged by max_results / offset."
         ),
         read_only=True,
         idempotent=True,
     )
     async def list_isaac_articulations(
-        self, root_path: str = "/", max_results: int = 50
+        self, root_path: str = "/", max_results: int = 50, offset: int = 0
     ) -> Dict[str, Any]:
         """
         List articulations and their joints in kinematic order.
@@ -417,17 +543,23 @@ class JointsMixin:
             root_path: USD path to search under for ArticulationRootAPI
                 prims. Joints and bodies are followed wherever they are on
                 the stage.
-            max_results: Maximum number of articulations returned, clamped
-                to [1, 200]; ``articulation_count`` is the full number.
+            max_results: Maximum number of articulations returned per page,
+                clamped to [1, 200]; ``articulation_count`` is the full
+                number.
+            offset: Number of articulations to skip before the page starts;
+                pass the previous page's ``next_offset`` to continue.
 
         Returns:
             Dict with one entry per articulation: ``root_body``,
-            ``fixed_base``, ``bodies`` and ``joints`` in tree order (each
-            joint with ``index``, ``parent_body``, ``child_body`` and the
-            joint aspect's fields), plus ``excluded_joints``,
-            ``loop_closure_joints`` and ``world_joints``.
+            ``fixed_base``, ``bodies``, ``dof_paths`` (Isaac Sim's DOF
+            order) and ``joints`` in tree order (each joint with
+            ``tree_index``, ``dof_index``, ``dof_type``, ``parent_body``,
+            ``child_body`` and the joint aspect's fields), plus
+            ``excluded_joints``, ``loop_closure_joints`` and
+            ``world_joints``; ``next_offset`` when more articulations remain.
         """
         max_results = max(1, min(max_results, 200))
+        offset = max(0, offset)
         script = _compose_script(
             """\
             import json
@@ -435,10 +567,12 @@ class JointsMixin:
             from pxr import Usd, UsdPhysics
             """,
             READ_JOINT_CORE,
+            ISAAC_DOF_ORDER_CORE,
             LIST_ARTICULATIONS_CORE,
             f"""\
             root_path = {_pyval(root_path)}
             limit = {max_results}
+            offset = {offset}
             """,
             """\
             stage = omni.usd.get_context().get_stage()
@@ -448,7 +582,7 @@ class JointsMixin:
             elif not root.IsValid():
                 print(json.dumps({"error": "Root path not found: " + root_path}))
             else:
-                print(json.dumps(_list_articulations(stage, root, limit)))
+                print(json.dumps(_list_articulations(stage, root, limit, offset)))
             """,
         )
         return await self._execute_json_script(script)
