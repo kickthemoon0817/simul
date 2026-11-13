@@ -59,7 +59,7 @@ def _call(
     instance, captured = tools
     result = asyncio.run(getattr(instance, method)(*args, **kwargs))
     if not captured or result.get("error_type") in (
-        "ValueError",
+        "ValidationError",
         "ScriptExecutionDisabled",
     ):
         return result
@@ -524,7 +524,7 @@ def test_invalid_delete_mode_is_refused_before_sending(capturing_tools: Tools) -
 
     result = asyncio.run(tools.delete_isaac_prim("/World/Box", mode="purge"))
 
-    assert result["error_type"] == "ValueError"
+    assert result["error_type"] == "ValidationError"
     assert captured == []
 
 
@@ -1158,7 +1158,7 @@ def test_create_object_checks_vectors_before_sending(capturing_tools: Tools) -> 
         tools.create_isaac_object("/World/Obj", translation=[1.0, 2.0], rigid_body=True)
     )
 
-    assert result["error_type"] == "ValueError"
+    assert result["error_type"] == "ValidationError"
     assert "3 components" in result["error"]
     assert captured == []
 
