@@ -384,7 +384,8 @@ value passes this way only when all of these hold:
 - nothing exists at that path on disk.
 
 `load_usd_file` lists each such path in `warnings` as `UnrealContentPath`,
-with the layer that names it. `validate_usd_file` reports pxr's
+with the layer that names it. With the sandbox off nothing is checked, so
+nothing is listed. `validate_usd_file` reports pxr's
 `UnresolvableDependency` and `MissingSourceTypeInRegistry` about exactly
 those paths as warnings rather than errors, so an Unreal export inside the
 sandbox loads and validates. `@/Engine/x.usda@`, a relative path and another

@@ -168,7 +168,7 @@ parse error). The checks, in order:
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
 them in `warnings`, along with an `UnrealContentPath` entry for each Unreal
-content path the sandbox let through. `simul usd validate` runs the same checks and exits 1
+content path the sandbox let through (none with the sandbox off). `simul usd validate` runs the same checks and exits 1
 when the file is invalid. A relative `file_path` resolves against
 `security.relative_path_base` (default: the server's working directory), and
 the result's `file_path` is the resolved path. A URL needs an asset resolver

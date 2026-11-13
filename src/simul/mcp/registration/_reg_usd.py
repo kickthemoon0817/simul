@@ -199,8 +199,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "payload, clip and asset path the file draws on: one outside it fails the "
             "load with SandboxError listing them. An Unreal content path in an asset value "
             "(/Engine, /Game or /Script .../Name.Name, as Unreal's USD exporter writes "
-            "info:unreal:sourceAsset) names an editor object, not a file: it passes and is "
-            "listed in warnings as UnrealContentPath."
+            "info:unreal:sourceAsset) names an editor object, not a file: it passes and, "
+            "with the sandbox on, is listed in warnings as UnrealContentPath."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False

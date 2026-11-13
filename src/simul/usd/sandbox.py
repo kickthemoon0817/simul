@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional,
 from pxr import Ar, Sdf, UsdUtils
 
 from ..utils.paths import SandboxDenied
+from .clips import clip_sets
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pxr import Usd
@@ -192,26 +193,41 @@ def _clip_paths(layer: "Sdf.Layer") -> Tuple[Set[str], List[Pattern[str]]]:
     """
     literal: Set[str] = set()
     templates: List[Pattern[str]] = []
-    stack: List[Any] = list(layer.rootPrims)
-    while stack:
-        spec = stack.pop()
-        if spec.HasInfo("clips"):
-            for clip_set in dict(spec.GetInfo("clips")).values():
-                if not isinstance(clip_set, dict):
-                    continue
-                for asset in clip_set.get("assetPaths") or ():
-                    literal.add(str(getattr(asset, "path", asset)))
-                manifest = clip_set.get("manifestAssetPath")
-                if manifest is not None:
-                    literal.add(str(getattr(manifest, "path", manifest)))
-                template = clip_set.get("templateAssetPath")
-                if template:
-                    literal.add(str(template))
-                    templates.append(_template_pattern(str(template)))
-        stack.extend(spec.nameChildren)
-        for variant_set in spec.variantSets.values():
-            stack.extend(variant.primSpec for variant in variant_set.variants.values())
+    for _path, sets in clip_sets(layer):
+        for clip_set in sets.values():
+            if not isinstance(clip_set, dict):
+                continue
+            for asset in clip_set.get("assetPaths") or ():
+                literal.add(str(getattr(asset, "path", asset)))
+            manifest = clip_set.get("manifestAssetPath")
+            if manifest is not None:
+                literal.add(str(getattr(manifest, "path", manifest)))
+            template = clip_set.get("templateAssetPath")
+            if template:
+                literal.add(str(template))
+                templates.append(_template_pattern(str(template)))
     return literal, templates
+
+
+class _ClipLabels:
+    """Tell a value clip path from another asset value, reading a layer's clip sets only when asked.
+
+    ``ExtractExternalReferences`` lists clip paths and asset values (an
+    ``assetInfo`` identifier, a texture) together. Only the label of a path
+    the sandbox refuses and the exemption of a content-shaped path depend on
+    which it is, so a layer's clip sets are scanned (``clips.clip_sets``) the
+    first time one of those needs it, once per layer.
+    """
+
+    def __init__(self) -> None:
+        self._scans: Dict[str, Tuple[Set[str], List[Pattern[str]]]] = {}
+
+    def kind(self, layer: "Sdf.Layer", path: str) -> str:
+        scan = self._scans.get(layer.identifier)
+        if scan is None:
+            scan = self._scans[layer.identifier] = _clip_paths(layer)
+        literal, templates = scan
+        return "clip" if path in literal or any(pattern.match(path) for pattern in templates) else "asset"
 
 
 def unreal_content_paths(layers: Iterable["Sdf.Layer"]) -> List[OutsidePath]:
@@ -221,12 +237,15 @@ def unreal_content_paths(layers: Iterable["Sdf.Layer"]) -> List[OutsidePath]:
     they recognise the same paths ``CompositionSandbox.content_paths`` lists.
     """
     found: Dict[str, OutsidePath] = {}
+    labels = _ClipLabels()
     for layer in layers:
         if layer.anonymous:
             continue
         for kind, authored in CompositionSandbox._dependencies(layer):
-            if kind == "asset" and is_unreal_content_path(authored):
-                found.setdefault(authored, OutsidePath(kind, authored, authored, layer.identifier))
+            if kind not in (None, "asset") or not is_unreal_content_path(authored):
+                continue
+            if (kind or labels.kind(layer, authored)) == "asset":
+                found.setdefault(authored, OutsidePath("asset", authored, authored, layer.identifier))
     return list(found.values())
 
 
@@ -251,6 +270,7 @@ class CompositionSandbox:
         self._allowed_check = policy.read_check()
         self._resolved: Dict[str, str] = {}
         self._content: Dict[str, OutsidePath] = {}
+        self._labels = _ClipLabels()
 
     @property
     def enabled(self) -> bool:
@@ -351,15 +371,16 @@ class CompositionSandbox:
         return held, outside
 
     @staticmethod
-    def _dependencies(layer: "Sdf.Layer") -> Iterator[Tuple[str, str]]:
+    def _dependencies(layer: "Sdf.Layer") -> Iterator[Tuple[Optional[str], str]]:
         """The asset paths ``layer`` authors, with the kind of each.
 
         Kinds: ``sublayer``, ``reference`` and ``payload`` for composition
-        arcs; ``clip`` for a value clip, clip manifest or clip template path
-        a clip set authors; ``asset`` for anything else, such as a texture or
-        an ``assetInfo`` identifier. The clip sets are read only when a path
-        could be told apart by them: one naming a layer file or shaped like
-        an Unreal content path.
+        arcs; ``asset`` for an asset value that names no layer file and is
+        not shaped like an Unreal content path (a texture); None for any
+        other path, which is either a value clip (a clip, manifest or
+        template path some clip set authors) or an asset value such as an
+        ``assetInfo`` identifier. ``_ClipLabels`` tells those apart, only
+        when the answer matters, since it reads every prim spec's clip sets.
         """
         arcs = _composition_arcs(layer)
         try:
@@ -376,33 +397,33 @@ class CompositionSandbox:
             yield "sublayer", path
         for path in payloads:
             yield "payload", path
-        clips: Optional[Tuple[Set[str], List[Pattern[str]]]] = None
         for path in references:
             if path in arcs:
                 yield "reference", path
-                continue
-            if not _is_layer_path(path) and not UNREAL_OBJECT_PATH.match(path):
+            elif _is_layer_path(path) or UNREAL_OBJECT_PATH.match(path):
+                yield None, path
+            else:
                 yield "asset", path
-                continue
-            if clips is None:
-                clips = _clip_paths(layer)
-            literal, templates = clips
-            is_clip = path in literal or any(pattern.match(path) for pattern in templates)
-            yield ("clip" if is_clip else "asset"), path
 
-    def _check(self, layer: "Sdf.Layer", kind: str, authored: str) -> Any:
-        """Return an ``OutsidePath``, the identifier to follow, or None for nothing to check."""
+    def _check(self, layer: "Sdf.Layer", kind: Optional[str], authored: str) -> Any:
+        """Return an ``OutsidePath``, the identifier to follow, or None for nothing to check.
+
+        A None ``kind`` (a clip or an asset value) is resolved only when a
+        content-shaped path or a refusal needs it.
+        """
         if not authored:
             return None
-        if kind == "asset" and is_unreal_content_path(authored):
-            # An editor object, not a file: nothing to resolve or follow.
-            self._content.setdefault(authored, OutsidePath(kind, authored, authored, layer.identifier))
-            return None
+        if kind in (None, "asset") and is_unreal_content_path(authored):
+            kind = kind or self._labels.kind(layer, authored)
+            if kind == "asset":
+                # An editor object, not a file: nothing to resolve or follow.
+                self._content.setdefault(authored, OutsidePath(kind, authored, authored, layer.identifier))
+                return None
         scheme = self._policy.url_scheme(authored)
         if scheme is not None and scheme != "file":
             if self._allowed_check(authored):
                 return None
-            return OutsidePath(kind, authored, authored, layer.identifier)
+            return OutsidePath(kind or self._labels.kind(layer, authored), authored, authored, layer.identifier)
         try:
             identifier = layer.ComputeAbsolutePath(authored)
         except Exception:
@@ -414,7 +435,9 @@ class CompositionSandbox:
             locations.append(anchored)
         for location in locations:
             if not self._allowed(location):
-                return OutsidePath(kind, authored, location, layer.identifier)
+                return OutsidePath(
+                    kind or self._labels.kind(layer, authored), authored, location, layer.identifier
+                )
         return identifier if (resolved or os.path.isabs(anchored)) else None
 
     def _resolve(self, identifier: str) -> str:
