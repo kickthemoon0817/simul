@@ -80,6 +80,7 @@ STATIC_MESH_ACTOR = Class("/Script/Engine.StaticMeshActor", ACTOR)
 LIGHT = Class("/Script/Engine.Light", ACTOR)
 POINT_LIGHT = Class("/Script/Engine.PointLight", LIGHT)
 CAMERA_ACTOR = Class("/Script/Engine.CameraActor", ACTOR)
+SKY_LIGHT = Class("/Script/Engine.SkyLight", ACTOR)
 # A Blueprint class: Unreal's Python module has no attribute for it.
 BP_LAMP = Class("/Game/Blueprints/BP_Lamp.BP_Lamp_C", POINT_LIGHT)
 SCENE_COMPONENT_CLASS = Class("/Script/Engine.SceneComponent", OBJECT)
@@ -327,6 +328,7 @@ class Editor:
             Light=native(LIGHT),
             PointLight=native(POINT_LIGHT),
             CameraActor=native(CAMERA_ACTOR),
+            SkyLight=native(SKY_LIGHT),
             EditorActorSubsystem="actors",
             LevelEditorSubsystem="level",
             UnrealEditorSubsystem="editor",
