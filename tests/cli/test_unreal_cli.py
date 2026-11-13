@@ -621,6 +621,26 @@ def test_exec_printed_success_false_exits_1(monkeypatch) -> None:
     assert payload["error_type"] == "ScriptError"
 
 
+def test_exec_keeps_a_printed_error_type_and_lists_error_keys(monkeypatch) -> None:
+    """As isaac exec and execute_unreal_script word it."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [
+                {"Type": "Info", "Output": '{"success": false, "pose_error": 0.4, "error_type": "InvalidState"}\n'},
+            ],
+            "CommandResult": "",
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('{...}')"])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert (payload["error"], payload["error_type"]) == ("pose_error: 0.4", "InvalidState")
+
+
 def test_exec_concatenates_multi_line_log_output(monkeypatch) -> None:
     """Multiple Info log lines join in order; Warning/Error entries route
     to their own streams instead of being silently dropped."""

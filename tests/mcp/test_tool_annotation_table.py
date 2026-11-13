@@ -8,10 +8,14 @@ every backend:
 
 - ``readOnlyHint`` is true only when the tool changes nothing (a capture that
   returns the image in memory is read-only; one that writes a file is not).
-- ``destructiveHint`` is true when the tool overwrites or deletes existing
-  state or files, or runs arbitrary code. Additive tools (create, add, spawn,
-  import) and runtime control (play, pause, step, focus, enable) are not
-  destructive, and say so: the MCP spec's default for a missing
+- ``destructiveHint`` is true when the tool can overwrite or delete existing
+  state or files with any of its arguments, or runs arbitrary code; a tool
+  with several actions takes the hint of its most destructive one (the UI
+  controls' set_property). Moving a camera that is scene content (a Blender
+  camera object, Isaac's active camera prim) counts. Purely additive tools
+  (create, add, spawn, import), an editor's own view (Unreal's viewport, a
+  Blender 3D View) and runtime control (play, pause, step, the current frame,
+  enable) are not destructive, and say so: the MCP spec's default for a missing
   ``destructiveHint`` is true, so every tool that is not read-only carries it
   explicitly (round-2 audit m-1). A read-only tool leaves it off.
 - ``idempotentHint`` is true when repeating the call with the same arguments
@@ -47,19 +51,19 @@ RO, RW, DESTRUCTIVE = "read_only", "additive", "destructive"
 # tool name -> (class, idempotent, open_world)
 EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     # Isaac Sim
-    "add_isaac_collision": (RW, False, True),
+    "add_isaac_collision": (DESTRUCTIVE, False, True),  # overwrites an existing collision approximation
     "add_isaac_reference": (RW, False, True),
-    "add_isaac_rigid_body": (RW, False, True),
+    "add_isaac_rigid_body": (DESTRUCTIVE, False, True),  # kinematic=true overwrites kinematicEnabled
     "assign_isaac_material": (DESTRUCTIVE, True, True),
     "capture_isaac_viewport": (DESTRUCTIVE, False, True),  # writes a new PNG and deletes the oldest captures
     "claim_isaac_instance": (RW, True, False),
     "configure_isaac_physics_scene": (DESTRUCTIVE, True, True),
-    "connect_isaac_graph_nodes": (RW, True, True),
+    "connect_isaac_graph_nodes": (DESTRUCTIVE, True, True),  # can replace an input's upstream connection
     "create_isaac_graph_node": (RW, False, True),
     "create_isaac_light": (RW, False, True),
     "create_isaac_material": (RW, False, True),
     "create_isaac_object": (RW, False, True),
-    "create_isaac_physics_scene": (RW, True, True),
+    "create_isaac_physics_scene": (DESTRUCTIVE, True, True),  # updates the gravity of an existing scene
     "create_isaac_prim": (RW, False, True),
     "delete_isaac_graph_node": (DESTRUCTIVE, True, True),
     "delete_isaac_prim": (DESTRUCTIVE, True, True),
@@ -68,7 +72,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "enable_isaac_extension": (RW, True, True),
     "execute_isaac_script": (DESTRUCTIVE, False, True),
     "find_isaac_prims_in_area": (RO, True, True),
-    "focus_isaac_viewport": (RW, True, True),
+    "focus_isaac_viewport": (DESTRUCTIVE, True, True),  # moves the active camera, which can be a stage camera prim
     "get_isaac_camera_info": (RO, True, True),
     "get_isaac_carb_settings": (RO, True, True),
     "get_isaac_graph_nodes": (RO, True, True),
@@ -115,7 +119,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "save_isaac_stage": (DESTRUCTIVE, True, True),
     "search_isaac_prims": (RO, True, True),
     "set_active_isaac_instance": (RW, True, False),  # routes this session; the instance is untouched
-    "set_isaac_camera": (RW, True, True),
+    "set_isaac_camera": (DESTRUCTIVE, True, True),  # moves the active camera, which can be a stage camera prim
     "set_isaac_carb_settings": (DESTRUCTIVE, True, True),
     "set_isaac_graph_node_values": (DESTRUCTIVE, True, True),
     "set_isaac_joint_drive": (DESTRUCTIVE, True, True),
@@ -161,7 +165,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "compute_unreal_convex_hull": (DESTRUCTIVE, False, True),
     "compute_unreal_mesh_uv": (DESTRUCTIVE, False, True),
     "control_unreal_simulation": (RW, False, True),
-    "control_unreal_ui": (RW, False, True),
+    "control_unreal_ui": (DESTRUCTIVE, False, True),  # its set_property action edits actor transforms
     "convert_to_simready": (DESTRUCTIVE, False, True),
     "convert_unreal_mesh_format": (DESTRUCTIVE, False, True),
     "create_unreal_material_instance": (RW, False, True),
@@ -233,7 +237,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "check_blender_object_bounds": (RO, True, True),
     "clean_blender_mesh": (DESTRUCTIVE, True, True),
     "clear_blender_object_parent": (DESTRUCTIVE, True, True),
-    "control_blender_ui": (RW, False, True),
+    "control_blender_ui": (DESTRUCTIVE, False, True),  # its set_property action writes the active object's transform
     "create_blender_mesh_from_data": (RW, False, True),
     "create_blender_object": (RW, False, True),
     "delete_blender_keyframe": (DESTRUCTIVE, True, True),
@@ -241,7 +245,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "execute_blender_script": (DESTRUCTIVE, False, True),
     "export_blender_file": (DESTRUCTIVE, True, True),
     "export_simready_usd": (DESTRUCTIVE, True, True),
-    "focus_blender_on_object": (RW, True, True),
+    "focus_blender_on_object": (DESTRUCTIVE, True, True),  # moves and re-clips a camera object
     "free_blender_bake": (DESTRUCTIVE, True, True),
     "get_blender_bounding_box": (RO, True, True),
     "get_blender_camera_info": (RO, True, True),
@@ -262,15 +266,15 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "get_blender_viewport_info": (RO, True, True),
     "get_simready_metadata": (RO, True, True),
     "import_blender_file": (RW, False, True),
-    "insert_blender_keyframe": (RW, False, True),
-    "insert_blender_keyframes": (RW, False, True),
+    "insert_blender_keyframe": (DESTRUCTIVE, False, True),  # replaces an existing key at that frame
+    "insert_blender_keyframes": (DESTRUCTIVE, False, True),  # replaces existing keys at those frames
     "list_blender_scene_objects": (RO, True, True),
     "open_blender_file": (DESTRUCTIVE, True, True),  # discards unsaved work
     "play_blender_animation": (RW, True, True),
     "remove_blender_modifier": (DESTRUCTIVE, False, True),
     "save_blender_file": (DESTRUCTIVE, True, True),
     "search_blender_objects": (RO, True, True),
-    "set_blender_camera_view": (RW, True, True),
+    "set_blender_camera_view": (DESTRUCTIVE, True, True),  # moves a camera object
     "set_blender_frame": (RW, True, True),
     "set_blender_frame_range": (DESTRUCTIVE, True, True),
     "set_blender_light_params": (DESTRUCTIVE, True, True),
@@ -280,7 +284,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "set_blender_pose_bone_transform": (DESTRUCTIVE, True, True),
     "set_blender_rigid_body_world": (DESTRUCTIVE, True, True),
     "setup_blender_rigid_body": (DESTRUCTIVE, True, True),
-    "setup_simready_hierarchy": (RW, False, True),
+    "setup_simready_hierarchy": (DESTRUCTIVE, False, True),  # re-parents existing objects
     "summarize_blender_scene": (RO, True, True),
     "uv_unwrap_blender_mesh": (DESTRUCTIVE, True, True),
     "validate_simready_compliance": (RO, True, True),

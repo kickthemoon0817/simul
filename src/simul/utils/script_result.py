@@ -9,7 +9,9 @@ prints is its data. ``{"position_error": 0.002}`` is a tracking metric, and
 script ran without raising, unless the script itself says otherwise by
 printing ``"success": false``.
 
-Shared by the adapters and the MCP layer, so it imports neither.
+One rule for the failure's message and type on every backend
+(``reported_failure_message``, ``reported_error_type``), shared by the
+adapters, the MCP layer and the CLI.
 """
 
 from __future__ import annotations
@@ -17,8 +19,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
 
-#: The ``error_type`` of a failure the script raised or reported itself.
-SCRIPT_ERROR = "ScriptError"
+from ..mcp.error_types import SCRIPT_ERROR
 
 
 def script_reported_failure(payload: Dict[str, Any]) -> bool:
@@ -38,8 +39,9 @@ def apply_script_success(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     The script ran without raising, so every key it printed is its data,
     ``error`` and ``*_error`` included. It failed only when it printed
-    ``"success": false``; that payload also gets ``error_type: ScriptError``
-    unless it names one. Any other ``success`` value, or none, reads as
+    ``"success": false``; that payload's ``error`` becomes its message and
+    its ``error_type`` its type (``reported_failure_message``,
+    ``reported_error_type``). Any other ``success`` value, or none, reads as
     success and is set to ``True``: ``success`` is the envelope's flag.
 
     Args:
@@ -50,8 +52,9 @@ def apply_script_success(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     failed = script_reported_failure(payload)
     payload["success"] = not failed
-    if failed and not payload.get("error_type"):
-        payload["error_type"] = SCRIPT_ERROR
+    if failed:
+        payload["error"] = reported_failure_message(payload)
+        payload["error_type"] = reported_error_type(payload)
     return payload
 
 
@@ -78,14 +81,42 @@ def printed_json_object(output: Optional[str]) -> Optional[Dict[str, Any]]:
 def reported_failure_message(payload: Dict[str, Any]) -> str:
     """The message of a failure a script reported with ``"success": false``.
 
+    The same on every backend: the printed ``error`` as text (a string as is,
+    an object or a number as its JSON), else the non-null ``*_error`` keys as
+    ``key: value; ...``, else a sentence saying the script gave no message.
+
     Args:
         payload: The JSON object the script printed.
 
     Returns:
-        Its ``error`` when that is a non-empty string, otherwise a sentence
-        saying the script reported the failure.
+        The message.
     """
     error = payload.get("error")
-    if isinstance(error, str) and error.strip():
-        return error
-    return "The script printed success: false without an error message."
+    if isinstance(error, str):
+        if error.strip():
+            return error
+    elif error is not None:
+        return json.dumps(error, default=str)
+    parts = [
+        f"{key}: {json.dumps(value, default=str) if not isinstance(value, str) else value}"
+        for key, value in payload.items()
+        if key.endswith("_error") and key != "error" and value is not None
+    ]
+    return (
+        "; ".join(parts)
+        or "The script printed success: false without an error message."
+    )
+
+
+def reported_error_type(payload: Dict[str, Any]) -> str:
+    """The ``error_type`` of a failure a script reported: the one it printed, else ``ScriptError``.
+
+    Args:
+        payload: The JSON object the script printed.
+
+    Returns:
+        A non-empty type name. The MCP envelope maps a name outside its
+        vocabulary onto that name's family.
+    """
+    printed = payload.get("error_type")
+    return printed if isinstance(printed, str) and printed else SCRIPT_ERROR

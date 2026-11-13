@@ -1899,8 +1899,12 @@ def set_carb_settings(
 def read_aovs(
     aov_names: List[str] = typer.Argument(..., help="AOV names to read (e.g. HdrColor DirectDiffuse)"),
     camera: str = typer.Option("/OmniverseKit_Persp", "--camera", "-c", help="Camera prim path"),
-    width: int = typer.Option(256, "--width", "-W", help="Render width"),
-    height: int = typer.Option(256, "--height", help="Render height"),
+    width: int = typer.Option(
+        256, "--width", "-W", help="Render width, 1 to 3840 pixels; another value exits 1"
+    ),
+    height: int = typer.Option(
+        256, "--height", help="Render height, 1 to 2160 pixels; another value exits 1"
+    ),
     frames: int = typer.Option(5, "--frames", "-f", help="Number of render frames before reading"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,

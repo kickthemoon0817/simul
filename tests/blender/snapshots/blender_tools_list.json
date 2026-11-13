@@ -273,7 +273,7 @@
         },
         "required": ["agent_control"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_info": {
@@ -581,7 +581,7 @@
         },
         "required": ["location", "rotation_euler"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_camera_info": {
@@ -626,7 +626,7 @@
         },
         "required": ["object_name"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_viewport_info": {
@@ -1425,7 +1425,7 @@
         },
         "required": ["object_name", "data_path", "frame"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "delete_blender_keyframe": {
@@ -1620,7 +1620,7 @@
         },
         "required": ["object_name", "channels"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "setup_blender_rigid_body": {
@@ -2799,7 +2799,7 @@
         },
         "required": ["root_name", "child_names"]
       },
-      "annotations": {"readOnlyHint": false, "destructiveHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     }
   }

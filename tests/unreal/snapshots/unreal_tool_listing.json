@@ -324,7 +324,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": false,
+    "destructiveHint": true,
     "idempotentHint": null,
     "openWorldHint": null
    },

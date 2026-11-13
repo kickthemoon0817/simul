@@ -2736,8 +2736,11 @@ What an agent's own script prints is data, on every backend
 - the script **raises** (`error_type: ScriptError`, the exception named in
   `details.exception_type` where the engine reports it), or
 - the script **prints `"success": false`** in its JSON object. Its `error`
-  becomes the message (without one, the message lists the object's `*_error`
-  keys), and `error_type` is `ScriptError` unless the object names another.
+  becomes the message, as text (an object or a number as its JSON); without
+  one, the message lists the object's non-null `*_error` keys as
+  `key: value; ...`. `error_type` is `ScriptError` unless the object names
+  another. The rule is the same on all three backends and both `exec`
+  commands.
 
 Any other key, `error` and `*_error` included, is returned as printed:
 `{"position_error": 0.002}` is a successful call carrying a metric, and
@@ -2891,13 +2894,23 @@ rule on every backend, pinned for all tools by
 
 - **read-only**: changes nothing, a capture that only returns the image
   included (`capture_blender_viewport`);
-- **destructive**: overwrites or deletes existing state or files, or runs
-  arbitrary code (`capture_isaac_viewport` deletes the oldest captures in its
-  directory and `capture_blender_viewport_sequence` replaces same-numbered
-  frame files, so both are destructive; `capture_unreal_viewport` writes a new
-  screenshot and is only additive). Every tool that is not read-only states
-  `destructiveHint`, `false` included, because a client reads a missing one as
-  `true`; a read-only tool leaves it out;
+- **destructive**: can overwrite or delete existing state or files, with any
+  of its arguments, or runs arbitrary code. `capture_isaac_viewport` deletes
+  the oldest captures in its directory and `capture_blender_viewport_sequence`
+  replaces same-numbered frame files, so both are destructive;
+  `capture_unreal_viewport` writes a new screenshot and is only additive.
+  `insert_blender_keyframe` replaces a key already at that frame,
+  `add_isaac_collision` an authored approximation and `create_isaac_physics_scene`
+  an existing scene's gravity, so they are destructive too. Moving a camera that
+  is scene content (a Blender camera object, Isaac's active viewport camera,
+  which can be a stage camera prim) is destructive; moving an editor's own view
+  (Unreal's level viewport, a Blender 3D View) and runtime control (play,
+  pause, step, the current frame) are not. A tool with several actions takes
+  the hint of its most destructive one: `control_unreal_ui` and
+  `control_blender_ui` are destructive because `set_property` edits a
+  transform. Every tool that is not read-only states `destructiveHint`,
+  `false` included, because a client reads a missing one as `true`; a
+  read-only tool leaves it out;
 - **idempotent**: repeating the call with the same arguments changes nothing
   more (a set, a delete, a save or export to the same path, a focus); a
   create, a step, a capture that writes a new file or an edit that compounds

@@ -215,6 +215,7 @@ from ..schemas.simready import (
 from ...utils.script_result import (
     SCRIPT_ERROR,
     printed_json_object,
+    reported_error_type,
     reported_failure_message,
     script_reported_failure,
 )
@@ -253,12 +254,11 @@ def _execute_script(session: Any, **arguments: Any) -> Dict[str, Any]:
     printed = printed_json_object(payload.get("output"))
     if printed is None or not script_reported_failure(printed):
         return payload
-    error_type = printed.get("error_type")
     return {
         **payload,
         "success": False,
         "error": reported_failure_message(printed),
-        "error_type": error_type if isinstance(error_type, str) and error_type else SCRIPT_ERROR,
+        "error_type": reported_error_type(printed),
     }
 
 
@@ -759,7 +759,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Uses Blender UI APIs, not physical key/click events or arbitrary button lookup. "
             "Requires attached mode; does not launch Blender or execute arbitrary scripts."
         ),
-        hints=ADDITIVE,
+        # Destructive: its set_property action writes the active object's transform.
+        hints=DESTRUCTIVE,
         operation="control_ui",
         request=BlenderUIRequest,
         response=BlenderUIResponse,
@@ -953,7 +954,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "after the placement (or its evaluated pose did not change), override_check is "
             "'skipped' and placement_overridden null."
         ),
-        hints=IDEMPOTENT,
+        # Destructive: moves a camera object.
+        hints=OVERWRITING,
         operation="set_camera_view",
         request=BlenderSetCameraViewRequest,
         response=BlenderSetCameraViewResponse,
@@ -990,7 +992,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "placement (or whose evaluated pose did not change), override_check is 'skipped' "
             "and placement_overridden null."
         ),
-        hints=IDEMPOTENT,
+        # Destructive: moves and re-clips a camera object.
+        hints=OVERWRITING,
         operation="focus_on_object",
         request=BlenderFocusOnObjectRequest,
         response=BlenderFocusOnObjectResponse,
@@ -1325,7 +1328,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Insert a keyframe on an object property: its current value, or value; "
             "optionally the interpolation and key type."
         ),
-        hints=ADDITIVE,
+        # Destructive: replaces an existing key at that frame.
+        hints=DESTRUCTIVE,
         operation="insert_keyframe",
         params={
             "interpolation": Param(Optional[BlenderKeyframeInterpolation]),
@@ -1380,7 +1384,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Insert many keyframes in one call: for each property, a value per frame "
             "(up to 10 000 keys), with an optional interpolation and key type."
         ),
-        hints=ADDITIVE,
+        # Destructive: replaces existing keys at those frames.
+        hints=DESTRUCTIVE,
         operation="insert_keyframes",
         request=BlenderInsertKeyframesRequest,
         response=BlenderInsertKeyframesResponse,
@@ -1763,7 +1768,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "and changes nothing on failure; an existing root name is refused unless "
             "reuse_root=true. Optionally stores semantic labels on the root."
         ),
-        hints=ADDITIVE,
+        # Destructive: re-parents existing objects.
+        hints=DESTRUCTIVE,
         operation="setup_simready_hierarchy",
         request=SimReadySetupHierarchyRequest,
         response=SimReadySetupHierarchyResponse,

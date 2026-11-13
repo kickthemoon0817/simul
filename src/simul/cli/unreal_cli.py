@@ -746,7 +746,11 @@ def exec_script(
     ``"success": false``; any other key it prints, ``error`` included, is data.
     """
     from simul.adapters.unreal_runtime import UNREAL_EXEC_MODES, UnrealRuntimeSession
-    from simul.utils.script_result import reported_failure_message, script_reported_failure
+    from simul.utils.script_result import (
+        reported_error_type,
+        reported_failure_message,
+        script_reported_failure,
+    )
 
     if mode not in UNREAL_EXEC_MODES:
         msg = f"Invalid mode '{mode}'. Must be one of: {', '.join(sorted(UNREAL_EXEC_MODES))}"
@@ -803,9 +807,11 @@ def exec_script(
         if success and mode != "EvaluateStatement"
         else None
     )
+    error_type = "ScriptError"
     if printed is not None and script_reported_failure(printed):
         success = False
         error_text = reported_failure_message(printed)
+        error_type = reported_error_type(printed)
 
     if is_json_mode() and not raw:
         payload: Dict[str, Any] = {
@@ -818,7 +824,7 @@ def exec_script(
         }
         if not success:
             payload["error"] = error_text
-            payload["error_type"] = "ScriptError"
+            payload["error_type"] = error_type
         print(json.dumps(payload, default=str))
         if not success:
             raise typer.Exit(1)

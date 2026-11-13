@@ -35,7 +35,11 @@ from simul.mcp import backends as backends_module
 from simul.mcp import server as server_module
 from simul.mcp.tools.isaac_tools import IsaacTools
 from simul.mcp.usage_tracker import ToolUsageTracker
-from simul.utils.script_result import apply_script_success, printed_json_object
+from simul.utils.script_result import (
+    apply_script_success,
+    printed_json_object,
+    reported_failure_message,
+)
 from tests.fakes import AvailableAdapter, BlenderSessionAdapter, StrictBlenderSession
 
 METRICS = {
@@ -85,6 +89,7 @@ def test_only_a_printed_success_false_fails() -> None:
     }
     assert apply_script_success({"success": False}) == {
         "success": False,
+        "error": "The script printed success: false without an error message.",
         "error_type": "ScriptError",
     }
     assert (
@@ -93,6 +98,31 @@ def test_only_a_printed_success_false_fails() -> None:
         ]
         == "NotFoundError"
     )
+
+
+@pytest.mark.parametrize(
+    ("printed", "message"),
+    [
+        ({"error": "target unreachable"}, "target unreachable"),
+        ({"error": {"code": 3}}, '{"code": 3}'),
+        ({"error": 0.0}, "0.0"),
+        (
+            {"error": "", "position_error": 0.4, "tag_error": "far"},
+            "position_error: 0.4; tag_error: far",
+        ),
+        (
+            {"position_error": None},
+            "The script printed success: false without an error message.",
+        ),
+    ],
+)
+def test_one_failure_message_rule_for_every_backend(
+    printed: Dict[str, Any], message: str
+) -> None:
+    """The message a printed success: false gives is the same on Isaac, Unreal and Blender."""
+    failed = {"success": False, **printed}
+    assert reported_failure_message(failed) == message
+    assert apply_script_success(dict(failed))["error"] == message
 
 
 @pytest.mark.parametrize(
@@ -340,6 +370,34 @@ def test_blender_success_false_inside_other_output_is_only_text(
 
     assert is_error is False
     assert payload["success"] is True
+
+
+SAME_FAILURE = {"success": False, "position_error": 0.4, "error_type": "InvalidState"}
+
+
+def test_the_three_backends_word_a_reported_failure_alike(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """*_error keys become the message and a printed error_type is kept, on every backend."""
+    blender, _ = _blender_server(monkeypatch, tmp_path / "b", json.dumps(SAME_FAILURE))
+    outcomes = [
+        _call(
+            _isaac_server(tmp_path / "i", SAME_FAILURE),
+            "execute_isaac_script",
+            {"code": "x"},
+        ),
+        _call(
+            _unreal_server(tmp_path / "u", SAME_FAILURE),
+            "execute_unreal_script",
+            {"code": "x"},
+        ),
+        _call(blender, "execute_blender_script", {"script": "x"}),
+    ]
+
+    assert [
+        (is_error, payload["error"], payload["error_type"])
+        for is_error, payload in outcomes
+    ] == [(True, "position_error: 0.4", "InvalidState")] * 3
 
 
 # ---------------------------------------------------------------------------

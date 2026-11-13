@@ -151,7 +151,7 @@ lifecycle.
 | `open-stage`, `save-stage`, `new-stage` | Stage files |
 | `start`, `stop`, `pause`, `step [COUNT]`, `reset` | Simulation control |
 | `capture [OUTPUT] [--width] [--height] [--eye x,y,z] [--target x,y,z]` | Viewport to an image file |
-| `viewport-info`, `read-aovs`, `list-aovs`, `list-render-vars` | Viewport and render data |
+| `viewport-info`, `read-aovs`, `list-aovs`, `list-render-vars` | Viewport and render data; `read-aovs --width` takes 1 to 3840 and `--height` 1 to 2160 pixels, and a value outside them exits 1 with `ValidationError` (it is no longer clamped) |
 | `get-carb-settings`, `set-carb-settings key=value ...` | Carbonite settings |
 | `list-extensions`, `enable-extension`, `disable-extension` | Extension manager |
 | `logs [--level] [-n N] [--source] [--search]`, `set-log-level` | Isaac Sim console log |

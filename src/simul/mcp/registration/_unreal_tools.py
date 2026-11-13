@@ -613,6 +613,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealUIResponse,
         read_only=False,
+        destructive=True,
         method="control_ui",
         params=(
             ToolParam(
