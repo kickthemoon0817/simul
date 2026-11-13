@@ -75,6 +75,7 @@ from ._unreal_mesh_scripts import (
     REMESH,
     REMESH_OVERSHOOT,
     SIMPLIFY,
+    STATIC_MESH_COLLISION,
     SUBDIVIDE,
     SUBDIVISION_SCHEMES,
     TARGET_FORMATS,
@@ -88,7 +89,7 @@ from ._unreal_mesh_scripts import (
 )
 from ._unreal_mesh_scripts import edge_selection as parse_edge_selection
 from ._unreal_mesh_scripts import face_selection as parse_face_selection
-from ._unreal_mesh_scripts import invalid_choice, mesh_script, primitive_dimensions, refusal
+from ._unreal_mesh_scripts import game_asset_path, invalid_choice, mesh_script, primitive_dimensions, refusal
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_python import isolate, python_command
 from ._unreal_scripts import (
@@ -6071,24 +6072,30 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         mesh_path: str,
         max_faces: int = 250,
         output: str = "actor",
+        save: bool = False,
     ) -> Dict[str, Any]:
         """
-        Compute the convex hull of a DynamicMeshActor's mesh as simple collision.
+        Compute the convex hull of a mesh as simple collision.
 
         Args:
-            mesh_path: Source mesh actor path.
+            mesh_path: A DynamicMeshActor, a StaticMeshActor or a StaticMesh
+                asset (its first LOD is read).
             max_faces: Simplify the hull to at most this many triangles; 0
                 keeps every face of the exact hull.
             output: 'actor' (a new DynamicMeshActor at the source's transform
                 whose mesh and simple collision are the hull), 'collision'
-                (the hull replaces the source's simple collision) or 'both'.
+                (the hull replaces the source's simple collision: a
+                StaticMesh source's asset, which every actor using it shares
+                and which must be under /Game) or 'both'.
+            save: Save the StaticMesh asset whose collision was set (its
+                package only).
 
         Returns:
-            Dict with output, hull_actor_path (null for 'collision'), hull
-            vertex/triangle counts, max_faces, the source triangle count,
-            hull_volume, source_volume and volume_ratio (null for an open
-            source), collision (each actor given the hull and its collision
-            shape count) and warnings.
+            Dict with source_kind, output, hull_actor_path (null for
+            'collision'), hull vertex/triangle counts, max_faces, the source
+            triangle count, hull_volume, source_volume and volume_ratio (null
+            for an open source), collision (each actor or asset given the
+            hull, its collision shape count and the file saved) and warnings.
         """
         problem = invalid_choice("output", output.lower(), HULL_OUTPUTS, "UNKNOWN_OUTPUT")
         if problem is None and not 0 <= int(max_faces) <= 10_000:
@@ -6096,7 +6103,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         if problem is not None:
             return problem
         return await self._run_mesh_script(
-            CONVEX_HULL, mesh=mesh_path, max_faces=int(max_faces), output=output.lower()
+            CONVEX_HULL, mesh=mesh_path, max_faces=int(max_faces), output=output.lower(), save=bool(save)
         )
 
     async def decompose_convex_hull(
@@ -6107,16 +6114,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         error_tolerance: float = 0.0,
         min_part_thickness: float = 0.1,
         output: str = "actor",
+        save: bool = False,
     ) -> Dict[str, Any]:
         """
-        Decompose a DynamicMeshActor's mesh into convex hulls, as simple collision.
+        Decompose a mesh into convex hulls, as simple collision.
 
         Uses GeometryScript's convex decomposition (Unreal's own, the one
         its collision generation uses; not V-HACD), with sphere, box and
         capsule detection off so the result is always hulls.
 
         Args:
-            mesh_path: Source mesh actor path.
+            mesh_path: A DynamicMeshActor, a StaticMeshActor or a StaticMesh
+                asset (its first LOD is read).
             max_hulls: Most convex pieces (1 to 64).
             max_vertices_per_hull: Each piece is simplified to at most this
                 many vertices (4 to 256; 2 x this - 4 triangles).
@@ -6126,10 +6135,15 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 their neighbours.
             output: 'actor' (a new DynamicMeshActor at the source's transform
                 whose mesh and simple collision are the pieces), 'collision'
-                (the pieces replace the source's simple collision) or 'both'.
+                (the pieces replace the source's simple collision: a
+                StaticMesh source's asset, which must be under /Game) or
+                'both'.
+            save: Save the StaticMesh asset whose collision was set (its
+                package only).
 
         Returns:
-            Dict with output, decomp_actor_path (null for 'collision'),
+            Dict with source_kind, output, decomp_actor_path (null for
+            'collision'),
             hull_count, hulls (per piece: index, vertex/triangle counts,
             volume, local bounds), the limits used, the largest piece's
             vertex count, totals, hulls_volume, source_volume, volume_ratio,
@@ -6155,6 +6169,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             error_tolerance=float(error_tolerance),
             min_part_thickness=float(min_part_thickness),
             output=output.lower(),
+            save=bool(save),
         )
 
     async def edit_mesh_topology(
@@ -6397,13 +6412,15 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         checks: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Check a DynamicMeshActor's mesh.
+        Check a mesh.
 
-        Reads only, so it also runs while Play In Editor runs. No check finds
+        Reads only, so it also runs while Play In Editor runs (a StaticMesh
+        asset path excepted: Unreal loads no assets then). No check finds
         self-intersections.
 
         Args:
-            mesh_path: Mesh actor path.
+            mesh_path: A DynamicMeshActor, a StaticMeshActor or a StaticMesh
+                asset (its first LOD is read).
             checks: The checks to run; all of them when empty: closed (no
                 open border edges), manifold (no bowtie vertices),
                 degenerate_triangles (none with an area under 0.001 cm2 or an
@@ -6413,7 +6430,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 every triangle has UVs in channel 0).
 
         Returns:
-            Dict with is_valid (every check run passed), checks (per check:
+            Dict with source_kind, is_valid (every check run passed), checks (per check:
             passed, count where it counts something, detail), issues, the
             triangle/vertex counts, connected_components, uv_channels, local
             bounds, surface_area, volume (null for an open mesh) and
@@ -6434,26 +6451,98 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         self,
         mesh_path: str,
         target_format: str,
-        tessellation_options: Optional[Dict[str, Any]] = None,
+        asset_path: Optional[str] = None,
+        overwrite: bool = False,
+        save: bool = True,
+        replace_actor: bool = False,
+        collision: str = "auto",
+        nanite: bool = False,
+        location: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         """
-        Place an editable DynamicMeshActor copy of a StaticMesh asset.
+        Convert between a StaticMesh and an editable DynamicMeshActor.
+
+        ``dynamic_mesh`` places a DynamicMeshActor copy of a StaticMesh (an
+        asset, at ``location``, or a StaticMeshActor's, at its transform),
+        with its materials, for the other mesh tools to edit. ``static_mesh``
+        writes a DynamicMeshActor's mesh into a StaticMesh asset under /Game,
+        with the component's materials and simple collision, so the result can
+        be saved, placed and exported. Creating or overwriting an asset, with
+        its materials and collision, is not undoable (Unreal does not transact
+        asset creation); placing or replacing actors is, in one transaction.
 
         Args:
-            mesh_path: Source StaticMesh asset path.
-            target_format: 'dynamic_mesh'; 'static_mesh' is refused as not
-                implemented yet.
-            tessellation_options: Unused (reserved for future CAD support).
+            mesh_path: The source: a StaticMesh asset or StaticMeshActor for
+                dynamic_mesh, a DynamicMeshActor for static_mesh.
+            target_format: dynamic_mesh or static_mesh.
+            asset_path: static_mesh: the asset to write, /Game/<folders>/<name>
+                (default /Game/Generated/SM_<actor label>). Paths outside /Game
+                (/Engine, plugin content) are refused.
+            overwrite: static_mesh: replace the mesh of an existing StaticMesh
+                at asset_path (its references are kept); without it an
+                existing asset is refused.
+            save: static_mesh: save the asset's package (only that package).
+            replace_actor: Replace the source actor with the result in the
+                level, at its transform: a StaticMeshActor for static_mesh, a
+                DynamicMeshActor (from a StaticMeshActor) for dynamic_mesh.
+            collision: static_mesh: the asset's simple collision. auto copies
+                the component's when it has any, else computes one convex
+                hull; component copies it; convex_hull computes one; none
+                leaves none.
+            nanite: static_mesh: enable Nanite on the asset; false leaves an
+                overwritten asset's Nanite setting as it was.
+            location: dynamic_mesh from an asset: where to place the actor
+                [x, y, z] in cm (the world origin by default).
 
         Returns:
-            Dict with source_path, source_format, result_path,
-            target_format, triangle/vertex counts and warnings.
+            Dict with source_path, source_format (static_mesh_asset,
+            static_mesh_actor or dynamic_mesh_actor), result_path (the actor
+            placed, or the asset written), target_format, placed_actor_path,
+            removed_actor_path, asset (for static_mesh: asset_path,
+            overwritten, saved_file, collision, collision_shape_count,
+            material_slots, nanite (read back from the asset), the asset's
+            triangle and vertex counts), hint (without replace_actor: the
+            DynamicMeshActor stays, and Unreal's USD exporter writes it as an
+            empty Xform),
+            the mesh's triangle/vertex counts and warnings.
         """
         target = target_format.lower()
-        problem = invalid_choice("target_format", target, TARGET_FORMATS, "UNKNOWN_FORMAT")
+        chosen = collision.lower()
+        problem = invalid_choice("target_format", target, TARGET_FORMATS, "UNKNOWN_FORMAT") or invalid_choice(
+            "collision", chosen, STATIC_MESH_COLLISION, "UNKNOWN_COLLISION"
+        )
         if problem is not None:
             return problem
-        return await self._run_mesh_script(CONVERT, mesh=mesh_path, target_format=target)
+        package = None
+        if target == "dynamic_mesh":
+            given = [name for name, value, default in (
+                ("asset_path", asset_path, None), ("overwrite", overwrite, False), ("save", save, True),
+                ("collision", chosen, "auto"), ("nanite", nanite, False),
+            ) if value != default]
+            if given:
+                return refusal(
+                    "OPTION_NOT_APPLICABLE",
+                    f"{', '.join(given)} {'applies' if len(given) == 1 else 'apply'} to target_format static_mesh",
+                )
+        else:
+            if location is not None:
+                return refusal("OPTION_NOT_APPLICABLE", "location applies to target_format dynamic_mesh")
+            if asset_path:
+                package, problem = game_asset_path(asset_path)
+                if problem is not None:
+                    return problem
+        return await self._run_mesh_script(
+            CONVERT,
+            mesh=mesh_path,
+            target_format=target,
+            asset_path=package,
+            overwrite=bool(overwrite),
+            save=bool(save),
+            replace_actor=bool(replace_actor),
+            collision=chosen,
+            nanite=bool(nanite),
+            location=[float(value) for value in (location or [0.0, 0.0, 0.0])],
+        )
 
     async def remesh_mesh(
         self,

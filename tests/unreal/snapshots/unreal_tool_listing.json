@@ -2831,13 +2831,13 @@
   {
    "name": "compute_unreal_convex_hull",
    "title": "Compute Unreal Convex Hull",
-   "description": "Compute the convex hull of a DynamicMeshActor's mesh, simplified to max_faces triangles, as simple collision: on a new DynamicMeshActor at the source's transform whose mesh is the hull (output 'actor'), on the source itself ('collision', replacing its simple collision) or both; one undoable transaction. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
+   "description": "Compute the convex hull of a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset, simplified to max_faces triangles, as simple collision: on a new DynamicMeshActor at the source's transform whose mesh is the hull (output 'actor'), on the source itself ('collision': a StaticMesh's asset, under /Game, saved with save) or both; one undoable transaction. Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
-      "description": "Source mesh actor path.",
+      "description": "A DynamicMeshActor, a StaticMeshActor or a StaticMesh asset (its first LOD is read).",
       "type": "string"
      },
      "max_faces": {
@@ -2849,13 +2849,18 @@
      },
      "output": {
       "default": "actor",
-      "description": "'actor' (a new DynamicMeshActor at the source's transform whose mesh and simple collision are the hull), 'collision' (the hull replaces the source's simple collision) or 'both'.",
+      "description": "'actor' (a new DynamicMeshActor at the source's transform whose mesh and simple collision are the hull), 'collision' (the hull replaces the source's simple collision: a StaticMesh source's asset, which every actor using it shares and which must be under /Game) or 'both'.",
       "enum": [
        "actor",
        "collision",
        "both"
       ],
       "type": "string"
+     },
+     "save": {
+      "default": false,
+      "description": "Save the StaticMesh asset whose collision was set (its package only).",
+      "type": "boolean"
      }
     },
     "required": [
@@ -2881,13 +2886,13 @@
   {
    "name": "decompose_unreal_convex_hull",
    "title": "Decompose Unreal Convex Hull",
-   "description": "Decompose a DynamicMeshActor's mesh into convex hulls with Unreal's own convex decomposition (GeometryScript's, not V-HACD), as simple collision: on a new DynamicMeshActor at the source's transform holding the pieces (output 'actor'), on the source itself ('collision', replacing its simple collision) or both; one undoable transaction. Reports each piece and how much of the source's volume they cover. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
+   "description": "Decompose a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset into convex hulls with Unreal's own convex decomposition (GeometryScript's, not V-HACD), as simple collision: on a new DynamicMeshActor at the source's transform holding the pieces (output 'actor'), on the source itself ('collision': a StaticMesh's asset, under /Game, saved with save) or both; one undoable transaction. Reports each piece and how much of the source's volume they cover. Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
-      "description": "Source mesh actor path.",
+      "description": "A DynamicMeshActor, a StaticMeshActor or a StaticMesh asset (its first LOD is read).",
       "type": "string"
      },
      "max_hulls": {
@@ -2918,13 +2923,18 @@
      },
      "output": {
       "default": "actor",
-      "description": "'actor' (a new DynamicMeshActor at the source's transform whose mesh and simple collision are the pieces), 'collision' (the pieces replace the source's simple collision) or 'both'.",
+      "description": "'actor' (a new DynamicMeshActor at the source's transform whose mesh and simple collision are the pieces), 'collision' (the pieces replace the source's simple collision: a StaticMesh source's asset, which must be under /Game) or 'both'.",
       "enum": [
        "actor",
        "collision",
        "both"
       ],
       "type": "string"
+     },
+     "save": {
+      "default": false,
+      "description": "Save the StaticMesh asset whose collision was set (its package only).",
+      "type": "boolean"
      }
     },
     "required": [
@@ -3263,13 +3273,13 @@
   {
    "name": "validate_unreal_mesh",
    "title": "Validate Unreal Mesh",
-   "description": "Check a DynamicMeshActor's mesh: closed (no open border edges), manifold (no bowtie vertices), degenerate_triangles, orientation (a closed mesh's faces point out), compact (no ID gaps), normals and uvs, each with its count and detail. It does not look for self-intersections. Reads only, also while PIE runs. Needs the GeometryScripting plugin, which simul unreal setup enables.",
+   "description": "Check the mesh of a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset: closed (no open border edges), manifold (no bowtie vertices), degenerate_triangles, orientation (a closed mesh's faces point out), compact (no ID gaps), normals and uvs, each with its count and detail. It does not look for self-intersections. Reads only, also while PIE runs. Needs the GeometryScripting plugin, which simul unreal setup enables.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
-      "description": "Mesh actor path.",
+      "description": "A DynamicMeshActor, a StaticMeshActor or a StaticMesh asset (its first LOD is read).",
       "type": "string"
      },
      "checks": {
@@ -3301,27 +3311,80 @@
   {
    "name": "convert_unreal_mesh_format",
    "title": "Convert Unreal Mesh Format",
-   "description": "Place an editable DynamicMeshActor copy of a StaticMesh asset at the world origin (one undoable spawn), for the other mesh tools to edit; target_format 'dynamic_mesh'. 'static_mesh' (back to an asset) is not implemented yet and is refused. Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
+   "description": "Convert between StaticMeshes and editable DynamicMeshActors. dynamic_mesh places a DynamicMeshActor copy of a StaticMesh asset (at location) or of a StaticMeshActor (at its transform), with its materials, for the other mesh tools to edit. static_mesh writes a DynamicMeshActor's mesh, materials and simple collision into a StaticMesh asset under /Game (refusing /Engine and plugin content and, without overwrite, an existing asset) and saves only that asset; writing the asset is not undoable. replace_actor swaps the source actor for the result in one undoable step. Unreal's USD exporter writes DynamicMeshActors as empty Xforms, so convert (with replace_actor) before exporting a mesh made with these tools. Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
-      "description": "StaticMesh asset path, such as /Game/Meshes/SM_Crate.",
+      "description": "dynamic_mesh: a StaticMesh asset (/Game/Meshes/SM_Crate) or a StaticMeshActor; static_mesh: a DynamicMeshActor.",
       "type": "string"
      },
      "target_format": {
-      "description": "'dynamic_mesh'; 'static_mesh' is refused as not implemented yet.",
+      "description": "dynamic_mesh or static_mesh.",
       "enum": [
        "dynamic_mesh",
        "static_mesh"
       ],
       "type": "string"
      },
-     "tessellation_options": {
-      "default": "{}",
-      "description": "Unused (reserved for future CAD support).",
+     "asset_path": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "static_mesh: the asset to write, /Game/<folders>/<name> (default /Game/Generated/SM_<actor label>). Paths outside /Game (/Engine, plugin content) are refused."
+     },
+     "overwrite": {
+      "default": false,
+      "description": "static_mesh: replace the mesh of an existing StaticMesh at asset_path (its references are kept); without it an existing asset is refused.",
+      "type": "boolean"
+     },
+     "save": {
+      "default": true,
+      "description": "static_mesh: save the asset's package (only that package).",
+      "type": "boolean"
+     },
+     "replace_actor": {
+      "default": false,
+      "description": "Replace the source actor with the result in the level, at its transform: a StaticMeshActor for static_mesh, a DynamicMeshActor (from a StaticMeshActor) for dynamic_mesh.",
+      "type": "boolean"
+     },
+     "collision": {
+      "default": "auto",
+      "description": "static_mesh: the asset's simple collision. auto copies the component's when it has any, else computes one convex hull; component copies it; convex_hull computes one; none leaves none.",
+      "enum": [
+       "auto",
+       "component",
+       "convex_hull",
+       "none"
+      ],
       "type": "string"
+     },
+     "nanite": {
+      "default": false,
+      "description": "static_mesh: enable Nanite on the asset; false leaves an overwritten asset's Nanite setting as it was.",
+      "type": "boolean"
+     },
+     "location": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "number"
+        },
+        "type": "array"
+       }
+      ],
+      "default": "",
+      "description": "dynamic_mesh from an asset: where to place the actor [x, y, z] in cm (the world origin by default)."
      }
     },
     "required": [

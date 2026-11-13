@@ -1250,13 +1250,50 @@ Behaviour worth knowing:
     (restart an editor that was already running). Without it every mesh tool
     returns `error_type: "UnsupportedOperation"` with `details.code:
     "GEOMETRY_SCRIPTING_DISABLED"` and a hint naming setup.
-  - They take the path of a DynamicMeshActor in the level open in the editor,
-    found without loading a map. A path that names nothing is `NotFoundError`.
-    A StaticMeshActor (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh
-    asset path (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose
-    `details.hint` names `convert_unreal_mesh_format`, which places an
-    editable DynamicMeshActor copy of a StaticMesh asset in the level; any
-    other actor is `"NO_DYNAMIC_MESH"`.
+  - They take the path of an actor in the level open in the editor, found
+    without loading a map, or of an asset. A path that names nothing is
+    `NotFoundError`. `validate_unreal_mesh`, `compute_unreal_convex_hull` and
+    `decompose_unreal_convex_hull` read a DynamicMeshActor, a StaticMeshActor
+    or a StaticMesh asset (its first LOD, copied into a transient
+    DynamicMesh; the reply's `source_kind` says which). The tools that edit a
+    mesh in place take a DynamicMeshActor only: a StaticMeshActor
+    (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh asset path
+    (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose `details.hint` names
+    `convert_unreal_mesh_format`; any other actor is `"NO_DYNAMIC_MESH"`.
+  - `convert_unreal_mesh_format` moves meshes between the two kinds.
+    `dynamic_mesh` places a DynamicMeshActor copy of a StaticMesh asset (at
+    `location`) or of a StaticMeshActor (at its transform), with its
+    materials; `replace_actor` removes the StaticMeshActor in the same
+    transaction. `static_mesh` writes a DynamicMeshActor's mesh into a
+    StaticMesh asset: `asset_path` (default `/Game/Generated/SM_<label>`, the
+    label's ASCII letters and digits joined by underscores) must
+    be under `/Game` (anything else, `/Engine` or a plugin's content, is
+    `SandboxError` `"OUTSIDE_GAME_CONTENT"`); an existing StaticMesh is
+    refused (`"ASSET_EXISTS"`) unless `overwrite`, which replaces its mesh and
+    keeps its references; the component's materials go to its slots; its
+    simple collision is the component's, a convex hull or none (`collision`,
+    `auto` by default); `nanite` enables Nanite; `save` (default true) saves
+    that asset's package and nothing else, and the reply names the `.uasset`
+    written. With Nanite the asset's `triangle_count` and `vertex_count` are the
+    mesh written, which Nanite renders, and `fallback_triangle_count` and
+    `fallback_vertex_count` its fallback mesh (LOD 0: 316 triangles for a
+    1,920-triangle sphere). `replace_actor` swaps the DynamicMeshActor for a
+    StaticMeshActor at its transform, in one undoable transaction. Writing the
+    asset, new or overwritten, with its materials and collision, is not
+    undoable: Unreal records no undo step for a new asset, so simul records
+    none for the rest of the write either (its collision used to be an Undo
+    step of its own, and one Undo dropped it from the asset). Unreal's USD exporter
+    writes a DynamicMeshActor as an empty Xform, without its mesh, so convert
+    with `replace_actor` before exporting a mesh made with these tools; the
+    reply's `hint` says so when the DynamicMeshActor was left in place.
+  - A hull or decomposition with `output` `collision` or `both` on a
+    StaticMesh source sets the StaticMesh asset's simple collision (every
+    actor using it shares it), only for an asset under `/Game`, in one
+    undoable transaction; `save` saves that asset. Undo restores the asset's
+    collision, but Unreal does not rebuild the physics of the actors already
+    placed with it: until the level is reloaded they keep colliding with the
+    hull (a line trace still hits it). Save before such an edit, or set the
+    collision again rather than undo it.
   - Every GeometryScript call is checked after it returns. GeometryScript
     reports most failures that way and otherwise leaves the mesh as it was
     (Catmull-Clark on a mesh without quad polygroups returned with the

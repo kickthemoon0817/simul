@@ -309,7 +309,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "actor_label": "Box",
     },
     "apply_unreal_mesh_boolean": {"target_mesh_path": MESH, "tool_mesh_path": OTHER_MESH, "operation": "subtract"},
-    "compute_unreal_convex_hull": {"mesh_path": MESH, "max_faces": 64, "output": "both"},
+    "compute_unreal_convex_hull": {"mesh_path": MESH, "max_faces": 64, "output": "both", "save": True},
     "decompose_unreal_convex_hull": {
         "mesh_path": MESH,
         "max_hulls": 4,
@@ -317,6 +317,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "error_tolerance": 1.5,
         "min_part_thickness": 0.2,
         "output": "collision",
+        "save": True,
     },
     "edit_unreal_mesh_topology": {
         "mesh_path": MESH,
@@ -345,8 +346,14 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
     "validate_unreal_mesh": {"mesh_path": MESH, "checks": "manifold,, normals "},
     "convert_unreal_mesh_format": {
         "mesh_path": MESH,
-        "target_format": "dynamic_mesh",
-        "tessellation_options": '{"level": 2}',
+        "target_format": "static_mesh",
+        "asset_path": "/Game/Props/SM_Chair",
+        "overwrite": True,
+        "save": False,
+        "replace_actor": True,
+        "collision": "convex_hull",
+        "nanite": True,
+        "location": "",
     },
     "remesh_unreal_mesh": {
         "mesh_path": MESH,

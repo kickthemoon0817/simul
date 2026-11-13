@@ -3889,7 +3889,8 @@
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
       "max_faces": 250,
-      "output": "actor"
+      "output": "actor",
+      "save": false
      }
     }
    ],
@@ -3912,7 +3913,8 @@
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
     "max_faces": 64,
-    "output": "both"
+    "output": "both",
+    "save": true
    },
    "envelope": [
     {
@@ -3928,7 +3930,8 @@
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
       "max_faces": 64,
-      "output": "both"
+      "output": "both",
+      "save": true
      }
     }
    ],
@@ -3968,7 +3971,8 @@
       "max_vertices_per_hull": 32,
       "error_tolerance": 0.0,
       "min_part_thickness": 0.1,
-      "output": "actor"
+      "output": "actor",
+      "save": false
      }
     }
    ],
@@ -3994,7 +3998,8 @@
     "max_vertices_per_hull": 16,
     "error_tolerance": 1.5,
     "min_part_thickness": 0.2,
-    "output": "collision"
+    "output": "collision",
+    "save": true
    },
    "envelope": [
     {
@@ -4013,7 +4018,8 @@
       "max_vertices_per_hull": 16,
       "error_tolerance": 1.5,
       "min_part_thickness": 0.2,
-      "output": "collision"
+      "output": "collision",
+      "save": true
      }
     }
    ],
@@ -4458,7 +4464,7 @@
    "case": "required",
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
-    "target_format": "dynamic_mesh"
+    "target_format": "static_mesh"
    },
    "envelope": [
     {
@@ -4473,8 +4479,14 @@
      "method": "convert_mesh_format",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "target_format": "dynamic_mesh",
-      "tessellation_options": {}
+      "target_format": "static_mesh",
+      "asset_path": null,
+      "overwrite": false,
+      "save": true,
+      "replace_actor": false,
+      "collision": "auto",
+      "nanite": false,
+      "location": null
      }
     }
    ],
@@ -4496,8 +4508,14 @@
    "case": "every argument",
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
-    "target_format": "dynamic_mesh",
-    "tessellation_options": "{\"level\": 2}"
+    "target_format": "static_mesh",
+    "asset_path": "/Game/Props/SM_Chair",
+    "overwrite": true,
+    "save": false,
+    "replace_actor": true,
+    "collision": "convex_hull",
+    "nanite": true,
+    "location": ""
    },
    "envelope": [
     {
@@ -4512,10 +4530,14 @@
      "method": "convert_mesh_format",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "target_format": "dynamic_mesh",
-      "tessellation_options": {
-       "level": 2
-      }
+      "target_format": "static_mesh",
+      "asset_path": "/Game/Props/SM_Chair",
+      "overwrite": true,
+      "save": false,
+      "replace_actor": true,
+      "collision": "convex_hull",
+      "nanite": true,
+      "location": null
      }
     }
    ],
