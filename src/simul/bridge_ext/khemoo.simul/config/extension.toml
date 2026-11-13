@@ -29,6 +29,9 @@ exts."khemoo.simul".allow_unsafe_execution = true
 # python_server's token is accepted, so `simul isaac launch
 # --generate-auth-token` protects both ports with one token. With auth
 # required and no token configured anywhere, every request is rejected.
+# Auth only tightens: once required it stays required, with the first token
+# seen, until the extension restarts, so a later settings write that clears
+# these keys (or replaces /exts/khemoo.simul) does not reopen the bridge.
 exts."khemoo.simul".require_auth = false
 # The bridge's own token; empty means "use python_server's". Kit takes
 # settings on argv, where other local users can read them, so prefer

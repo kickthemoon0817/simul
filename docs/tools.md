@@ -341,7 +341,8 @@ Notes:
 - `get_isaac_prim_detail` reads one or more aspects of a prim per call:
   `info`, `transform`, `ancestors`, `relationships`, `variants`,
   `bounding_box`, `mesh`, `light`, `material`, `rigid_body`, `collision`,
-  `joint`, `mass`, `animation`.
+  `joint`, `mass`, `animation`. A missing prim fails the call
+  (`NotFoundError`) with or without the bridge.
 - Poses (the `transform` aspect, `info`'s transform, `get_isaac_camera_info`
   and the reply of `set_isaac_prim_transform`) are factored out of the
   composed matrix, so rotation and scale stay right under scaled parents and
@@ -358,7 +359,10 @@ Notes:
   is refused outright.
 - `set_isaac_prim_attribute` converts the JSON value to the attribute's type:
   quaternions (`xformOp:orient`, `physics:localRot0`) as `[w, x, y, z]`,
-  matrices as rows or a flat row-major list, arrays as lists.
+  matrices as rows or a flat row-major list, arrays as lists. A path written
+  to an `asset` or `asset[]` attribute goes through the file sandbox
+  (`security.allowed_paths`) like `create_isaac_light`'s `texture_file` and
+  is written resolved; one outside it is `SandboxError` and nothing is set.
 - `query_isaac_typed_prims` resolves `type_name` through the schema registry
   (`UsdPhysics.RevoluteJoint`, `PhysicsRevoluteJoint`,
   `UsdPhysics.RigidBodyAPI`, any `pxr` module) and refuses a name that
@@ -385,7 +389,9 @@ Notes:
   layer (Kit's `OmniverseKit_*` viewport cameras), which a deactivation would
   hide by writing into the scene's layer. `reparent_isaac_prim` keeps the
   world pose (`keep_world_transform=true`) and retargets relationships and
-  connections that point into the moved subtree. Removal and moves go
+  connections that point into the moved subtree; without Kit it also
+  retargets the edit target's internal references, payloads, inherits and
+  specializes (`retargeted`), as Kit's `MovePrim` does. Removal and moves go
   through Kit's undoable `DeletePrims` / `MovePrim` (`destructive=false`)
   when Kit is there; when Kit declines one, the tool reports
   `KIT_DECLINED` and changes nothing rather than editing the layer itself.
@@ -393,6 +399,17 @@ Notes:
   Refusals are typed: `error_type` is `NotFoundError`, `ValidationError` or
   `InvalidState`, and `details.code` names the case (`INSTANCE_PROXY`,
   `DEFINED_ELSEWHERE`, `DESTINATION_EXISTS`, `UNKNOWN_PRIM_TYPE`, ...).
+  Every other Isaac tool's script failures are typed by the condition as well:
+  - no open stage is `InvalidState`;
+  - a prim, root path, graph, camera or extension that isn't there is
+    `NotFoundError`;
+  - a prim of the wrong kind or missing an API is `ValidationError`;
+  - no viewport is `ViewportUnavailable`;
+  - a missing capability (PhysX scene query) is `UnsupportedOperation`;
+  - anything else Kit reports is `EngineError`.
+
+  A bridge script stopped at its timeout is `TimeoutError`, and a script too
+  large for the 5.1 stock socket is `PayloadTooLarge`.
 - The listings (`list_isaac_prims`, `search_isaac_prims`, `get_isaac_subtree`,
   `query_isaac_typed_prims`) descend into instanceable prims by default,
   where Isaac assets keep their meshes and colliders; entries there carry
@@ -401,6 +418,13 @@ Notes:
   `include_inactive=true` to also see deactivated prims (`active: false`).
   `list_isaac_physics_objects` counts instanced colliders too, and
   `get_isaac_subtree` takes `max_depth=-1` as unlimited.
+  `find_isaac_prims_in_area`, `get_isaac_scene_stats`,
+  `get_isaac_scene_summary`, `list_isaac_lights`, `list_isaac_cameras`,
+  `list_isaac_materials` and `get_isaac_texture_dependencies` take the same
+  `include_instance_proxies` (default true); the stats, summary and the
+  light, camera and material listings also take `include_inactive`. The
+  prim counts of the stats, the summary, `get_isaac_stage_info` and
+  `list_isaac_prims` agree, and none counts the pseudo-root.
 - `create_isaac_prim` refuses a type that isn't a concrete registered schema
   (`cube` gets a suggestion, `Cube`) and attributes the type's schema doesn't
   define; a value that can't be set removes the new prim again, with any
@@ -416,7 +440,9 @@ Notes:
   duplicating a subtree that holds one. They use the same predicates as the
   graph tools (`graph.py`).
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
-  mass and material in one call.
+  mass and material in one call. Its script embeds only the steps asked for;
+  the full set runs as two scripts (`round_trips: 2`) so each stays under
+  Isaac Sim 5.1's 32 KiB socket limit.
 - `create_isaac_physics_scene` derives a new scene's gravity from the stage:
   Earth gravity along the negative up axis, in stage units (981 on a
   centimetre stage); `gravity_magnitude` is taken in m/s^2. It refuses a prim
@@ -482,7 +508,9 @@ Notes:
   SimulationManager stops PhysX writing to USD (`/physics/updateToUsd` and
   `/physics/updateVelocitiesToUsd` false, `omni.physx.fabric` on). While the
   simulation runs, those results then carry `stale_under_fabric: true`,
-  `usd_readback` and a warning: the values are from before play. Read the
+  `usd_readback` and a warning: the values are from before play. Poses and
+  velocities are judged apart (`poses_stale`, `velocities_stale`), so a pose
+  read is not flagged when only the velocity write-back is off. Read the
   simulated state with `execute_isaac_script` through a physics view (see
   [isaac-sim.md](isaac-sim.md#reading-simulated-state)).
 - `step_isaac_simulation` advances N timeline frames. Each frame runs
@@ -493,7 +521,7 @@ Notes:
   restores simulated prims to their pre-play state. Edits made in between
   (`set_isaac_prim_transform`, `set_isaac_prim_attribute`,
   `create_isaac_object`) are reverted with them, so those tools add a
-  warning while paused.
+  warning while paused or playing (`timeline_state`).
 - `raycast_isaac_scene` normalizes the direction and returns both the
   collision shape hit (`collision_path`) and its body (`rigid_body_path`).
   PhysX holds colliders only once the simulation has started, so a miss on a
@@ -508,10 +536,20 @@ Notes:
 - `get_isaac_logs` reads this instance's log (Kit's `/log/file`). When Kit
   does not name it, the tool falls back to the newest Kit log and warns that
   it may be another process's.
-- `set_isaac_carb_settings` refuses the transport namespaces (bridge,
-  python_server, 5.x VS Code). It refuses `/persistent/` keys, which Kit saves
-  for later sessions, unless `allow_persistent=true`. `get_isaac_carb_settings`
-  reads `auth_token` values back as `***`.
+- `set_isaac_carb_settings` refuses any write that reaches the transport
+  namespaces (bridge, python_server, 5.x VS Code). That covers a key inside
+  one, the namespace itself, and an ancestor such as `/exts` or `/`, because
+  Carb's `set(path, dict)` replaces the whole subtree. Dict values are checked
+  key by key, and `.`/`..` segments are refused. With script execution off it
+  also refuses `/app/scripting`. It refuses `/persistent` keys, which Kit
+  saves for later sessions, unless `allow_persistent=true`.
+  `get_isaac_carb_settings` reads `auth_token` values back as `***`, and
+  `get_isaac_logs` redacts the python_server token that 6.0.1 logs at Info
+  level (`redacted_lines` counts the lines).
+- With script execution off, imports, references and duplicates that carry a
+  Python Scripting Component (`OmniScriptingAPI` / `omni:scripting:scripts`),
+  and imports with unloaded payloads, are refused. See
+  [configuration.md](configuration.md#script-execution).
 - `ping_isaac` does not wait for a call already running on the instance and
   reports `busy` when one is. A call the client cancels keeps the instance
   until Isaac Sim has finished it (the bridge is asked to interrupt it first);

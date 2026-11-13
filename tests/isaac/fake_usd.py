@@ -158,7 +158,7 @@ class FakeStage:
     def GetPseudoRoot(self) -> FakePrim:
         return self.by_path["/"]
 
-    def Traverse(self) -> Iterable[FakePrim]:
+    def Traverse(self, predicate: Any = None) -> Iterable[FakePrim]:
         for prim in FakePrimRange(self.by_path["/"]):
             if not prim.IsPseudoRoot():
                 yield prim

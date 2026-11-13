@@ -8,8 +8,10 @@ from ...schemas.common import ErrorResponse
 from ._shared import (
     BIND_MATERIAL_CORE,
     DEFINE_MATERIAL_CORE,
+    TRAVERSAL_PREDICATE_CORE,
     FloatList,
     _compose_script,
+    _listing_predicate,
     _pyval,
 )
 from .._meta import tool_meta
@@ -324,12 +326,21 @@ class MaterialsMixin:
 
     @tool_meta(
         name="list_isaac_materials",
-        description="List all material prims in the current stage.",
+        description=(
+            "List all material prims in the current stage. Looks inside instanceable "
+            "prims (materials there carry instance_proxy=true) unless "
+            "include_instance_proxies=false; include_inactive=true also lists deactivated "
+            "materials."
+        ),
         read_only=True,
         idempotent=True,
     )
     async def list_isaac_materials(
-        self, max_results: int = 200, offset: int = 0
+        self,
+        max_results: int = 200,
+        offset: int = 0,
+        include_instance_proxies: bool = True,
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         """
         List all materials in the current stage.
@@ -340,6 +351,11 @@ class MaterialsMixin:
                 applied_limit.
             offset: Number of materials to skip before the page starts; pass
                 the previous page's next_offset to continue.
+            include_instance_proxies: Look inside instanceable prims, as the
+                other listings do; materials there carry
+                ``instance_proxy: true``.
+            include_inactive: Also list deactivated materials
+                (``active: false``).
 
         Returns:
             Dict with a page of material paths and basic info plus the total
@@ -347,11 +363,15 @@ class MaterialsMixin:
         """
         max_results = max(1, min(max_results, 1000))
         offset = max(0, offset)
-        script = textwrap.dedent(f"""\
+        _predicate = _listing_predicate(include_instance_proxies, include_inactive)
+        script = _compose_script(
+            """\
             import json
             import omni.usd
-            from pxr import UsdShade
-
+            from pxr import Usd, UsdShade
+            """,
+            TRAVERSAL_PREDICATE_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -360,7 +380,7 @@ class MaterialsMixin:
                 limit = {max_results}
                 materials = []
                 total = 0
-                for p in stage.Traverse():
+                for p in Usd.PrimRange(stage.GetPseudoRoot(), {_predicate}):
                     if not p.IsA(UsdShade.Material):
                         continue
                     index = total
@@ -384,11 +404,16 @@ class MaterialsMixin:
                         else:
                             sid = shader_obj.GetIdAttr().Get()
                             shader_type = str(sid) if sid else None
-                    materials.append({{
+                    entry = {{
                         "path": str(p.GetPath()),
                         "name": p.GetName(),
                         "shader_type": shader_type,
-                    }})
+                    }}
+                    if p.IsInstanceProxy():
+                        entry["instance_proxy"] = True
+                    if not p.IsActive():
+                        entry["active"] = False
+                    materials.append(entry)
                 page = materials
                 truncated = offset + len(page) < total
                 print(json.dumps({{
@@ -398,9 +423,12 @@ class MaterialsMixin:
                     "applied_limit": limit,
                     "truncated": truncated,
                     "next_offset": offset + len(page) if truncated else None,
+                    "include_instance_proxies": {_pyval(bool(include_instance_proxies))},
+                    "include_inactive": {_pyval(bool(include_inactive))},
                     "materials": page,
                 }}))
-        """)
+            """,
+        )
         return await self._execute_json_script(script)
 
     @tool_meta(
