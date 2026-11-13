@@ -612,6 +612,9 @@ def test_every_operation_is_classified_for_undo(bridge_module: Any) -> None:
             assert spec.operation in {
                 "control_ui",
                 "export_file",
+                # Step through frames and fill caches, but restore the frame.
+                "get_object_trajectory",
+                "get_trajectories",
                 "open_blend_file",
                 "play_animation",
                 "save_blend_file",
@@ -620,6 +623,23 @@ def test_every_operation_is_classified_for_undo(bridge_module: Any) -> None:
 
 def test_an_unclassified_operation_is_recorded_rather_than_lost(bridge_module: Any) -> None:
     assert bridge_module.undo_step_name("new_operation", {}) == "simul: new_operation"
+
+
+def test_stopping_the_bridge_removes_the_playback_handlers(
+    bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """play_blender_animation's handlers are persistent: they outlived the add-on."""
+    removed: list = []
+    monkeypatch.setattr(
+        bridge_module, "stop_watching_playback", lambda: removed.append(True)
+    )
+    bpy = sys.modules["bpy"]
+    bpy.app.timers = SimpleNamespace(is_registered=lambda timer: False)  # type: ignore[attr-defined]
+    bpy.app.handlers.load_post = []  # type: ignore[attr-defined]
+
+    _bridge(bridge_module, tmp_path).stop()
+
+    assert removed == [True]
 
 
 # ---------------------------------------------------------------------------

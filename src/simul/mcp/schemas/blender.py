@@ -1,7 +1,7 @@
 """Blender MCP schemas."""
 
 import math
-from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import (
     AfterValidator,
@@ -10,6 +10,7 @@ from pydantic import (
     Field,
     FiniteFloat,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from pydantic.json_schema import SkipJsonSchema
@@ -2004,11 +2005,36 @@ class BlenderFileInfoResponse(BaseModel):
 # Blender animation & timeline schemas (Phase 5)
 # ---------------------------------------------------------------------------
 
+# Blender's frame limits; mirror FRAME_LIMIT and SCENE_FRAME_MIN in
+# simul.adapters.blender_runtime. Blender clamps a frame outside them.
+#: A current frame Blender keeps as given.
+BlenderFrame = Annotated[int, Field(ge=-1_048_574, le=1_048_574)]
+#: A frame of a scene's frame range.
+BlenderSceneFrame = Annotated[int, Field(ge=0, le=1_048_574)]
+#: Frames between trajectory samples.
+BlenderFrameStep = Annotated[int, Field(ge=1)]
+
+# The same bounds as a tool's input schema states them. They only describe:
+# the request models above enforce them inside the server's envelope, so an
+# out-of-range argument is rate limited, recorded and answered with the
+# envelope's ValidationError like any other invalid input, instead of being
+# refused by FastMCP before the envelope sees it.
+#: A current frame, as advertised.
+AdvertisedFrame = Annotated[
+    int, Field(json_schema_extra={"minimum": -1_048_574, "maximum": 1_048_574})
+]
+#: A frame of a scene's frame range, as advertised.
+AdvertisedSceneFrame = Annotated[
+    int, Field(json_schema_extra={"minimum": 0, "maximum": 1_048_574})
+]
+#: Frames between trajectory samples, as advertised.
+AdvertisedFrameStep = Annotated[int, Field(json_schema_extra={"minimum": 1})]
+
 
 class BlenderSetFrameRequest(BaseModel):
     """Request to set the current animation frame."""
 
-    frame: int = Field(..., description="Frame number to set")
+    frame: BlenderFrame = Field(..., description="Frame number to set")
 
 
 class BlenderSetFrameResponse(BaseModel):
@@ -2031,14 +2057,37 @@ class BlenderGetFrameResponse(BaseModel):
     current_frame: int = Field(..., description="Current scene frame")
     frame_start: int = Field(..., description="Animation start frame")
     frame_end: int = Field(..., description="Animation end frame")
-    fps: float = Field(..., description="Frames per second")
+    fps: float = Field(
+        ...,
+        description=(
+            "Frames per second as Blender plays them: render.fps / render.fps_base "
+            "(29.97 for 30 / 1.001)"
+        ),
+    )
+    fps_base: Optional[float] = Field(
+        None,
+        description="render.fps_base, the divisor of render.fps (1.001 for NTSC rates)",
+    )
 
 
 class BlenderSetFrameRangeRequest(BaseModel):
     """Request to set the animation frame range."""
 
-    frame_start: int = Field(..., description="Start frame of the animation range")
-    frame_end: int = Field(..., description="End frame of the animation range")
+    frame_start: BlenderSceneFrame = Field(
+        ..., description="Start frame of the animation range"
+    )
+    frame_end: BlenderSceneFrame = Field(
+        ..., description="End frame of the animation range"
+    )
+
+    @model_validator(mode="after")
+    def _start_not_after_end(self) -> "BlenderSetFrameRangeRequest":
+        if self.frame_start > self.frame_end:
+            raise ValueError(
+                f"frame_start ({self.frame_start}) must not be after "
+                f"frame_end ({self.frame_end})"
+            )
+        return self
 
 
 class BlenderSetFrameRangeResponse(BaseModel):
@@ -2064,11 +2113,39 @@ class BlenderSetFrameRangeResponse(BaseModel):
     )
 
 
-class BlenderPlayAnimationRequest(BaseModel):
-    """Request to play or stop animation playback."""
+#: play_blender_animation's actions; mirrors PLAYBACK_ACTIONS in simul.adapters.blender_runtime.
+BlenderPlaybackAction = Literal["play", "reverse", "pause", "stop"]
+#: Keyframe interpolations; mirrors KEYFRAME_INTERPOLATIONS in simul.adapters.blender_runtime.
+BlenderKeyframeInterpolation = Literal[
+    "CONSTANT",
+    "LINEAR",
+    "BEZIER",
+    "SINE",
+    "QUAD",
+    "CUBIC",
+    "QUART",
+    "QUINT",
+    "EXPO",
+    "CIRC",
+    "BACK",
+    "BOUNCE",
+    "ELASTIC",
+]
+#: Blender's key types; mirrors KEYFRAME_TYPES in simul.adapters.blender_runtime.
+BlenderKeyframeType = Literal[
+    "KEYFRAME", "BREAKDOWN", "MOVING_HOLD", "EXTREME", "JITTER", "GENERATED"
+]
 
-    action: str = Field(
-        ..., description="Playback action: 'play', 'stop', or 'reverse'"
+
+class BlenderPlayAnimationRequest(BaseModel):
+    """Request to play, reverse, pause or stop animation playback."""
+
+    action: BlenderPlaybackAction = Field(
+        "play",
+        description=(
+            "play (forward), reverse, pause (stop on the current frame) or stop "
+            "(stop and return to the frame playback started from)"
+        ),
     )
 
 
@@ -2081,6 +2158,17 @@ class BlenderPlayAnimationResponse(BaseModel):
     )
     action: str = Field(..., description="The action that was performed")
     is_playing: bool = Field(..., description="Whether animation is currently playing")
+    direction: Optional[Literal["forward", "reverse"]] = Field(
+        None, description="Playback direction; null when not playing"
+    )
+    changed: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the call changed playback: false when it already ran that way, "
+            "or was already stopped"
+        ),
+    )
+    frame: Optional[int] = Field(None, description="Current frame after the action")
 
 
 class BlenderInsertKeyframeRequest(BaseModel):
@@ -2092,6 +2180,31 @@ class BlenderInsertKeyframeRequest(BaseModel):
     )
     frame: int = Field(..., description="Frame number for the keyframe")
     index: int = Field(-1, description="Array index (-1 for all channels)")
+    value: Optional[Union[float, List[float]]] = Field(
+        None,
+        description=(
+            "Value to key instead of the property's current one: one number for one "
+            "channel, else one per element. The keyed channels then show what their "
+            "F-curves give at the current frame; other channels keep their values"
+        ),
+    )
+    interpolation: Optional[BlenderKeyframeInterpolation] = Field(
+        None,
+        description=(
+            "Interpolation to the next key; null leaves Blender's choice (the previous "
+            "key's, or its preference, BEZIER by default)"
+        ),
+    )
+    keyframe_type: BlenderKeyframeType = Field("KEYFRAME", description="Blender's key type")
+
+
+class BlenderInsertedKeyframe(BaseModel):
+    """One key the insertion left on one channel, as Blender stored it."""
+
+    array_index: int = Field(..., description="Array index of the channel")
+    value: float = Field(..., description="Keyed value")
+    interpolation: str = Field(..., description="Interpolation from this key to the next")
+    keyframe_type: str = Field(..., description="Blender's key type")
 
 
 class BlenderInsertKeyframeResponse(BaseModel):
@@ -2104,6 +2217,24 @@ class BlenderInsertKeyframeResponse(BaseModel):
     object_name: str = Field(..., description="Object name")
     data_path: str = Field(..., description="Property data path")
     frame: int = Field(..., description="Frame number of the keyframe")
+    value_source: Optional[Literal["given", "current"]] = Field(
+        None,
+        description=(
+            "given: the value argument was keyed; current: the property's current "
+            "value was keyed, as Blender's I key does"
+        ),
+    )
+    keyframes: List[BlenderInsertedKeyframe] = Field(
+        default_factory=list, description="The key on each keyed channel"
+    )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the inserted key could not be read back, or when the keyed "
+            "channels keep their values until a frame change (an object with NLA "
+            "tracks)"
+        ),
+    )
 
 
 class BlenderDeleteKeyframeRequest(BaseModel):
@@ -2130,27 +2261,91 @@ class BlenderDeleteKeyframeResponse(BaseModel):
 
 
 class BlenderGetKeyframesRequest(BaseModel):
-    """Request to get keyframe summary for an object."""
+    """Request to list an object's keyed channels, a page at a time."""
 
     object_name: str = Field(..., description="Name of the object")
+    data_path: Optional[str] = Field(
+        None, description="Only this property's channels (the bone's, with bone_name)"
+    )
+    bone_name: Optional[str] = Field(None, description="Only this pose bone's channels")
+    include_keys: bool = Field(False, description="Also return every key")
+    offset: int = Field(0, ge=0, description="First channel to return: next_offset")
+    key_offset: int = Field(
+        0, ge=0, description="First key of that channel, with include_keys: next_key_offset"
+    )
+    limit: Optional[int] = Field(None, ge=1, description="Most channels to return")
 
 
-class BlenderKeyframeSummaryEntry(BaseModel):
-    """Summary of keyframes for a single FCurve or channel."""
+class BlenderPageTruncation(BaseModel):
+    """Why a page stops before the end, and how to get the rest."""
+
+    field: str = Field(..., description="The list the page cut")
+    returned: int = Field(..., description="Items this page returned")
+    total: int = Field(..., description="Items there are in all")
+    hint: str = Field(..., description="The call that continues")
+
+
+class _SetFieldsOnly(BaseModel):
+    """Dumps only the fields the payload gave.
+
+    A field the payload leaves out (a Bezier key's handles on a linear key, a
+    trajectory field nobody asked for) is left out of the reply too, instead
+    of costing every item of a page a null.
+    """
+
+    @model_serializer(mode="wrap")
+    def _set_fields_only(self, handler: Any) -> Dict[str, Any]:
+        data = handler(self)
+        return {key: value for key, value in data.items() if key in self.model_fields_set}
+
+
+class BlenderKeyEntry(_SetFieldsOnly):
+    """One key of a channel, as Blender stores it."""
+
+    frame: float = Field(..., description="Frame of the key; it can sit between frames")
+    value: float = Field(..., description="Keyed value")
+    interpolation: str = Field(..., description="Interpolation from this key to the next")
+    keyframe_type: str = Field(..., description="Blender's key type")
+    easing: Optional[str] = Field(None, description="Easing, for an eased interpolation")
+    handle_left: Optional[List[float]] = Field(
+        None, description="Left Bezier handle (frame, value), for a Bezier key"
+    )
+    handle_right: Optional[List[float]] = Field(
+        None, description="Right Bezier handle (frame, value), for a Bezier key"
+    )
+    handle_left_type: Optional[str] = Field(None, description="Left handle type")
+    handle_right_type: Optional[str] = Field(None, description="Right handle type")
+
+
+class BlenderKeyframeSummaryEntry(_SetFieldsOnly):
+    """A keyed channel (one F-curve): what it animates, its keys and their frames."""
 
     data_path: str = Field(..., description="Property data path")
     array_index: int = Field(..., description="Array index of the channel")
+    bone_name: Optional[str] = Field(
+        None, description="The pose bone the channel animates; null for the object's own"
+    )
     keyframe_count: int = Field(..., description="Number of keyframes")
-    frame_range: List[int] = Field(
+    frame_range: List[float] = Field(
         ...,
-        description="[first_frame, last_frame] of keyframes",
+        description="[first_frame, last_frame] of keyframes; a key can sit between frames",
         min_length=2,
         max_length=2,
+    )
+    key_offset: Optional[int] = Field(
+        None, description="With include_keys: index of the first key in keys"
+    )
+    keys: Optional[List[BlenderKeyEntry]] = Field(
+        None,
+        description=(
+            "With include_keys: the keys from key_offset; fewer than keyframe_count - "
+            "key_offset when the page ends inside the channel"
+        ),
     )
 
 
 class BlenderGetKeyframesResponse(BaseModel):
-    """Response with keyframe summary for an object."""
+    """Response with one page of an object's keyed channels."""
 
     success: bool = Field(..., description="Whether retrieval succeeded")
     error: Optional[str] = Field(
@@ -2167,8 +2362,153 @@ class BlenderGetKeyframesResponse(BaseModel):
             "an action whose keys were all deleted"
         ),
     )
+    total_channels: Optional[int] = Field(
+        None, description="Keyed channels the filters keep, on every page"
+    )
+    offset: Optional[int] = Field(None, description="Index of this page's first channel")
     channels: List[BlenderKeyframeSummaryEntry] = Field(
         default_factory=list, description="Keyframe summary per channel"
+    )
+    next_offset: Optional[int] = Field(
+        None, description="offset of the next page; null on the last page"
+    )
+    next_key_offset: Optional[int] = Field(
+        None, description="key_offset of the next page; null on the last page"
+    )
+    truncated: Optional[bool] = Field(
+        None, description="Whether channels or keys remain after this page"
+    )
+    truncation: Optional[BlenderPageTruncation] = Field(
+        None, description="Set when the page stops before the end"
+    )
+
+
+class BlenderKeyframeChannelData(BaseModel):
+    """The keys to insert on one property: a value per frame."""
+
+    data_path: str = Field(..., description="Property data path, as for insert_blender_keyframe")
+    index: int = Field(-1, description="Array index (-1 for all elements)")
+    frames: List[float] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Frames to key, each once and more than 0.01 apart, since Blender keeps one "
+            "key for keys closer than that"
+        ),
+    )
+    values: List[Union[float, List[float]]] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "One value per frame: a number for one channel, else one number per element"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_value_per_frame(self) -> "BlenderKeyframeChannelData":
+        if len(self.values) != len(self.frames):
+            raise ValueError(
+                f"{len(self.frames)} frames but {len(self.values)} values; give one "
+                "value per frame"
+            )
+        return self
+
+
+class BlenderInsertKeyframesRequest(BaseModel):
+    """Request to insert many keyframes on an object's properties in one call."""
+
+    object_name: str = Field(..., description="Name of the object")
+    channels: List[BlenderKeyframeChannelData] = Field(
+        ..., min_length=1, description="Per property, its frames and values"
+    )
+    interpolation: Optional[BlenderKeyframeInterpolation] = Field(
+        None, description="Interpolation of every inserted key; null leaves Blender's choice"
+    )
+    keyframe_type: BlenderKeyframeType = Field("KEYFRAME", description="Blender's key type")
+
+
+class BlenderSetPoseBoneTransformRequest(BaseModel):
+    """Request to set a pose bone's own transform."""
+
+    object_name: str = Field(..., description="The armature object")
+    bone_name: str = Field(..., description="Its pose bone")
+    location: Optional[List[float]] = Field(
+        None, min_length=3, max_length=3, description="New location relative to the rest position"
+    )
+    rotation_euler: Optional[List[float]] = Field(
+        None, min_length=3, max_length=3, description="New rotation, XYZ Euler angles in radians"
+    )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None, min_length=4, max_length=4, description="New rotation, a quaternion [w, x, y, z]"
+    )
+    scale: Optional[List[float]] = Field(
+        None, min_length=3, max_length=3, description="New scale"
+    )
+
+    @model_validator(mode="after")
+    def _one_rotation(self) -> "BlenderSetPoseBoneTransformRequest":
+        if self.rotation_euler is not None and self.rotation_quaternion is not None:
+            raise ValueError("Give either rotation_euler or rotation_quaternion, not both")
+        return self
+
+
+class BlenderSetPoseBoneTransformResponse(BaseModel):
+    """Response after setting a pose bone's transform."""
+
+    success: bool = Field(..., description="Whether the transform was set")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="The armature object")
+    bone_name: str = Field(..., description="The pose bone")
+    rotation_mode: str = Field(..., description="The bone's rotation mode, kept")
+    location: List[float] = Field(..., description="Its location relative to the rest position")
+    rotation_euler: List[float] = Field(..., description="Its rotation as XYZ Euler angles")
+    rotation_quaternion: List[float] = Field(
+        ..., description="Its rotation as a quaternion (w, x, y, z)"
+    )
+    rotation_in_mode: List[float] = Field(
+        ..., description="Its rotation as rotation_mode stores it"
+    )
+    scale: List[float] = Field(..., description="Its scale")
+    world_head: List[float] = Field(
+        ..., description="Where Blender evaluates the bone's head, in world space"
+    )
+    world_tail: List[float] = Field(
+        ..., description="Where Blender evaluates the bone's tail, in world space"
+    )
+
+
+class BlenderInsertedChannel(BaseModel):
+    """What a batch insertion did to one channel."""
+
+    data_path: str = Field(..., description="Property data path")
+    array_index: int = Field(..., description="Array index of the channel")
+    inserted: int = Field(..., description="Keys this call inserted on the channel")
+    keyframe_count: int = Field(..., description="Keys on the channel afterwards")
+
+
+class BlenderInsertKeyframesResponse(BaseModel):
+    """Response after inserting many keyframes."""
+
+    success: bool = Field(..., description="Whether the keyframes were inserted")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    key_count: int = Field(..., description="Keys inserted: one per frame and element")
+    frame_range: List[float] = Field(
+        ..., min_length=2, max_length=2, description="[first, last] frame keyed"
+    )
+    channels: List[BlenderInsertedChannel] = Field(
+        default_factory=list, description="Per keyed channel"
+    )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the keyed channels keep their values until a frame change (an "
+            "object with NLA tracks)"
+        ),
     )
 
 
@@ -2855,51 +3195,194 @@ class BlenderGetPhysicsStateResponse(BaseModel):
     )
 
 
-class BlenderTrajectoryPoint(BaseModel):
-    """Single point in a trajectory."""
+#: What a trajectory sample can report; mirrors TRAJECTORY_FIELDS in simul.adapters.blender_runtime.
+BlenderTrajectoryField = Literal[
+    "time",
+    "location",
+    "rotation_euler",
+    "rotation_quaternion",
+    "local_rotation",
+    "velocity",
+]
+
+
+class BlenderTrajectoryPoint(_SetFieldsOnly):
+    """Single point in a trajectory: its frame and the fields asked for."""
 
     frame: int = Field(..., description="Frame number")
-    time: float = Field(..., description="Time in seconds")
-    location: List[float] = Field(
-        ...,
-        description="XYZ position",
+    time: Optional[float] = Field(
+        None,
+        description=(
+            "Seconds since the scene's frame_start (time_origin_frame), at "
+            "render.fps / render.fps_base"
+        ),
+    )
+    location: Optional[List[float]] = Field(
+        None,
+        description="World XYZ position (a bone's head)",
         min_length=3,
         max_length=3,
     )
-    rotation_euler: List[float] = Field(
-        ...,
-        description="Euler rotation (radians)",
+    rotation_euler: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World rotation as Euler angles (radians) in euler_order, each the "
+            "equivalent nearest the previous sample's"
+        ),
         min_length=3,
         max_length=3,
+    )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description="World rotation as a quaternion (w, x, y, z), its sign kept continuous",
+        min_length=4,
+        max_length=4,
+    )
+    local_rotation: Optional[List[float]] = Field(
+        None,
+        description=(
+            "The target's own rotation channels as rotation_mode stores them, "
+            "unwrapped: Euler (x, y, z), quaternion (w, x, y, z) or axis-angle "
+            "(angle, x, y, z)"
+        ),
+        min_length=3,
+        max_length=4,
     )
     velocity: Optional[List[float]] = Field(
         None,
-        description="Estimated velocity (computed from position delta)",
+        description=(
+            "World location change since the sample before, per second; null for the "
+            "first sample of the request"
+        ),
         min_length=3,
         max_length=3,
     )
 
 
-class BlenderGetTrajectoryRequest(BaseModel):
-    """Request to get object trajectory over a frame range."""
+class _TrajectoryRange(BaseModel):
+    """The frames a trajectory request samples, and which page of them."""
 
-    object_name: str = Field(..., description="Name of the object to track")
     start_frame: int = Field(..., description="First frame of trajectory")
     end_frame: int = Field(..., description="Last frame of trajectory")
-    step: int = Field(1, description="Frame step size")
+    step: BlenderFrameStep = Field(1, description="Frames between samples; at least 1")
+    fields: Optional[List[BlenderTrajectoryField]] = Field(
+        None, description="What each sample reports besides its frame; null for all"
+    )
+    offset: int = Field(0, ge=0, description="First sample to return: next_offset")
+    limit: Optional[int] = Field(None, ge=1, description="Most samples to return")
+    max_simulated_frames: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Most frames of unbaked rigid-body simulation the call may step through",
+    )
+
+    @model_validator(mode="after")
+    def _start_not_after_end(self) -> "_TrajectoryRange":
+        if self.start_frame > self.end_frame:
+            raise ValueError(
+                f"start_frame ({self.start_frame}) must not be after "
+                f"end_frame ({self.end_frame})"
+            )
+        return self
 
 
-class BlenderGetTrajectoryResponse(BaseModel):
-    """Response with trajectory data."""
+class BlenderGetTrajectoryRequest(_TrajectoryRange):
+    """Request to get an object's or bone's trajectory over a frame range."""
+
+    object_name: str = Field(..., description="Name of the object to track")
+    bone_name: Optional[str] = Field(
+        None, description="Track this pose bone of the armature instead"
+    )
+
+
+class _TrajectoryPage(BaseModel):
+    """What every trajectory reply says about its page and its walk."""
 
     success: bool = Field(..., description="Whether query succeeded")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
+    fps: Optional[float] = Field(
+        None, description="Frames per second used for time and velocity"
+    )
+    time_origin_frame: Optional[int] = Field(
+        None, description="The frame at time 0: the scene's frame_start"
+    )
+    start_frame: Optional[int] = Field(None, description="First frame of the request")
+    end_frame: Optional[int] = Field(None, description="Last frame of the request")
+    step: Optional[int] = Field(None, description="Frames between samples")
+    total_points: Optional[int] = Field(None, description="Samples the request has in all")
+    offset: Optional[int] = Field(None, description="Index of this page's first sample")
+    point_count: int = Field(..., description="Number of trajectory points in this page")
+    next_offset: Optional[int] = Field(
+        None, description="offset of the next page; null on the last page"
+    )
+    truncated: Optional[bool] = Field(
+        None, description="Whether samples remain after this page"
+    )
+    truncation: Optional[BlenderPageTruncation] = Field(
+        None, description="Set when the page stops before the end"
+    )
+    simulated_frames: Optional[int] = Field(
+        None, description="Frames of rigid-body simulation the call stepped through"
+    )
+    warning: Optional[str] = Field(
+        None, description="Set when samples are past the rigid-body cache end"
+    )
+
+
+class BlenderGetTrajectoryResponse(_TrajectoryPage):
+    """Response with one page of a trajectory."""
+
     object_name: str = Field(..., description="Name of the tracked object")
-    point_count: int = Field(..., description="Number of trajectory points")
+    bone_name: Optional[str] = Field(None, description="The tracked bone, if any")
+    rotation_mode: Optional[str] = Field(
+        None, description="The target's rotation mode, which local_rotation follows"
+    )
+    euler_order: Optional[str] = Field(
+        None,
+        description=(
+            "Order of rotation_euler: the target's Euler order, XYZ for a quaternion "
+            "or axis-angle one"
+        ),
+    )
     points: List[BlenderTrajectoryPoint] = Field(
         default_factory=list, description="Trajectory points"
+    )
+
+
+class BlenderTrajectoryTarget(BaseModel):
+    """An object, or a pose bone of an armature, to sample."""
+
+    object_name: str = Field(..., description="Name of the object (an armature for a bone)")
+    bone_name: Optional[str] = Field(None, description="Pose bone of the armature")
+
+
+class BlenderGetTrajectoriesRequest(_TrajectoryRange):
+    """Request to sample several objects and bones over one frame range."""
+
+    targets: List[BlenderTrajectoryTarget] = Field(
+        ..., min_length=1, max_length=32, description="Objects and bones to sample"
+    )
+
+
+class BlenderTargetTrajectory(BaseModel):
+    """One target's samples of a page."""
+
+    object_name: str = Field(..., description="Name of the object")
+    bone_name: Optional[str] = Field(None, description="The bone, if any")
+    rotation_mode: str = Field(..., description="Its rotation mode")
+    euler_order: str = Field(..., description="Order of rotation_euler")
+    points: List[BlenderTrajectoryPoint] = Field(
+        default_factory=list, description="Its samples, the page's frames"
+    )
+
+
+class BlenderGetTrajectoriesResponse(_TrajectoryPage):
+    """Response with one page of several targets' trajectories."""
+
+    trajectories: List[BlenderTargetTrajectory] = Field(
+        default_factory=list, description="Per target, in the order requested"
     )
 
 
