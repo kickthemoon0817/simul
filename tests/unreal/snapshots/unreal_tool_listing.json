@@ -3222,6 +3222,7 @@
       "default": "auto",
       "description": "auto, xatlas or patch_builder; the reply's method names the one that ran.",
       "enum": [
+       "auto",
        "xatlas",
        "patch_builder"
       ],

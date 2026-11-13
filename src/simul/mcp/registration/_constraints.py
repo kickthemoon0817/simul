@@ -227,7 +227,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     },
     # The editor also takes aliases (patchbuilder, auto_uv; any case), so the
     # canonical names are advertised without refusing the rest.
-    "compute_unreal_mesh_uv": {"method": Choices(("xatlas", "patch_builder"), enforced=False)},
+    "compute_unreal_mesh_uv": {"method": Choices(("auto", "xatlas", "patch_builder"), enforced=False)},
     "convert_unreal_mesh_format": {
         "target_format": Choices(("static_mesh", "dynamic_mesh"), enforced=False),
     },
