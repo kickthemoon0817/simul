@@ -150,7 +150,11 @@ parse error). The checks, in order:
   the bytes do not match the extension (text in a `.usdc`).
 - Composition: `MissingSublayer`, `MissingReference`, `MissingPayload`,
   `UnresolvedPrimPath`, and pxr's `UnresolvableDependency` for other asset
-  paths such as textures.
+  paths such as textures. For an Unreal content path in an asset value
+  (`/Engine/.../Name.Name`, as Unreal's USD exporter writes
+  `info:unreal:sourceAsset`), `UnresolvableDependency` and
+  `MissingSourceTypeInRegistry` are warnings, not errors: the path names an
+  object in Unreal's content, not a file.
 - Stage metadata: a dangling defaultPrim is an error; an unset defaultPrim,
   upAxis or metersPerUnit is a warning, since consumers fall back to Y up and
   centimeters.
@@ -163,7 +167,8 @@ parse error). The checks, in order:
 `load_usd_file` fails with `error_type: LoadError` and `details.reason` set
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
-them in `warnings`. `simul usd validate` runs the same checks and exits 1
+them in `warnings`, along with an `UnrealContentPath` entry for each Unreal
+content path the sandbox let through (none with the sandbox off). `simul usd validate` runs the same checks and exits 1
 when the file is invalid. A relative `file_path` resolves against
 `security.relative_path_base` (default: the server's working directory), and
 the result's `file_path` is the resolved path. A URL needs an asset resolver
@@ -1121,7 +1126,10 @@ Behaviour worth knowing:
     reference, payload or clip) whose value is under `/Engine`, `/Game` or
     `/Script` and ends in `<Name>.<Name>` with no file extension, naming no
     file on disk. `@/Engine/x.usda@`, a relative path and another content
-    root (a plugin's) are refused like any path outside the sandbox.
+    root (a plugin's) are refused like any path outside the sandbox. The
+    rule lives in `CompositionSandbox`, so `load_usd_file` and
+    `validate_usd_file` accept the same exports (see
+    [configuration.md](configuration.md#file-sandbox)).
   - An import can leave engine or plugin packages modified in memory: on UE
     5.7.4 Interchange set `bUsedWithNanite` on its shared parent material
     `/InterchangeAssets/Materials/PBRSurfaceMaterial_MR`. Unreal does that on
