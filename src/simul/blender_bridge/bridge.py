@@ -22,7 +22,7 @@ from typing import Any
 import bpy
 from bpy.app.handlers import persistent
 
-from ..adapters.blender_runtime import BlenderRuntimeSession
+from ..adapters.blender_runtime import BlenderRuntimeSession, stop_watching_playback
 from ..utils.errors import ScriptExecutionDisabled, exception_message, exception_type_name
 from ..utils.paths import PathPolicy, state_dir
 from .agent_control import reset_ui
@@ -62,6 +62,7 @@ UNDO_STEPS: dict[str, str] = {
     "free_bake": "free_blender_bake",
     "import_file": "import_blender_file",
     "insert_keyframe": "insert_blender_keyframe",
+    "insert_keyframes": "insert_blender_keyframes",
     "remove_modifier": "remove_blender_modifier",
     "set_camera_view": "set_blender_camera_view",
     # Blender records frame changes as undo steps too.
@@ -72,6 +73,7 @@ UNDO_STEPS: dict[str, str] = {
     "set_object_mode": "set_blender_object_mode",
     "set_object_parent": "set_blender_object_parent",
     "set_object_transform": "set_blender_object_transform",
+    "set_pose_bone_transform": "set_blender_pose_bone_transform",
     "set_rigid_body_world": "set_blender_rigid_body_world",
     "setup_rigid_body": "setup_blender_rigid_body",
     "setup_simready_hierarchy": "setup_simready_hierarchy",
@@ -102,6 +104,7 @@ NO_UNDO_STEP = frozenset(
         "get_object_trajectory",
         "get_physics_state",
         "get_rigid_body_world",
+        "get_trajectories",
         "get_runtime_info",
         "get_simready_metadata",
         "get_viewport_info",
@@ -228,6 +231,8 @@ class BlenderBridge:
             self.listener.close()
             self.listener = None
         self.discovery_path.unlink(missing_ok=True)
+        # play_blender_animation's playback handlers are persistent.
+        stop_watching_playback()
 
     def poll(self) -> float | None:
         """Read and execute bounded requests from Blender's main-thread timer."""

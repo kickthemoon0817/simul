@@ -11,20 +11,19 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
 
+import numpy as np
 import pytest
 
 from simul.adapters import blender_runtime
+from tests.fakes import FakeMatrix, euler_matrix
 
 
-class _Matrix:
-    def __init__(self, translation: List[float], euler: List[float]) -> None:
-        self.translation = translation
-        self._euler = euler
-        self.orders: List[str] = []
-
-    def to_euler(self, order: str) -> List[float]:
-        self.orders.append(order)
-        return self._euler
+def _Matrix(translation: List[float], euler: List[float]) -> FakeMatrix:
+    """A world matrix at ``translation``, turned by the XYZ Euler angles ``euler``."""
+    rows = np.eye(4)
+    rows[:3, :3] = euler_matrix(euler)
+    rows[:3, 3] = translation
+    return FakeMatrix(rows)
 
 
 class _Objects(dict):
@@ -53,27 +52,32 @@ def _object(name: str, kind: str = "MESH", **extra: Any) -> SimpleNamespace:
 def _fake_bpy(
     objects: List[Any],
     rigidbody_world: Optional[Any] = None,
-    evaluated: Optional[Dict[int, _Matrix]] = None,
+    evaluated: Optional[Dict[int, FakeMatrix]] = None,
 ) -> SimpleNamespace:
     calls: Dict[str, Any] = {"frames": [], "overrides": [], "ops": []}
     scene = SimpleNamespace(
         name="Scene",
         frame_current=1,
+        frame_subframe=0.0,
         frame_start=1,
         frame_end=250,
-        render=SimpleNamespace(fps=10),
+        render=SimpleNamespace(fps=10, fps_base=1.0),
         rigidbody_world=rigidbody_world,
         objects=_Objects({o.name: o for o in objects}),
     )
 
-    def frame_set(frame: int) -> None:
+    def frame_set(frame: int, subframe: float = 0.0) -> None:
         calls["frames"].append(frame)
         scene.frame_current = frame
+        scene.frame_subframe = subframe
 
     scene.frame_set = frame_set
 
     def evaluated_get(obj: Any, depsgraph: Any) -> Any:
-        return SimpleNamespace(matrix_world=evaluated[scene.frame_current])
+        return SimpleNamespace(
+            matrix_world=evaluated[scene.frame_current],
+            rotation_euler=obj.rotation_euler,
+        )
 
     for obj in objects:
         obj.evaluated_get = lambda depsgraph, _obj=obj: evaluated_get(_obj, depsgraph)
@@ -124,7 +128,7 @@ def _fake_bpy(
 
 
 @pytest.fixture
-def install(monkeypatch: pytest.MonkeyPatch) -> Any:
+def install(monkeypatch: pytest.MonkeyPatch, mathutils: Any) -> Any:
     def _install(fake: SimpleNamespace) -> Any:
         monkeypatch.setattr(blender_runtime, "bpy", fake)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -133,18 +137,21 @@ def install(monkeypatch: pytest.MonkeyPatch) -> Any:
     return _install
 
 
-def _rigidbody_world(baked: bool = False, *bodies: Any) -> SimpleNamespace:
+def _rigidbody_world(
+    baked: bool = False, *bodies: Any, info: str = ""
+) -> SimpleNamespace:
+    """A rigid-body world of ``bodies``, its cache holding what ``info`` says (nothing by default)."""
     return SimpleNamespace(
         enabled=True,
         time_scale=1.0,
         collection=SimpleNamespace(name="RigidBodyWorld", all_objects=list(bodies)),
         point_cache=SimpleNamespace(
-            frame_start=1, frame_end=250, is_baked=baked, is_outdated=False, info=""
+            frame_start=1, frame_end=250, is_baked=baked, is_outdated=False, info=info
         ),
     )
 
 
-def _falling(frames: range) -> Dict[int, _Matrix]:
+def _falling(frames: range) -> Dict[int, FakeMatrix]:
     return {f: _Matrix([0.0, 0.0, 10.0 - 0.5 * (f - 1)], [0.1 * f, 0.0, 0.0]) for f in frames}
 
 

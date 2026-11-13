@@ -246,7 +246,6 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         "jpeg_quality": Bounds(ge=1, le=100),
     },
     "setup_blender_rigid_body": {"restitution": _UNIT},
-    "play_blender_animation": {"action": Choices(("play", "stop", "reverse"))},
     # Compared upper-cased, so other spellings still work.
     "import_blender_file": {
         "file_format": Choices(("OBJ", "FBX", "GLTF", "USD", "STL", "PLY"), enforced=False),
