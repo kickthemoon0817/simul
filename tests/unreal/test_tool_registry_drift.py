@@ -159,9 +159,14 @@ def test_request_model_has_one_field_per_parameter(spec: UnrealTool) -> None:
 def test_a_check_fails_validation_with_its_own_message() -> None:
     model = request_model_for(SPECS["capture_unreal_viewport"])
 
-    with pytest.raises(InvalidToolInput, match=r"^Invalid format 'jpg'. Must be one of \['png'\]$"):
+    with pytest.raises(InvalidToolInput, match=r"^Invalid format 'jpg'. Must be one of \['jpeg', 'png'\]$"):
         model(format="jpg")
+    with pytest.raises(InvalidToolInput, match=r"^Invalid view 'player'. Must be one of \['auto', 'editor', 'game'\]"):
+        model(view="player")
+    with pytest.raises(InvalidToolInput, match=r"^inline_max_size must be 0 or between 16 and 16384$"):
+        model(inline_max_size=8)
     assert model(format="png").format == "png"
+    assert model(format="jpeg", view="game", jpeg_quality=60, inline_max_size=512).view == "game"
 
 
 # ---------------------------------------------------------------------------
@@ -249,22 +254,31 @@ def _records(instance: server_module.SimulMCPServer, tool: str) -> List[Dict[str
 def test_invalid_input_reports_the_check_and_the_input(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     instance, session = _capture_server(monkeypatch, tmp_path)
 
-    payload = _call(instance, "capture_unreal_viewport", format="jpg")
+    # The schema takes 0 to 16384 (format and view are refused there); 1 to 15 only the check refuses.
+    payload = _call(instance, "capture_unreal_viewport", inline_max_size=5)
 
     assert payload == {
         "success": False,
-        "error": "Invalid format 'jpg'. Must be one of ['png']",
+        "error": "inline_max_size must be 0 or between 16 and 16384",
         "error_type": "ValidationError",
         "details": {
             "errors": [
-                {"field": None, "message": "Invalid format 'jpg'. Must be one of ['png']", "type": "value_error"}
+                {"field": None, "message": "inline_max_size must be 0 or between 16 and 16384", "type": "value_error"}
             ],
-            "input": {"resolution_x": 1920, "resolution_y": 1080, "format": "jpg", "inline": False},
+            "input": {
+                "resolution_x": 1920,
+                "resolution_y": 1080,
+                "format": "png",
+                "inline": False,
+                "view": "auto",
+                "jpeg_quality": 85,
+                "inline_max_size": 5,
+            },
         },
     }
     assert session.calls == []
     assert _records(instance, "capture_unreal_viewport") == [
-        {"success": False, "error": "Invalid format 'jpg'. Must be one of ['png']"}
+        {"success": False, "error": "inline_max_size must be 0 or between 16 and 16384"}
     ]
 
 

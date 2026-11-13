@@ -82,6 +82,20 @@ UNREAL_MAX_ASPECT_RATIO = 16384.0
 UNREAL_MAX_PAGE = 5000
 UNREAL_MAX_SCENE_DEPTH = 64
 UNREAL_MIN_FOV_DEGREES = 0.001
+#: Unreal camera capture edge (``CAMERA_CAPTURE_MAX_DIMENSION``), the longest
+#: side of a scaled inline copy (``INLINE_MAX_SIZE``; 1 to 15 is refused by the
+#: tools' own check) and the most actors one World Partition load changes
+#: (``WORLD_PARTITION_MAX_ACTORS``).
+UNREAL_MAX_CAMERA_CAPTURE_DIMENSION = 8192
+UNREAL_MAX_INLINE_SIZE = 16384
+UNREAL_MAX_WORLD_PARTITION_ACTORS = 10_000
+#: The capture formats and views, and the World Partition actions
+#: (``CAPTURE_FORMATS``, ``CAPTURE_VIEWS``, ``WORLD_PARTITION_ACTIONS``).
+UNREAL_CAPTURE_FORMATS = ("png", "jpeg")
+UNREAL_CAPTURE_VIEWS = ("auto", "editor", "game")
+UNREAL_WORLD_PARTITION_ACTIONS = ("load", "unload")
+_JPEG_QUALITY = Bounds(ge=1, le=100)
+_INLINE_SIZE = Bounds(ge=0, le=UNREAL_MAX_INLINE_SIZE)
 #: Longest force ``apply_force`` keeps on (``FORCE_MAX_DURATION_S``, seconds of
 #: physics time) and the largest physics-state page (``PHYSICS_STATE_MAX_RESULTS``).
 UNREAL_FORCE_MAX_DURATION_S = 600.0
@@ -193,6 +207,21 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     "capture_unreal_viewport": {
         "resolution_x": Bounds(ge=1, le=UNREAL_MAX_CAPTURE_DIMENSION),
         "resolution_y": Bounds(ge=1, le=UNREAL_MAX_CAPTURE_DIMENSION),
+        "format": Choices(UNREAL_CAPTURE_FORMATS),
+        "view": Choices(UNREAL_CAPTURE_VIEWS),
+        "jpeg_quality": _JPEG_QUALITY,
+        "inline_max_size": _INLINE_SIZE,
+    },
+    "capture_unreal_camera": {
+        "resolution_x": Bounds(ge=1, le=UNREAL_MAX_CAMERA_CAPTURE_DIMENSION),
+        "resolution_y": Bounds(ge=1, le=UNREAL_MAX_CAMERA_CAPTURE_DIMENSION),
+        "format": Choices(UNREAL_CAPTURE_FORMATS),
+        "jpeg_quality": _JPEG_QUALITY,
+        "inline_max_size": _INLINE_SIZE,
+    },
+    "load_unreal_world_partition_actors": {
+        "max_actors": Bounds(ge=1, le=UNREAL_MAX_WORLD_PARTITION_ACTORS),
+        "action": Choices(UNREAL_WORLD_PARTITION_ACTIONS),
     },
     "focus_unreal_on_actor": {
         "fov": Bounds(ge=UNREAL_MIN_FOV_DEGREES, lt=180.0),

@@ -150,6 +150,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "assign_unreal_material": (DESTRUCTIVE, True, True),
     "batch_unreal_operations": (DESTRUCTIVE, False, True),
     "call_unreal_actor_function": (DESTRUCTIVE, False, True),
+    "capture_unreal_camera": (RW, False, True),  # writes a new image file
     "capture_unreal_viewport": (RW, False, True),  # writes a new screenshot file
     # output collision replaces the source's simple collision.
     "compute_unreal_convex_hull": (DESTRUCTIVE, False, True),
@@ -186,6 +187,8 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "list_unreal_actors": (RO, True, True),
     "list_unreal_instances": (RO, True, True),
     "list_unreal_simulation_actors": (RO, True, True),
+    # Loads actors into the editor, not the map; loading a loaded region again changes nothing.
+    "load_unreal_world_partition_actors": (RW, True, True),
     "ping_unreal": (RO, True, True),
     "query_unreal_scene_graph": (RO, True, True),
     "remesh_unreal_mesh": (DESTRUCTIVE, False, True),

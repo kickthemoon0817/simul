@@ -96,6 +96,10 @@ def test_the_choice_lists_are_the_tools_own() -> None:
 
     assert set(values("execute_unreal_script", "mode")) == unreal_runtime.UNREAL_EXEC_MODES
     assert values("set_unreal_actor_visibility", "scope") == unreal_runtime.VISIBILITY_SCOPES
+    assert values("capture_unreal_viewport", "format") == unreal_runtime.CAPTURE_FORMATS
+    assert values("capture_unreal_camera", "format") == unreal_runtime.CAPTURE_FORMATS
+    assert values("capture_unreal_viewport", "view") == unreal_runtime.CAPTURE_VIEWS
+    assert values("load_unreal_world_partition_actors", "action") == unreal_runtime.WORLD_PARTITION_ACTIONS
 
 
 def test_choices_never_replace_a_literal_a_parameter_declares() -> None:
@@ -125,6 +129,9 @@ def test_the_table_uses_the_unreal_runtime_constants() -> None:
 
     assert _constraints.UNREAL_MIN_FOV_DEGREES == unreal_runtime.FOCUS_MIN_FOV_DEGREES
     assert _constraints.UNREAL_MAX_ASPECT_RATIO == unreal_runtime.FOCUS_MAX_ASPECT_RATIO
+    assert _constraints.UNREAL_MAX_CAMERA_CAPTURE_DIMENSION == unreal_runtime.CAMERA_CAPTURE_MAX_DIMENSION
+    assert _constraints.UNREAL_MAX_INLINE_SIZE == unreal_runtime.INLINE_MAX_SIZE
+    assert _constraints.UNREAL_MAX_WORLD_PARTITION_ACTORS == unreal_runtime.WORLD_PARTITION_MAX_ACTORS
     assert _constraints.UNREAL_FORCE_MAX_DURATION_S == unreal_runtime.FORCE_MAX_DURATION_S
     assert _constraints.UNREAL_PHYSICS_STATE_MAX_RESULTS == unreal_runtime.PHYSICS_STATE_MAX_RESULTS
     assert _constraints.UNREAL_MAX_PAGE == unreal_runtime.SIMULATION_ACTORS_MAX_RESULTS
@@ -344,3 +351,34 @@ def test_unreal_capture_dimensions_are_a_validation_error(tmp_path: Path) -> Non
     payload = json.loads(asyncio.run(run()).content[-1].text)
     assert payload["error_type"] == "ValidationError"
     assert payload["details"]["errors"][0]["field"] == "resolution_x"
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "field"),
+    [
+        ("capture_unreal_viewport", {"format": "gif"}, "format"),
+        ("capture_unreal_viewport", {"view": "pane"}, "view"),
+        ("capture_unreal_viewport", {"jpeg_quality": 0}, "jpeg_quality"),
+        ("capture_unreal_viewport", {"inline_max_size": 20000}, "inline_max_size"),
+        ("capture_unreal_camera", {"actor_path": "/Game/M.M:L.C", "resolution_x": 9000}, "resolution_x"),
+        ("load_unreal_world_partition_actors", {"max_actors": 10001}, "max_actors"),
+        ("load_unreal_world_partition_actors", {"action": "reload"}, "action"),
+    ],
+)
+def test_unreal_capture_and_world_partition_limits_are_refused_by_the_schema(
+    tool: str, arguments: Dict[str, Any], field: str
+) -> None:
+    """The ranges and choices these tools document are refused before the editor is reached."""
+    pytest.importorskip("aiohttp")
+    instance = server_module.SimulMCPServer(
+        Settings(unreal={"host": "127.0.0.1", "port": 39310, "max_retries": 0, "tool_surface": "full"}),
+        backends={"unreal"},
+    )
+
+    async def run() -> Any:
+        async with Client(instance.mcp) as client:
+            return await client.call_tool(tool, arguments, raise_on_error=False)
+
+    payload = json.loads(asyncio.run(run()).content[-1].text)
+    assert payload["error_type"] == "ValidationError"
+    assert [error["field"] for error in payload["details"]["errors"]] == [field]
