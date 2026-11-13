@@ -38,9 +38,13 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from .paged_results import PagedList, current_paging, paging_for, tool_result
+from ..logging import get_logger
+from .paged_results import PagedList, current_paging, current_tool, paging_for, tool_result
+
+logger = get_logger(__name__)
 
 # ~40 KB ≈ 10k tokens: large enough for a real listing, small enough that a
 # single call cannot dominate a context window.
@@ -396,9 +400,18 @@ def _trim_page(
     for key in paging.reset_fields:
         if key in trimmed:
             trimmed[key] = None
+    for key in paging.count_maps:
+        counts = payload.get(key)
+        if isinstance(counts, dict):
+            restated = dict(counts)
+            for path, _items in lists:
+                if len(path) == 1 and path[0] in restated:
+                    restated[path[0]] = len(trimmed[path[0]])
+            trimmed[key] = restated
     stale = payload.get("hint")
-    if isinstance(old_next, int) and isinstance(stale, str) and f"offset={old_next}" in stale:
-        trimmed["hint"] = stale.replace(f"offset={old_next}", f"offset={new_next}")
+    if isinstance(old_next, int) and isinstance(stale, str):
+        # "offset=1000" (Unreal's listings) or "offset 1000" (its robotics page).
+        trimmed["hint"] = re.sub(rf"(\boffset[ =]){old_next}\b", rf"\g<1>{new_next}", stale)
     trimmed["truncation"] = _page_notice(paging, kept, longest, new_next)
     if compacted:
         trimmed["truncation"]["compacted_entries"] = compacted
@@ -475,6 +488,15 @@ def _trim_largest_list(
     field, items, item_sizes = largest
     total = len(items)
     paged = "next_offset" in payload or bool(paged_roots)
+    if "next_offset" in payload and not paged_roots:
+        # A paged result with no declaration in paged_results.PAGED_RESULTS:
+        # its page is cut as if it were not one. Say so where it can be fixed.
+        logger.warning(
+            "Result budget cut %r of an undeclared paged result%s; declare its page in "
+            "simul.mcp.paged_results.PAGED_RESULTS",
+            field,
+            f" from {current_tool()}" if current_tool() else "",
+        )
     if paged:
         hint = (
             f"{field} was cut to fit the response budget. It is not the list next_offset pages, so "

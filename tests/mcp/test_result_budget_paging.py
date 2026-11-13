@@ -325,6 +325,48 @@ def test_a_cut_page_clears_cursors_into_its_last_entry() -> None:
     assert "smaller limit" in page["truncation"]["hint"]
 
 
+def _robotics_page(surfaces: int, objects: int, offset: int, keep: int) -> Dict[str, Any]:
+    """analyze_unreal_scene_for_robotics' shape: two category lists at one offset, counted in returned."""
+    lists = {
+        "traversable_surfaces": _entries(surfaces)[offset:offset + keep],
+        "graspable_objects": _entries(objects, 5000)[offset:offset + keep],
+    }
+    end = offset + keep
+    return {
+        **lists,
+        "totals": {"traversable_surfaces": surfaces, "graspable_objects": objects},
+        "returned": {name: len(items) for name, items in lists.items()},
+        "offset": offset,
+        "max_results": keep,
+        "next_offset": end if max(surfaces, objects) > end else None,
+        "hint": f"Both lists are paged together, {keep} per category from offset {offset}. Pass offset {end} "
+        "for the next page.",
+    }
+
+
+def test_per_category_returned_counts_follow_the_cut() -> None:
+    page = apply_result_budget(
+        _robotics_page(500, 30, 0, 400), paging=PAGED_RESULTS["analyze_unreal_scene_for_robotics"]
+    )
+
+    kept = page["next_offset"]
+    assert 30 < kept < 400
+    assert page["returned"] == {"traversable_surfaces": kept, "graspable_objects": 30}
+    assert page["totals"] == {"traversable_surfaces": 500, "graspable_objects": 30}
+    assert f"Pass offset {kept} for the next page" in page["hint"]
+
+
+def test_an_undeclared_paged_cut_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """A paged tool missing from PAGED_RESULTS is visible at run time, not only in the drift test."""
+    with caplog.at_level("WARNING"), tool_result("some_new_paged_tool"):
+        apply_result_budget(_page(_entries(3000), offset=0, limit=1000))
+
+    assert any(
+        "undeclared paged result" in record.getMessage() and "some_new_paged_tool" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_non_paged_list_of_a_declared_tool_is_reported_separately() -> None:
     payload = _page(_entries(10), 0, 10, warnings=["w" * 300 for _ in range(300)])
 

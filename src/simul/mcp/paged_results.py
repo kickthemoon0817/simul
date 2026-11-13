@@ -45,6 +45,9 @@ class PagedList:
         reset_fields: Secondary cursors into the page's last entry (Blender's
             ``next_key_offset``); a cut page ends on another entry, so they
             are cleared to None.
+        count_maps: Result fields mapping each paged list's name to its
+            length (``returned: {"traversable_surfaces": 40, ...}``); restated
+            to the lengths kept.
     """
 
     fields: Tuple[str, ...]
@@ -52,6 +55,7 @@ class PagedList:
     limit_param: Optional[str] = "max_results"
     count_fields: Tuple[str, ...] = ("count", "returned")
     reset_fields: Tuple[str, ...] = ()
+    count_maps: Tuple[str, ...] = ()
 
 
 #: Every paged tool's declaration, by registered tool name.
@@ -93,6 +97,12 @@ PAGED_RESULTS: Dict[str, PagedList] = {
     "get_unreal_actor_by_semantic_label": PagedList(("actors",)),
     "query_unreal_scene_graph": PagedList(("root.children",)),
     "search_unreal_assets": PagedList(("assets",)),
+    "get_unreal_physics_state": PagedList(("bodies",)),
+    "list_unreal_simulation_actors": PagedList(("actors",)),
+    # Both categories paged together at one offset; returned counts each.
+    "analyze_unreal_scene_for_robotics": PagedList(
+        ("traversable_surfaces", "graspable_objects"), count_maps=("returned",)
+    ),
 }
 
 _CURRENT_TOOL: ContextVar[Optional[str]] = ContextVar("simul_result_tool", default=None)
@@ -113,9 +123,14 @@ def paging_for(tool_name: Optional[str]) -> Optional[PagedList]:
     return PAGED_RESULTS.get(tool_name) if tool_name else None
 
 
+def current_tool() -> Optional[str]:
+    """The tool named by the enclosing ``tool_result``, if any."""
+    return _CURRENT_TOOL.get()
+
+
 def current_paging() -> Optional[PagedList]:
     """The declaration for the tool named by the enclosing ``tool_result``."""
     return paging_for(_CURRENT_TOOL.get())
 
 
-__all__ = ["PAGED_RESULTS", "PagedList", "current_paging", "paging_for", "tool_result"]
+__all__ = ["PAGED_RESULTS", "PagedList", "current_paging", "current_tool", "paging_for", "tool_result"]
