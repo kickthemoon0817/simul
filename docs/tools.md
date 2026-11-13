@@ -1167,10 +1167,10 @@ Behaviour worth knowing:
     collision it had before the Undo or Redo (a trace against a hull that Redo
     put back misses). Every mesh tool repairs both on each DynamicMeshActor it
     touches, `validate_unreal_mesh` included: it rebuilds the collision, and
-    in a level an Undo or Redo left dirty it sets the component's mesh again,
-    which binds it (and renames the mesh object). A clean level is left
-    alone, so a level saved right after an Undo keeps the stale binding until
-    it is reloaded or edited.
+    where an Undo or Redo left the actor's package dirty (or in a level never
+    saved) it sets the component's mesh again, which binds it (and renames the
+    mesh object). A clean level is left alone, so a level saved right after an
+    Undo keeps the stale binding until it is reloaded or edited.
   - Each in-place edit keeps the mesh it replaced alive for Undo: a full copy
     that the editor's undo buffer limit (256 MB by default) does not count, so
     it is freed only when the edit leaves the undo history. A hundred edits of
