@@ -1189,7 +1189,14 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"frame": {"description": "Frame number to set.", "type": "integer"}},
+        "properties": {
+          "frame": {
+            "description": "Frame number to set, within -1048574..1048574 (Blender's limits).",
+            "maximum": 1048574,
+            "minimum": -1048574,
+            "type": "integer"
+          }
+        },
         "required": ["frame"]
       },
       "annotations": {"readOnlyHint": false, "idempotentHint": true},
@@ -1198,7 +1205,7 @@
     "get_blender_frame": {
       "name": "get_blender_frame",
       "title": "Get Blender Frame",
-      "description": "Get the current frame and animation range.",
+      "description": "Get the current frame, the animation range and the frame rate (fps / fps_base).",
       "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
@@ -1206,13 +1213,23 @@
     "set_blender_frame_range": {
       "name": "set_blender_frame_range",
       "title": "Set Blender Frame Range",
-      "description": "Set the animation frame range. An unbaked rigid-body cache follows it; a baked one keeps its range, with a warning.",
+      "description": "Set the animation frame range; start may equal end for a one-frame range. An unbaked rigid-body cache follows it; a baked one keeps its range, with a warning.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "frame_start": {"description": "Start frame of the animation range.", "type": "integer"},
-          "frame_end": {"description": "End frame of the animation range.", "type": "integer"}
+          "frame_start": {
+            "description": "Start frame of the animation range, 0..1048574.",
+            "maximum": 1048574,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "frame_end": {
+            "description": "End frame of the animation range, 0..1048574; may equal frame_start for a one-frame range.",
+            "maximum": 1048574,
+            "minimum": 0,
+            "type": "integer"
+          }
         },
         "required": ["frame_start", "frame_end"]
       },
@@ -1222,36 +1239,73 @@
     "play_blender_animation": {
       "name": "play_blender_animation",
       "title": "Play Blender Animation",
-      "description": "Control animation playback (play, stop, reverse).",
+      "description": "Play, reverse, pause or stop animation playback; repeating a call changes nothing more. pause keeps the current frame, stop returns to the frame playback started from. Needs Blender's event loop: refused in background mode.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "action": {
             "default": "play",
-            "description": "One of 'play', 'stop', or 'reverse'.",
+            "description": "play (forward), reverse, pause (stop on the current frame) or stop (stop and return to the frame playback started from).",
+            "enum": ["play", "reverse", "pause", "stop"],
             "type": "string"
           }
         }
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "insert_blender_keyframe": {
       "name": "insert_blender_keyframe",
       "title": "Insert Blender Keyframe",
-      "description": "Insert a keyframe on an object property.",
+      "description": "Insert a keyframe on an object property: its current value, or value; optionally the interpolation and key type.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Name of the object.", "type": "string"},
           "data_path": {
-            "description": "Property data path (e.g. 'location', 'rotation_euler').",
+            "description": "Property data path (e.g. 'location', 'rotation_euler', 'pose.bones[\"Bone\"].rotation_quaternion', '[\"custom\"]').",
             "type": "string"
           },
           "frame": {"description": "Frame number for the keyframe.", "type": "integer"},
-          "index": {"default": -1, "description": "Array index (-1 for all channels).", "type": "integer"}
+          "index": {"default": -1, "description": "Array index (-1 for all channels).", "type": "integer"},
+          "value": {
+            "anyOf": [{"type": "number"}, {"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "Value to key instead of the current one: one number for a single channel (index >= 0, or a property that is not an array), otherwise one number per element, such as [x, y, z] for location. The keyed channels then show what their F-curves give at the current frame; every other channel keeps its value."
+          },
+          "interpolation": {
+            "anyOf": [
+              {
+                "enum": [
+                  "CONSTANT",
+                  "LINEAR",
+                  "BEZIER",
+                  "SINE",
+                  "QUAD",
+                  "CUBIC",
+                  "QUART",
+                  "QUINT",
+                  "EXPO",
+                  "CIRC",
+                  "BACK",
+                  "BOUNCE",
+                  "ELASTIC"
+                ],
+                "type": "string"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "Interpolation from this key to the next (CONSTANT, LINEAR, BEZIER, SINE, QUAD, CUBIC, QUART, QUINT, EXPO, CIRC, BACK, BOUNCE or ELASTIC); None leaves Blender's choice: the previous key's on a curve that already has two keys, else the preference (Bezier by default)."
+          },
+          "keyframe_type": {
+            "default": "KEYFRAME",
+            "description": "Blender's key type: KEYFRAME, BREAKDOWN, MOVING_HOLD, EXTREME, JITTER or GENERATED.",
+            "enum": ["KEYFRAME", "BREAKDOWN", "MOVING_HOLD", "EXTREME", "JITTER", "GENERATED"],
+            "type": "string"
+          }
         },
         "required": ["object_name", "data_path", "frame"]
       },
@@ -1597,19 +1651,27 @@
     "get_blender_object_trajectory": {
       "name": "get_blender_object_trajectory",
       "title": "Get Blender Object Trajectory",
-      "description": "Sample object position over a frame range.",
+      "description": "Sample an object's world pose over a frame range. Not read-only: it steps the scene through the frames (frame-change handlers run, an unbaked rigid-body cache fills) and restores the current frame afterwards.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Name of the object to track.", "type": "string"},
           "start_frame": {"description": "First frame of trajectory.", "type": "integer"},
-          "end_frame": {"description": "Last frame of trajectory (inclusive).", "type": "integer"},
-          "step": {"default": 1, "description": "Frame step size.", "type": "integer"}
+          "end_frame": {
+            "description": "Last frame of trajectory (inclusive); not before start_frame.",
+            "type": "integer"
+          },
+          "step": {
+            "default": 1,
+            "description": "Frames between samples; at least 1.",
+            "minimum": 1,
+            "type": "integer"
+          }
         },
         "required": ["object_name", "start_frame", "end_frame"]
       },
-      "annotations": {"readOnlyHint": true, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "bake_blender_simulation": {
