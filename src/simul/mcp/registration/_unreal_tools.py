@@ -75,13 +75,16 @@ from ..schemas.unreal import (
     UnrealGetSimulationStatusResponse,
     UnrealGetThumbnailResponse,
     UnrealHealthCheckResponse,
+    UnrealImportAssetResponse,
     UnrealImportUsdResponse,
+    UnrealListActorComponentsResponse,
     UnrealListActorsResponse,
     UnrealListInstancesResponse,
     UnrealLoadedMapResponse,
     UnrealPingResponse,
     UnrealQuerySceneGraphResponse,
     UnrealRemeshMeshResponse,
+    UnrealSaveAssetsResponse,
     UnrealSceneSummaryResponse,
     UnrealSearchAssetsResponse,
     UnrealSetActorParentResponse,
@@ -601,7 +604,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- Scene read operations ----------------------------------------------
     UnrealTool(
         name="list_unreal_actors",
-        description="List actors in the current Unreal Engine level with optional class and tag filters.",
+        description=(
+            "List the current level's actors, one page at a time, with world transforms, tags and "
+            "attachment (parent, children). Filter by class (optionally with subclasses), tag and "
+            "label. total counts every match; a page stops at max_results or the response budget, "
+            "and next_offset is where the next one starts."
+        ),
         response=UnrealListActorsResponse,
         read_only=True,
         idempotent=True,
@@ -611,25 +619,46 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 "class_filter",
                 str,
                 "",
-                description="Filter by UClass name (empty string = no filter).",
+                description=(
+                    "Keep actors whose class has this name (StaticMeshActor, BP_Door_C) or path "
+                    "(/Script/Engine.StaticMeshActor); empty keeps every class."
+                ),
                 convert=_optional_text,
             ),
             ToolParam(
                 "tag_filter",
                 str,
                 "",
-                description="Filter by actor tag (empty string = no filter).",
+                description="Keep actors with this actor tag, ignoring case (empty string = no filter).",
                 convert=_optional_text,
             ),
-            ToolParam("max_results", int, 200, description="Maximum number of actors to return."),
+            ToolParam("max_results", int, 200, description="Most actors in the page, 1 to 5000."),
+            ToolParam("offset", int, 0, description="Matching actors to skip: the previous page's next_offset."),
+            ToolParam(
+                "label_filter",
+                str,
+                "",
+                description="Keep actors whose label contains this text, ignoring case (empty = no filter).",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "include_subclasses",
+                bool,
+                False,
+                description=(
+                    "Also keep actors whose class derives from class_filter's: Light keeps PointLight, "
+                    "SpotLight and Blueprints derived from them."
+                ),
+            ),
         ),
     ),
     UnrealTool(
         name="get_unreal_actor_info",
         description=(
-            "Get detailed information about a specific actor including transform, components, and tags. The path "
-            "must name a live actor of the level open in the editor; a deleted actor, or one of a map that is not "
-            "open, is not found, and no map is loaded to look for it."
+            "Get detailed information about a specific actor including transform, components, tags and "
+            "attachment (parent and children). The path must name a live actor of the level open in the "
+            "editor; a deleted actor, or one of a map that is not open, is not found, and no map is loaded "
+            "to look for it."
         ),
         response=UnrealGetActorInfoResponse,
         read_only=True,
@@ -638,26 +667,69 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         params=(ToolParam("actor_path", str, description="Full object path of the actor."),),
     ),
     UnrealTool(
+        name="list_unreal_actor_components",
+        description=(
+            "List an actor's components, one page at a time: class, root and editor-only flags, and "
+            "for scene components the component they are attached to, world location, mobility and "
+            "visibility; primitive components add world bounds (center, half-size, sphere radius)."
+        ),
+        response=UnrealListActorComponentsResponse,
+        read_only=True,
+        idempotent=True,
+        method="list_actor_components",
+        params=(
+            ToolParam("actor_path", str, description="Full object path of the actor."),
+            ToolParam(
+                "class_filter",
+                str,
+                "",
+                description=(
+                    "Keep components whose class has this name or path or derives from it "
+                    "(PrimitiveComponent keeps meshes, shapes and sprites); empty keeps all."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam("offset", int, 0, description="Components to skip: the previous page's next_offset."),
+            ToolParam("max_results", int, 200, description="Most components in the page, 1 to 5000."),
+        ),
+    ),
+    UnrealTool(
         name="search_unreal_assets",
-        description="Search the Unreal Asset Registry by name, class, or package path.",
+        description=(
+            "Search the Unreal Asset Registry, loading nothing: every mounted content root (/Game, /Engine, "
+            "plugins) unless package_paths narrows it, subfolders included. Matches part of the asset name "
+            "(ignoring case), sorted by path; page with offset (total counts every match). Each asset carries "
+            "the registry metadata Unreal records, such as Triangles, LODs, NaniteEnabled and CollisionPrims."
+        ),
         response=UnrealSearchAssetsResponse,
         read_only=True,
         idempotent=True,
         method="search_assets",
         params=(
-            ToolParam("query", str, "", description="Search query string."),
+            ToolParam(
+                "query",
+                str,
+                "",
+                description="Part of the asset name to match, ignoring case; empty matches every asset.",
+            ),
             ToolParam(
                 "class_names",
                 str,
                 "",
-                description="Comma-separated UClass names to filter.",
+                description=(
+                    "Comma-separated asset classes, by name (StaticMesh, Material, Texture2D) or class path "
+                    "(/Script/Engine.StaticMesh). Empty matches every class."
+                ),
                 convert=_name_list,
             ),
             ToolParam(
                 "package_paths",
                 str,
                 "",
-                description="Comma-separated package paths to search.",
+                description=(
+                    "Comma-separated content folders to search, such as /Game/Props. Empty searches every "
+                    "mounted content root."
+                ),
                 convert=_name_list,
             ),
             ToolParam(
@@ -666,6 +738,96 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 100,
                 description=f"Maximum number of results, from 1 to {MAX_ASSET_SEARCH_RESULTS}.",
             ),
+            ToolParam(
+                "offset",
+                Annotated[int, Field(ge=0)],
+                0,
+                description="Matches to skip, for the next page: pass the previous call's next_offset.",
+            ),
+            ToolParam(
+                "recursive_paths",
+                bool,
+                True,
+                description="Include the subfolders of package_paths.",
+            ),
+            ToolParam(
+                "include_subclasses",
+                bool,
+                True,
+                description="Include assets whose class derives from one of class_names.",
+            ),
+        ),
+    ),
+    UnrealTool(
+        name="import_unreal_asset",
+        description=(
+            "Import an FBX, glTF, GLB or OBJ file as assets (meshes, materials, textures) under a /Game folder "
+            "through Unreal's Interchange importer, saved, placing no actor. Every file the model names (glTF "
+            "buffers and images, OBJ MTL libraries and textures, FBX textures, UDIM tiles) must be inside the "
+            "sandbox too, else SandboxError with details.references_outside. Without replace_existing, assets "
+            "that already exist are kept, and a file whose every asset exists imports nothing; with it, "
+            "Unreal reimports the mesh and keeps the other assets, listed in kept_assets."
+        ),
+        response=UnrealImportAssetResponse,
+        read_only=False,
+        destructive=True,
+        method="import_asset",
+        params=(
+            ToolParam(
+                "file_path",
+                str,
+                description="Path of the .fbx, .gltf, .glb or .obj file on disk; must be inside the sandbox.",
+            ),
+            ToolParam(
+                "destination_path",
+                str,
+                "/Game/Imports",
+                description="Content folder under /Game to import into (/Game itself included).",
+            ),
+            ToolParam(
+                "replace_existing",
+                bool,
+                False,
+                description=(
+                    "Reimport the asset named after the file. Unreal keeps the textures and materials an "
+                    "earlier import made (kept_assets, with a warning). Default false keeps every existing "
+                    "asset, and refuses (InvalidState) a file whose every asset exists."
+                ),
+            ),
+        ),
+    ),
+    UnrealTool(
+        name="save_unreal_assets",
+        description=(
+            "Save modified packages to disk: the named assets, the level being edited (save_level), or every "
+            "modified package (all_dirty). Only /Game packages unless allow_engine_content; refused during "
+            "Play In Editor. dry_run lists what would be saved."
+        ),
+        response=UnrealSaveAssetsResponse,
+        read_only=False,
+        idempotent=True,
+        destructive=True,
+        method="save_assets",
+        params=(
+            ToolParam(
+                "asset_paths",
+                str,
+                "",
+                description="Comma-separated asset paths whose packages to save, such as /Game/Materials/MI_Red.",
+                convert=_name_list,
+            ),
+            ToolParam(
+                "save_level",
+                bool,
+                False,
+                description=(
+                    "Save the level being edited: its map package and, in a World Partition level, its "
+                    "actors' packages."
+                ),
+            ),
+            ToolParam("all_dirty", bool, False, description="Save every modified package."),
+            ToolParam("allow_engine_content", bool, False, description=_ALLOW_ENGINE_CONTENT_DESCRIPTION),
+            ToolParam("dry_run", bool, False, description="Report what would be saved; save nothing."),
         ),
     ),
     UnrealTool(
@@ -1128,6 +1290,21 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("actor_path", str),
             ToolParam("material_path", str),
             ToolParam("slot_index", int, 0),
+            ToolParam(
+                "slot_name",
+                str,
+                "",
+                description="Material slot name, as the Details panel shows it; empty uses slot_index.",
+            ),
+            ToolParam(
+                "component_name",
+                str,
+                "",
+                description=(
+                    "Mesh component to assign to, by name (StaticMeshComponent0) or path. Empty picks the "
+                    "actor's mesh root component, else its only mesh component."
+                ),
+            ),
         ),
     ),
     UnrealTool(
@@ -1315,7 +1492,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "<destination_path>/<file name>, and actors into the level being edited. Without "
             "replace_existing it is refused when that folder already holds assets, and existing actors are "
             "kept; with it, those assets and the level's actors from an earlier import of the file are "
-            "replaced."
+            "replaced. Every layer and asset the stage draws on (sublayers, references, payloads, clips, "
+            "textures) must be inside the sandbox too, else SandboxError naming them."
         ),
         response=UnrealImportUsdResponse,
         read_only=False,
@@ -1329,8 +1507,18 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 Optional[Dict[str, Any]],
                 None,
                 description=(
-                    "Boolean USD options: import_actors, import_geometry, import_materials, "
-                    "import_lights, import_cameras."
+                    "USDImporter options. Booleans: import_actors, import_geometry, import_materials, "
+                    "import_skeletal_animations, import_level_sequences, import_groom_assets, "
+                    "import_sparse_volume_textures, import_sounds, import_only_used_materials, "
+                    "use_prim_kinds_for_collapsing (merge a prim's meshes into one per kinds_to_collapse; "
+                    "false keeps a mesh per prim), merge_identical_material_slots, "
+                    "share_assets_for_identical_prims, prim_path_folder_structure, interpret_lods. "
+                    "kinds_to_collapse: list of USD kinds (model, component, group, assembly, subcomponent). "
+                    "fallback_collision_type: none (render triangles), convex_decomposition, convex_hull, "
+                    "sphere, cube, mesh_simplification, capsule, custom_mesh. nanite_triangle_threshold: int. "
+                    "prims_to_import: prim paths. meters_per_unit with up_axis (y or z), together, override the "
+                    "stage's own. Lights and cameras import as actors with import_actors. Unset options take "
+                    "Unreal's defaults."
                 ),
             ),
             ToolParam(
@@ -1349,7 +1537,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="export_unreal_usd",
         description=(
             "Export actors of the level being edited with the optional USDImporter plugin's "
-            "LevelExporterUSD; actors_exported counts the actors the written stage has a prim for."
+            "LevelExporterUSD; actors_exported counts the actors the written stage has a prim for. Mesh and "
+            "material files go to <output name>_assets beside the output. DynamicMeshActors export as empty "
+            "Xforms, reported in warnings."
         ),
         response=UnrealExportUsdResponse,
         read_only=False,
@@ -1368,6 +1558,17 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 Optional[Dict[str, Any]],
                 None,
                 description="Boolean USD options: export_actor_folders, export_sublayers.",
+            ),
+            ToolParam(
+                "overwrite",
+                bool,
+                False,
+                description=(
+                    "Replace the files the export writes. Default false refuses it (InvalidState, with "
+                    "details.existing_files) when the output exists, its <output name>_assets folder holds "
+                    "files, or, with export_sublayers, a sublevel layer or MaterialOverrides file beside it "
+                    "exists. Every file written is listed in written_files."
+                ),
             ),
         ),
     ),
@@ -1416,7 +1617,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="get_unreal_interchange_info",
-        description="Query available Interchange pipelines and supported formats.",
+        description=(
+            "Interchange's supported formats by translator kind (assets, scenes, actors), the project's "
+            "content and scene pipeline stacks, and whether USD import and export are available."
+        ),
         response=UnrealGetInterchangeInfoResponse,
         read_only=True,
         idempotent=True,
@@ -1449,16 +1653,52 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="query_unreal_scene_graph",
-        description="Query the Unreal scene graph hierarchy.",
+        description=(
+            "Read the level's attachment hierarchy as a tree: the level (or the root_path actor), "
+            "the actors attached to it and theirs, max_depth levels down, optionally with each "
+            "actor's components. One page of the root's children at a time; total_actors and "
+            "total_depth cover the whole tree."
+        ),
         response=UnrealQuerySceneGraphResponse,
         read_only=True,
         idempotent=True,
         method="query_scene_graph",
         params=(
-            ToolParam("root_path", Optional[str], None),
-            ToolParam("max_depth", int, 10),
-            ToolParam("include_components", bool, False),
-            ToolParam("class_filter", Optional[str], None),
+            ToolParam(
+                "root_path",
+                Optional[str],
+                None,
+                description="Actor whose attached actors form the tree; null or empty starts at the level.",
+            ),
+            ToolParam(
+                "max_depth",
+                int,
+                10,
+                description="Levels below the root to include, 1 to 64 (the root's children are level 1).",
+            ),
+            ToolParam(
+                "include_components",
+                bool,
+                False,
+                description="Give each actor its components: name, class, is_root, attach_parent.",
+            ),
+            ToolParam(
+                "class_filter",
+                Optional[str],
+                None,
+                description=(
+                    "Keep actors whose class has this name or path, and the actors above them "
+                    "(matches_filter false); null keeps every actor."
+                ),
+            ),
+            ToolParam(
+                "include_subclasses",
+                bool,
+                False,
+                description="Also keep actors whose class derives from class_filter's.",
+            ),
+            ToolParam("offset", int, 0, description="Root children to skip: the previous page's next_offset."),
+            ToolParam("max_results", int, 100, description="Most root children in the page, 1 to 5000."),
         ),
     ),
     UnrealTool(
@@ -1544,7 +1784,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="get_unreal_actor_by_semantic_label",
-        description="Find level actors whose actor tags match a label: exact, contains or regex, ignoring case.",
+        description=(
+            "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case. "
+            "One page at a time: total_matches counts every match, and next_offset is where the next "
+            "page starts."
+        ),
         response=UnrealGetActorBySemanticLabelResponse,
         read_only=True,
         idempotent=True,
@@ -1553,6 +1797,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("label", str),
             ToolParam("match_mode", str, "exact"),
             ToolParam("max_results", int, 100),
+            ToolParam("offset", int, 0, description="Matching actors to skip: the previous page's next_offset."),
         ),
     ),
     # -- Geometry and modeling (GeometryScript) --------------------------------------

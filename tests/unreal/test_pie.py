@@ -131,6 +131,12 @@ class Actor:
     def get_all_child_actors(self, include_descendants: bool = True) -> List[Any]:
         return []
 
+    def get_attach_parent_actor(self) -> Optional["Actor"]:
+        return None
+
+    def get_attached_actors(self) -> List["Actor"]:
+        return []
+
     def actor_has_tag(self, tag: str) -> bool:
         return tag in self.tags
 
@@ -616,6 +622,10 @@ class AssetLibrary:
             "MaterialEditingLibrary": SimpleNamespace(
                 set_material_instance_parent=self.set_material_instance_parent
             ),
+            # The registry lists no level at these paths, so the parent is loaded.
+            "AssetRegistryHelpers": SimpleNamespace(
+                get_asset_registry=lambda: SimpleNamespace(get_assets_by_package_name=lambda package: [])
+            ),
             "MaterialInterface": MaterialInterface,
             "MaterialInstanceConstant": MaterialInstanceConstant,
             "MaterialInstanceConstantFactoryNew": SimpleNamespace,
@@ -678,17 +688,20 @@ def test_a_material_instance_outside_pie_is_created_parented_and_saved(
 
 
 @pytest.mark.parametrize(
-    ("parent_path", "instance_name", "error"),
+    ("parent_path", "instance_name", "error_type", "error"),
     [
         (
             "/Game/Materials/M_Missing",
             "MI_Chair",
-            "Parent material not found: /Game/Materials/M_Missing",
+            "NotFoundError",
+            "No parent material at '/Game/Materials/M_Missing': pass a Material or Material Instance asset path "
+            "such as /Engine/BasicShapes/BasicShapeMaterial",
         ),
         (
             "/Game/Materials/M_Wood",
             "M_Wood",
-            "Asset already exists: /Game/Materials/M_Wood",
+            "InvalidState",
+            "Asset already exists: /Game/Materials/M_Wood; pass another instance_name or save_path",
         ),
     ],
 )
@@ -698,6 +711,7 @@ def test_a_material_instance_outside_pie_reports_a_missing_parent_or_a_taken_nam
     monkeypatch: pytest.MonkeyPatch,
     parent_path: str,
     instance_name: str,
+    error_type: str,
     error: str,
 ) -> None:
     result = asyncio.run(
@@ -706,7 +720,7 @@ def test_a_material_instance_outside_pie_reports_a_missing_parent_or_a_taken_nam
         )
     )
 
-    assert result["success"] is False and result["error_type"] == "ScriptError"
+    assert result["success"] is False and result["error_type"] == error_type
     assert result["error"] == error
     assert "create_asset" not in asset_library.calls
 

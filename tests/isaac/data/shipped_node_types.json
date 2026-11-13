@@ -1,0 +1,3804 @@
+{
+ "extensions": [
+  "carb.audio",
+  "carb.windowing.plugins",
+  "isaacsim.action_and_event_data_generation.setup",
+  "isaacsim.anim.robot",
+  "isaacsim.app.about",
+  "isaacsim.app.selector",
+  "isaacsim.app.setup",
+  "isaacsim.asset.browser",
+  "isaacsim.asset.exporter.urdf",
+  "isaacsim.asset.gen.conveyor",
+  "isaacsim.asset.gen.conveyor.ui",
+  "isaacsim.asset.gen.omap",
+  "isaacsim.asset.gen.omap.ui",
+  "isaacsim.asset.importer.heightmap",
+  "isaacsim.asset.importer.mjcf",
+  "isaacsim.asset.importer.urdf",
+  "isaacsim.asset.validation",
+  "isaacsim.benchmark.examples",
+  "isaacsim.benchmark.services",
+  "isaacsim.code_editor.jupyter",
+  "isaacsim.code_editor.vscode",
+  "isaacsim.core.api",
+  "isaacsim.core.cloner",
+  "isaacsim.core.deprecation_manager",
+  "isaacsim.core.experimental.materials",
+  "isaacsim.core.experimental.objects",
+  "isaacsim.core.experimental.prims",
+  "isaacsim.core.experimental.utils",
+  "isaacsim.core.includes",
+  "isaacsim.core.nodes",
+  "isaacsim.core.prims",
+  "isaacsim.core.simulation_manager",
+  "isaacsim.core.throttling",
+  "isaacsim.core.utils",
+  "isaacsim.core.version",
+  "isaacsim.cortex.behaviors",
+  "isaacsim.cortex.framework",
+  "isaacsim.examples.browser",
+  "isaacsim.examples.extension",
+  "isaacsim.examples.interactive",
+  "isaacsim.examples.ui",
+  "isaacsim.gui.components",
+  "isaacsim.gui.content_browser",
+  "isaacsim.gui.menu",
+  "isaacsim.gui.property",
+  "isaacsim.gui.sensors.icon",
+  "isaacsim.replicator.agent.core",
+  "isaacsim.replicator.agent.ui",
+  "isaacsim.replicator.behavior",
+  "isaacsim.replicator.behavior.ui",
+  "isaacsim.replicator.caption.core",
+  "isaacsim.replicator.domain_randomization",
+  "isaacsim.replicator.examples",
+  "isaacsim.replicator.grasping",
+  "isaacsim.replicator.grasping.ui",
+  "isaacsim.replicator.incident",
+  "isaacsim.replicator.mobility_gen",
+  "isaacsim.replicator.mobility_gen.examples",
+  "isaacsim.replicator.mobility_gen.ui",
+  "isaacsim.replicator.object",
+  "isaacsim.replicator.synthetic_recorder",
+  "isaacsim.replicator.writers",
+  "isaacsim.robot.manipulators",
+  "isaacsim.robot.manipulators.examples",
+  "isaacsim.robot.manipulators.ui",
+  "isaacsim.robot.policy.examples",
+  "isaacsim.robot.schema",
+  "isaacsim.robot.surface_gripper",
+  "isaacsim.robot.surface_gripper.ui",
+  "isaacsim.robot.wheeled_robots",
+  "isaacsim.robot.wheeled_robots.ui",
+  "isaacsim.robot_motion.lula",
+  "isaacsim.robot_motion.lula_test_widget",
+  "isaacsim.robot_motion.motion_generation",
+  "isaacsim.robot_setup.assembler",
+  "isaacsim.robot_setup.gain_tuner",
+  "isaacsim.robot_setup.grasp_editor",
+  "isaacsim.robot_setup.wizard",
+  "isaacsim.robot_setup.xrdf_editor",
+  "isaacsim.ros2.bridge",
+  "isaacsim.ros2.sim_control",
+  "isaacsim.ros2.tf_viewer",
+  "isaacsim.ros2.urdf",
+  "isaacsim.sensors.camera",
+  "isaacsim.sensors.camera.ui",
+  "isaacsim.sensors.physics",
+  "isaacsim.sensors.physics.examples",
+  "isaacsim.sensors.physics.ui",
+  "isaacsim.sensors.physx",
+  "isaacsim.sensors.physx.examples",
+  "isaacsim.sensors.physx.ui",
+  "isaacsim.sensors.rtx",
+  "isaacsim.sensors.rtx.placement",
+  "isaacsim.sensors.rtx.ui",
+  "isaacsim.simulation_app",
+  "isaacsim.storage.native",
+  "isaacsim.test.collection",
+  "isaacsim.test.docstring",
+  "isaacsim.util.camera_inspector",
+  "isaacsim.util.debug_draw",
+  "isaacsim.util.merge_mesh",
+  "isaacsim.util.physics",
+  "isaacsim.xr.openxr",
+  "omni.activity.core",
+  "omni.activity.profiler",
+  "omni.activity.pump",
+  "omni.activity.ui",
+  "omni.activity.usd_resolver",
+  "omni.anim.asset",
+  "omni.anim.behavior.schema",
+  "omni.anim.curve.bundle",
+  "omni.anim.curve.core",
+  "omni.anim.curve.ui",
+  "omni.anim.curve_editor",
+  "omni.anim.graph.bundle",
+  "omni.anim.graph.core",
+  "omni.anim.graph.schema",
+  "omni.anim.graph.ui",
+  "omni.anim.navigation.bundle",
+  "omni.anim.navigation.core",
+  "omni.anim.navigation.meshtools",
+  "omni.anim.navigation.schema",
+  "omni.anim.navigation.ui",
+  "omni.anim.people",
+  "omni.anim.retarget.bundle",
+  "omni.anim.retarget.core",
+  "omni.anim.retarget.preview",
+  "omni.anim.retarget.ui",
+  "omni.anim.shared.core",
+  "omni.anim.skelJoint",
+  "omni.anim.timeline",
+  "omni.anim.widget.timeline",
+  "omni.anim.window.timeline",
+  "omni.appwindow",
+  "omni.asset_validator.core",
+  "omni.asset_validator.ui",
+  "omni.assets.plugins",
+  "omni.blobkey",
+  "omni.client",
+  "omni.convexdecomposition",
+  "omni.cuopt.examples",
+  "omni.cuopt.service",
+  "omni.cuopt.visualization",
+  "omni.curve.creator",
+  "omni.curve.manipulator",
+  "omni.datastore",
+  "omni.debugdraw",
+  "omni.fabric.commands",
+  "omni.flowusd",
+  "omni.genproc.core",
+  "omni.gpu_foundation",
+  "omni.gpu_foundation.shadercache.vulkan",
+  "omni.gpucompute.plugins",
+  "omni.graph",
+  "omni.graph.action",
+  "omni.graph.action_core",
+  "omni.graph.action_nodes",
+  "omni.graph.action_nodes_core",
+  "omni.graph.bundle.action",
+  "omni.graph.core",
+  "omni.graph.examples.cpp",
+  "omni.graph.exec",
+  "omni.graph.image.core",
+  "omni.graph.image.nodes",
+  "omni.graph.io",
+  "omni.graph.nodes",
+  "omni.graph.nodes_core",
+  "omni.graph.scriptnode",
+  "omni.graph.telemetry",
+  "omni.graph.tools",
+  "omni.graph.ui",
+  "omni.graph.ui_nodes",
+  "omni.graph.visualization.nodes",
+  "omni.graph.window.action",
+  "omni.graph.window.core",
+  "omni.graph.window.generic",
+  "omni.hsscclient",
+  "omni.hydra.engine.stats",
+  "omni.hydra.iray.shadercache.vulkan",
+  "omni.hydra.rtx",
+  "omni.hydra.rtx.shadercache.vulkan",
+  "omni.hydra.scene_api",
+  "omni.hydra.scene_delegate",
+  "omni.hydra.usdrt_delegate",
+  "omni.importer.onshape",
+  "omni.index",
+  "omni.index.libs",
+  "omni.inspect",
+  "omni.iray.libs",
+  "omni.isaac.core_archive",
+  "omni.isaac.ml_archive",
+  "omni.kit.actions.core",
+  "omni.kit.actions.window",
+  "omni.kit.asset_converter",
+  "omni.kit.audiodeviceenum",
+  "omni.kit.browser.asset",
+  "omni.kit.browser.core",
+  "omni.kit.browser.folder.core",
+  "omni.kit.browser.material",
+  "omni.kit.browser.sample",
+  "omni.kit.capture.viewport",
+  "omni.kit.clipboard",
+  "omni.kit.collaboration.channel_manager",
+  "omni.kit.collaboration.presence_layer",
+  "omni.kit.collaboration.telemetry",
+  "omni.kit.commands",
+  "omni.kit.context_menu",
+  "omni.kit.converter.cad",
+  "omni.kit.converter.common",
+  "omni.kit.converter.dgn",
+  "omni.kit.converter.dgn_core",
+  "omni.kit.converter.hoops",
+  "omni.kit.converter.hoops_core",
+  "omni.kit.converter.jt",
+  "omni.kit.converter.jt_core",
+  "omni.kit.core.collection",
+  "omni.kit.data2ui.core",
+  "omni.kit.data2ui.usd",
+  "omni.kit.debug.python",
+  "omni.kit.debug.vscode",
+  "omni.kit.environment.core",
+  "omni.kit.exec.core",
+  "omni.kit.gfn",
+  "omni.kit.graph.delegate.default",
+  "omni.kit.graph.delegate.modern",
+  "omni.kit.graph.editor.core",
+  "omni.kit.graph.usd.commands",
+  "omni.kit.graph.widget.variables",
+  "omni.kit.helper.file_utils",
+  "omni.kit.hotkeys.core",
+  "omni.kit.hotkeys.window",
+  "omni.kit.hydra_texture",
+  "omni.kit.livestream.core",
+  "omni.kit.livestream.messaging",
+  "omni.kit.livestream.webrtc",
+  "omni.kit.loop",
+  "omni.kit.mainwindow",
+  "omni.kit.manipulator.camera",
+  "omni.kit.manipulator.prim",
+  "omni.kit.manipulator.prim.core",
+  "omni.kit.manipulator.prim.fabric",
+  "omni.kit.manipulator.prim.usd",
+  "omni.kit.manipulator.selection",
+  "omni.kit.manipulator.selector",
+  "omni.kit.manipulator.tool.snap",
+  "omni.kit.manipulator.transform",
+  "omni.kit.manipulator.viewport",
+  "omni.kit.material.library",
+  "omni.kit.menu.common",
+  "omni.kit.menu.core",
+  "omni.kit.menu.create",
+  "omni.kit.menu.stage",
+  "omni.kit.menu.utils",
+  "omni.kit.mesh.raycast",
+  "omni.kit.ngsearch",
+  "omni.kit.notification_manager",
+  "omni.kit.numpy.common",
+  "omni.kit.pip_archive",
+  "omni.kit.pipapi",
+  "omni.kit.playlist.core",
+  "omni.kit.pointclouds",
+  "omni.kit.preferences.animation",
+  "omni.kit.prim.icon",
+  "omni.kit.primitive.mesh",
+  "omni.kit.profiler.tracy",
+  "omni.kit.profiler.window",
+  "omni.kit.property.adapter.core",
+  "omni.kit.property.adapter.fabric",
+  "omni.kit.property.adapter.usd",
+  "omni.kit.property.audio",
+  "omni.kit.property.bundle",
+  "omni.kit.property.camera",
+  "omni.kit.property.collection",
+  "omni.kit.property.environment",
+  "omni.kit.property.geometry",
+  "omni.kit.property.layer",
+  "omni.kit.property.light",
+  "omni.kit.property.material",
+  "omni.kit.property.physx",
+  "omni.kit.property.render",
+  "omni.kit.property.transform",
+  "omni.kit.property.usd",
+  "omni.kit.quicklayout",
+  "omni.kit.raycast.query",
+  "omni.kit.renderer.capture",
+  "omni.kit.renderer.core",
+  "omni.kit.renderer.imgui",
+  "omni.kit.renderer.init",
+  "omni.kit.scripting",
+  "omni.kit.search.files",
+  "omni.kit.search.service",
+  "omni.kit.search_core",
+  "omni.kit.selection",
+  "omni.kit.sequencer.core",
+  "omni.kit.sequencer.usd",
+  "omni.kit.stage.copypaste",
+  "omni.kit.stage.mdl_converter",
+  "omni.kit.stage_column.payload",
+  "omni.kit.stage_column.variant",
+  "omni.kit.stage_template.core",
+  "omni.kit.stage_templates",
+  "omni.kit.stagerecorder.bundle",
+  "omni.kit.stagerecorder.core",
+  "omni.kit.stagerecorder.ui",
+  "omni.kit.streamsdk.plugins",
+  "omni.kit.telemetry",
+  "omni.kit.test",
+  "omni.kit.test_suite.helpers",
+  "omni.kit.thumbnails.mdl",
+  "omni.kit.timeline.minibar",
+  "omni.kit.tool.asset_exporter",
+  "omni.kit.tool.asset_importer",
+  "omni.kit.tool.collect",
+  "omni.kit.tool.measure",
+  "omni.kit.tool.remove_unused.controller",
+  "omni.kit.tool.remove_unused.core",
+  "omni.kit.ui.actions",
+  "omni.kit.ui_test",
+  "omni.kit.uiapp",
+  "omni.kit.usd.collect",
+  "omni.kit.usd.layers",
+  "omni.kit.usd.mdl",
+  "omni.kit.usd_undo",
+  "omni.kit.usda_edit",
+  "omni.kit.usdz_export",
+  "omni.kit.variant.editor",
+  "omni.kit.variant.presenter",
+  "omni.kit.viewport.actions",
+  "omni.kit.viewport.bundle",
+  "omni.kit.viewport.legacy_gizmos",
+  "omni.kit.viewport.manipulator.transform",
+  "omni.kit.viewport.menubar.camera",
+  "omni.kit.viewport.menubar.core",
+  "omni.kit.viewport.menubar.display",
+  "omni.kit.viewport.menubar.lighting",
+  "omni.kit.viewport.menubar.render",
+  "omni.kit.viewport.menubar.settings",
+  "omni.kit.viewport.menubar.waypoint",
+  "omni.kit.viewport.registry",
+  "omni.kit.viewport.rtx",
+  "omni.kit.viewport.scene_camera_model",
+  "omni.kit.viewport.utility",
+  "omni.kit.viewport.window",
+  "omni.kit.viewport_widgets_manager",
+  "omni.kit.waypoint.core",
+  "omni.kit.waypoint.playlist",
+  "omni.kit.widget.browser_bar",
+  "omni.kit.widget.cache_indicator",
+  "omni.kit.widget.calendar",
+  "omni.kit.widget.collection",
+  "omni.kit.widget.context_menu",
+  "omni.kit.widget.extended_searchfield",
+  "omni.kit.widget.filebrowser",
+  "omni.kit.widget.filter",
+  "omni.kit.widget.graph",
+  "omni.kit.widget.highlight_label",
+  "omni.kit.widget.imageview",
+  "omni.kit.widget.layers",
+  "omni.kit.widget.live",
+  "omni.kit.widget.live_session_management",
+  "omni.kit.widget.live_session_management.ui",
+  "omni.kit.widget.material_preview",
+  "omni.kit.widget.nucleus_connector",
+  "omni.kit.widget.nucleus_info",
+  "omni.kit.widget.options_button",
+  "omni.kit.widget.options_menu",
+  "omni.kit.widget.path_field",
+  "omni.kit.widget.prompt",
+  "omni.kit.widget.schema_api",
+  "omni.kit.widget.search_delegate",
+  "omni.kit.widget.searchable_combobox",
+  "omni.kit.widget.searchfield",
+  "omni.kit.widget.settings",
+  "omni.kit.widget.sliderbar",
+  "omni.kit.widget.stage",
+  "omni.kit.widget.stage_icons",
+  "omni.kit.widget.text_editor",
+  "omni.kit.widget.timeline",
+  "omni.kit.widget.toolbar",
+  "omni.kit.widget.versioning",
+  "omni.kit.widget.viewport",
+  "omni.kit.widget.zoombar",
+  "omni.kit.widgets.custom",
+  "omni.kit.window.collection",
+  "omni.kit.window.commands",
+  "omni.kit.window.console",
+  "omni.kit.window.content_browser",
+  "omni.kit.window.content_browser_registry",
+  "omni.kit.window.cursor",
+  "omni.kit.window.drop_support",
+  "omni.kit.window.extensions",
+  "omni.kit.window.file",
+  "omni.kit.window.file_exporter",
+  "omni.kit.window.file_importer",
+  "omni.kit.window.filepicker",
+  "omni.kit.window.material",
+  "omni.kit.window.material_graph",
+  "omni.kit.window.movie_capture",
+  "omni.kit.window.popup_dialog",
+  "omni.kit.window.preferences",
+  "omni.kit.window.property",
+  "omni.kit.window.quicksearch",
+  "omni.kit.window.script_editor",
+  "omni.kit.window.section",
+  "omni.kit.window.stage",
+  "omni.kit.window.stats",
+  "omni.kit.window.status_bar",
+  "omni.kit.window.title",
+  "omni.kit.window.toolbar",
+  "omni.kit.window.usd_paths",
+  "omni.kit.window.usddebug",
+  "omni.kit.xr.advertise",
+  "omni.kit.xr.core",
+  "omni.kit.xr.profile.ar",
+  "omni.kit.xr.profile.common",
+  "omni.kit.xr.profile.tabletar",
+  "omni.kit.xr.profile.vr",
+  "omni.kit.xr.scene_view.core",
+  "omni.kit.xr.scene_view.utils",
+  "omni.kit.xr.system.openxr",
+  "omni.kit.xr.system.simulatedxr",
+  "omni.kit.xr.ui.stage",
+  "omni.kit.xr.ui.window.profile",
+  "omni.kit.xr.ui.window.viewport",
+  "omni.kvdb",
+  "omni.localcache",
+  "omni.materialx.libs",
+  "omni.mdl",
+  "omni.mdl.neuraylib",
+  "omni.mdl.usd_converter",
+  "omni.metrics.core",
+  "omni.metropolis.utils",
+  "omni.no_code_ui.bundle",
+  "omni.ocio",
+  "omni.physics",
+  "omni.physics.physx",
+  "omni.physics.stageupdate",
+  "omni.physics.tensors",
+  "omni.physx",
+  "omni.physx.asset_validator",
+  "omni.physx.bundle",
+  "omni.physx.camera",
+  "omni.physx.cct",
+  "omni.physx.commands",
+  "omni.physx.cooking",
+  "omni.physx.demos",
+  "omni.physx.fabric",
+  "omni.physx.foundation",
+  "omni.physx.graph",
+  "omni.physx.pvd",
+  "omni.physx.supportui",
+  "omni.physx.telemetry",
+  "omni.physx.tensors",
+  "omni.physx.tests",
+  "omni.physx.tests.visual",
+  "omni.physx.ui",
+  "omni.physx.vehicle",
+  "omni.pip.cloud",
+  "omni.pip.compute",
+  "omni.ramp",
+  "omni.replicator.core",
+  "omni.replicator.replicator_yaml",
+  "omni.resourcemonitor",
+  "omni.rtx.settings.core",
+  "omni.rtx.shadercache.vulkan",
+  "omni.rtx.window.settings",
+  "omni.scene.optimizer.bundle",
+  "omni.scene.optimizer.core",
+  "omni.scene.optimizer.ui",
+  "omni.scene.visualization.bundle",
+  "omni.scene.visualization.core",
+  "omni.scene.visualization.ui",
+  "omni.sensors.net",
+  "omni.sensors.nv.camera",
+  "omni.sensors.nv.common",
+  "omni.sensors.nv.ids",
+  "omni.sensors.nv.lidar",
+  "omni.sensors.nv.materials",
+  "omni.sensors.nv.radar",
+  "omni.sensors.nv.ultrasonic",
+  "omni.sensors.nv.wpm",
+  "omni.services.client",
+  "omni.services.convert.cad",
+  "omni.services.core",
+  "omni.services.facilities.base",
+  "omni.services.facilities.monitoring.progress",
+  "omni.services.livestream.nvcf",
+  "omni.services.pip_archive",
+  "omni.services.starfleet.auth",
+  "omni.services.transport.client.base",
+  "omni.services.transport.client.http_async",
+  "omni.services.transport.server.base",
+  "omni.services.transport.server.http",
+  "omni.services.transport.server.zeroconf",
+  "omni.services.usd",
+  "omni.simready.explorer",
+  "omni.stats",
+  "omni.syntheticdata",
+  "omni.timeline",
+  "omni.timeline.live_session",
+  "omni.tools.array",
+  "omni.ui",
+  "omni.ui.scene",
+  "omni.ui_query",
+  "omni.uiaudio",
+  "omni.ujitso.client",
+  "omni.ujitso.default",
+  "omni.usd",
+  "omni.usd.config",
+  "omni.usd.core",
+  "omni.usd.fileformat.e57",
+  "omni.usd.fileformat.pts",
+  "omni.usd.libs",
+  "omni.usd.metrics.assembler",
+  "omni.usd.metrics.assembler.physics",
+  "omni.usd.metrics.assembler.ui",
+  "omni.usd.schema.anim",
+  "omni.usd.schema.audio",
+  "omni.usd.schema.flow",
+  "omni.usd.schema.geospatial",
+  "omni.usd.schema.metrics.assembler",
+  "omni.usd.schema.omni_lens_distortion",
+  "omni.usd.schema.omni_sensors",
+  "omni.usd.schema.omnigraph",
+  "omni.usd.schema.omniscripting",
+  "omni.usd.schema.physx",
+  "omni.usd.schema.render_settings.rtx",
+  "omni.usd.schema.scene.visualization",
+  "omni.usd.schema.semantics",
+  "omni.usd.schema.sequence",
+  "omni.usd_resolver",
+  "omni.usdex.libs",
+  "omni.usdphysics",
+  "omni.usdphysics.ui",
+  "omni.vdb_timesample_editor",
+  "omni.videoencoding",
+  "omni.volume",
+  "omni.warehouse_creator",
+  "omni.warp",
+  "omni.warp.core",
+  "semantics.schema.editor",
+  "semantics.schema.property",
+  "usdrt.scenegraph"
+ ],
+ "node_types": {
+  "isaacsim.core.nodes.IsaacArticulationController": [
+   "effortCommand",
+   "execIn",
+   "jointIndices",
+   "jointNames",
+   "positionCommand",
+   "robotPath",
+   "targetPrim",
+   "velocityCommand"
+  ],
+  "isaacsim.core.nodes.IsaacArticulationState": [
+   "execIn",
+   "jointIndices",
+   "jointNames",
+   "robotPath",
+   "targetPrim"
+  ],
+  "isaacsim.core.nodes.IsaacCreateRenderProduct": [
+   "cameraPrim",
+   "enabled",
+   "execIn",
+   "height",
+   "width"
+  ],
+  "isaacsim.core.nodes.IsaacCreateViewport": [
+   "execIn",
+   "name",
+   "viewportId"
+  ],
+  "isaacsim.core.nodes.IsaacGenerateRGBA": [
+   "color",
+   "height",
+   "width"
+  ],
+  "isaacsim.core.nodes.IsaacGetViewportRenderProduct": [
+   "execIn",
+   "viewport"
+  ],
+  "isaacsim.core.nodes.IsaacReadEnvVar": [
+   "envVar"
+  ],
+  "isaacsim.core.nodes.IsaacReadFilePath": [
+   "path"
+  ],
+  "isaacsim.core.nodes.IsaacSetCameraOnRenderProduct": [
+   "cameraPrim",
+   "execIn",
+   "renderProductPath"
+  ],
+  "isaacsim.core.nodes.IsaacSetViewportResolution": [
+   "execIn",
+   "height",
+   "viewport",
+   "width"
+  ],
+  "isaacsim.core.nodes.IsaacTestNode": [
+   "execIn",
+   "input"
+  ],
+  "isaacsim.core.nodes.OgnIsaacScaleToFromStageUnit": [
+   "conversion",
+   "value"
+  ],
+  "isaacsim.replicator.domain_randomization.OgnCountIndices": [
+   "indices"
+  ],
+  "isaacsim.replicator.domain_randomization.OgnIntervalFiltering": [
+   "execIn",
+   "frameCounts",
+   "ignoreInterval",
+   "indices",
+   "interval"
+  ],
+  "isaacsim.replicator.domain_randomization.OgnOnRLFrame": [
+   "num_envs",
+   "run"
+  ],
+  "isaacsim.replicator.domain_randomization.OgnWritePhysicsArticulationView": [
+   "attribute",
+   "dist_param_1",
+   "dist_param_2",
+   "distribution",
+   "execIn",
+   "indices",
+   "num_buckets",
+   "on_reset",
+   "operation",
+   "prims",
+   "values"
+  ],
+  "isaacsim.replicator.domain_randomization.OgnWritePhysicsRigidPrimView": [
+   "attribute",
+   "dist_param_1",
+   "dist_param_2",
+   "distribution",
+   "execIn",
+   "indices",
+   "num_buckets",
+   "on_reset",
+   "operation",
+   "prims",
+   "values"
+  ],
+  "isaacsim.replicator.domain_randomization.OgnWritePhysicsSimulationContext": [
+   "attribute",
+   "dist_param_1",
+   "dist_param_2",
+   "distribution",
+   "execIn",
+   "indices",
+   "num_buckets",
+   "on_reset",
+   "operation",
+   "prims",
+   "values"
+  ],
+  "isaacsim.replicator.domain_randomization.Random3f": [
+   "maximum",
+   "minimum"
+  ],
+  "isaacsim.replicator.examples.OgnSampleBetweenSpheres": [
+   "execIn",
+   "prims",
+   "radius1",
+   "radius2"
+  ],
+  "isaacsim.replicator.examples.OgnSampleInSphere": [
+   "execIn",
+   "prims",
+   "radius"
+  ],
+  "isaacsim.replicator.examples.OgnSampleOnSphere": [
+   "execIn",
+   "prims",
+   "radius"
+  ],
+  "isaacsim.replicator.writers.Dope": [
+   "boundingBox3d",
+   "cameraFisheyeMaxFOV",
+   "cameraFisheyeNominalHeight",
+   "cameraFisheyeNominalWidth",
+   "cameraFisheyeOpticalCentre",
+   "cameraFisheyePolynomial",
+   "cameraModel",
+   "cameraNearFar",
+   "cameraProjection",
+   "cameraRotation",
+   "cameraViewTransform",
+   "exec",
+   "focalLength",
+   "height",
+   "horizontalAperture",
+   "occlusion",
+   "sdIMInstanceSemanticMap",
+   "sdIMMaxSemanticHierarchyDepth",
+   "sdIMMinSemanticIndex",
+   "sdIMNumSemanticTokens",
+   "sdIMNumSemantics",
+   "sdIMSemanticTokenMap",
+   "semanticTypes",
+   "width"
+  ],
+  "isaacsim.replicator.writers.Pose": [
+   "bufferSize",
+   "cameraProjection",
+   "cameraRotation",
+   "cameraViewTransform",
+   "data",
+   "exec",
+   "getCenters",
+   "imageHeight",
+   "imageWidth",
+   "includeOccludedPrims",
+   "sdIMInstanceSemanticMap",
+   "sdIMMaxSemanticHierarchyDepth",
+   "sdIMMinSemanticIndex",
+   "sdIMNumSemanticTokens",
+   "sdIMNumSemantics",
+   "sdIMSemanticTokenMap",
+   "sdIMSemanticWorldTransform",
+   "semanticTypes"
+  ],
+  "isaacsim.robot.manipulators.IsaacGripperController": [
+   "articulationRootPrim",
+   "close",
+   "closePosition",
+   "execIn",
+   "gripperPrim",
+   "gripperSpeed",
+   "jointNames",
+   "open",
+   "openPosition",
+   "stop"
+  ],
+  "isaacsim.robot.surface_gripper.SurfaceGripper": [
+   "SurfaceGripper",
+   "Toggle",
+   "enabled"
+  ],
+  "isaacsim.robot.wheeled_robots.AckermannController": [
+   "acceleration",
+   "backWheelRadius",
+   "dt",
+   "execIn",
+   "frontWheelRadius",
+   "invertSteering",
+   "maxAcceleration",
+   "maxSteeringAngleVelocity",
+   "maxWheelRotation",
+   "maxWheelVelocity",
+   "speed",
+   "steeringAngle",
+   "steeringAngleVelocity",
+   "trackWidth",
+   "wheelBase"
+  ],
+  "isaacsim.robot.wheeled_robots.AckermannControllerDeprecated": [
+   "DT",
+   "acceleration",
+   "currentLinearVelocity",
+   "execIn",
+   "invertSteeringAngle",
+   "maxWheelRotation",
+   "maxWheelVelocity",
+   "speed",
+   "steeringAngle",
+   "trackWidth",
+   "turningWheelRadius",
+   "useAcceleration",
+   "wheelBase"
+  ],
+  "isaacsim.robot.wheeled_robots.AckermannSteering": [
+   "DT",
+   "acceleration",
+   "currentLinearVelocity",
+   "execIn",
+   "invertSteeringAngle",
+   "maxWheelRotation",
+   "maxWheelVelocity",
+   "speed",
+   "steeringAngle",
+   "trackWidth",
+   "turningWheelRadius",
+   "useAcceleration",
+   "wheelBase"
+  ],
+  "isaacsim.robot.wheeled_robots.CheckGoal2D": [
+   "currentOrientation",
+   "currentPosition",
+   "execIn",
+   "target",
+   "targetChanged",
+   "thresholds"
+  ],
+  "isaacsim.robot.wheeled_robots.DifferentialController": [
+   "angularVelocity",
+   "dt",
+   "execIn",
+   "linearVelocity",
+   "maxAcceleration",
+   "maxAngularAcceleration",
+   "maxAngularSpeed",
+   "maxDeceleration",
+   "maxLinearSpeed",
+   "maxWheelSpeed",
+   "wheelDistance",
+   "wheelRadius"
+  ],
+  "isaacsim.robot.wheeled_robots.HolonomicController": [
+   "angularGain",
+   "execIn",
+   "inputVelocity",
+   "linearGain",
+   "maxAngularSpeed",
+   "maxLinearSpeed",
+   "maxWheelSpeed",
+   "mecanumAngles",
+   "upAxis",
+   "wheelAxis",
+   "wheelOrientations",
+   "wheelPositions",
+   "wheelRadius"
+  ],
+  "isaacsim.robot.wheeled_robots.HolonomicRobotUsdSetup": [
+   "comPrim",
+   "comPrimPath",
+   "robotPrim",
+   "robotPrimPath",
+   "usePath"
+  ],
+  "isaacsim.robot.wheeled_robots.QuinticPathPlanner": [
+   "currentOrientation",
+   "currentPosition",
+   "execIn",
+   "goalAccel",
+   "goalVelocity",
+   "initialAccel",
+   "initialVelocity",
+   "maxAccel",
+   "maxJerk",
+   "step",
+   "targetOrientation",
+   "targetPosition",
+   "targetPrim"
+  ],
+  "isaacsim.robot.wheeled_robots.StanleyControlPID": [
+   "currentOrientation",
+   "currentPosition",
+   "currentSpeed",
+   "drawPath",
+   "execIn",
+   "gains",
+   "maxVelocity",
+   "pathArrays",
+   "reachedGoal",
+   "step",
+   "target",
+   "targetChanged",
+   "thresholds",
+   "wheelBase"
+  ],
+  "isaacsim.ros2.bridge.ROS2CameraHelper": [
+   "context",
+   "enableSemanticLabels",
+   "enabled",
+   "execIn",
+   "frameId",
+   "frameSkipCount",
+   "nodeNamespace",
+   "qosProfile",
+   "queueSize",
+   "renderProductPath",
+   "resetSimulationTimeOnStop",
+   "semanticLabelsTopicName",
+   "stereoOffset",
+   "topicName",
+   "type",
+   "useSystemTime",
+   "viewport"
+  ],
+  "isaacsim.ros2.bridge.ROS2CameraInfoHelper": [
+   "context",
+   "enabled",
+   "execIn",
+   "frameId",
+   "frameIdRight",
+   "frameSkipCount",
+   "nodeNamespace",
+   "qosProfile",
+   "queueSize",
+   "renderProductPath",
+   "renderProductPathRight",
+   "resetSimulationTimeOnStop",
+   "topicName",
+   "topicNameRight",
+   "useSystemTime"
+  ],
+  "isaacsim.ros2.bridge.ROS2QoSProfile": [
+   "createProfile",
+   "deadline",
+   "depth",
+   "durability",
+   "history",
+   "leaseDuration",
+   "lifespan",
+   "liveliness",
+   "reliability"
+  ],
+  "isaacsim.ros2.bridge.ROS2RtxLidarHelper": [
+   "context",
+   "enabled",
+   "execIn",
+   "frameId",
+   "frameSkipCount",
+   "fullScan",
+   "nodeNamespace",
+   "qosProfile",
+   "queueSize",
+   "renderProductPath",
+   "resetSimulationTimeOnStop",
+   "showDebugView",
+   "topicName",
+   "type",
+   "useSystemTime"
+  ],
+  "isaacsim.sensors.physics.IsaacReadEffortSensor": [
+   "enabled",
+   "execIn",
+   "prim",
+   "sensorPeriod",
+   "useLatestData"
+  ],
+  "omni.anim.DecomposeMatrix": [
+   "matrix",
+   "rotateOrder"
+  ],
+  "omni.anim.MatrixInverse": [
+   "transform"
+  ],
+  "omni.anim.MatrixMixer": [
+   "alpha",
+   "interpolate_rotation",
+   "interpolate_scale",
+   "interpolate_translation",
+   "transform_a",
+   "transform_b"
+  ],
+  "omni.anim.MatrixMultiply": [
+   "transform_a",
+   "transform_b"
+  ],
+  "omni.anim.graph.ExtractCharacterPoseBundle": [
+   "pose"
+  ],
+  "omni.anim.graph.GetCharacterJointTransform": [
+   "joint",
+   "skelRootPath"
+  ],
+  "omni.anim.graph.GetCharacterWorldTransform": [
+   "skelRootPath"
+  ],
+  "omni.anim.graph.SetCharacterWorldTransform": [
+   "execIn",
+   "skelRootPath",
+   "transform"
+  ],
+  "omni.anim.graph.UpdateCharacter": [
+   "deltaTime",
+   "execIn",
+   "skelRootPath"
+  ],
+  "omni.anim.graph.WriteAnimationGraphVariable": [
+   "execIn",
+   "graph",
+   "skelRootPath",
+   "value",
+   "variableName"
+  ],
+  "omni.flowusd.FlowBlocks": [],
+  "omni.flowusd.FlowNanoVdbReadback": [],
+  "omni.flowusd.FlowSimTime": [],
+  "omni.flowusd.FlowVoxelizePoints": [
+   "cellSize",
+   "colors",
+   "localToWorld",
+   "maxBlocks",
+   "points"
+  ],
+  "omni.flowusd.ReadUsdAttributeRange": [
+   "firstElement",
+   "name",
+   "prim",
+   "primPath",
+   "rangeSize",
+   "usdTimecode",
+   "usePath"
+  ],
+  "omni.graph.BundleToUSDA": [
+   "bundle",
+   "outputAncestors",
+   "outputValues",
+   "usePrimPath",
+   "usePrimType",
+   "usePrimvarMetadata"
+  ],
+  "omni.graph.ExportUSDPrim": [
+   "applyTransform",
+   "attrNamesToExport",
+   "bundle",
+   "excludedAttrNames",
+   "exportToRootLayer",
+   "inputAttrNames",
+   "layerName",
+   "onlyExportToExisting",
+   "outputAttrNames",
+   "primPathFromBundle",
+   "removeMissingAttrs",
+   "renameAttributes",
+   "timeVaryingAttributes",
+   "usdTimecode"
+  ],
+  "omni.graph.ImportUSDPrim": [
+   "applySkelBinding",
+   "applyTransform",
+   "attrNamesToImport",
+   "computeBoundingBox",
+   "importAttributes",
+   "importPath",
+   "importPrimvarMetadata",
+   "importTime",
+   "importTransform",
+   "importType",
+   "inputAttrNames",
+   "keepPrimsSeparate",
+   "outputAttrNames",
+   "prim",
+   "renameAttributes",
+   "timeVaryingAttributes",
+   "usdTimecode"
+  ],
+  "omni.graph.TransformBundle": [
+   "input",
+   "transform"
+  ],
+  "omni.graph.action.AddPrimRelationship": [
+   "execIn",
+   "name",
+   "path",
+   "target"
+  ],
+  "omni.graph.action.Branch": [
+   "condition",
+   "execIn"
+  ],
+  "omni.graph.action.Countdown": [
+   "duration",
+   "execIn",
+   "period"
+  ],
+  "omni.graph.action.Counter": [
+   "execIn",
+   "reset"
+  ],
+  "omni.graph.action.Delay": [
+   "duration",
+   "execIn"
+  ],
+  "omni.graph.action.ExitApplication": [
+   "execIn"
+  ],
+  "omni.graph.action.FlipFlop": [
+   "execIn"
+  ],
+  "omni.graph.action.ForEach": [
+   "arrayIn",
+   "execIn"
+  ],
+  "omni.graph.action.ForEachTarget": [
+   "execIn",
+   "targets"
+  ],
+  "omni.graph.action.ForLoop": [
+   "breakLoop",
+   "execIn",
+   "start",
+   "step",
+   "stop"
+  ],
+  "omni.graph.action.Gate": [
+   "enter",
+   "startClosed",
+   "toggle"
+  ],
+  "omni.graph.action.Multigate": [
+   "execIn",
+   "reset"
+  ],
+  "omni.graph.action.Multisequence": [
+   "execIn"
+  ],
+  "omni.graph.action.OnClosing": [],
+  "omni.graph.action.OnCustomEvent": [
+   "eventName",
+   "onlyPlayback"
+  ],
+  "omni.graph.action.OnGamepadInput": [
+   "gamepadElementIn",
+   "gamepadId",
+   "onlyPlayback"
+  ],
+  "omni.graph.action.OnImpulseEvent": [
+   "onlyPlayback"
+  ],
+  "omni.graph.action.OnKeyboardInput": [
+   "altIn",
+   "ctrlIn",
+   "keyIn",
+   "onlyPlayback",
+   "shiftIn"
+  ],
+  "omni.graph.action.OnLoaded": [],
+  "omni.graph.action.OnMessageBusEvent": [
+   "eventName",
+   "onlyPlayback"
+  ],
+  "omni.graph.action.OnMouseInput": [
+   "mouseElement",
+   "onlyPlayback"
+  ],
+  "omni.graph.action.OnObjectChange": [
+   "name",
+   "onlyPlayback",
+   "path",
+   "prim"
+  ],
+  "omni.graph.action.OnPlaybackTick": [],
+  "omni.graph.action.OnStageEvent": [
+   "eventName",
+   "onlyPlayback"
+  ],
+  "omni.graph.action.OnTick": [
+   "framePeriod",
+   "onlyPlayback"
+  ],
+  "omni.graph.action.OnVariableChange": [
+   "onlyPlayback",
+   "variableName"
+  ],
+  "omni.graph.action.Once": [
+   "execIn",
+   "reset"
+  ],
+  "omni.graph.action.RationalTimeSyncGate": [
+   "execIn",
+   "rationalTimeDenominator",
+   "rationalTimeNumerator"
+  ],
+  "omni.graph.action.SendCustomEvent": [
+   "bundle",
+   "eventName",
+   "execIn",
+   "path"
+  ],
+  "omni.graph.action.SendMessageBusEvent": [
+   "eventName",
+   "execIn"
+  ],
+  "omni.graph.action.Sequence": [
+   "execIn"
+  ],
+  "omni.graph.action.SetPrimActive": [
+   "active",
+   "execIn",
+   "prim",
+   "primTarget"
+  ],
+  "omni.graph.action.SwitchToken": [
+   "execIn",
+   "value"
+  ],
+  "omni.graph.action.SyncGate": [
+   "execIn",
+   "syncValue"
+  ],
+  "omni.graph.core.ReadVariable": [
+   "graph",
+   "targetPath",
+   "variableName"
+  ],
+  "omni.graph.core.WriteVariable": [
+   "execIn",
+   "graph",
+   "targetPath",
+   "value",
+   "variableName"
+  ],
+  "omni.graph.examples.cpp.GpuInteropAdjustExposure": [
+   "cudaMipmappedArray",
+   "exposure",
+   "format",
+   "height",
+   "hydraTime",
+   "mipCount",
+   "simTime",
+   "stream",
+   "width"
+  ],
+  "omni.graph.examples.cpp.GpuInteropCpuToDisk": [
+   "active",
+   "aovCpu",
+   "aovGpu",
+   "autoFileNumber",
+   "fileName",
+   "fileNumber",
+   "fileType",
+   "frameCount",
+   "gpu",
+   "maxInflightWrites",
+   "rp",
+   "saveFlags",
+   "saveLocation",
+   "skipInactive",
+   "startFrame"
+  ],
+  "omni.graph.examples.cpp.GpuInteropGpuToCpuCopy": [
+   "aovGpu",
+   "gpu",
+   "rp"
+  ],
+  "omni.graph.nodes.ATan2": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.Absolute": [
+   "input"
+  ],
+  "omni.graph.nodes.Acos": [
+   "value"
+  ],
+  "omni.graph.nodes.Add": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.AnyZero": [
+   "tolerance",
+   "value"
+  ],
+  "omni.graph.nodes.AppendArray": [
+   "input0",
+   "input1"
+  ],
+  "omni.graph.nodes.AppendPath": [
+   "path",
+   "suffix"
+  ],
+  "omni.graph.nodes.AppendString": [
+   "suffix",
+   "value"
+  ],
+  "omni.graph.nodes.AppendTargetPaths": [
+   "input0",
+   "rootTargets"
+  ],
+  "omni.graph.nodes.AppendTargets": [
+   "allowDuplicates",
+   "input0",
+   "input1"
+  ],
+  "omni.graph.nodes.ArrayAppendValue": [
+   "array",
+   "value"
+  ],
+  "omni.graph.nodes.ArrayFill": [
+   "array",
+   "fillValue"
+  ],
+  "omni.graph.nodes.ArrayFindValue": [
+   "array",
+   "value"
+  ],
+  "omni.graph.nodes.ArrayGetSize": [
+   "array"
+  ],
+  "omni.graph.nodes.ArrayIndex": [
+   "array",
+   "index"
+  ],
+  "omni.graph.nodes.ArrayInsertValue": [
+   "array",
+   "index",
+   "value"
+  ],
+  "omni.graph.nodes.ArrayLength": [
+   "attrName",
+   "data"
+  ],
+  "omni.graph.nodes.ArrayRemoveIndex": [
+   "array",
+   "index"
+  ],
+  "omni.graph.nodes.ArrayRemoveValue": [
+   "array",
+   "removeAll",
+   "removeAllFound",
+   "value"
+  ],
+  "omni.graph.nodes.ArrayReplaceValue": [
+   "array",
+   "newValue",
+   "replaceAllFound",
+   "value"
+  ],
+  "omni.graph.nodes.ArrayResize": [
+   "array",
+   "newSize"
+  ],
+  "omni.graph.nodes.ArrayReverse": [
+   "array"
+  ],
+  "omni.graph.nodes.ArrayRotate": [
+   "array",
+   "steps"
+  ],
+  "omni.graph.nodes.ArraySetIndex": [
+   "array",
+   "index",
+   "resizeToFit",
+   "value"
+  ],
+  "omni.graph.nodes.ArraySlice": [
+   "array",
+   "end",
+   "start",
+   "useLength"
+  ],
+  "omni.graph.nodes.Asin": [
+   "value"
+  ],
+  "omni.graph.nodes.Atan": [
+   "value"
+  ],
+  "omni.graph.nodes.AttributeType": [
+   "attrName",
+   "data"
+  ],
+  "omni.graph.nodes.BlendVariants": [
+   "blend",
+   "execIn",
+   "layerIdentifier",
+   "prim",
+   "setVariant",
+   "variantNameA",
+   "variantNameB",
+   "variantSetName"
+  ],
+  "omni.graph.nodes.BooleanAnd": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.BooleanNand": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.BooleanNor": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.BooleanNot": [
+   "valueIn"
+  ],
+  "omni.graph.nodes.BooleanOr": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.BooleanXor": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.BreakMatrix2": [
+   "matrix"
+  ],
+  "omni.graph.nodes.BreakMatrix3": [
+   "matrix"
+  ],
+  "omni.graph.nodes.BreakMatrix4": [
+   "matrix",
+   "outputType"
+  ],
+  "omni.graph.nodes.BreakVector2": [
+   "tuple"
+  ],
+  "omni.graph.nodes.BreakVector3": [
+   "tuple"
+  ],
+  "omni.graph.nodes.BreakVector4": [
+   "tuple"
+  ],
+  "omni.graph.nodes.BuildString": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.BundleConstructor": [],
+  "omni.graph.nodes.BundleInspector": [
+   "bundle",
+   "execIn",
+   "inspectDepth",
+   "print"
+  ],
+  "omni.graph.nodes.CapitalizeString": [
+   "operation",
+   "string"
+  ],
+  "omni.graph.nodes.Ceil": [
+   "a"
+  ],
+  "omni.graph.nodes.Clamp": [
+   "input",
+   "lower",
+   "upper"
+  ],
+  "omni.graph.nodes.ClearVariantSelection": [
+   "execIn",
+   "layerIdentifier",
+   "prim",
+   "setVariant",
+   "variantSetName"
+  ],
+  "omni.graph.nodes.Compare": [
+   "a",
+   "b",
+   "operation"
+  ],
+  "omni.graph.nodes.CompareTargets": [
+   "a",
+   "b",
+   "compareEach",
+   "operation"
+  ],
+  "omni.graph.nodes.ConstantBool": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantColor3d": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantColor3f": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantColor3h": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantColor4d": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantColor4f": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantColor4h": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantDouble": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantDouble2": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantDouble3": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantDouble4": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantE": [
+   "exponent"
+  ],
+  "omni.graph.nodes.ConstantFloat": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantFloat2": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantFloat3": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantFloat4": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantFrame": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantHalf": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantHalf2": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantHalf3": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantHalf4": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantInt": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantInt2": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantInt3": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantInt4": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantInt64": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantMatrix2d": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantMatrix3d": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantMatrix4d": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantNormal3d": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantNormal3f": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantNormal3h": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantPath": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantPi": [
+   "factor"
+  ],
+  "omni.graph.nodes.ConstantPoint3d": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantPoint3f": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantPoint3h": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantPrims": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantQuatd": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantQuatf": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantQuath": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantString": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantTarget": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantTexCoord2d": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantTexCoord2f": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantTexCoord2h": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantTexCoord3d": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantTexCoord3f": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantTexCoord3h": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantTimecode": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantToken": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantUChar": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantUInt": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantUInt64": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantVector3d": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantVector3f": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstantVector3h": [
+   "value"
+  ],
+  "omni.graph.nodes.ConstructArray": [
+   "arraySize",
+   "arrayType",
+   "input0"
+  ],
+  "omni.graph.nodes.CopyAttribute": [
+   "$constraint",
+   "fullData",
+   "inputAttrNames",
+   "outputAttrNames",
+   "partialData"
+  ],
+  "omni.graph.nodes.Cos": [
+   "value"
+  ],
+  "omni.graph.nodes.CreateTubeTopology": [
+   "cols",
+   "rows"
+  ],
+  "omni.graph.nodes.CrossProduct": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.CurveToFrame": [
+   "curvePoints",
+   "curveVertexCounts",
+   "curveVertexStarts"
+  ],
+  "omni.graph.nodes.CurveTubePositions": [
+   "cols",
+   "curvePoints",
+   "curveVertexCounts",
+   "curveVertexStarts",
+   "out",
+   "tubePointStarts",
+   "up",
+   "width"
+  ],
+  "omni.graph.nodes.CurveTubeST": [
+   "cols",
+   "curveVertexCounts",
+   "curveVertexStarts",
+   "scaleTLikeS",
+   "t",
+   "tubeQuadStarts",
+   "tubeSTStarts",
+   "width"
+  ],
+  "omni.graph.nodes.DeformedPointsToHydra": [
+   "points",
+   "primPath",
+   "sendToHydra",
+   "stream",
+   "verbose"
+  ],
+  "omni.graph.nodes.Distance3D": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.Divide": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.DotProduct": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.EachZero": [
+   "tolerance",
+   "value"
+  ],
+  "omni.graph.nodes.Ease": [
+   "alpha",
+   "blendExponent",
+   "easeFunc",
+   "end",
+   "start"
+  ],
+  "omni.graph.nodes.EndsWith": [
+   "suffix",
+   "value"
+  ],
+  "omni.graph.nodes.Exponent": [
+   "base",
+   "exponent"
+  ],
+  "omni.graph.nodes.ExtractAttribute": [
+   "attrName",
+   "data"
+  ],
+  "omni.graph.nodes.ExtractBundle": [
+   "bundle"
+  ],
+  "omni.graph.nodes.ExtractPrim": [
+   "prim",
+   "primPath",
+   "prims"
+  ],
+  "omni.graph.nodes.FMod": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.FindPrims": [
+   "ignoreSystemPrims",
+   "namePrefix",
+   "pathPattern",
+   "recursive",
+   "requiredAttributes",
+   "requiredRelationship",
+   "requiredRelationshipTarget",
+   "requiredTarget",
+   "rootPrim",
+   "rootPrimPath",
+   "type"
+  ],
+  "omni.graph.nodes.FindString": [
+   "pos",
+   "string",
+   "value"
+  ],
+  "omni.graph.nodes.FindTarget": [
+   "searchTarget",
+   "targets"
+  ],
+  "omni.graph.nodes.Floor": [
+   "a"
+  ],
+  "omni.graph.nodes.GetAttributeNames": [
+   "data",
+   "sort"
+  ],
+  "omni.graph.nodes.GetGraphTargetId": [],
+  "omni.graph.nodes.GetGraphTargetPrim": [],
+  "omni.graph.nodes.GetLocationAtDistanceOnCurve": [
+   "curve",
+   "distance",
+   "forwardAxis",
+   "upAxis"
+  ],
+  "omni.graph.nodes.GetLocationAtDistanceOnCurve2": [
+   "curve",
+   "distance",
+   "forwardAxis",
+   "upAxis"
+  ],
+  "omni.graph.nodes.GetLookAtRotation": [
+   "forward",
+   "start",
+   "target",
+   "up"
+  ],
+  "omni.graph.nodes.GetMatrix4Quaternion": [
+   "matrix",
+   "rotationOrder"
+  ],
+  "omni.graph.nodes.GetMatrix4Rotation": [
+   "matrix",
+   "rotationOrder"
+  ],
+  "omni.graph.nodes.GetMatrix4RotationMatrix": [
+   "matrix",
+   "rotationOrder"
+  ],
+  "omni.graph.nodes.GetMatrix4Scale": [
+   "matrix"
+  ],
+  "omni.graph.nodes.GetMatrix4Translation": [
+   "matrix"
+  ],
+  "omni.graph.nodes.GetParentPath": [
+   "path"
+  ],
+  "omni.graph.nodes.GetParentPrims": [
+   "prims"
+  ],
+  "omni.graph.nodes.GetPrimDirectionVector": [
+   "prim",
+   "primPath",
+   "usePath"
+  ],
+  "omni.graph.nodes.GetPrimLocalToWorldTransform": [
+   "prim",
+   "primPath",
+   "usePath"
+  ],
+  "omni.graph.nodes.GetPrimPath": [
+   "prim"
+  ],
+  "omni.graph.nodes.GetPrimPaths": [
+   "prims"
+  ],
+  "omni.graph.nodes.GetPrimRelationship": [
+   "name",
+   "path",
+   "prim",
+   "usePath"
+  ],
+  "omni.graph.nodes.GetPrims": [
+   "bundle",
+   "inverse",
+   "pathPattern",
+   "prims",
+   "typePattern"
+  ],
+  "omni.graph.nodes.GetPrimsAtPath": [
+   "path"
+  ],
+  "omni.graph.nodes.GetRelativePath": [
+   "anchor",
+   "path"
+  ],
+  "omni.graph.nodes.GetString": [
+   "count",
+   "index",
+   "string"
+  ],
+  "omni.graph.nodes.GetStringLength": [
+   "string"
+  ],
+  "omni.graph.nodes.GetTargets": [
+   "count",
+   "index",
+   "targets"
+  ],
+  "omni.graph.nodes.GetTargetsSize": [
+   "targets"
+  ],
+  "omni.graph.nodes.GetTimeline": [],
+  "omni.graph.nodes.GetVariantNames": [
+   "prim",
+   "variantSetName"
+  ],
+  "omni.graph.nodes.GetVariantSelection": [
+   "prim",
+   "variantSetName"
+  ],
+  "omni.graph.nodes.GetVariantSetNames": [
+   "prim"
+  ],
+  "omni.graph.nodes.GpuInteropCudaEntry": [
+   "sourceName"
+  ],
+  "omni.graph.nodes.GpuInteropRenderProductEntry": [],
+  "omni.graph.nodes.GraphTarget": [
+   "targetPath"
+  ],
+  "omni.graph.nodes.HasAttribute": [
+   "attrName",
+   "data"
+  ],
+  "omni.graph.nodes.HasVariantSet": [
+   "prim",
+   "variantSetName"
+  ],
+  "omni.graph.nodes.Increment": [
+   "increment",
+   "value"
+  ],
+  "omni.graph.nodes.InsertAttribute": [
+   "attrToInsert",
+   "data",
+   "outputAttrName"
+  ],
+  "omni.graph.nodes.InsertString": [
+   "index",
+   "string",
+   "value"
+  ],
+  "omni.graph.nodes.InsertTargets": [
+   "index",
+   "insertTargets",
+   "targets"
+  ],
+  "omni.graph.nodes.InterpolateTo": [
+   "current",
+   "deltaSeconds",
+   "exponent",
+   "speed",
+   "target"
+  ],
+  "omni.graph.nodes.Interpolator": [
+   "knots",
+   "param",
+   "values"
+  ],
+  "omni.graph.nodes.Invert": [
+   "value"
+  ],
+  "omni.graph.nodes.IsEmpty": [
+   "input"
+  ],
+  "omni.graph.nodes.IsPrimActive": [
+   "prim",
+   "primTarget"
+  ],
+  "omni.graph.nodes.IsPrimSelected": [
+   "prim",
+   "primPath"
+  ],
+  "omni.graph.nodes.IsZero": [
+   "tolerance",
+   "value"
+  ],
+  "omni.graph.nodes.JoinString": [
+   "delimiter",
+   "elements"
+  ],
+  "omni.graph.nodes.LengthAlongCurve": [
+   "curvePoints",
+   "curveVertexCounts",
+   "curveVertexStarts",
+   "normalize"
+  ],
+  "omni.graph.nodes.Logarithm": [
+   "base",
+   "value"
+  ],
+  "omni.graph.nodes.LoopTimeline": [
+   "execIn",
+   "loop"
+  ],
+  "omni.graph.nodes.Magnitude": [
+   "input"
+  ],
+  "omni.graph.nodes.MakeMatrix2": [
+   "x",
+   "y"
+  ],
+  "omni.graph.nodes.MakeMatrix3": [
+   "x",
+   "y",
+   "z"
+  ],
+  "omni.graph.nodes.MakeMatrix4": [
+   "w",
+   "x",
+   "y",
+   "z"
+  ],
+  "omni.graph.nodes.MakeTransform": [
+   "rotationOrder",
+   "rotationXYZ",
+   "scale",
+   "translation"
+  ],
+  "omni.graph.nodes.MakeTransformLookAt": [
+   "center",
+   "eye",
+   "up"
+  ],
+  "omni.graph.nodes.MakeVector2": [
+   "x",
+   "y"
+  ],
+  "omni.graph.nodes.MakeVector3": [
+   "x",
+   "y",
+   "z"
+  ],
+  "omni.graph.nodes.MakeVector4": [
+   "w",
+   "x",
+   "y",
+   "z"
+  ],
+  "omni.graph.nodes.MatrixMultiply": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.Maximum": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.Minimum": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.Modulo": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.MoveToTarget": [
+   "execIn",
+   "exponent",
+   "sourcePrim",
+   "sourcePrimPath",
+   "speed",
+   "stop",
+   "targetPrim",
+   "targetPrimPath",
+   "useSourcePath",
+   "useTargetPath"
+  ],
+  "omni.graph.nodes.MoveToTransform": [
+   "execIn",
+   "exponent",
+   "prim",
+   "primPath",
+   "speed",
+   "stop",
+   "target",
+   "usePath"
+  ],
+  "omni.graph.nodes.Multiply": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.Negate": [
+   "input"
+  ],
+  "omni.graph.nodes.Noise": [
+   "position",
+   "seed"
+  ],
+  "omni.graph.nodes.Noop": [],
+  "omni.graph.nodes.Normalize": [
+   "vector"
+  ],
+  "omni.graph.nodes.NthRoot": [
+   "nthRoot",
+   "value"
+  ],
+  "omni.graph.nodes.OgnInvertMatrix": [
+   "matrix"
+  ],
+  "omni.graph.nodes.Orthonormalize": [
+   "matrix"
+  ],
+  "omni.graph.nodes.PartialSum": [
+   "array"
+  ],
+  "omni.graph.nodes.PauseSound": [
+   "execIn",
+   "soundId"
+  ],
+  "omni.graph.nodes.PlaySound": [
+   "execIn",
+   "prim"
+  ],
+  "omni.graph.nodes.RandomBoolean": [
+   "execIn",
+   "isNoise",
+   "seed",
+   "useSeed"
+  ],
+  "omni.graph.nodes.RandomGaussian": [
+   "execIn",
+   "isNoise",
+   "mean",
+   "seed",
+   "stdev",
+   "useLog",
+   "useSeed"
+  ],
+  "omni.graph.nodes.RandomNumeric": [
+   "execIn",
+   "isNoise",
+   "max",
+   "min",
+   "seed",
+   "useSeed"
+  ],
+  "omni.graph.nodes.RandomUnitQuaternion": [
+   "execIn",
+   "isNoise",
+   "seed",
+   "useSeed"
+  ],
+  "omni.graph.nodes.RandomUnitVector": [
+   "execIn",
+   "isNoise",
+   "seed",
+   "useSeed"
+  ],
+  "omni.graph.nodes.ReadGamepadState": [
+   "deadzone",
+   "gamepadElement",
+   "gamepadId"
+  ],
+  "omni.graph.nodes.ReadKeyboardState": [
+   "key"
+  ],
+  "omni.graph.nodes.ReadOmniGraphValue": [
+   "name",
+   "path"
+  ],
+  "omni.graph.nodes.ReadPrim": [
+   "attrNamesToImport",
+   "computeBoundingBox",
+   "prim",
+   "usdTimecode"
+  ],
+  "omni.graph.nodes.ReadPrimAttribute": [
+   "name",
+   "prim",
+   "primPath",
+   "usdTimecode",
+   "usePath"
+  ],
+  "omni.graph.nodes.ReadPrimAttributes": [
+   "attrNamesToImport",
+   "prim",
+   "primPath",
+   "usdTimecode",
+   "usePath"
+  ],
+  "omni.graph.nodes.ReadPrimBundle": [
+   "attrNamesToImport",
+   "computeBoundingBox",
+   "prim",
+   "primPath",
+   "usdTimecode",
+   "usePath"
+  ],
+  "omni.graph.nodes.ReadPrimMaterial": [
+   "prim",
+   "primPath"
+  ],
+  "omni.graph.nodes.ReadPrimRelationship": [
+   "name",
+   "prim"
+  ],
+  "omni.graph.nodes.ReadPrims": [
+   "applySkelBinding",
+   "attrNamesToImport",
+   "computeBoundingBox",
+   "pathPattern",
+   "prims",
+   "typePattern",
+   "usdTimecode",
+   "useFindPrims"
+  ],
+  "omni.graph.nodes.ReadPrimsBundle": [
+   "attrNamesToImport",
+   "primPaths",
+   "prims",
+   "usdTimecode",
+   "usePaths"
+  ],
+  "omni.graph.nodes.ReadPrimsV2": [
+   "_debugStamp",
+   "applySkelBinding",
+   "attrNamesToImport",
+   "computeBoundingBox",
+   "enableBundleChangeTracking",
+   "enableChangeTracking",
+   "pathPattern",
+   "prims",
+   "typePattern",
+   "usdTimecode"
+  ],
+  "omni.graph.nodes.ReadSetting": [
+   "settingPath"
+  ],
+  "omni.graph.nodes.ReadStageSelection": [],
+  "omni.graph.nodes.ReadTime": [],
+  "omni.graph.nodes.RemoveAttribute": [
+   "allowRemovePrimInternal",
+   "attrNamesToRemove",
+   "data"
+  ],
+  "omni.graph.nodes.RemoveString": [
+   "count",
+   "index",
+   "string"
+  ],
+  "omni.graph.nodes.RemoveTarget": [
+   "index",
+   "targets"
+  ],
+  "omni.graph.nodes.RenameAttribute": [
+   "$constraint",
+   "data",
+   "inputAttrNames",
+   "outputAttrNames"
+  ],
+  "omni.graph.nodes.RenderPostProcessEntry": [
+   "sourceName"
+  ],
+  "omni.graph.nodes.RenderPreProcessEntry": [],
+  "omni.graph.nodes.ReplaceString": [
+   "replace",
+   "replaceAll",
+   "string",
+   "value"
+  ],
+  "omni.graph.nodes.ReplaceTargetName": [
+   "newName",
+   "targets"
+  ],
+  "omni.graph.nodes.ReplaceTargetParent": [
+   "newParent",
+   "oldParent",
+   "targets"
+  ],
+  "omni.graph.nodes.ReplaceTargets": [
+   "replaceTargets",
+   "setTargets",
+   "targets"
+  ],
+  "omni.graph.nodes.RotateToOrientation": [
+   "execIn",
+   "exponent",
+   "prim",
+   "primPath",
+   "speed",
+   "stop",
+   "target",
+   "usePath"
+  ],
+  "omni.graph.nodes.RotateToTarget": [
+   "execIn",
+   "exponent",
+   "sourcePrim",
+   "sourcePrimPath",
+   "speed",
+   "stop",
+   "targetPrim",
+   "targetPrimPath",
+   "useSourcePath",
+   "useTargetPath"
+  ],
+  "omni.graph.nodes.RotateVector": [
+   "rotation",
+   "rotationOrder",
+   "vector"
+  ],
+  "omni.graph.nodes.Round": [
+   "decimals",
+   "input"
+  ],
+  "omni.graph.nodes.RpResourceExampleAllocator": [
+   "points",
+   "primPath",
+   "reload",
+   "stream",
+   "verbose"
+  ],
+  "omni.graph.nodes.RpResourceExampleDeformer": [
+   "deformScale",
+   "pointCountCollection",
+   "positionScale",
+   "primPathCollection",
+   "resourcePointerCollection",
+   "runDeformerKernel",
+   "simTime",
+   "stream",
+   "timeScale",
+   "verbose"
+  ],
+  "omni.graph.nodes.RpResourceExampleHydra": [
+   "pointCountCollection",
+   "primPathCollection",
+   "resourcePointerCollection",
+   "sendToHydra",
+   "verbose"
+  ],
+  "omni.graph.nodes.ScaleToSize": [
+   "execIn",
+   "exponent",
+   "prim",
+   "primPath",
+   "speed",
+   "stop",
+   "target",
+   "usePath"
+  ],
+  "omni.graph.nodes.SelectIf": [
+   "condition",
+   "ifFalse",
+   "ifTrue"
+  ],
+  "omni.graph.nodes.SelectTargetIf": [
+   "condition",
+   "ifFalse",
+   "ifTrue"
+  ],
+  "omni.graph.nodes.SetMatrix4Quaternion": [
+   "matrix",
+   "quaternion"
+  ],
+  "omni.graph.nodes.SetMatrix4Rotation": [
+   "fixedRotationAxis",
+   "matrix",
+   "rotationAngle",
+   "rotationAxis",
+   "rotationOrder"
+  ],
+  "omni.graph.nodes.SetMatrix4Scale": [
+   "matrix",
+   "scale"
+  ],
+  "omni.graph.nodes.SetMatrix4Translation": [
+   "matrix",
+   "translation"
+  ],
+  "omni.graph.nodes.SetTarget": [
+   "index",
+   "setTarget",
+   "targets"
+  ],
+  "omni.graph.nodes.SetTimeline": [
+   "execIn",
+   "propName",
+   "propValue"
+  ],
+  "omni.graph.nodes.SetVariantSelection": [
+   "execIn",
+   "layerIdentifier",
+   "prim",
+   "setVariant",
+   "variantName",
+   "variantSetName"
+  ],
+  "omni.graph.nodes.Sin": [
+   "value"
+  ],
+  "omni.graph.nodes.SourceIndices": [
+   "sourceStartsInTarget"
+  ],
+  "omni.graph.nodes.SplitString": [
+   "delimiter",
+   "string"
+  ],
+  "omni.graph.nodes.StartTimeline": [
+   "execIn"
+  ],
+  "omni.graph.nodes.StartsWith": [
+   "prefix",
+   "value"
+  ],
+  "omni.graph.nodes.StopAllSound": [
+   "execIn"
+  ],
+  "omni.graph.nodes.StopSound": [
+   "execIn",
+   "soundId"
+  ],
+  "omni.graph.nodes.StopTimeline": [
+   "execIn"
+  ],
+  "omni.graph.nodes.Subtract": [
+   "a",
+   "b"
+  ],
+  "omni.graph.nodes.Tan": [
+   "value"
+  ],
+  "omni.graph.nodes.Timer": [
+   "duration",
+   "endValue",
+   "play",
+   "startValue"
+  ],
+  "omni.graph.nodes.ToBool": [
+   "value"
+  ],
+  "omni.graph.nodes.ToDeg": [
+   "radians"
+  ],
+  "omni.graph.nodes.ToDouble": [
+   "role",
+   "value"
+  ],
+  "omni.graph.nodes.ToFloat": [
+   "role",
+   "value"
+  ],
+  "omni.graph.nodes.ToHalf": [
+   "role",
+   "value"
+  ],
+  "omni.graph.nodes.ToInt": [
+   "value"
+  ],
+  "omni.graph.nodes.ToInt64": [
+   "value"
+  ],
+  "omni.graph.nodes.ToRad": [
+   "degrees"
+  ],
+  "omni.graph.nodes.ToString": [
+   "value"
+  ],
+  "omni.graph.nodes.ToTarget": [
+   "value"
+  ],
+  "omni.graph.nodes.ToToken": [
+   "value"
+  ],
+  "omni.graph.nodes.ToUchar": [
+   "value"
+  ],
+  "omni.graph.nodes.ToUint": [
+   "value"
+  ],
+  "omni.graph.nodes.ToUint64": [
+   "value"
+  ],
+  "omni.graph.nodes.TransformVector": [
+   "matrix",
+   "vector"
+  ],
+  "omni.graph.nodes.TranslateToLocation": [
+   "execIn",
+   "exponent",
+   "prim",
+   "primPath",
+   "speed",
+   "stop",
+   "target",
+   "usePath"
+  ],
+  "omni.graph.nodes.TranslateToTarget": [
+   "execIn",
+   "exponent",
+   "sourcePrim",
+   "sourcePrimPath",
+   "speed",
+   "stop",
+   "targetPrim",
+   "targetPrimPath",
+   "useSourcePath",
+   "useTargetPath"
+  ],
+  "omni.graph.nodes.Transpose": [
+   "matrix"
+  ],
+  "omni.graph.nodes.UpdateTickEvent": [],
+  "omni.graph.nodes.WritePrim": [
+   "execIn",
+   "layerIdentifier",
+   "prim",
+   "usdWriteBack"
+  ],
+  "omni.graph.nodes.WritePrimAttribute": [
+   "execIn",
+   "layerIdentifier",
+   "name",
+   "prim",
+   "primPath",
+   "usdWriteBack",
+   "usePath",
+   "value"
+  ],
+  "omni.graph.nodes.WritePrimMaterial": [
+   "execIn",
+   "layerIdentifier",
+   "material",
+   "materialPath",
+   "prim",
+   "primPath"
+  ],
+  "omni.graph.nodes.WritePrimRelationship": [
+   "execIn",
+   "layerIdentifier",
+   "name",
+   "prim",
+   "usdWriteBack",
+   "value"
+  ],
+  "omni.graph.nodes.WritePrims": [
+   "attrNamesToExport",
+   "execIn",
+   "pathPattern",
+   "primsBundle",
+   "typePattern",
+   "usdWriteBack"
+  ],
+  "omni.graph.nodes.WritePrimsV2": [
+   "attrNamesToExport",
+   "execIn",
+   "layerIdentifier",
+   "pathPattern",
+   "prims",
+   "primsBundle",
+   "scatterUnderTargets",
+   "typePattern",
+   "usdWriteBack"
+  ],
+  "omni.graph.nodes.WriteSetting": [
+   "execIn",
+   "settingPath",
+   "value"
+  ],
+  "omni.graph.scriptnode.ScriptNode": [
+   "execIn",
+   "script",
+   "scriptPath",
+   "usePath"
+  ],
+  "omni.graph.ui_nodes.Button": [
+   "create",
+   "parentWidgetPath",
+   "size",
+   "startHidden",
+   "style",
+   "text",
+   "widgetIdentifier"
+  ],
+  "omni.graph.ui_nodes.GetActiveViewportCamera": [
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.GetCameraPosition": [
+   "prim",
+   "primPath",
+   "usePath"
+  ],
+  "omni.graph.ui_nodes.GetCameraTarget": [
+   "prim",
+   "primPath",
+   "usePath"
+  ],
+  "omni.graph.ui_nodes.GetViewportRenderer": [
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.GetViewportResolution": [
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.LockViewportRender": [
+   "fadeTime",
+   "lock",
+   "unlock",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.OnNewFrame": [
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.OnPicked": [
+   "gesture",
+   "onlyPlayback",
+   "trackedPrims",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.OnViewportClicked": [
+   "gesture",
+   "onlyPlayback",
+   "useNormalizedCoords",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.OnViewportDragged": [
+   "gesture",
+   "onlyPlayback",
+   "useNormalizedCoords",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.OnViewportHovered": [
+   "onlyPlayback",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.OnViewportPressed": [
+   "gesture",
+   "onlyPlayback",
+   "useNormalizedCoords",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.OnViewportScrolled": [
+   "onlyPlayback",
+   "useNormalizedCoords",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.OnWidgetClicked": [
+   "widgetIdentifier"
+  ],
+  "omni.graph.ui_nodes.OnWidgetValueChanged": [
+   "widgetIdentifier"
+  ],
+  "omni.graph.ui_nodes.PrintText": [
+   "execIn",
+   "logLevel",
+   "text",
+   "toScreen",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.ReadMouseState": [
+   "mouseElement",
+   "useRelativeCoords"
+  ],
+  "omni.graph.ui_nodes.ReadPickState": [
+   "gesture",
+   "trackedPrimPaths",
+   "trackedPrims",
+   "usePaths",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.ReadViewportClickState": [
+   "gesture",
+   "useNormalizedCoords",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.ReadViewportDragState": [
+   "gesture",
+   "useNormalizedCoords",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.ReadViewportHoverState": [
+   "useNormalizedCoords",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.ReadViewportPressState": [
+   "gesture",
+   "useNormalizedCoords",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.ReadViewportScrollState": [
+   "useNormalizedCoords",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.SetActiveViewportCamera": [
+   "execIn",
+   "primPath",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.SetCameraPosition": [
+   "execIn",
+   "position",
+   "prim",
+   "primPath",
+   "rotate",
+   "usePath"
+  ],
+  "omni.graph.ui_nodes.SetCameraTarget": [
+   "execIn",
+   "prim",
+   "primPath",
+   "rotate",
+   "target",
+   "usePath"
+  ],
+  "omni.graph.ui_nodes.SetViewportFullscreen": [
+   "exec",
+   "mode"
+  ],
+  "omni.graph.ui_nodes.SetViewportMode": [
+   "enablePicking",
+   "enableViewportMouseEvents",
+   "execIn",
+   "mode",
+   "passClicksThru",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.SetViewportRenderer": [
+   "exec",
+   "renderer",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.SetViewportResolution": [
+   "exec",
+   "resolution",
+   "viewport"
+  ],
+  "omni.graph.ui_nodes.Slider": [
+   "create",
+   "disable",
+   "enable",
+   "hide",
+   "max",
+   "min",
+   "parentWidgetPath",
+   "show",
+   "step",
+   "tearDown",
+   "widgetIdentifier",
+   "width"
+  ],
+  "omni.graph.visualization.nodes.DrawLabel": [
+   "color",
+   "execIn",
+   "offset",
+   "size",
+   "text",
+   "transform"
+  ],
+  "omni.graph.visualization.nodes.DrawLine": [
+   "color",
+   "end",
+   "execIn",
+   "start",
+   "thickness"
+  ],
+  "omni.graph.visualization.nodes.DrawScreenSpaceText": [
+   "backgroundColor",
+   "boxWidth",
+   "execIn",
+   "position",
+   "size",
+   "text",
+   "textColor"
+  ],
+  "omni.physx.cct.OgnCharacterController": [
+   "activate",
+   "capsulePath",
+   "controlsSettings",
+   "deactivate",
+   "fpCameraPathToken",
+   "gravity",
+   "setupControls",
+   "speed"
+  ],
+  "omni.physx.cct.OgnControlsSettings": [
+   "backward",
+   "down",
+   "forward",
+   "gamepadSensitivity",
+   "left",
+   "mouseSensitivity",
+   "right",
+   "up"
+  ],
+  "omni.physx.cct.OgnSpawnCapsule": [
+   "capsuleHeight",
+   "capsulePos",
+   "capsuleRadius",
+   "spawn"
+  ],
+  "omni.physx.graph.GenerateContacts": [
+   "contactDistance",
+   "execIn",
+   "meshContactMargin",
+   "shape0",
+   "shape1",
+   "toleranceLength"
+  ],
+  "omni.physx.graph.ImmediateComputeBoundsOverlaps": [
+   "execIn",
+   "primsBundle"
+  ],
+  "omni.physx.graph.ImmediateComputeGeometryBounds": [
+   "execIn",
+   "primsBundle"
+  ],
+  "omni.physx.graph.ImmediateComputeGeometryOverlaps": [
+   "execIn",
+   "overlapsPair0",
+   "overlapsPair1",
+   "primsBundle"
+  ],
+  "omni.physx.graph.ImmediateComputeGeometryPenetrations": [
+   "execIn",
+   "overlapsPair0",
+   "overlapsPair1",
+   "primsBundle"
+  ],
+  "omni.physx.graph.ImmediateComputeGeometryRaycastHits": [
+   "bothSides",
+   "direction",
+   "execIn",
+   "origin",
+   "prims",
+   "primsBundle",
+   "raycastRange"
+  ],
+  "omni.physx.graph.ImmediateComputeMeshIntersectingFaces": [
+   "execIn",
+   "overlapsPair0",
+   "overlapsPair1",
+   "primsBundle"
+  ],
+  "omni.physx.graph.ImmediateGenerateGeometryContacts": [
+   "contactDistance",
+   "execIn",
+   "meshContactMargin",
+   "overlapsPair0",
+   "overlapsPair1",
+   "primsBundle",
+   "toleranceLength"
+  ],
+  "omni.physx.graph.OnContactEventAdvanced": [
+   "bodyPaths",
+   "targetBodies"
+  ],
+  "omni.physx.graph.OnContactEventBasic": [
+   "bodyPaths",
+   "targetBodies"
+  ],
+  "omni.physx.graph.OnTriggerCollider": [
+   "listenToAllTriggers",
+   "triggersPaths",
+   "triggersRelationships"
+  ],
+  "omni.physx.graph.PropertyQueryRigidBody": [
+   "prim",
+   "timeout",
+   "use_local_frame"
+  ],
+  "omni.physx.graph.SceneQueryOverlapBoxAll": [
+   "dimensions",
+   "execIn",
+   "position",
+   "rotation"
+  ],
+  "omni.physx.graph.SceneQueryOverlapBoxAny": [
+   "dimensions",
+   "execIn",
+   "position",
+   "rotation"
+  ],
+  "omni.physx.graph.SceneQueryOverlapPrimAll": [
+   "execIn",
+   "prim",
+   "primPath"
+  ],
+  "omni.physx.graph.SceneQueryOverlapPrimAny": [
+   "execIn",
+   "prim",
+   "primPath"
+  ],
+  "omni.physx.graph.SceneQueryOverlapSphereAll": [
+   "execIn",
+   "position",
+   "radius"
+  ],
+  "omni.physx.graph.SceneQueryOverlapSphereAny": [
+   "execIn",
+   "position",
+   "radius"
+  ],
+  "omni.physx.graph.SceneQueryRaycastAll": [
+   "bothSides",
+   "direction",
+   "execIn",
+   "origin",
+   "raycastRange",
+   "sortByDistance"
+  ],
+  "omni.physx.graph.SceneQueryRaycastAny": [
+   "bothSides",
+   "direction",
+   "execIn",
+   "origin",
+   "raycastRange"
+  ],
+  "omni.physx.graph.SceneQueryRaycastClosest": [
+   "bothSides",
+   "direction",
+   "execIn",
+   "origin",
+   "raycastRange"
+  ],
+  "omni.physx.graph.SceneQuerySweepBoxAll": [
+   "bothSides",
+   "dimensions",
+   "direction",
+   "execIn",
+   "origin",
+   "rotation",
+   "sortByDistance",
+   "sweepRange"
+  ],
+  "omni.physx.graph.SceneQuerySweepBoxAny": [
+   "bothSides",
+   "dimensions",
+   "direction",
+   "execIn",
+   "origin",
+   "rotation",
+   "sweepRange"
+  ],
+  "omni.physx.graph.SceneQuerySweepBoxClosest": [
+   "bothSides",
+   "dimensions",
+   "direction",
+   "execIn",
+   "origin",
+   "rotation",
+   "sweepRange"
+  ],
+  "omni.physx.graph.SceneQuerySweepPrimAll": [
+   "bothSides",
+   "direction",
+   "execIn",
+   "prim",
+   "sortByDistance",
+   "sweepRange"
+  ],
+  "omni.physx.graph.SceneQuerySweepPrimAny": [
+   "bothSides",
+   "direction",
+   "execIn",
+   "prim",
+   "sweepRange"
+  ],
+  "omni.physx.graph.SceneQuerySweepPrimClosest": [
+   "bothSides",
+   "direction",
+   "execIn",
+   "prim",
+   "sweepRange"
+  ],
+  "omni.physx.graph.SceneQuerySweepSphereAll": [
+   "bothSides",
+   "direction",
+   "execIn",
+   "origin",
+   "radius",
+   "sortByDistance",
+   "sweepRange"
+  ],
+  "omni.physx.graph.SceneQuerySweepSphereAny": [
+   "bothSides",
+   "direction",
+   "execIn",
+   "origin",
+   "radius",
+   "sweepRange"
+  ],
+  "omni.physx.graph.SceneQuerySweepSphereClosest": [
+   "bothSides",
+   "direction",
+   "execIn",
+   "origin",
+   "radius",
+   "sweepRange"
+  ],
+  "omni.physx.graph.VehicleGetDriveState": [
+   "vehiclePath"
+  ],
+  "omni.physx.graph.VehicleGetWheelState": [
+   "vehicleWheelAttachmentPaths"
+  ],
+  "omni.replicator.core.AugBgRandExp": [
+   "bufferSize",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "exec",
+   "folderpath",
+   "format",
+   "height",
+   "seed",
+   "strides",
+   "width",
+   "xform"
+  ],
+  "omni.replicator.core.AugCanny": [
+   "bufferSize",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "exec",
+   "format",
+   "height",
+   "strides",
+   "thresholdHigh",
+   "thresholdLow",
+   "width"
+  ],
+  "omni.replicator.core.AugContrastExp": [
+   "bufferSize",
+   "contrastFactor",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "exec",
+   "format",
+   "height",
+   "strides",
+   "width",
+   "xform"
+  ],
+  "omni.replicator.core.AugConv2dExp": [
+   "alpha",
+   "bufferSize",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "exec",
+   "format",
+   "height",
+   "kernel",
+   "strides",
+   "width",
+   "xform"
+  ],
+  "omni.replicator.core.AugCropResizeExp": [
+   "bufferSize",
+   "cropFactor",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "exec",
+   "format",
+   "height",
+   "offsetFactor",
+   "strides",
+   "width",
+   "xform"
+  ],
+  "omni.replicator.core.AugCutMixExp": [
+   "bufferSize",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "exec",
+   "folderpath",
+   "format",
+   "height",
+   "seed",
+   "strides",
+   "width",
+   "xform"
+  ],
+  "omni.replicator.core.AugImgBlendExp": [
+   "blendFactor",
+   "bufferSize",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "exec",
+   "folderpath",
+   "format",
+   "height",
+   "seed",
+   "strides",
+   "width",
+   "xform"
+  ],
+  "omni.replicator.core.AugMotionBlurExp": [
+   "alpha",
+   "bufferSize",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "exec",
+   "format",
+   "height",
+   "kernelSize",
+   "motionAngle",
+   "strength",
+   "strides",
+   "width",
+   "xform"
+  ],
+  "omni.replicator.core.AugPixellateExp": [
+   "bufferSize",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "exec",
+   "format",
+   "height",
+   "kernelSize",
+   "strides",
+   "width",
+   "xform"
+  ],
+  "omni.replicator.core.AugRotateExp": [
+   "bufferSize",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "exec",
+   "format",
+   "height",
+   "rotation",
+   "strides",
+   "width",
+   "xform"
+  ],
+  "omni.replicator.core.BoundingBoxLegacy": [
+   "bboxIds",
+   "bufferSize",
+   "data",
+   "exec",
+   "height",
+   "ids",
+   "labels",
+   "primPaths",
+   "semanticFilterName",
+   "semanticTypes",
+   "width"
+  ],
+  "omni.replicator.core.InstanceIdSegmentationLegacy": [
+   "bufferSize",
+   "colorize",
+   "cudaDeviceIndex",
+   "dataPtr",
+   "dataType",
+   "exec",
+   "height",
+   "ids",
+   "labels",
+   "strides",
+   "width"
+  ],
+  "omni.replicator.core.InstanceSegmentationLegacy": [
+   "bufferSize",
+   "colorize",
+   "cudaDeviceIndex",
+   "dataPtr",
+   "dataType",
+   "exec",
+   "height",
+   "ids",
+   "labels",
+   "semantics",
+   "strides",
+   "width"
+  ],
+  "omni.replicator.core.OgnArray": [
+   "array",
+   "arrayType"
+  ],
+  "omni.replicator.core.OgnAugShadeSegmentation": [
+   "exec",
+   "format",
+   "height",
+   "lightSource",
+   "normalBufferSize",
+   "normalCudaDeviceIndex",
+   "normalData",
+   "normalDataPtr",
+   "normalStrides",
+   "segmentationBufferSize",
+   "segmentationCudaDeviceIndex",
+   "segmentationData",
+   "segmentationDataPtr",
+   "segmentationStrides",
+   "useCandyColours",
+   "width"
+  ],
+  "omni.replicator.core.OgnAugment": [
+   "augmentationFunctionName",
+   "augmentationScript",
+   "bufferSize",
+   "cudaDeviceIndex",
+   "data",
+   "dataOutShape",
+   "dataPtr",
+   "dataShape",
+   "dataType",
+   "exec",
+   "format",
+   "height",
+   "strides",
+   "width"
+  ],
+  "omni.replicator.core.OgnAugmentCPU": [
+   "augmentationFunctionName",
+   "augmentationScript",
+   "bufferSize",
+   "cudaDeviceIndex",
+   "data",
+   "dataPtr",
+   "dataShape",
+   "dataType",
+   "exec",
+   "format",
+   "height",
+   "strides",
+   "width"
+  ],
+  "omni.replicator.core.OgnBindMaterial": [
+   "exec",
+   "materialPaths",
+   "materialPrims",
+   "prims"
+  ],
+  "omni.replicator.core.OgnCameraRelativePosition": [
+   "cameraPrim",
+   "distance",
+   "execIn",
+   "height",
+   "horizontalLocation",
+   "numSamples",
+   "verticalLocation",
+   "width"
+  ],
+  "omni.replicator.core.OgnConditionScript": [
+   "conditionScript"
+  ],
+  "omni.replicator.core.OgnCreateProjectionMaterial": [
+   "execIn",
+   "materialPrim",
+   "offsetScale",
+   "prims",
+   "proxyPrim",
+   "semantics"
+  ],
+  "omni.replicator.core.OgnDecal": [
+   "clip_depth",
+   "clip_height",
+   "clip_width",
+   "clip_xform",
+   "execIn",
+   "mesh",
+   "offset_depth",
+   "offset_normal"
+  ],
+  "omni.replicator.core.OgnGetPrimAtPath": [
+   "execIn",
+   "paths"
+  ],
+  "omni.replicator.core.OgnGetPrims": [
+   "cachePrims",
+   "execIn",
+   "ignoreCase",
+   "pathMatch",
+   "pathPattern",
+   "pathPatternExclusion",
+   "primTypes",
+   "primTypesExclusion",
+   "semantics",
+   "semanticsExclusion"
+  ],
+  "omni.replicator.core.OgnGetSkeletonData": [
+   "cameraAperture",
+   "cameraFisheyeMaxFOV",
+   "cameraFisheyeNominalHeight",
+   "cameraFisheyeNominalWidth",
+   "cameraFisheyeOpticalCentre",
+   "cameraFisheyePolynomial",
+   "cameraFocalLength",
+   "cameraModel",
+   "cameraNearFar",
+   "cameraProjection",
+   "cameraViewTransform",
+   "exec",
+   "fabricJoints",
+   "fabricPrims",
+   "instanceSegmentationCudaDeviceIndex",
+   "instanceSegmentationHeight",
+   "instanceSegmentationIds",
+   "instanceSegmentationLabels",
+   "instanceSegmentationPtr",
+   "instanceSegmentationSemantics",
+   "instanceSegmentationStrides",
+   "instanceSegmentationWidth",
+   "jointWorldOrientations",
+   "jointWorldPositions",
+   "jointWorldScales",
+   "primWorldOrientations",
+   "primWorldPositions",
+   "primWorldScales",
+   "prims",
+   "renderProductPath",
+   "useSkelJoints"
+  ],
+  "omni.replicator.core.OgnGroup": [
+   "primsIn"
+  ],
+  "omni.replicator.core.OgnLookAt": [
+   "execIn",
+   "prims",
+   "target",
+   "targetPrim",
+   "upAxis"
+  ],
+  "omni.replicator.core.OgnMeshBoundsDecalPlacement": [
+   "boundsVector",
+   "execIn",
+   "offset",
+   "prims",
+   "rotation",
+   "scale"
+  ],
+  "omni.replicator.core.OgnMeshDecal": [
+   "decalPrim",
+   "diffuse",
+   "execIn",
+   "materialPrim",
+   "metallic",
+   "normal",
+   "offsetDepth",
+   "offsetNormal",
+   "opacity",
+   "position",
+   "prims",
+   "rotation",
+   "roughness",
+   "scale",
+   "semantics",
+   "textureGroup"
+  ],
+  "omni.replicator.core.OgnModifyAnimationTarget": [
+   "exec",
+   "prims",
+   "reset_timeline",
+   "values"
+  ],
+  "omni.replicator.core.OgnModifyProjectionMaterial": [
+   "diffuse",
+   "execIn",
+   "metallic",
+   "normal",
+   "position",
+   "prims",
+   "rotation",
+   "roughness",
+   "scale",
+   "textureGroup"
+  ],
+  "omni.replicator.core.OgnOnCondition": [
+   "condition",
+   "maxExecs",
+   "rt_subframes"
+  ],
+  "omni.replicator.core.OgnOnFrame": [
+   "interval",
+   "maxExecs",
+   "renderProduct",
+   "rtSubframes",
+   "run"
+  ],
+  "omni.replicator.core.OgnOnTime": [
+   "interval",
+   "maxExecs",
+   "resetPhysics",
+   "rtSubframes",
+   "run",
+   "triggerOnLastFrame"
+  ],
+  "omni.replicator.core.OgnOrbit": [
+   "azimuth",
+   "barycentreCoordinates",
+   "barycentreMode",
+   "barycentrePrim",
+   "distance",
+   "elevation",
+   "exec",
+   "prims"
+  ],
+  "omni.replicator.core.OgnPerAxisPose": [
+   "exec",
+   "fullValues",
+   "mode",
+   "numSamples",
+   "prims",
+   "xValue",
+   "yValue",
+   "zValue"
+  ],
+  "omni.replicator.core.OgnPhysicsReset": [
+   "execIn"
+  ],
+  "omni.replicator.core.OgnPhysicsSimulate": [
+   "execIn",
+   "physicsScene",
+   "simulationTime",
+   "stepDt"
+  ],
+  "omni.replicator.core.OgnPointCloudGenerator": [
+   "bufferSize",
+   "camera3dPositionsCudaDeviceIndex",
+   "camera3dPositionsPtr",
+   "camera3dPositionsStrides",
+   "cameraViewTransform",
+   "exec",
+   "height",
+   "includeUnlabelled",
+   "instanceSegmentationCudaDeviceIndex",
+   "instanceSegmentationPtr",
+   "instanceSegmentationStrides",
+   "normalsCudaDeviceIndex",
+   "normalsPtr",
+   "normalsStrides",
+   "rgbCudaDeviceIndex",
+   "rgbPtr",
+   "rgbStrides",
+   "semanticSegmentationCudaDeviceIndex",
+   "semanticSegmentationPtr",
+   "semanticSegmentationStrides",
+   "width"
+  ],
+  "omni.replicator.core.OgnSampleChoice": [
+   "choices",
+   "numSamples",
+   "seed",
+   "weights",
+   "withReplacements"
+  ],
+  "omni.replicator.core.OgnSampleChoicePrim": [
+   "choices",
+   "numSamples",
+   "seed",
+   "weights",
+   "withReplacements"
+  ],
+  "omni.replicator.core.OgnSampleCombine": [
+   "numInputNodes",
+   "numSamples"
+  ],
+  "omni.replicator.core.OgnSampleLight": [
+   "colorMax",
+   "colorMin",
+   "enableTemperature",
+   "execIn",
+   "intensityRange",
+   "prims",
+   "seed",
+   "temperatureRange"
+  ],
+  "omni.replicator.core.OgnSampleLogUniform": [
+   "lower",
+   "numSamples",
+   "outputType",
+   "seed",
+   "upper"
+  ],
+  "omni.replicator.core.OgnSampleMaterial": [
+   "execIn",
+   "materialPaths",
+   "materialPrim",
+   "maxCachedMaterials",
+   "prims",
+   "seed",
+   "useMaterialPrim"
+  ],
+  "omni.replicator.core.OgnSampleNormal": [
+   "mean",
+   "numSamples",
+   "outputType",
+   "seed",
+   "std"
+  ],
+  "omni.replicator.core.OgnSampleOmniPBR": [
+   "diffuse",
+   "diffuseTexture",
+   "execIn",
+   "metallic",
+   "metallicTexture",
+   "mode",
+   "prims",
+   "projectUVW",
+   "roughness",
+   "roughnessTexture",
+   "textureRotate",
+   "textureScale"
+  ],
+  "omni.replicator.core.OgnSamplePopulation": [
+   "exec",
+   "mode",
+   "paths",
+   "populationName",
+   "populationPath",
+   "prims",
+   "semantics",
+   "useCache",
+   "withReplacements"
+  ],
+  "omni.replicator.core.OgnSampleRotation": [
+   "execIn",
+   "maxAngle",
+   "minAngle",
+   "prims",
+   "seed"
+  ],
+  "omni.replicator.core.OgnSampleSequence": [
+   "items",
+   "ordered",
+   "seed"
+  ],
+  "omni.replicator.core.OgnSampleSequencePrim": [
+   "items",
+   "ordered",
+   "seed"
+  ],
+  "omni.replicator.core.OgnSampleUniform": [
+   "lower",
+   "numSamples",
+   "outputType",
+   "seed",
+   "upper"
+  ],
+  "omni.replicator.core.OgnScatter2D": [
+   "checkForCollisions",
+   "execIn",
+   "maxSamp",
+   "minSamp",
+   "noCollPrims",
+   "normalOffset",
+   "prims",
+   "seed",
+   "surfacePrims"
+  ],
+  "omni.replicator.core.OgnScatter3D": [
+   "checkForCollisions",
+   "execIn",
+   "maxSamp",
+   "minSamp",
+   "noCollPrims",
+   "preventVolOverlap",
+   "prims",
+   "resolutionScaling",
+   "seed",
+   "vizSampledVoxels",
+   "volumeExclPrims",
+   "volumePrims",
+   "voxelSize"
+  ],
+  "omni.replicator.core.OgnScheduleWriter": [
+   "exec",
+   "rationalTimeOfSimDenominator",
+   "rationalTimeOfSimNumerator",
+   "writer_id"
+  ],
+  "omni.replicator.core.OgnSetPivot": [
+   "execIn",
+   "pivot",
+   "prims"
+  ],
+  "omni.replicator.core.OgnSetTimeline": [
+   "execIn",
+   "modifyType",
+   "value"
+  ],
+  "omni.replicator.core.OgnSetVariant": [
+   "execIn",
+   "prims",
+   "values",
+   "variant"
+  ],
+  "omni.replicator.core.OgnSetVisibility": [
+   "execIn",
+   "prims",
+   "values"
+  ],
+  "omni.replicator.core.OgnSizeToScale": [
+   "execIn",
+   "maintainAspectRatio",
+   "numSamples",
+   "prims",
+   "size"
+  ],
+  "omni.replicator.core.OgnTriggerGate": [
+   "exec",
+   "syncValue",
+   "triggerExec"
+  ],
+  "omni.replicator.core.OgnWriteCarbSetting": [
+   "execIn",
+   "setting",
+   "values"
+  ],
+  "omni.replicator.core.OgnWritePhysics": [
+   "attribute",
+   "execIn",
+   "overwriteRigidBody",
+   "physicsScene",
+   "prims",
+   "values"
+  ],
+  "omni.replicator.core.OgnWritePrimAttribute": [
+   "attribute",
+   "attributeType",
+   "execIn",
+   "prims",
+   "values"
+  ],
+  "omni.replicator.core.OgnWriteSemantics": [
+   "execIn",
+   "mode",
+   "prims",
+   "semantics",
+   "semantics_values"
+  ],
+  "omni.replicator.core.OgnWriter": [
+   "dataStructure",
+   "exec",
+   "referenceTimeDenominator",
+   "referenceTimeNumerator",
+   "renderProducts",
+   "writerId",
+   "writerName"
+  ],
+  "omni.replicator.core.SemanticSegmentation": [
+   "bufferSize",
+   "colorize",
+   "exec",
+   "height",
+   "ids",
+   "instanceSegmentationCudaDeviceIndex",
+   "instanceSegmentationPtr",
+   "instanceSegmentationStrides",
+   "labels",
+   "mapping",
+   "semantics",
+   "width"
+  ],
+  "omni.replicator.replicator_yaml.OgnCameraPositionLookAtPrim": [
+   "axes",
+   "execIn",
+   "scale",
+   "targetPrim"
+  ],
+  "omni.syntheticdata.SdTestPrintRawArray": [
+   "bufferSize",
+   "data",
+   "dataFileBaseName",
+   "elementCount",
+   "elementType",
+   "exec",
+   "height",
+   "mode",
+   "randomSeed",
+   "referenceNumUniqueRandomValues",
+   "referenceSWHFrameNumbers",
+   "referenceTolerance",
+   "referenceValues",
+   "swhFrameNumber",
+   "width"
+  ],
+  "omni.syntheticdata.SdTestRationalTimeSyncGate": [
+   "execIn",
+   "rationalTimeDenominator",
+   "rationalTimeNumerator"
+  ],
+  "omni.syntheticdata.SdTestStageManipulationScenarii": [
+   "randomSeed",
+   "worldPrimPath"
+  ],
+  "omni.warp.FixedTime": [
+   "end",
+   "fps",
+   "start"
+  ],
+  "omni.warp.WarpClothSimulate": [
+   "cloth",
+   "clothDensity",
+   "clothEdgeBendingStiffness",
+   "clothEdgeDampingStiffness",
+   "clothTriAreaStiffness",
+   "clothTriDampingStiffness",
+   "clothTriDrag",
+   "clothTriElasticStiffness",
+   "clothTriLift",
+   "collider",
+   "colliderContactDistance",
+   "colliderContactQueryRange",
+   "contactDampingStiffness",
+   "contactElasticStiffness",
+   "contactFrictionCoeff",
+   "contactFrictionStiffness",
+   "enabled",
+   "execIn",
+   "gravity",
+   "groundAltitude",
+   "groundEnabled",
+   "springDampingStiffness",
+   "springElasticStiffness",
+   "springIndexPairs",
+   "springVisualize",
+   "springVisualizeColor",
+   "springVisualizeWidth",
+   "substepCount",
+   "time"
+  ],
+  "omni.warp.WarpGridCreate": [
+   "dims",
+   "execIn",
+   "size",
+   "transform"
+  ],
+  "omni.warp.WarpKernel": [
+   "codeFile",
+   "codeProvider",
+   "codeStr",
+   "device",
+   "dim1",
+   "dim2",
+   "dim3",
+   "dim4",
+   "dimCount",
+   "dimSource",
+   "execIn"
+  ],
+  "omni.warp.WarpMeshFromVolume": [
+   "data",
+   "dim1",
+   "dim2",
+   "dim3",
+   "execIn",
+   "maxPoints",
+   "maxTriangles",
+   "size",
+   "threshold",
+   "transform"
+  ],
+  "omni.warp.WarpNoiseDeform": [
+   "amplitude",
+   "axisAmplitude",
+   "base",
+   "cellSize",
+   "execIn",
+   "falloff",
+   "func",
+   "mode",
+   "prims",
+   "seed",
+   "speed",
+   "time",
+   "upAxis"
+  ],
+  "omni.warp.WarpOgnBundleInspectChanges": [
+   "bundle",
+   "execIn"
+  ],
+  "omni.warp.WarpParticlesFromMesh": [
+   "execIn",
+   "mass",
+   "maxPoints",
+   "maxSdf",
+   "mesh",
+   "minSdf",
+   "radius",
+   "seed",
+   "spacing",
+   "spacingJitter",
+   "transform",
+   "velocityAmount",
+   "velocityDir"
+  ],
+  "omni.warp.WarpParticlesSimulate": [
+   "collider",
+   "colliderContactDistance",
+   "colliderContactQueryRange",
+   "contactDampingStiffness",
+   "contactElasticStiffness",
+   "contactFrictionCoeff",
+   "contactFrictionStiffness",
+   "enabled",
+   "execIn",
+   "globalScale",
+   "gravity",
+   "groundAltitude",
+   "groundEnabled",
+   "particles",
+   "particlesContactAdhesion",
+   "particlesContactCohesion",
+   "particlesQueryRange",
+   "substepCount",
+   "time"
+  ],
+  "omni.warp.WarpSampleMeshDeform": [
+   "execIn",
+   "mesh",
+   "time"
+  ],
+  "omni.warp.WarpSampleOceanDeform": [
+   "amplitude",
+   "cameraPos",
+   "clipmapCellSize",
+   "direction",
+   "directionality",
+   "execIn",
+   "mesh",
+   "scale",
+   "time",
+   "waterDepth",
+   "windSpeed"
+  ],
+  "omni.warp.WarpSamplePrimFlocking": [
+   "execIn",
+   "time"
+  ],
+  "omni.warp.WarpSampleProceduralVolume": [
+   "dim",
+   "execIn",
+   "smoothMinRadius",
+   "time",
+   "torusAltitude",
+   "torusMajorRadius",
+   "torusMinorRadius"
+  ],
+  "omni.warp.WarpTextureWrite": [
+   "data",
+   "dim1",
+   "dim2",
+   "dim3",
+   "dim4",
+   "dimCount",
+   "execIn",
+   "uri"
+  ],
+  "omni.warp.WarpWaveSolve": [
+   "amplitude",
+   "cellSize",
+   "collider",
+   "damping",
+   "execIn",
+   "size",
+   "speed",
+   "time",
+   "transform"
+  ]
+ },
+ "source": "Isaac Sim 5.0.0 standalone: every .ogn node definition under extscache/, exts/ and extsDeprecated/ (559 files, 545 distinct type IDs), and every extension directory under extscache/ and exts/."
+}
