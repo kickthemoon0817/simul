@@ -160,6 +160,11 @@ class CompositionSandbox:
     def enabled(self) -> bool:
         return self._policy.enabled
 
+    @property
+    def policy(self) -> "PathPolicy":
+        """The path policy every location is judged by."""
+        return self._policy
+
     def check_layers(self, root_layer: "Sdf.Layer") -> List["Sdf.Layer"]:
         """Walk the layers ``root_layer`` draws on before the stage is composed.
 

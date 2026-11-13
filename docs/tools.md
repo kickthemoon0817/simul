@@ -160,6 +160,15 @@ parse error). The checks, in order:
 - pxr's UsdValidation validators, listed in `validators`; the usdz package
   rules (alignment, compression, file types) run only for a `.usdz`.
 
+The checks read the files as they are on disk. pxr keeps one in-memory copy
+of each file per process and gives it to every stage that opens the file,
+so when a loaded stage (any session's) holds the file or one it draws on,
+that copy may be older than the file. Validation then runs again in a fresh
+process, which adds a few hundred milliseconds. Unsaved edits are never part
+of the check: an `info` issue `UnsavedEdits` names each stage of the calling
+session with unsaved edits to a checked file. Save or export them and
+validate the written file to check them.
+
 `load_usd_file` fails with `error_type: LoadError` and `details.reason` set
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
@@ -320,8 +329,12 @@ and unsaved edits are lost when the server exits.
   default it writes the root layer with its composition arcs, and
   re-anchors relative asset paths (sublayers, references, textures) so they
   resolve from the new location. `flatten=true` writes the composed stage
-  as one layer. A `.usdz` is packaged with the files it depends on. The
-  file is written under a temporary name beside the destination and moved
+  as one layer. A `.usdz` is packaged with the files it depends on. A stage
+  loaded from a `.usdz` exports without `flatten` too. Its root layer keeps
+  drawing on the files inside the package: a `.usda` gets paths such as
+  `./pkg.usdz[inner_sub.usda]`, and a `.usdz` carries the original package
+  nested inside it. The file is written under a temporary name beside the
+  destination and moved
   into place in one step, so a reader never sees half a file, and without
   `overwrite` the destination is claimed exclusively: of two exports to one
   new path, one succeeds and the other is refused. A relative `file_path`
