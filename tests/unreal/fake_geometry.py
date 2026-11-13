@@ -253,7 +253,7 @@ class Actor:
         return self.world
 
     def get_outermost(self) -> SimpleNamespace:
-        return SimpleNamespace(get_name=lambda: LEVEL_PACKAGE)
+        return SimpleNamespace(get_name=lambda: self.editor.package)
 
     def get_components_by_class(self, cls: type) -> List[Any]:
         return [c for c in self.components if isinstance(c, cls)]
@@ -332,6 +332,7 @@ class FakeEditor:
         self.assets: Dict[str, Any] = {}
         self.spawned = 0
         self.dirty: set = set()
+        self.package = LEVEL_PACKAGE
         self.namespace: Dict[str, Any] = {}
 
     # -- level ---------------------------------------------------------------
