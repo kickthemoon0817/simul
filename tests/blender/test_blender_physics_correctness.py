@@ -137,13 +137,16 @@ def install(monkeypatch: pytest.MonkeyPatch, mathutils: Any) -> Any:
     return _install
 
 
-def _rigidbody_world(baked: bool = False, *bodies: Any) -> SimpleNamespace:
+def _rigidbody_world(
+    baked: bool = False, *bodies: Any, info: str = ""
+) -> SimpleNamespace:
+    """A rigid-body world of ``bodies``, its cache holding what ``info`` says (nothing by default)."""
     return SimpleNamespace(
         enabled=True,
         time_scale=1.0,
         collection=SimpleNamespace(name="RigidBodyWorld", all_objects=list(bodies)),
         point_cache=SimpleNamespace(
-            frame_start=1, frame_end=250, is_baked=baked, is_outdated=False, info=""
+            frame_start=1, frame_end=250, is_baked=baked, is_outdated=False, info=info
         ),
     )
 

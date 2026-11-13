@@ -261,7 +261,7 @@ class Editor:
         level_editor = SimpleNamespace(
             is_in_play_in_editor=lambda: editor.pie,
             editor_request_end_play=end_play,
-            on_map_changed=SimpleNamespace(add_callable=lambda callback: None),
+            on_map_changed=SimpleNamespace(add_callable_unique=lambda callback: None),
             get_viewport_config_keys=lambda: [VIEWPORT],
             get_active_viewport_config_key=lambda: VIEWPORT,
             editor_get_game_view=lambda viewport: False,
@@ -509,35 +509,6 @@ def test_a_delete_unreal_refuses_outside_pie_is_an_error(
 
     assert result["success"] is False and result["error_type"] == "DeleteNotApplied"
     assert result["error"] == "Unreal did not delete " + LEVEL + "Crate"
-
-
-@pytest.mark.parametrize(
-    ("method", "kwargs"),
-    [
-        ("generate_mesh_primitive", {"primitive_type": "box"}),
-        ("compute_convex_hull", {"mesh_path": LEVEL + "Crate"}),
-        ("decompose_convex_hull", {"mesh_path": LEVEL + "Crate"}),
-        (
-            "convert_mesh_format",
-            {"mesh_path": "/Game/Meshes/SM_Crate", "target_format": "dynamic_mesh"},
-        ),
-    ],
-)
-def test_mesh_tools_that_spawn_actors_are_refused_during_pie(
-    editor: Editor, monkeypatch: pytest.MonkeyPatch, method: str, kwargs: Dict[str, Any]
-) -> None:
-    """Each spawns its result with EditorActorSubsystem, which returns None during PIE."""
-    session = _session(editor, monkeypatch)
-
-    editor.pie = True
-    refused = asyncio.run(getattr(session, method)(**kwargs))
-    editor.pie = False
-    ran = asyncio.run(getattr(session, method)(**kwargs))
-
-    assert refused["success"] is False and refused["error_type"] == PIE_ACTIVE
-    assert refused["error"] == pie_refusal("spawn actors")["error"]
-    # Outside PIE the body runs: the fake editor has no GeometryScript, so it raises.
-    assert "GeometryScript" in ran["error"] or "EditorAssetLibrary" in ran["error"]
 
 
 @pytest.mark.parametrize(

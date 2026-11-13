@@ -704,7 +704,7 @@ class PhysicsMixin:
                     f"Invalid approximation {approximation!r}. Must be one of: "
                     f"{', '.join(COLLISION_APPROXIMATIONS)}"
                 ),
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         _prim_path = _pyval(prim_path)
         _approx = _pyval(approximation)
@@ -832,12 +832,12 @@ class PhysicsMixin:
         ):
             if value is not None and not value >= 0:
                 return ErrorResponse(
-                    error=f"{name} must be >= 0, got {value!r}", error_type="ValueError"
+                    error=f"{name} must be >= 0, got {value!r}", error_type="ValidationError"
                 ).model_dump()
         if restitution is not None and not 0.0 <= restitution <= 1.0:
             return ErrorResponse(
                 error=f"restitution must be in [0, 1], got {restitution!r}",
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         values = {
             "static_friction": static_friction,
@@ -917,7 +917,7 @@ class PhysicsMixin:
                         "gravity_direction must be three finite numbers, not all zero; got "
                         f"{list(gravity_direction)!r}"
                     ),
-                    error_type="ValueError",
+                    error_type="ValidationError",
                 ).model_dump()
             direction = [c / length for c in components]
         if gravity_magnitude is not None and not (
@@ -925,7 +925,7 @@ class PhysicsMixin:
         ):
             return ErrorResponse(
                 error=f"gravity_magnitude must be a finite value >= 0 (m/s^2), got {gravity_magnitude!r}",
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         magnitude = float(gravity_magnitude) if gravity_magnitude is not None else None
         script = _compose_script(
@@ -1094,7 +1094,7 @@ class PhysicsMixin:
         }
         problem = _physx_settings_problem(requested)
         if problem is not None:
-            return ErrorResponse(error=problem, error_type="ValueError").model_dump()
+            return ErrorResponse(error=problem, error_type="ValidationError").model_dump()
         script = _compose_script(
             """\
             import json

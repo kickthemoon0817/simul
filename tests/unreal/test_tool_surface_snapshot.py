@@ -334,7 +334,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
     },
     "edit_unreal_mesh_topology": {
         "mesh_path": MESH,
-        "operation": "extrude",
+        "operation": "extrude_faces",
         "face_selection": "0,1",
         "edge_selection": "2",
         "distance": 5.0,

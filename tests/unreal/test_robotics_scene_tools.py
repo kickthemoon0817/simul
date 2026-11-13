@@ -1430,12 +1430,13 @@ def test_the_generator_tool_returns_its_tag_and_folder(monkeypatch: pytest.Monke
 @pytest.mark.parametrize(
     "arguments, error_type, message",
     [
-        ({"scene_type": "garage"}, "ValueError", "scene_type must be one of"),
-        # U2-16: json's own error ("Expecting property name") did not name the parameter.
-        ({"scene_type": "room", "parameters": "{bad"}, "ValueError", "parameters must be a JSON object"),
-        ({"scene_type": "room", "parameters": "[1, 2]"}, "ValueError", "parameters must be a JSON object, got list"),
-        ({"scene_type": "room", "bounds_min": "0,0"}, "ValueError", "bounds_min must be three finite numbers"),
-        ({"scene_type": "room", "bounds_min": "0,0,nan"}, "ValueError", "bounds_min must be three finite numbers"),
+        # An argument check's ValueError is a ValidationError in the shared taxonomy.
+        ({"scene_type": "garage"}, "ValidationError", "scene_type must be one of"),
+        # U2-16: json's own error ("Expecting property name") did not say an object is expected.
+        ({"scene_type": "room", "parameters": "{bad"}, "ValidationError", "parameters: must be a JSON object such"),
+        ({"scene_type": "room", "parameters": "[1, 2]"}, "ValidationError", "parameters: must be a JSON object, got"),
+        ({"scene_type": "room", "bounds_min": "0,0"}, "ValidationError", "bounds_min must be three finite"),
+        ({"scene_type": "room", "bounds_min": "0,0,nan"}, "ValidationError", "bounds_min must be three finite"),
     ],
 )
 def test_the_generator_tool_reports_invalid_input(

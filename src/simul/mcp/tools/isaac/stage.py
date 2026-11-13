@@ -526,7 +526,7 @@ class StageAssetMixin:
         if not url or url.startswith("anon:"):
             return ErrorResponse(
                 error="The stage has never been saved, so it has no file to save in place. Pass file_path.",
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         layers: List[str] = [url] + [layer for layer in probe.get("dirty_layers") or [] if layer != url]
         for layer in layers:
@@ -844,5 +844,5 @@ def _asset_prim_path_problem(asset_prim_path: Optional[str]) -> Optional[Dict[st
         return None
     return ErrorResponse(
         error=f"asset_prim_path must be an absolute prim path such as /Robot, got {asset_prim_path!r}",
-        error_type="ValueError",
+        error_type="ValidationError",
     ).model_dump()

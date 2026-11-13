@@ -752,7 +752,9 @@ def _call_tool(instance: Any, tool: str, arguments: Dict[str, Any]) -> Dict[str,
 def test_a_bad_argument_is_a_validation_error_with_a_code(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """Review of #320: argument errors were ValueError with no details."""
+    """Review of #320: argument errors were ValueError with no details. A range
+    the schema states is refused there, in the shared envelope; a rule it cannot
+    state (no duration with an impulse) is the session's, with a code."""
     editor = Editor()
     cube = simulated_cube(editor)
     editor.start()
@@ -766,20 +768,18 @@ def test_a_bad_argument_is_a_validation_error_with_a_code(
     paged = _call_tool(
         instance, "get_unreal_physics_state", {"tag_filter": "props", "offset": -1}
     )
+    coded = _call_tool(
+        instance,
+        "apply_unreal_force",
+        {"actor_path": cube.get_path_name(), "force_z": 1.0, "is_impulse": True, "duration": 1.0},
+    )
 
     assert (payload["success"], payload["error_type"]) == (False, "ValidationError")
-    assert payload["details"] == {
-        "code": "OUT_OF_RANGE",
-        "parameter": "duration",
-        "value": 601.0,
-        "minimum": 0.0,
-        "maximum": 600.0,
-    }
-    assert (
-        paged["error_type"],
-        paged["details"]["code"],
-        paged["details"]["parameter"],
-    ) == ("ValidationError", "OUT_OF_RANGE", "offset")
+    assert [error["field"] for error in payload["details"]["errors"]] == ["duration"]
+    assert paged["error_type"] == "ValidationError"
+    assert [error["field"] for error in paged["details"]["errors"]] == ["offset"]
+    assert (coded["error_type"], coded["details"]["code"]) == ("ValidationError", "DURATION_WITH_IMPULSE")
+    assert cube.root_component.pushes == []
 
 
 def test_the_simulation_tool_lists_its_actions_and_modes(
