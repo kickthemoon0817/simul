@@ -491,6 +491,72 @@ def test_reload_reports_a_sublayer_that_no_longer_parses(sandbox: Path) -> None:
     assert listed["stages"][0]["changed_on_disk"] == [sub]
 
 
+def test_validation_checks_the_disk_and_names_this_sessions_unsaved_edits(sandbox: Path) -> None:
+    """The audit's B4: a file fixed and saved by one stage still failed while another stage held it."""
+    (sandbox / "asset.usda").write_text('#usda 1.0\n(\n    defaultPrim = "Gone"\n)\ndef Xform "A"\n{\n}\n')
+    (sandbox / "user.usda").write_text(
+        '#usda 1.0\ndef Xform "W"\n{\n    def "R" (\n        references = @./asset.usda@</A>\n    )\n    {\n    }\n}\n'
+    )
+    server = _server(sandbox)
+    asset = str(sandbox / "asset.usda")
+
+    async def steps(first: Client, second: Client) -> List[Dict[str, Any]]:
+        await _call(first, "load_usd_file", file_path=str(sandbox / "user.usda"))
+        fix = (await _call(first, "load_usd_file", file_path=asset))["stage_id"]
+        await _call(first, "create_prim", stage_id=fix, prim_path="/Gone", prim_type="Xform")
+        await _call(first, "save_usd_stage", stage_id=fix)
+        fixed = await _call(first, "validate_usd_file", file_path=asset)
+        await _call(first, "create_prim", stage_id=fix, prim_path="/Gone/Unsaved", prim_type="Xform")
+        mine = await _call(first, "validate_usd_file", file_path=asset)
+        theirs = await _call(second, "validate_usd_file", file_path=asset)
+        return [{"fix": fix}, fixed, mine, theirs]
+
+    ids, fixed, mine, theirs = _legacy_pair(server, steps)
+
+    assert fixed["is_valid"] is True, fixed["issues"]
+    notices = [issue for issue in mine["issues"] if issue["code"] == "UnsavedEdits"]
+    assert len(notices) == 1 and notices[0]["severity"] == "info"
+    assert ids["fix"] in notices[0]["message"]
+    assert notices[0]["location"]["layer"] == str((sandbox / "asset.usda").resolve())
+    assert mine["is_valid"] is True and mine["info_count"] == 1
+    assert theirs["is_valid"] is True and theirs["info_count"] == 0
+
+
+def test_a_usdz_stage_exports_without_flatten(sandbox: Path) -> None:
+    """The audit's B6: the route docs give for editing a .usdz, export it, works without flatten."""
+    from pxr import UsdUtils
+
+    source = sandbox / "pkg_src"
+    source.mkdir()
+    (source / "inner.usda").write_text(
+        '#usda 1.0\ndef Xform "Pkg"\n{\n    def Xform "FromSublayer"\n    {\n    }\n}\n'
+    )
+    (source / "root.usda").write_text('#usda 1.0\n(\n    defaultPrim = "Pkg"\n    subLayers = [@./inner.usda@]\n)\n')
+    assert UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(str(source / "root.usda")), str(sandbox / "pkg.usdz"))
+    (sandbox / "out").mkdir()
+    server = _server(sandbox)
+
+    async def steps(client: Client) -> List[Dict[str, Any]]:
+        stage_id = (await _call(client, "load_usd_file", file_path=str(sandbox / "pkg.usdz")))["stage_id"]
+        await _call(client, "create_prim", stage_id=stage_id, prim_path="/Pkg/Edited", prim_type="Xform")
+        refused = await _call(client, "save_usd_stage", stage_id=stage_id)
+        exported = [
+            await _call(client, "export_usd_stage", stage_id=stage_id, file_path=str(sandbox / "out" / name))
+            for name in ("edited.usda", "edited.usdz")
+        ]
+        reloaded = await _call(client, "load_usd_file", file_path=str(sandbox / "out" / "edited.usda"))
+        return [refused, *exported, reloaded]
+
+    refused, as_usda, as_usdz, reloaded = _run(server, steps)
+
+    assert refused["error_type"] == "UnsupportedOperation" and "export_usd_stage" in refused["error"]
+    assert as_usda["success"] is True and as_usdz["success"] is True
+    for name in ("edited.usda", "edited.usdz"):
+        stage = Usd.Stage.Open(str(sandbox / "out" / name))
+        assert stage.GetPrimAtPath("/Pkg/FromSublayer") and stage.GetPrimAtPath("/Pkg/Edited")
+    assert reloaded["success"] is True and reloaded["total_prims"] == 3
+
+
 def test_a_self_referencing_file_loads_with_a_warning(sandbox: Path) -> None:
     (sandbox / "self.usda").write_text(
         '#usda 1.0\ndef Xform "W"\n{\n    def Cube "Proto"\n    {\n        double size = 1\n    }\n'

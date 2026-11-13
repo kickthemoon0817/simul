@@ -59,6 +59,7 @@ from ...logging import get_logger
 from ...usd import stage_files
 from ...usd.sandbox import CompositionSandbox
 from ...usd.validation import (
+    INFO,
     WARNING,
     ValidationIssue,
     composition_issues,
@@ -387,7 +388,10 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "defaultPrim, upAxis and metersPerUnit, physics (joint body targets, "
             "nested rigid bodies or articulation roots, mass, inverted joint limits) "
             "and pxr's UsdValidation validators, with the usdz package rules for a "
-            ".usdz. Returns is_valid (no error-severity issue), can_read (pxr opened "
+            ".usdz. Checks the files as they are on disk, not the copies loaded stages "
+            "hold; an info issue UnsavedEdits names this session's stages with unsaved "
+            "edits to a checked file, which the check does not include. "
+            "Returns is_valid (no error-severity issue), can_read (pxr opened "
             "it, so load_usd_file can) and issues with severity, code and location. "
             "Paths: sandbox (security.allowed_paths), applied to everything the file "
             "draws on as load_usd_file applies it. pxr's UnresolvableDependency and "
@@ -411,12 +415,25 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             File validity information or error
         """
 
-        def _validate(target: str) -> Dict[str, Any]:
+        def _validate(session: "HeadlessUSDSession", target: str) -> Dict[str, Any]:
             report = run_validation(
                 target,
                 server.settings.usd,
                 sandbox=CompositionSandbox(server._path_policy),
+                layer_is_current=getattr(session, "layer_is_current", None),
             )
+            unsaved = getattr(session, "unsaved_stages_of", None)
+            for stage_id, path in unsaved(report.files) if unsaved is not None else []:
+                report.issues.append(
+                    ValidationIssue(
+                        INFO,
+                        "UnsavedEdits",
+                        f"Checked {path} as it is on disk. Stage {stage_id} has unsaved edits to "
+                        "it, which this check does not include; write them with save_usd_stage "
+                        "or export_usd_stage and validate the file written to check them.",
+                        layer=path,
+                    )
+                )
             return USDFileInfo(**report.to_dict()).model_dump()
 
         async def _validate_call(session: "HeadlessUSDSession") -> Dict[str, Any]:
@@ -425,7 +442,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 return input_data
             target = usd_target(input_data.file_path)
             # Touches no loaded stage: it waits only for a running edit.
-            return await scheduler.run("validate_usd_file", lambda: _validate(target))
+            return await scheduled("validate_usd_file", lambda s: _validate(s, target))(session)
 
         return await server._exec_backend(
             "validate_usd_file",
@@ -1414,7 +1431,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "files it depends on). flatten=true writes the composed stage as one layer; "
             "otherwise the root layer is written with its sublayers, references and "
             "payloads kept as composition arcs and relative asset paths re-anchored to the "
-            "new location. Refuses an existing file unless overwrite=true; the file is "
+            "new location; for a stage loaded from a .usdz they point into that package "
+            "(a .usdz export nests it). Refuses an existing file unless overwrite=true; the file is "
             "written under a temporary name and moved into place, so of two exports to one "
             "new path only one creates it. The stage stays bound to its own file and keeps "
             "its unsaved state. A relative file_path resolves against "

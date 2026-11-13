@@ -10,6 +10,7 @@ server relies on is tested without a server.
 from __future__ import annotations
 
 import os
+import secrets
 import stat
 import threading
 import time
@@ -21,11 +22,12 @@ import pytest
 
 pytest.importorskip("pxr", reason="pxr library not available")
 
-from pxr import Sdf, Usd, UsdGeom  # noqa: E402
+from pxr import Sdf, Usd, UsdGeom, UsdUtils  # noqa: E402
 
 from simul.adapters import headless_usd  # noqa: E402
 from simul.adapters.headless_usd import HeadlessUSDSession  # noqa: E402
-from simul.usd import stage_files  # noqa: E402
+from simul.config import Settings  # noqa: E402
+from simul.usd import stage_files, validation  # noqa: E402
 from simul.usd.sandbox import CompositionSandbox  # noqa: E402
 from simul.usd.editing import USDEditError  # noqa: E402
 from simul.utils.paths import PathPolicy, SandboxDenied  # noqa: E402
@@ -715,6 +717,316 @@ class TestLoadOwnership:
 
         _edit_externally(files["robot"], "/Robot/Outside")
         assert session.reuse_stage(second, files["robot"]) is False
+
+
+def _package(directory: Path) -> Path:
+    """A .usdz whose root layer sublayers a file inside it and names a texture inside it."""
+    source = directory / "pkg_src"
+    (source / "tex").mkdir(parents=True)
+    (source / "tex" / "wood.png").write_bytes(b"\x89PNG\r\n\x1a\nnot-really")
+    (source / "inner.usda").write_text(
+        '#usda 1.0\ndef Xform "Pkg"\n{\n    def Xform "FromSublayer"\n    {\n    }\n}\n'
+    )
+    (source / "root.usda").write_text(
+        '#usda 1.0\n(\n    defaultPrim = "Pkg"\n    subLayers = [@./inner.usda@]\n)\n'
+        'over "Pkg"\n{\n    asset custom:texture = @./tex/wood.png@\n}\n'
+    )
+    package = directory / "pkg" / "pkg.usdz"
+    package.parent.mkdir()
+    assert UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(str(source / "root.usda")), str(package))
+    return package
+
+
+def _replace_package(package: Path, inner: str) -> None:
+    """Build a new ``package`` whose inner.usda is ``inner``, from a fresh source tree, and swap it in."""
+    source = package.parent.parent / f"pkg_src_{secrets.token_hex(4)}"
+    source.mkdir()
+    (source / "inner.usda").write_text(inner)
+    (source / "root.usda").write_text(
+        '#usda 1.0\n(\n    defaultPrim = "Pkg"\n    subLayers = [@./inner.usda@]\n)\n'
+    )
+    staged = package.with_name("staged.usdz")
+    assert UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(str(source / "root.usda")), str(staged))
+    os.replace(staged, package)
+    _touch_later(package)
+
+
+class TestChangedPackage:
+    """A layer inside a .usdz changes with its package file."""
+
+    def test_reload_rereads_the_layers_of_a_replaced_package(self, session, tmp_path) -> None:
+        package = _package(tmp_path)
+        stage_id = session.load_stage(package)
+        inner = f"{package.resolve()}[inner.usda]"
+        _replace_package(package, '#usda 1.0\ndef Xform "Pkg"\n{\n    def Xform "Replaced"\n    {\n    }\n}\n')
+
+        assert inner in session.stage_status(stage_id)["changed_on_disk"]
+        result = session.reload_stage(stage_id)
+
+        stage = session.get_stage(stage_id)
+        assert stage.GetPrimAtPath("/Pkg/Replaced") and not stage.GetPrimAtPath("/Pkg/FromSublayer")
+        assert inner in result["reloaded_files"]
+        assert session.stage_status(stage_id)["changed_on_disk"] == []
+
+    def test_validation_reads_a_replaced_package_from_disk(self, session, tmp_path) -> None:
+        package = _package(tmp_path)
+        session.load_stage(package)  # holds the package's inner layer
+        _replace_package(package, "#usda 1.0\n(\n    subLayers = [@./missing.usda@]\n)\n")
+
+        report = validation.validate_usd_file(
+            str(package.resolve()), Settings().usd, layer_is_current=session.layer_is_current
+        )
+
+        assert "MissingSublayer" in [issue.code for issue in report.issues]
+        assert not report.is_valid
+
+
+class TestUsdzExport:
+    """A stage loaded from a .usdz exports without flatten, and the result composes like the package."""
+
+    @pytest.mark.parametrize("suffix", [".usda", ".usdc", ".usdz"])
+    def test_a_usdz_stage_exports_with_its_package_content(self, session, tmp_path, suffix) -> None:
+        stage_id = session.load_stage(_package(tmp_path))
+        session.create_prim(stage_id, "/Pkg/Edited", "Xform")
+        (tmp_path / "out").mkdir()
+        destination = tmp_path / "out" / f"edited{suffix}"
+
+        result = session.export_stage(stage_id, str(destination))
+
+        assert result["rewritten_asset_paths"] == 2
+        exported = Usd.Stage.Open(str(destination))
+        assert exported.GetPrimAtPath("/Pkg/FromSublayer")
+        assert exported.GetPrimAtPath("/Pkg/Edited")
+        texture = exported.GetPrimAtPath("/Pkg").GetAttribute("custom:texture").Get()
+        assert texture.resolvedPath
+        if suffix != ".usdz":
+            assert list(exported.GetRootLayer().subLayerPaths) == ["../pkg/pkg.usdz[inner.usda]"]
+        assert validation.validate_usd_file(str(destination), Settings().usd).is_valid
+
+    def test_a_reference_into_another_package_is_reanchored(self, session, files, tmp_path) -> None:
+        package = _package(tmp_path)
+        scene = tmp_path / "uses_pkg.usda"
+        scene.write_text(
+            '#usda 1.0\ndef Xform "World"\n{\n    def "Inner" (\n'
+            "        references = @./pkg/pkg.usdz[inner.usda]@</Pkg>\n    )\n    {\n    }\n}\n"
+        )
+        assert package.exists()
+        (tmp_path / "out").mkdir()
+        destination = tmp_path / "out" / "copy.usda"
+
+        session.export_stage(session.load_stage(scene), str(destination))
+
+        assert Usd.Stage.Open(str(destination)).GetPrimAtPath("/World/Inner/FromSublayer")
+
+
+class TestValidationReadsTheDisk:
+    """pxr's in-memory copy of a file a loaded stage holds is not what validation checks."""
+
+    _DANGLING_ASSET = '#usda 1.0\n(\n    defaultPrim = "Gone"\n)\ndef Xform "A"\n{\n}\n'
+    _USER = (
+        '#usda 1.0\ndef Xform "W"\n{\n    def "R" (\n        references = @./asset.usda@</A>\n'
+        "    )\n    {\n    }\n}\n"
+    )
+
+    @staticmethod
+    def _codes(report: validation.ValidationReport) -> List[str]:
+        return [issue.code for issue in report.issues]
+
+    def test_a_file_fixed_and_saved_validates_as_fixed(self, session, tmp_path) -> None:
+        (tmp_path / "asset.usda").write_text(self._DANGLING_ASSET)
+        (tmp_path / "user.usda").write_text(self._USER)
+        session.load_stage(tmp_path / "user.usda")  # holds asset.usda in memory
+        stale = validation.validate_usd_file(str(tmp_path / "asset.usda"), Settings().usd)
+        assert "DanglingDefaultPrim" in self._codes(stale)
+        fix = session.load_stage(tmp_path / "asset.usda")
+        session.create_prim(fix, "/Gone", "Xform")
+        session.save_stage(fix)
+
+        report = validation.validate_usd_file(str(tmp_path / "asset.usda"), Settings().usd)
+
+        assert report.is_valid, self._codes(report)
+
+    def test_a_sublayer_broken_on_disk_fails_validation(self, session, files) -> None:
+        session.load_stage(files["scene"])  # holds sub.usda in memory
+        files["sub"].write_text(_BROKEN)
+        _touch_later(files["sub"])
+
+        report = validation.validate_usd_file(str(files["scene"]), Settings().usd)
+
+        assert not report.is_valid
+        assert "MissingSublayer" in self._codes(report)
+        assert report.files[0] == str(files["scene"].resolve())
+
+    def test_a_file_no_stage_holds_is_validated_in_process(self, files, monkeypatch) -> None:
+        def no_child(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("validation started a process although nothing was in memory")
+
+        monkeypatch.setattr(validation.subprocess, "run", no_child)
+
+        report = validation.validate_usd_file(str(files["scene"]), Settings().usd)
+
+        assert report.can_read and report.files[0] == str(files["scene"].resolve())
+
+    def test_a_file_that_now_reaches_outside_is_refused(self, session, tmp_path) -> None:
+        inside, outside = tmp_path / "inside", tmp_path / "outside"
+        inside.mkdir()
+        outside.mkdir()
+        (outside / "secret.usda").write_text('#usda 1.0\ndef "S"\n{\n}\n')
+        (inside / "asset.usda").write_text(_ASSET)
+        (inside / "scene.usda").write_text(_SCENE)
+        policy = PathPolicy(enabled=True, allowed_paths=[str(inside)])
+        session.load_stage_or_raise(inside / "scene.usda", sandbox=CompositionSandbox(policy))
+        (inside / "asset.usda").write_text(_ASSET_REACHING_OUT)
+        _touch_later(inside / "asset.usda")
+
+        with pytest.raises(SandboxDenied) as caught:
+            validation.validate_usd_file(
+                str(inside / "scene.usda"), Settings().usd, sandbox=CompositionSandbox(policy)
+            )
+
+        assert caught.value.details["outside_sandbox"][0]["location"] == str((outside / "secret.usda").resolve())
+
+    def test_a_child_that_dies_is_reported_as_an_error(self, session, files, monkeypatch) -> None:
+        import subprocess
+
+        session.load_stage(files["scene"])
+        monkeypatch.setattr(
+            validation.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(a, -11, b"", b"Segmentation fault: 11\n"),
+        )
+
+        report = validation.validate_usd_file(str(files["scene"]), Settings().usd)
+
+        assert report.can_read is False
+        assert [(issue.severity, issue.code) for issue in report.issues] == [("error", "OpenFailed")]
+        assert "Segmentation fault" in report.issues[0].message
+
+    def test_a_child_that_times_out_raises_with_the_setting(self, session, files, monkeypatch) -> None:
+        import subprocess
+
+        from simul.config import USDConfig
+
+        session.load_stage(files["scene"])
+        seen: Dict[str, Any] = {}
+
+        def too_slow(*args: Any, **kwargs: Any) -> Any:
+            seen["timeout"] = kwargs["timeout"]
+            raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+        monkeypatch.setattr(validation.subprocess, "run", too_slow)
+
+        with pytest.raises(TimeoutError, match="usd.validation_timeout_seconds"):
+            validation.validate_usd_file(str(files["scene"]), USDConfig(validation_timeout_seconds=7))
+
+        assert seen["timeout"] == 7
+
+    @pytest.mark.parametrize("failure", ["exit", "start"])
+    def test_a_child_that_cannot_run_falls_back_with_a_warning(self, session, files, monkeypatch, failure) -> None:
+        """No pxr in the child, or no child at all, says nothing about the file."""
+        import subprocess
+
+        session.load_stage(files["scene"])
+
+        def broken(*args: Any, **kwargs: Any) -> Any:
+            if failure == "start":
+                raise FileNotFoundError("no python there")
+            return subprocess.CompletedProcess(args, 1, b"", b"ModuleNotFoundError: No module named 'pxr'\n")
+
+        monkeypatch.setattr(validation.subprocess, "run", broken)
+
+        report = validation.validate_usd_file(str(files["scene"]), Settings().usd)
+
+        assert report.can_read is True and report.is_valid is True
+        warning = [issue for issue in report.issues if issue.code == "ValidatedInMemoryCopy"]
+        assert len(warning) == 1 and warning[0].severity == "warning"
+        assert ("ModuleNotFoundError" if failure == "exit" else "could not start") in warning[0].message
+        assert str(files["sub"].resolve()) in warning[0].message
+
+    def test_held_layers_unchanged_since_read_are_validated_in_process(self, session, files, monkeypatch) -> None:
+        import subprocess
+
+        session.load_stage(files["scene"])  # holds sub.usda and robot.usda, unchanged
+        calls: List[Any] = []
+
+        def child(*args: Any, **kwargs: Any) -> Any:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, -11, b"", b"")
+
+        monkeypatch.setattr(validation.subprocess, "run", child)
+
+        report = validation.validate_usd_file(
+            str(files["scene"]), Settings().usd, layer_is_current=session.layer_is_current
+        )
+
+        assert calls == [] and report.is_valid is True
+
+        _edit_externally(files["sub"], "/World/AddedOutside")
+        stale = validation.validate_usd_file(
+            str(files["scene"]), Settings().usd, layer_is_current=session.layer_is_current
+        )
+
+        assert len(calls) == 1 and [issue.code for issue in stale.issues] == ["OpenFailed"]
+
+    def test_the_fresh_process_lets_unreal_content_paths_through(self, session, tmp_path, monkeypatch) -> None:
+        """An Unreal export's /Engine/... material paths pass the sandbox in the child as in the server."""
+        (tmp_path / "Cube.usda").write_text(
+            '#usda 1.0\n(\n    defaultPrim = "Cube"\n)\ndef Xform "Cube"\n{\n    def Shader "UnrealShader"\n    {\n'
+            '        uniform token info:implementationSource = "sourceAsset"\n'
+            "        uniform asset info:unreal:sourceAsset = "
+            "@/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@\n    }\n}\n"
+        )
+        (tmp_path / "level.usda").write_text(
+            '#usda 1.0\n(\n    defaultPrim = "Root"\n    metersPerUnit = 0.01\n    upAxis = "Z"\n)\n'
+            'def Xform "Root"\n{\n    def "Cube" (\n        prepend references = @./Cube.usda@\n    )\n'
+            "    {\n    }\n}\n"
+        )
+        policy = PathPolicy(enabled=True, allowed_paths=[str(tmp_path)])
+        session.load_stage_or_raise(tmp_path / "level.usda", sandbox=CompositionSandbox(policy))
+        _touch_later(tmp_path / "Cube.usda")  # the held copy is now older than the file
+        real_run, runs = validation.subprocess.run, []
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            runs.append(args)
+            return real_run(*args, **kwargs)
+
+        monkeypatch.setattr(validation.subprocess, "run", spy)
+
+        report = validation.validate_usd_file(
+            str(tmp_path / "level.usda"),
+            Settings().usd,
+            sandbox=CompositionSandbox(policy),
+            layer_is_current=session.layer_is_current,
+        )
+
+        assert len(runs) == 1
+        assert report.is_valid, [(issue.code, issue.message) for issue in report.issues if issue.severity == "error"]
+        assert report.files and report.files[0] == str((tmp_path / "level.usda").resolve())
+
+    def test_the_child_gets_the_sandbox_options(self, session, tmp_path, monkeypatch) -> None:
+        import pickle
+        import subprocess
+
+        (tmp_path / "sub.usda").write_text('#usda 1.0\ndef Xform "World"\n{\n}\n')
+        (tmp_path / "root.usda").write_text("#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\n")
+        session.load_stage(tmp_path / "root.usda")
+        _touch_later(tmp_path / "sub.usda")
+        policy = PathPolicy(enabled=True, allowed_paths=[str(tmp_path)])
+        sent: Dict[str, Any] = {}
+
+        def capture(*args: Any, **kwargs: Any) -> Any:
+            sent.update(pickle.loads(kwargs["input"]))
+            return subprocess.CompletedProcess(args, -11, b"", b"")
+
+        monkeypatch.setattr(validation.subprocess, "run", capture)
+
+        report = validation.validate_usd_file(
+            str(tmp_path / "root.usda"), Settings().usd, sandbox=CompositionSandbox(policy)
+        )
+
+        assert set(sent["sandbox"]) == set(CompositionSandbox(policy).options())
+        assert sent["sandbox"]["policy"].allowed_roots == policy.allowed_roots
+        assert [(issue.code, "signal 11" in issue.message) for issue in report.issues] == [("OpenFailed", True)]
 
 
 class TestDiscard:

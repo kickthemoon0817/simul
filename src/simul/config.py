@@ -606,6 +606,14 @@ class USDConfig(BaseModel):
     max_file_size_mb: int = Field(
         default=500, description="Maximum USD file size in MB", ge=1
     )
+    validation_timeout_seconds: float = Field(
+        default=300.0,
+        description=(
+            "Longest validate_usd_file may take when it checks a file in a separate process "
+            "(because a loaded stage holds an older copy of a file it uses)"
+        ),
+        gt=0,
+    )
 
 
 class ViewportConfig(BaseModel):
@@ -1032,6 +1040,7 @@ _YAML_GROUPS: Dict[str, Dict[str, Dict[str, str]]] = {
     "usd": {
         "cache": {"enabled": "cache_enabled"},
         "files": {"allowed_extensions": "allowed_extensions", "max_file_size_mb": "max_file_size_mb"},
+        "validation": {"timeout_seconds": "validation_timeout_seconds"},
     },
     "viewport": {"capture": {"max_size": "max_size", "directory": "capture_dir"}},
     "logging": {

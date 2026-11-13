@@ -35,7 +35,7 @@ import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from pxr import UsdUtils
+from pxr import Ar, UsdUtils
 
 from ._pxr import Sdf, Usd
 
@@ -135,8 +135,12 @@ def stamp(path: str) -> Stamp:
 
     The modification time alone misses a write in the same clock tick as the
     read (a coarse filesystem clock); the size and the inode (a save that
-    replaces the file gets a new one) catch most of those.
+    replaces the file gets a new one) catch most of those. A layer inside a
+    package (``/x/pkg.usdz[inner.usda]``) changes with its package, so it is
+    stamped by the package file.
     """
+    if Ar.IsPackageRelativePath(path):
+        path = Ar.SplitPackageRelativePathOuter(path)[0]
     try:
         info = os.stat(path)
     except OSError:
@@ -202,6 +206,14 @@ def composes_own_file(stage: Usd.Stage) -> bool:
     return bool(path) and any(layer != root and layer.realPath == path for layer in stage.GetUsedLayers())
 
 
+def _resolves(asset_path: str) -> bool:
+    """Whether pxr's resolver finds ``asset_path`` (a file inside a package, for one)."""
+    try:
+        return bool(str(Ar.GetResolver().Resolve(asset_path)))
+    except Exception:
+        return False
+
+
 def _reanchor(layer: Sdf.Layer, source: Sdf.Layer, destination_dir: Optional[str]) -> int:
     """Rewrite ``layer``'s relative asset paths to resolve from ``destination_dir``.
 
@@ -212,23 +224,36 @@ def _reanchor(layer: Sdf.Layer, source: Sdf.Layer, destination_dir: Optional[str
     an existing file, made relative to ``destination_dir`` (or absolute when
     ``destination_dir`` is None, for packaging).
 
+    A path that anchors inside a package (the files beside the root layer of
+    a .usdz, or ``./other.usdz[inner.usda]``) is kept pointing into that
+    package: ``../pkg.usdz[inner.usda]`` from the new location, or the
+    package's absolute path for packaging, which pxr then packs as a nested
+    package.
+
     Returns:
         The number of asset paths rewritten.
     """
     rewritten = [0]
 
+    def relative(path: str) -> str:
+        new_path = os.path.relpath(path, destination_dir).replace(os.sep, "/")
+        return new_path if new_path.startswith(".") else "./" + new_path
+
     def modify(asset_path: str) -> str:
         if not asset_path or os.path.isabs(asset_path) or _URL.match(asset_path):
             return asset_path
         absolute = str(source.ComputeAbsolutePath(asset_path) or "")
-        if not absolute or not os.path.isabs(absolute) or not os.path.exists(absolute):
+        if Ar.IsPackageRelativePath(absolute):
+            outer, inner = Ar.SplitPackageRelativePathOuter(absolute)
+            if not os.path.isabs(outer) or not os.path.exists(outer) or not _resolves(absolute):
+                return asset_path
+            new_path = (
+                absolute if destination_dir is None else Ar.JoinPackageRelativePath(relative(outer), inner)
+            )
+        elif not absolute or not os.path.isabs(absolute) or not os.path.exists(absolute):
             return asset_path
-        if destination_dir is None:
-            new_path = absolute
         else:
-            new_path = os.path.relpath(absolute, destination_dir).replace(os.sep, "/")
-            if not new_path.startswith("."):
-                new_path = "./" + new_path
+            new_path = absolute if destination_dir is None else relative(absolute)
         if new_path != asset_path:
             rewritten[0] += 1
         return new_path

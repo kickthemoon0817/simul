@@ -189,6 +189,25 @@ parse error). The checks, in order:
 - pxr's UsdValidation validators, listed in `validators`; the usdz package
   rules (alignment, compression, file types) run only for a `.usdz`.
 
+The checks read the files as they are on disk. pxr keeps one in-memory copy
+of each file per process and gives it to every stage that opens the file,
+so a loaded stage (any session's) may hold a copy of the file, or of one it
+draws on, that is older than the file. Once the stage is composed, and
+before any check runs, each copy that was already in memory is compared
+with its file. When all of them match, the check runs in the server process
+as usual. When one changed since it was read, the whole check runs in a
+fresh process instead. That costs the time to start Python and pxr (a few
+tenths of a second) plus composing the file a second time, which for a
+large scene is most of the check. `usd.validation_timeout_seconds` (default
+300) caps that process; past it the call fails with `TimeoutError`. A
+process killed by a signal is pxr crashing on the file, reported as an
+`OpenFailed` error. If the process cannot start or ends without a result,
+the check runs in the server process anyway, with a `ValidatedInMemoryCopy`
+warning naming the files whose copies it used. Unsaved edits are never part
+of the check: an `info` issue `UnsavedEdits` names each stage of the calling
+session with unsaved edits to a checked file. Save or export them and
+validate the written file to check them.
+
 `load_usd_file` fails with `error_type: LoadError` and `details.reason` set
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
@@ -352,8 +371,12 @@ and unsaved edits are lost when the server exits.
   default it writes the root layer with its composition arcs, and
   re-anchors relative asset paths (sublayers, references, textures) so they
   resolve from the new location. `flatten=true` writes the composed stage
-  as one layer. A `.usdz` is packaged with the files it depends on. The
-  file is written under a temporary name beside the destination and moved
+  as one layer. A `.usdz` is packaged with the files it depends on. A stage
+  loaded from a `.usdz` exports without `flatten` too. Its root layer keeps
+  drawing on the files inside the package: a `.usda` gets paths such as
+  `./pkg.usdz[inner_sub.usda]`, and a `.usdz` carries the original package
+  nested inside it. The file is written under a temporary name beside the
+  destination and moved
   into place in one step, so a reader never sees half a file, and without
   `overwrite` the destination is claimed exclusively: of two exports to one
   new path, one succeeds and the other is refused. A relative `file_path`
