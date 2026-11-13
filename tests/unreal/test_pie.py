@@ -1399,3 +1399,34 @@ def test_an_agent_sees_whether_focus_selected_the_actor(
         False,
         None,
     )
+
+
+@pytest.mark.parametrize("pie", [False, True])
+def test_editor_world_asks_get_editor_world_only_outside_pie(monkeypatch: pytest.MonkeyPatch, pie: bool) -> None:
+    """Round-2 audit R2B-10: during PIE every tool call logged "LogUtils: Error: The
+    Editor is currently in a play mode." (84 lines in one session), because
+    editor_world() asked UnrealEditorSubsystem.get_editor_world first."""
+    from simul.adapters._unreal_scripts import EDITOR_WORLD
+
+    editor_world_package = SimpleNamespace(get_outermost=lambda: SimpleNamespace(get_name=lambda: "/Game/Maps/Main"))
+    asked: List[str] = []
+
+    def get_editor_world() -> Any:
+        asked.append("get_editor_world")
+        return None if pie else editor_world_package
+
+    subsystems = {
+        "UnrealEditorSubsystem": SimpleNamespace(
+            get_editor_world=get_editor_world,
+            get_game_world=lambda: SimpleNamespace() if pie else None,
+        ),
+        "LayersSubsystem": SimpleNamespace(get_world=lambda: editor_world_package),
+    }
+    fake = SimpleNamespace(get_editor_subsystem=subsystems.__getitem__, UnrealEditorSubsystem="UnrealEditorSubsystem",
+                           LayersSubsystem="LayersSubsystem")
+    monkeypatch.setitem(sys.modules, "unreal", fake)
+    namespace: Dict[str, Any] = {}
+    exec(EDITOR_WORLD + "\nresult = editor_world()\n", namespace)
+
+    assert namespace["result"] is editor_world_package
+    assert asked == ([] if pie else ["get_editor_world"])

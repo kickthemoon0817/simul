@@ -63,13 +63,15 @@ def pie_refusal(action: str) -> Dict[str, Any]:
 # tick that it is back on the editor world. That holds after the game opens
 # another level too, when the play world's package (UEDPIE_<n>_<map>) no longer
 # names the editor's map. GWorld holding a play world means no editor world can
-# be determined, and editor_world() returns None.
+# be determined, and editor_world() returns None. get_editor_world() is asked
+# only while no play world runs: during PIE it also logs "LogUtils: Error: The
+# Editor is currently in a play mode." on every call (84 such lines in one
+# session of tool calls, UE 5.7.4), which buried the editor's real errors.
 EDITOR_WORLD_FUNCTION = """
 def editor_world():
     editor = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
-    world = editor.get_editor_world()
-    if world is not None or editor.get_game_world() is None:
-        return world
+    if editor.get_game_world() is None:
+        return editor.get_editor_world()
     world = unreal.get_editor_subsystem(unreal.LayersSubsystem).get_world()
     if world is None or re.match("UEDPIE_[0-9]+_", world.get_outermost().get_name().rpartition("/")[2]):
         return None
@@ -80,7 +82,10 @@ def editor_world():
 # (the same envelope as the Python function), editor_world() and
 # level_actors(). During PIE, level_actors() reads the editor world directly:
 # every editable actor of its visible levels except the WorldSettings, which
-# can include the builder brush and helper actors the Outliner hides.
+# can include the builder brush and helper actors the Outliner hides. Either
+# way each actor is listed once: after a USD import that replaced actors the
+# level's actor list held each new actor twice (UE 5.7.4), and the robotics
+# analysis counted 4 actors for 3.
 EDITOR_WORLD = (
     "import json, re, unreal\n"
     f"_PIE_ACTIVE, _PIE_ERROR, _PIE_HINT = {PIE_ACTIVE!r}, {PIE_ACTIVE_ERROR!r}, {PIE_STOP_HINT!r}\n"
@@ -93,14 +98,23 @@ def pie_refusal(action):
     return {"success": False, "error_type": _PIE_ACTIVE, "error": _PIE_ERROR.format(action=action),
             "details": {"hint": _PIE_HINT}}
 
+def once_each(actors):
+    seen, kept = set(), []
+    for actor in actors:
+        key = actor.get_path_name()
+        if key not in seen:
+            seen.add(key)
+            kept.append(actor)
+    return kept
+
 def level_actors():
     if not pie_active():
-        return list(unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors())
+        return once_each(unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors())
     world = editor_world()
     if world is None:
         return []
-    return [actor for actor in unreal.GameplayStatics.get_all_actors_of_class(world, unreal.Actor)
-            if actor.is_editable() and not isinstance(actor, unreal.WorldSettings)]
+    return once_each(actor for actor in unreal.GameplayStatics.get_all_actors_of_class(world, unreal.Actor)
+                     if actor.is_editable() and not isinstance(actor, unreal.WorldSettings))
 """
 )
 
@@ -115,6 +129,17 @@ NOT_IN_SIMULATION = "NotInSimulation"
 SIMULATION_START_HINT = (
     "Start the simulation with control_unreal_simulation, action 'start' (CLI: simul unreal sim start), "
     "then retry."
+)
+
+#: Why an editor actor can have no copy in the running simulation, for the
+#: NotInSimulation refusal and the physics state read's ``warning``. In a World
+#: Partition level Simulate streams in only the cells around the level
+#: viewport's camera, so a body 1 km from it had no copy until
+#: focus_unreal_on_actor moved the camera to it (UE 5.7.4).
+NO_COPY_REASONS = (
+    "an actor spawned after the simulation started, destroyed in it, or not loaded in it has none; in a World "
+    "Partition level the simulation streams in only the cells around the level viewport's camera, so "
+    "focus_unreal_on_actor on the actor (which moves the camera there) streams its cell in"
 )
 
 # The running simulation and an actor's copy in it, on top of EDITOR_WORLD:
@@ -138,6 +163,7 @@ SIMULATION_WORLD = (
     EDITOR_WORLD
     + f"_SIMULATION_NOT_RUNNING, _NOT_IN_SIMULATION, _SIMULATION_START_HINT = "
     f"{SIMULATION_NOT_RUNNING!r}, {NOT_IN_SIMULATION!r}, {SIMULATION_START_HINT!r}\n"
+    f"_NO_COPY_REASONS = {NO_COPY_REASONS!r}\n"
     + """
 def simulation_world():
     return unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
@@ -456,6 +482,13 @@ print(json.dumps({"paths": {name: sorted({os.path.abspath(name), unreal.Paths.co
 # (a customized mesh lost its collision and lightmap resolution) and deleted
 # its actors even though AssetImportTask.replace_existing was False, which the
 # USD importer does not read. With replace, both policies are Replace.
+#
+# fallback_collision_type is the collision the importer gives a mesh whose
+# prim has no UsdPhysics collision, and its default, none, gives none: an
+# exported ground slab came back with no simple shape and a NoCollision
+# component, so bodies would fall through it (UE 5.7.4). The new actors are
+# checked (without_collision) and the reply lists those simulated bodies pass
+# through, with a warning naming the options that give collision.
 USD_IMPORT = EDITOR_WORLD + EDITOR_LOG + DIRTY_PACKAGES + """
 import os
 
@@ -509,6 +542,28 @@ def saved_settings():
     # The class default object holds the project's saved import settings.
     saved = unreal.get_default_object(unreal.UsdStageImportOptions)
     return {key: plain(saved.get_editor_property(key)) for key in DEFAULTS}
+
+def without_collision(actor_paths):
+    # (mesh components, the actors with a mesh component simulated bodies pass through): one whose
+    # collision has no physics, or whose mesh has no simple shape and does not stand its triangles in.
+    tools = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+    components, bare = 0, []
+    for path in actor_paths:
+        actor = unreal.find_object(None, path)
+        if not isinstance(actor, unreal.Actor):
+            continue
+        for component in actor.get_components_by_class(unreal.StaticMeshComponent):
+            mesh = component.get_editor_property("static_mesh")
+            if mesh is None:
+                continue
+            components += 1
+            physics = component.get_collision_enabled().name in ("QUERY_AND_PHYSICS", "PHYSICS_ONLY")
+            shapes = tools.get_simple_collision_count(mesh) + tools.get_convex_collision_count(mesh)
+            if not physics or (shapes == 0 and tools.get_collision_complexity(mesh).name
+                               != "CTF_USE_COMPLEX_AS_SIMPLE"):
+                bare.append(path)
+                break
+    return components, bare
 
 def import_usd(path, destination, name, options, replace):
     if not hasattr(unreal, "UsdStageImportFactory"):
@@ -579,8 +634,19 @@ def import_usd(path, destination, name, options, replace):
             "simul set these options explicitly for this import and left the saved settings unchanged. "
             "Earlier simul versions saved the options an import was given, so an import with "
             "import_actors false left bImportActors=False there.")
+    meshes, bare = without_collision(actors)
+    if bare:
+        fallback = options.get("fallback_collision_type", DEFAULTS["fallback_collision_type"])
+        warnings.append(
+            str(len(bare)) + " of the imported actors have a mesh without physics collision (fallback_collision_type "
+            + fallback + ", the collision the importer gives a mesh whose prim has no UsdPhysics collision), so "
+            "simulated bodies fall through them and analyze_unreal_scene_for_robotics finds no floor among "
+            "them; they are listed in actors_without_collision. Import again with replace_existing true and "
+            "fallback_collision_type convex_decomposition (concave meshes, such as a floor with walls) or convex_hull "
+            "(one hull per mesh), or give a mesh simple collision with compute_unreal_convex_hull (output collision).")
     return {"imported_assets": assets, "actor_paths": actors, "removed_actor_paths": removed,
-            "warnings": warnings, "dirty_engine_packages": dirtied}
+            "warnings": warnings, "dirty_engine_packages": dirtied, "mesh_components": meshes,
+            "actors_without_collision": bare[:LISTED], "actors_without_collision_count": len(bare)}
 
 print(json.dumps(import_usd(**args)))
 """
@@ -2472,7 +2538,8 @@ print(json.dumps(set_light()))
 INCOMPATIBLE_BODY = "IncompatibleBody"
 
 # Shared by the physics and collision scripts below. Each edits one primitive
-# component (the actor's root, else its only one, as actor_component picks).
+# component (the one named component_name, else the actor's root, else its
+# only one, as physics_component picks).
 # An actor in the editor world is edited the way the Details panel does it:
 # inside one ScopedEditorTransaction, after modify(), so the edit is one Undo
 # step and marks the map dirty, and Save All writes it. The runtime setters
@@ -2496,12 +2563,110 @@ INCOMPATIBLE_BODY = "IncompatibleBody"
 # before anything is written. A mesh that uses its render triangles as simple
 # collision (CTF_USE_COMPLEX_AS_SIMPLE) cannot simulate at all, though it can
 # be a kinematic collider. StaticMeshEditorSubsystem reports -1 for every mesh
-# while Play In Editor runs, so the mesh checks are skipped then.
+# while Play In Editor runs, so the mesh checks are skipped then. A generated
+# DynamicMeshActor's simple collision is read with GeometryScript (when the
+# GeometryScripting plugin is loaded): one without any never started
+# simulating, and a hull written to it fixed that (UE 5.7.4).
+#
+# The collision mode alone does not make a body collide: Unreal makes two
+# bodies collide only when each blocks the other's object type, and a preset
+# keeps its responses when the mode is changed. OverlapAll, OverlapAllDynamic
+# and Trigger overlap every object type, so with collision_enabled true on top
+# (QUERY_AND_PHYSICS, preset Custom) a simulated cube still fell through the
+# floor at about 2000 cm/s while the tools reported it simulated (UE 5.7.4).
+# So a body must block at least one object type (blocked_object_types) and the
+# remedy offered is a preset that blocks, unless the body's own responses
+# already do (NoCollision's block every object type, so collision_enabled true
+# is the fix there).
+#
+# A multi-part actor (a SceneComponent root with several primitive
+# components) has no one body: physics_component takes component_name to pick
+# one (editor-only components, such as the sprite an Actor spawned from the
+# class carries, never count), and refuses the actor without it (ValidationError AMBIGUOUS_COMPONENT,
+# the components listed), as assign_unreal_material does; it used to fail
+# with a ScriptError traceback. An actor with no primitive component at all is
+# an IncompatibleBody (NO_PRIMITIVE_COMPONENT). Scripts raise SimulRefusal
+# with the envelope and return it through refusable().
 PHYSICS_HELPERS = ACTOR_HELPERS + SIMULATION_WORLD + f"_INCOMPATIBLE_BODY = {INCOMPATIBLE_BODY!r}\n" + """
 PHYSICS_COLLISION = ("QUERY_AND_PHYSICS", "PHYSICS_ONLY")
+# Unreal's object types, by the name its Details panel shows and its CollisionChannel.
+OBJECT_TYPES = (("WorldStatic", "ECC_WORLD_STATIC"), ("WorldDynamic", "ECC_WORLD_DYNAMIC"), ("Pawn", "ECC_PAWN"),
+                ("PhysicsBody", "ECC_PHYSICS_BODY"), ("Vehicle", "ECC_VEHICLE"), ("Destructible", "ECC_DESTRUCTIBLE"))
+COMPONENTS_LISTED = 20
 
-def physics_component(actor):
-    return actor_component(actor, unreal.PrimitiveComponent)
+class SimulRefusal(Exception):
+    def __init__(self, payload):
+        Exception.__init__(self, payload["error"])
+        self.payload = payload
+
+def refusable(run):
+    try:
+        return run()
+    except SimulRefusal as refusal:
+        return refusal.payload
+
+def listed_components(components):
+    return [{"component_name": c.get_name(), "component_class": c.get_class().get_name(),
+             "component_path": c.get_path_name()} for c in components[:COMPONENTS_LISTED]]
+
+def editor_only(component):
+    try:
+        return bool(component.get_editor_property("is_editor_only"))
+    except Exception:
+        return False
+
+def body_components(actor):
+    # Its primitive components that can have a body: not editor-only ones such as the
+    # BillboardComponent sprite an Actor spawned from the class gets (UE 5.7.4).
+    return [c for c in actor.get_components_by_class(unreal.PrimitiveComponent) if not editor_only(c)]
+
+def unplayed(path):
+    # A path with the play world's UEDPIE_<n>_ prefix taken off its package name.
+    return re.sub("/" + _PIE_PACKAGE, "/", path, count=1)
+
+def physics_component(actor, component_name=None):
+    components = body_components(actor)
+    names = ", ".join(c.get_name() + " (" + c.get_class().get_name() + ")" for c in components[:COMPONENTS_LISTED])
+    if component_name:
+        for component in components:
+            if (component_name in (component.get_name(), component.get_path_name())
+                    or unplayed(component_name) == unplayed(component.get_path_name())):
+                return component
+        raise SimulRefusal({"success": False, "error_type": "ValidationError",
+                            "error": actor.get_actor_label() + " has no primitive component named "
+                                     + repr(component_name) + ("; its primitive components: " + names
+                                                               if components else "; it has none"),
+                            "details": {"code": "COMPONENT_NOT_FOUND", "parameter": "component_name",
+                                        "value": component_name, "components": listed_components(components)}})
+    root = actor.root_component
+    if isinstance(root, unreal.PrimitiveComponent):
+        return root
+    if len(components) == 1:
+        return components[0]
+    if not components:
+        problem = {"code": "NO_PRIMITIVE_COMPONENT", "message": (
+            "it has no primitive component (a mesh or a collision shape), so Unreal gives it no physics body")}
+        raise SimulRefusal({"success": False, "error_type": _INCOMPATIBLE_BODY,
+                            "error": actor.get_actor_label() + ": " + problem["message"],
+                            "details": {"code": "INCOMPATIBLE_BODY", "problems": [problem],
+                                        "actor_path": actor.get_path_name()}})
+    raise SimulRefusal({"success": False, "error_type": "ValidationError",
+                        "error": actor.get_actor_label() + " has " + str(len(components)) + " primitive components "
+                                 "and none is its root, so it has no one body; pass component_name, one of: " + names,
+                        "details": {"code": "AMBIGUOUS_COMPONENT", "parameter": "component_name",
+                                    "components": listed_components(components),
+                                    "hint": "Pass component_name to edit one component's body; each simulates on "
+                                            "its own."}})
+
+def blocked_object_types(component):
+    channels = unreal.CollisionChannel
+    return [name for name, channel in OBJECT_TYPES
+            if component.get_collision_response_to_channel(getattr(channels, channel)).name == "ECR_BLOCK"]
+
+def collision_fix(simulate):
+    preset = "PhysicsActor" if simulate else "BlockAllDynamic"
+    return ("call set_unreal_collision with collision_preset " + preset + ", which blocks every object type "
+            "(collision_enabled true alone keeps the current preset's responses)")
 
 def physics_mode(component):
     if component.get_collision_enabled().name not in PHYSICS_COLLISION:
@@ -2524,6 +2689,7 @@ def physics_report(component):
         "mobility": component.mobility.name.title(),
         "collision_mode": component.get_collision_enabled().name,
         "collision_preset": str(component.get_collision_profile_name()),
+        "blocked_object_types": blocked_object_types(component),
         "mass_kg": component.get_mass(),
         "mass_override_kg": body.get_editor_property("mass_in_kg_override") if override else None,
         "gravity_enabled": bool(body.get_editor_property("enable_gravity")),
@@ -2540,8 +2706,36 @@ def mesh_collision(mesh):
         return None
     return simple, convex, tools.get_collision_complexity(mesh).name
 
-def physics_problems(component, simulate, make_movable, allow_detach, collision=None):
-    # collision: the mode a preset applied in the same call will set; None reads the component's.
+def dynamic_mesh_problems(component, body, simulate):
+    # A DynamicMeshComponent's simple collision, read with GeometryScript; [] when it cannot be read.
+    if not hasattr(unreal, "GeometryScript_Collision"):
+        return []
+    try:
+        complex_as_simple = component.get_editor_property("collision_type").name == "CTF_USE_COMPLEX_AS_SIMPLE"
+    except Exception:
+        complex_as_simple = False
+    if complex_as_simple:
+        if not simulate:
+            return []
+        return [{"code": "COMPLEX_AS_SIMPLE", "message": (
+            "its dynamic mesh uses its triangles as simple collision (Collision Type: Use Complex Collision As "
+            "Simple), which Unreal cannot simulate: give it simple collision with compute_unreal_convex_hull "
+            "(output collision) or decompose_unreal_convex_hull, or make the body kinematic")}]
+    try:
+        library = unreal.GeometryScript_Collision
+        count = library.get_simple_collision_shape_count(library.get_simple_collision_from_component(component))
+    except Exception:
+        return []
+    if count:
+        return []
+    return [{"code": "NO_SIMPLE_COLLISION", "message": (
+        "its dynamic mesh has no simple collision shape, so " + body + " body would pass through everything "
+        "(Unreal does not start simulating it): give it simple collision with compute_unreal_convex_hull "
+        "(output collision) or decompose_unreal_convex_hull")}]
+
+def physics_problems(component, simulate, make_movable, allow_detach, collision=None, blocked=None):
+    # collision and blocked: the mode and blocked object types a preset applied in the same call will
+    # set; None reads the component's.
     problems = []
     body = "a simulated" if simulate else "a kinematic"
     mobility = component.mobility.name
@@ -2550,12 +2744,24 @@ def physics_problems(component, simulate, make_movable, allow_detach, collision=
             "its mobility is " + mobility.title() + ", and Unreal moves and simulates only Movable "
             "bodies: pass make_movable true (the default) to make it Movable")})
     collision = collision or component.get_collision_enabled().name
+    blocked = blocked_object_types(component) if blocked is None else blocked
+    preset = str(component.get_collision_profile_name())
     if collision not in PHYSICS_COLLISION:
+        fix = ("call set_unreal_collision with collision_enabled true (its responses block " + ", ".join(blocked)
+               + "), or with collision_preset " + ("PhysicsActor" if simulate else "BlockAllDynamic")
+               if blocked else collision_fix(simulate))
         problems.append({"code": "NO_PHYSICS_COLLISION", "message": (
-            "its collision is " + collision + " (preset " + str(component.get_collision_profile_name())
-            + "), and " + body + " body needs physics collision (QUERY_AND_PHYSICS or PHYSICS_ONLY): "
-            "call set_unreal_collision with collision_preset PhysicsActor, or with collision_enabled "
-            "true")})
+            "its collision is " + collision + " (preset " + preset + "), and " + body + " body needs physics "
+            "collision (QUERY_AND_PHYSICS or PHYSICS_ONLY): " + fix)})
+    elif not blocked:
+        effect = ("it would fall through the floor and pass through everything" if simulate
+                  else "simulated bodies would pass through it")
+        problems.append({"code": "NO_BLOCKING_RESPONSE", "message": (
+            "its collision responses (preset " + preset + ") overlap or ignore every object type ("
+            + ", ".join(name for name, _ in OBJECT_TYPES) + "), and Unreal makes two bodies collide only "
+            "when each blocks the other, so " + effect + ": " + collision_fix(simulate))})
+    if hasattr(unreal, "DynamicMeshComponent") and isinstance(component, unreal.DynamicMeshComponent):
+        problems += dynamic_mesh_problems(component, body, simulate)
     if isinstance(component, unreal.StaticMeshComponent):
         mesh = component.get_editor_property("static_mesh")
         if mesh is None:
@@ -2629,13 +2835,14 @@ def write_params(component, values):
         component.set_enable_gravity(values["enable_gravity"])
 
 def preset_collision(name):
-    # The collision mode a preset sets, read off a transient component, or None
-    # for a name Unreal does not know (it renames that to Custom).
+    # The collision mode a preset sets and the object types it blocks, read off a
+    # transient component, or None for a name Unreal does not know (it renames
+    # that to Custom).
     probe = unreal.new_object(unreal.StaticMeshComponent)
     probe.set_collision_profile_name(name)
     if str(probe.get_collision_profile_name()).lower() != name.lower():
         return None
-    return probe.get_collision_enabled().name
+    return probe.get_collision_enabled().name, blocked_object_types(probe)
 
 def snapshot(component):
     # Everything a physics setup writes, to put back: the body instance (a copy of
@@ -2660,11 +2867,21 @@ def expected_mode(mode):
     return {"simulate": "simulated", "kinematic": "kinematic"}.get(mode, "not simulating")
 
 def refusal(actor, what, problems, component):
+    part = "" if component == actor.root_component else " (component " + component.get_name() + ")"
     return {"success": False, "error_type": _INCOMPATIBLE_BODY,
-            "error": "Cannot " + what + " " + actor.get_actor_label() + ": "
+            "error": "Cannot " + what + " " + actor.get_actor_label() + part + ": "
                      + "; ".join(problem["message"] for problem in problems),
             "details": {"code": "INCOMPATIBLE_BODY", "problems": problems,
                         "component_path": component.get_path_name()}}
+
+def blocking_note(report):
+    # What a body with physics collision that blocks some object types, but not the level's floors, does.
+    blocked = report["blocked_object_types"]
+    if report["collision_mode"] not in PHYSICS_COLLISION or not blocked or "WorldStatic" in blocked:
+        return None
+    return ("The body blocks only " + ", ".join(blocked) + ", not WorldStatic, the object type of the level's "
+            "static floors and walls (StaticMeshActors and the like), so it passes through them; collision_preset "
+            "PhysicsActor blocks every object type.")
 
 def edit_note(simulation):
     if simulation:
@@ -2676,8 +2893,9 @@ def edit_note(simulation):
     return None
 """
 
-# Expects ``args`` = {"actor_path", "mode" ("simulate", "kinematic" or "off"),
-# "make_movable", "allow_detach", "transaction"}. "simulate" makes the body
+# Expects ``args`` = {"actor_path", "component_name" (or None), "mode"
+# ("simulate", "kinematic" or "off"), "make_movable", "allow_detach",
+# "transaction"}. "simulate" makes the body
 # simulate physics, "kinematic" keeps its physics collision without simulating
 # (simulated bodies hit it; it moves only when its transform is set) and "off"
 # stops it simulating, collision and mobility kept. A body that cannot take
@@ -2689,7 +2907,7 @@ def edit_note(simulation):
 ENABLE_PHYSICS = PHYSICS_HELPERS + """
 def enable():
     actor = actor_at(args["actor_path"], play_world=True)
-    component = physics_component(actor)
+    component = physics_component(actor, args["component_name"])
     mode = args["mode"]
     if mode != "off":
         problems = physics_problems(component, mode == "simulate", args["make_movable"], args["allow_detach"])
@@ -2736,17 +2954,18 @@ def enable():
         warnings.append("Detached from " + result["detached_from"] + ", as Unreal does when a body starts "
                         "simulating; Undo reattaches it, turning physics off does not "
                         "(set_unreal_actor_parent does).")
-    note = edit_note(simulation)
-    if note:
-        warnings.append(note)
-    result["warning"] = " ".join(warnings) or None
+    if mode != "off":
+        warnings.append(blocking_note(result))
+    warnings.append(edit_note(simulation))
+    result["warning"] = " ".join(warning for warning in warnings if warning) or None
     return result
 
-print(json.dumps(enable()))
+print(json.dumps(refusable(enable)))
 """
 
-# Expects ``args`` = {"actor_path", "values": {"mass", "linear_damping",
-# "angular_damping", "enable_gravity"} (only those given), "transaction"}.
+# Expects ``args`` = {"actor_path", "component_name" (or None), "values":
+# {"mass", "linear_damping", "angular_damping", "enable_gravity"} (only those
+# given), "transaction"}.
 # Writes them with the body's setters in one undoable transaction and reads
 # every value back (mass as the override stored, PhysicsParamsNotApplied for
 # one that reads back different). With no values it only reads the body.
@@ -2761,7 +2980,7 @@ def stored(value):
 
 def set_params():
     actor = actor_at(args["actor_path"], play_world=True)
-    component = physics_component(actor)
+    component = physics_component(actor, args["component_name"])
     values = args["values"]
     simulation = in_simulation(actor)
     if values:
@@ -2799,11 +3018,11 @@ def set_params():
                                "actual": {name: read[name] for name in rejected}})
     return result
 
-print(json.dumps(set_params()))
+print(json.dumps(refusable(set_params)))
 """
 
-# Expects ``args`` = {"actor_path", "preset" (or None), "enabled" (True, False
-# or None), "transaction"}. A preset is checked on a transient component
+# Expects ``args`` = {"actor_path", "component_name" (or None), "preset" (or
+# None), "enabled" (True, False or None), "transaction"}. A preset is checked on a transient component
 # first, since Unreal renames an unknown preset to Custom instead of failing,
 # so an unknown one changes nothing. Setting collision_enabled on a static mesh
 # component clears its Use Default Collision flag first, as setting a preset
@@ -2811,6 +3030,9 @@ print(json.dumps(set_params()))
 # set, Unreal puts the mesh's own collision back when the component is
 # registered again, in the play copy when the simulation starts and after the
 # map reloads, so a collision turned off came back as BlockAll (UE 5.7.4).
+# collision_enabled true keeps the preset's responses, so on an overlap preset
+# (OverlapAll, Trigger) the body still blocks nothing; the reply's warning says
+# so and names the preset that blocks (see PHYSICS_HELPERS).
 SET_COLLISION = PHYSICS_HELPERS + """
 def write(component, preset, enabled):
     if preset:
@@ -2824,7 +3046,7 @@ def write(component, preset, enabled):
 
 def set_collision():
     actor = actor_at(args["actor_path"], play_world=True)
-    component = physics_component(actor)
+    component = physics_component(actor, args["component_name"])
     preset, enabled = args["preset"], args["enabled"]
     if preset and preset_collision(preset) is None:
         return {"success": False, "error_type": "ValidationError",
@@ -2851,13 +3073,22 @@ def set_collision():
         warnings.append("The body simulates physics but now has no physics collision ("
                         + result["collision_mode"] + "): in the simulation it " + effect
                         + ", and Unreal logs Invalid Simulate Options.")
-    note = edit_note(simulation)
-    if note and (preset or enabled is not None):
-        warnings.append(note)
-    result["warning"] = " ".join(warnings) or None
+    elif result["collision_mode"] in PHYSICS_COLLISION and not result["blocked_object_types"]:
+        warnings.append("Collision is " + result["collision_mode"] + ", but its responses (preset "
+                        + result["collision_preset"] + ", kept from the preset it had) overlap or ignore every object "
+                        "type, so nothing collides with this body: physics bodies pass through it"
+                        + (", and as it simulates it falls through the floor" if result["simulate_physics"] else "")
+                        + ". For a body that collides, set collision_preset PhysicsActor (a simulated body), "
+                        "BlockAllDynamic (a Movable one moved by its transform, such as a kinematic body) or BlockAll "
+                        "(a static one).")
+    else:
+        warnings.append(blocking_note(result) if result["simulate_physics"] else None)
+    if preset or enabled is not None:
+        warnings.append(edit_note(simulation))
+    result["warning"] = " ".join(warning for warning in warnings if warning) or None
     return result
 
-print(json.dumps(set_collision()))
+print(json.dumps(refusable(set_collision)))
 """
 
 # Expects ``args`` = {"paths", "tag", "folder", "actor_filter" (each or None), "mode"
@@ -2914,13 +3145,14 @@ def select():
 
 def setup():
     mode, preset = args["mode"], args["preset"]
-    preset_mode = None
+    preset_mode = preset_blocked = None
     if preset:
-        preset_mode = preset_collision(preset)
-        if preset_mode is None:
+        known = preset_collision(preset)
+        if known is None:
             return {"success": False, "error_type": "ValidationError",
                     "error": "Unknown collision preset: " + preset + "; nothing was changed",
                     "details": {"code": "UNKNOWN_PRESET", "parameter": "collision_preset", "value": preset}}
+        preset_mode, preset_blocked = known
     actors, failed = select()
     # The paths that found no actor of the editor world count as matched, and failed.
     matched = len(actors) + len(failed)
@@ -2933,11 +3165,22 @@ def setup():
     for actor in actors:
         try:
             component = physics_component(actor)
+        except SimulRefusal as refused:
+            details = refused.payload.get("details") or {}
+            error = refused.payload["error"]
+            if details.get("code") == "AMBIGUOUS_COMPONENT":
+                error = (actor.get_actor_label() + " has several primitive components and none is its root, so it "
+                         "has a body per component, and bulk setup sets up one body an actor: set up each part with "
+                         "enable_unreal_physics and component_name (" + ", ".join(
+                             c["component_name"] for c in details.get("components", [])) + ")")
+            failed.append({"actor_path": actor.get_path_name(), "error": error,
+                           "problems": [p["code"] for p in details.get("problems", [])] or [details.get("code")]})
+            continue
         except Exception as exc:
             failed.append({"actor_path": actor.get_path_name(), "error": str(exc)})
             continue
         problems = [] if mode == "off" else physics_problems(
-            component, mode == "simulate", args["make_movable"], args["allow_detach"], preset_mode)
+            component, mode == "simulate", args["make_movable"], args["allow_detach"], preset_mode, preset_blocked)
         if problems:
             failed.append({"actor_path": actor.get_path_name(), "problems": [p["code"] for p in problems],
                            "error": "; ".join(p["message"] for p in problems)})
@@ -3114,9 +3357,11 @@ def start(job):
         handle = unreal.register_ticker_callback(tick)
 """
 
-# Expects ``args`` = {"actor_path", "vector" [x, y, z] in Unreal units (kg cm/s^2
-# for a force, kg cm/s for an impulse), "location" (world cm) or None,
-# "impulse", "duration" (s of physics time; 0 is one physics step)}. Acts on the
+# Expects ``args`` = {"actor_path", "component_name" (or None), "vector" [x, y,
+# z] in Unreal units (kg cm/s^2 for a force, kg cm/s for an impulse),
+# "location" (world cm) or None, "impulse", "duration" (s of physics time; 0 is
+# one physics step)}. component_name picks the body of a multi-part actor; the
+# copy's component of that name is pushed. Acts on the
 # actor's copy in the running simulation (SIMULATION_WORLD), the only world
 # whose bodies step; with no simulation running it refuses (SimulationNotRunning).
 APPLY_FORCE = (
@@ -3155,15 +3400,24 @@ def apply():
     if copy is None:
         return {"success": False, "error_type": _NOT_IN_SIMULATION,
                 "error": actor.get_actor_label() + " has no live copy in the running simulation ("
-                         + world.get_path_name() + "): an actor spawned after the simulation started, not "
-                         "loaded in it, or destroyed in it has none; list_unreal_simulation_actors lists the "
-                         "simulation's actors",
-                "details": {"code": "NOT_IN_SIMULATION", "actor_path": args["actor_path"]}}
-    component = physics_component(copy)
+                         + world.get_path_name() + "): " + _NO_COPY_REASONS + "; list_unreal_simulation_actors "
+                         "lists the simulation's actors",
+                "details": {"code": "NOT_IN_SIMULATION", "actor_path": args["actor_path"],
+                            "hint": "For an actor of a World Partition level, call focus_unreal_on_actor on it and "
+                                    "retry; for one added after the simulation started, stop and start it again."}}
+    name = args["component_name"]
+    if name and "/" in name:
+        # A component path of the editor actor names the copy's component of the same name, wherever
+        # World Partition streamed the copy (a cell level's path is not the editor's with a prefix).
+        for source in (actor, editor_counterpart(copy)):
+            if source is not None and source != copy:
+                name = next((c.get_name() for c in body_components(source) if c.get_path_name() == name), name)
+    component = physics_component(copy, name)
     mode = physics_mode(component)
     if mode != "simulated":
+        part = "" if component == copy.root_component else " (component " + component.get_name() + ")"
         return {"success": False, "error_type": _INCOMPATIBLE_BODY,
-                "error": copy.get_actor_label() + " does not simulate physics in the running simulation "
+                "error": copy.get_actor_label() + part + " does not simulate physics in the running simulation "
                          "(physics_mode " + mode + "), so a force moves nothing: enable_unreal_physics on the "
                          "editor actor and restart the simulation, or on the simulation path for this run",
                 "details": dict(physics_report(component), code="NOT_SIMULATING")}
@@ -3208,7 +3462,7 @@ def apply():
             "ends_at_sim_time": now + args["duration"] if application == "continuous" else None,
             "paused": paused, "warning": " ".join(warnings) or None}
 
-print(json.dumps(apply()))
+print(json.dumps(refusable(apply)))
 """
 )
 
@@ -3218,9 +3472,13 @@ print(json.dumps(apply()))
 # The actors at paths come first, then the actors with the tag, each once (an
 # editor path and the simulation path of the same body are one body); one page
 # of them, from offset, is rendered (SCENE_READ_HELPERS.page). A body's state is
-# its actor's root primitive component, else its only one; an actor without one
-# reports its transform alone. A path with no live actor, or no live copy in the
-# world read, is listed in not_found.
+# its actor's root primitive component, else its only one. A multi-part actor
+# (several primitive components, none the root) has a body per component, each
+# simulating on its own, so its entry's body fields are null and components
+# holds each one's state (the first COMPONENTS_LISTED, with components_total),
+# and note says why; an actor without a primitive component reports its
+# transform alone, with a note. A path with no live actor, or no live copy in
+# the world read, is listed in not_found, and warning says why that can be.
 PHYSICS_STATE = PHYSICS_HELPERS + SCENE_READ_HELPERS + """
 import math
 
@@ -3231,8 +3489,25 @@ def body_of(actor):
     root = actor.root_component
     if isinstance(root, unreal.PrimitiveComponent):
         return root
-    components = actor.get_components_by_class(unreal.PrimitiveComponent)
+    components = body_components(actor)
     return components[0] if len(components) == 1 else None
+
+def body_state(component):
+    linear = component.get_physics_linear_velocity()
+    report = physics_report(component)
+    return {"component_path": component.get_path_name(), "physics_mode": report["physics_mode"],
+            "linear_velocity": vector(linear),
+            "angular_velocity": vector(component.get_physics_angular_velocity_in_degrees()),
+            "speed": math.sqrt(linear.x * linear.x + linear.y * linear.y + linear.z * linear.z),
+            "awake": bool(component.is_any_rigid_body_awake()) if report["physics_mode"] == "simulated" else None,
+            "mass_kg": report["mass_kg"], "center_of_mass": vector(component.get_center_of_mass()),
+            "gravity_enabled": report["gravity_enabled"], "simulate_physics": report["simulate_physics"]}
+
+def part_state(component):
+    rotation = component.get_world_rotation()
+    return dict(body_state(component), component_name=component.get_name(),
+                location=vector(component.get_world_location()),
+                rotation=[rotation.pitch, rotation.yaw, rotation.roll])
 
 def state(actor, simulation):
     location, rotation = actor.get_actor_location(), actor.get_actor_rotation()
@@ -3242,18 +3517,18 @@ def state(actor, simulation):
              "simulation_path": actor.get_path_name() if simulation else None,
              "location": vector(location), "rotation": [rotation.pitch, rotation.yaw, rotation.roll]}
     component = body_of(actor)
-    if component is None:
-        entry.update(component_path=None, physics_mode=None)
+    if component is not None:
+        entry.update(body_state(component))
         return entry
-    linear = component.get_physics_linear_velocity()
-    report = physics_report(component)
-    entry.update(component_path=component.get_path_name(), physics_mode=report["physics_mode"],
-                 linear_velocity=vector(linear),
-                 angular_velocity=vector(component.get_physics_angular_velocity_in_degrees()),
-                 speed=math.sqrt(linear.x * linear.x + linear.y * linear.y + linear.z * linear.z),
-                 awake=bool(component.is_any_rigid_body_awake()) if report["physics_mode"] == "simulated" else None,
-                 mass_kg=report["mass_kg"], center_of_mass=vector(component.get_center_of_mass()),
-                 gravity_enabled=report["gravity_enabled"], simulate_physics=report["simulate_physics"])
+    parts = body_components(actor)
+    entry.update(component_path=None, physics_mode=None)
+    if not parts:
+        entry["note"] = "The actor has no primitive component, so it has no physics body; only its transform is read."
+        return entry
+    entry.update(components=[part_state(part) for part in parts[:COMPONENTS_LISTED]], components_total=len(parts),
+                 note="The actor has " + str(len(parts)) + " primitive components and none is its root, so it has a "
+                      "body per component, each moving on its own: their states are in components, and the "
+                      "physics tools take component_name to act on one.")
     return entry
 
 def read():
@@ -3288,11 +3563,15 @@ def read():
                 add(actor)
     entries, next_offset, ended = page(actors, args["offset"], args["max_results"], args["budget"],
                                        lambda actor: state(actor, simulation))
+    warning = None
+    if missing and simulation:
+        warning = ("A path in not_found names no live actor, or one with no copy in the running simulation: "
+                   + _NO_COPY_REASONS + ".")
     return {"world": "simulation" if simulation else "editor", "pie_active": pie_active(),
             "sim_time": unreal.GameplayStatics.get_time_seconds(world) if simulation else None,
             "paused": bool(unreal.GameplayStatics.is_game_paused(world)) if simulation else None,
             "bodies": entries, "count": len(entries), "total": len(actors), "offset": args["offset"],
-            "next_offset": next_offset, "page_ended_by": ended, "not_found": missing}
+            "next_offset": next_offset, "page_ended_by": ended, "not_found": missing, "warning": warning}
 
 print(json.dumps(read()))
 """
@@ -3600,8 +3879,12 @@ ROBOTICS_SCAN_MODULE = "_simul_unreal_robotics_scans_v1"
 # instanced static mesh component (ISM, HISM, foliage) draws its mesh once per
 # instance, not at the component, so it is no box of its own: each instance is
 # measured and classified by itself (instance_index), up to max_instances per
-# component, and a component with more counts whole by its world-axis bounds
-# (instances). The world-axis bounding box this used read a 20 m x 0.5 m plank
+# component. A component with more is not classified at all and is listed in
+# skipped_instance_components instead: counted whole by its world-axis bounds,
+# 1,500 instanced 30 cm cubes scattered over 50 x 50 m at 0-3 m read as one
+# traversable surface of 2,523 m2 among the real floors (UE 5.7.4), and a
+# sample of its instances would pass for all of them. The world-axis bounding
+# box this used read a 20 m x 0.5 m plank
 # yawed 45 degrees as 1449 x 1449 cm (210 m2 for its 10 m2), rejected a slab
 # pitched 14 degrees as too thick and one rolled 180 degrees as tilted 180
 # degrees (UE 5.7.4). A surface's normal is its box's thinnest axis, turned
@@ -3646,6 +3929,8 @@ class Scan:
     def __init__(self):
         self.mesh_tools = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
         self.mesh_collision, self.mesh_boxes = {}, {}
+        # Instanced components with more instances than are measured one by one.
+        self.skipped = []
 
     def collision_of(self, mesh):
         key = mesh.get_path_name()
@@ -3744,9 +4029,10 @@ class Scan:
                 continue
             boxes = self.instance_boxes(component, limit)
             if boxes is None:
-                found.append((self.world_bounds(component),
-                              {"component_path": component.get_path_name(),
-                               "instances": component.get_instance_count()}, [component]))
+                center, _, half = self.world_bounds(component)
+                self.skipped.append(entry(actor, half, {"component_path": component.get_path_name(),
+                                                        "instances": component.get_instance_count()},
+                                          bounds_center=[round(value, 2) for value in center]))
             else:
                 found += [(box, {"component_path": component.get_path_name(), "instance_index": index}, None)
                           for box, index in boxes]
@@ -3841,9 +4127,19 @@ def analyze():
             summary[key] = None
     traversable.sort(key=lambda item: (-item["area_m2"], item["path"], item.get("instance_index") or 0))
     graspable.sort(key=lambda item: (item["path"], item.get("instance_index") or 0))
+    skipped = sorted(scan.skipped, key=lambda item: (item["path"], item["component_path"]))
+    warning = None
+    if skipped:
+        warning = (str(len(skipped)) + " instanced mesh component(s) have more than " + str(args["max_instances"])
+                   + " instances (" + str(sum(item["instances"] for item in skipped)) + " in all), more than are "
+                   "measured one by one, so none of their instances was classified: they may hold floors or "
+                   "graspable props this analysis does not list. They are in skipped_instance_components, with "
+                   "their world bounds.")
     return {"traversable_surfaces": traversable, "graspable_objects": graspable,
             "collision_summary": summary if "collision_complexity" in analyses else {},
-            "total_actors_analyzed": summary["total_actors"], "pie_active": pie}
+            "total_actors_analyzed": summary["total_actors"], "pie_active": pie,
+            "skipped_instance_components": skipped[:20],
+            "skipped_instance_components_count": len(skipped), "warning": warning}
 
 def scans():
     module = sys.modules.get(_ROBOTICS_SCAN_MODULE)

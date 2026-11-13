@@ -349,8 +349,10 @@ def test_forces_act_on_the_running_simulation_and_the_reads_follow_it():
     async def run():
         client = session()
         level = "/Game/SimulReview_Forces_" + uuid.uuid4().hex[:8]
+        started_on = None
         try:
             assert (await client.control_simulation("stop"))["state"] == "stopped"
+            started_on = await current_map(client)
             made = await client._execute_json_script(f"""
 import unreal, json
 print(json.dumps({{'new': bool(unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).new_level({level!r}))}}))
@@ -404,6 +406,9 @@ print(json.dumps({{'new': bool(unreal.get_editor_subsystem(unreal.LevelEditorSub
             assert pawns["count"] == 1 and pawns["actors"][0]["editor_path"] is None, pawns
         finally:
             await client.control_simulation("stop")
+            if started_on is not None:
+                # Round-2 audit R2B-13: the scratch level was left open and kept.
+                await leave_scratch_level(client, started_on, level)
             await client.close()
 
     asyncio.run(run())
@@ -426,8 +431,10 @@ def test_a_force_keeps_pace_with_gravity_at_ten_frames_a_second():
     async def run():
         client = session()
         level = "/Game/SimulReview_Pace_" + uuid.uuid4().hex[:8]
+        started_on = None
         try:
             assert (await client.control_simulation("stop"))["state"] == "stopped"
+            started_on = await current_map(client)
             made = await client._execute_json_script(
                 "import unreal, json\nprint(json.dumps({'new': bool(unreal.get_editor_subsystem("
                 f"unreal.LevelEditorSubsystem).new_level({level!r}))}}))"
@@ -456,6 +463,9 @@ def test_a_force_keeps_pace_with_gravity_at_ten_frames_a_second():
         finally:
             await client._execute_json_script("args = {'fps': 0}\n" + _MAX_FPS)
             await client.control_simulation("stop")
+            if started_on is not None:
+                # Round-2 audit R2B-13: the test left the editor in its scratch level and kept it.
+                await leave_scratch_level(client, started_on, level)
             await client.close()
 
     asyncio.run(run())
@@ -1607,7 +1617,7 @@ def test_instanced_meshes_are_measured_one_instance_at_a_time_and_later_pages_re
             floor, shelf, gravel = (made[label] for label, *_ in actors)
 
             analysis = await client.analyze_scene_for_robotics(actor_filter=prefix, max_results=50)
-            assert analysis["totals"] == {"traversable_surfaces": 21, "graspable_objects": 12}, analysis
+            assert analysis["totals"] == {"traversable_surfaces": 20, "graspable_objects": 12}, analysis
             per_tile = {entry["instance_index"]: entry for entry in analysis["traversable_surfaces"]
                         if entry.get("component_path") == floor["component"]}
             assert sorted(per_tile) == list(range(20)), analysis
@@ -1615,9 +1625,12 @@ def test_instanced_meshes_are_measured_one_instance_at_a_time_and_later_pages_re
             assert per_tile[7]["tilt_degrees"] == pytest.approx(10.0, abs=0.01)
             assert per_tile[0]["tilt_degrees"] == pytest.approx(0.0, abs=0.01)
             assert per_tile[0]["area_m2"] == pytest.approx(4.0)
-            whole = [entry for entry in analysis["traversable_surfaces"] if entry["path"] == gravel["path"]]
-            assert len(whole) == 1 and whole[0]["instances"] == 1001, whole
-            assert "instance_index" not in whole[0]
+            # Round-2 audit R2B-05: over 1000 instances the component is listed apart, never
+            # counted whole as one surface (1,500 scattered cubes read as a 2,523 m2 floor).
+            assert not [entry for entry in analysis["traversable_surfaces"] if entry["path"] == gravel["path"]]
+            (skipped,) = analysis["skipped_instance_components"]
+            assert skipped["path"] == gravel["path"] and skipped["instances"] == 1001, skipped
+            assert "instance_index" not in skipped and "skipped_instance_components" in analysis["warning"]
             grasped = {entry["instance_index"]: entry for entry in analysis["graspable_objects"]}
             assert sorted(grasped) == list(range(12)), analysis
             assert all(entry["path"] == shelf["path"] and entry["mass_kg"] is None for entry in grasped.values())
@@ -1630,7 +1643,7 @@ def test_instanced_meshes_are_measured_one_instance_at_a_time_and_later_pages_re
             assert later["totals"] == first["totals"] == analysis["totals"], later  # the scan, not the level
             rescanned = await client.analyze_scene_for_robotics(actor_filter=prefix, max_results=5)
             assert rescanned["scanned_at"] > first["scanned_at"], rescanned
-            assert rescanned["totals"] == {"traversable_surfaces": 1, "graspable_objects": 12}, rescanned
+            assert rescanned["totals"] == {"traversable_surfaces": 0, "graspable_objects": 12}, rescanned
         finally:
             await client._execute_python(_remove_tagged(tag))
             await client.close()

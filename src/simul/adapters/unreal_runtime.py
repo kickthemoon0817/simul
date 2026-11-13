@@ -198,6 +198,11 @@ ROBOTICS_PAGE_BYTES = 32_000
 #: measures one by one; a component with more counts whole, by its world bounds.
 ROBOTICS_MAX_INSTANCES = 1000
 
+#: How close, in cm, two open edges of a mesh must be for ``validate_mesh``'s
+#: weld to join them: 10 um, so it closes the seams an importer split at hard
+#: edges, whose vertices coincide exactly, and nothing a modeller left open.
+MESH_WELD_TOLERANCE_CM = 0.001
+
 #: Seconds the robotics analysis keeps a scan for the pages after the first;
 #: offset 0 always scans. A 5,011-actor level took 13 to 99 s a page on a loaded
 #: machine when every page scanned the level again.
@@ -256,8 +261,9 @@ USD_IMPORT_BOOLEAN_OPTIONS: Tuple[str, ...] = (
 USD_KINDS: Dict[str, int] = {"model": 1, "component": 2, "group": 4, "assembly": 8, "subcomponent": 16}
 
 #: EUsdCollisionType names (UE 5.7), for ``fallback_collision_type``: the
-#: collision of a mesh whose prim has no physics schema. ``none`` uses the
-#: render triangles as collision (no simple shapes).
+#: collision of a mesh whose prim has no physics schema. ``none``, Unreal's
+#: default, gives it none: no simple shape and a NoCollision component, so
+#: nothing collides with it (UE 5.7.4; the import's reply lists such actors).
 USD_COLLISION_TYPES: Tuple[str, ...] = (
     "none",
     "convex_decomposition",
@@ -1858,19 +1864,6 @@ def _outside_project_refusal(path: str, action: str, hint: str) -> Dict[str, Any
         ),
         "details": {"content_path": path, "allowed_root": PROJECT_CONTENT_ROOT, "hint": hint},
     }
-
-
-#: An Unreal object path as Unreal's USD exporter writes one into an asset-valued
-#: attribute: ``/Engine``, ``/Game`` or ``/Script``, folders, then
-#: ``<Name>.<Name>`` (a package and its asset of the same name).
-_UNREAL_OBJECT_PATH = re.compile(r"^/(?:Engine|Game|Script)(?:/[A-Za-z0-9_ -]+)*/([A-Za-z0-9_-]+)\.\1$")
-
-#: Suffixes that make ``<Name>.<Name>`` a file name rather than an object path.
-_FILE_SUFFIXES = frozenset(
-    {"usd", "usda", "usdc", "usdz", "png", "jpg", "jpeg", "exr", "tga", "tif", "tiff", "bmp", "hdr", "dds",
-     "tx", "psd", "mdl", "mtlx", "abc", "vdb", "obj", "fbx", "gltf", "glb", "bin", "json", "txt", "uasset",
-     "umap", "wav", "mp4", "mov"}
-)
 
 
 def _usd_import_options(options: Any) -> Tuple[Dict[str, Any], List[str]]:
@@ -6039,19 +6032,24 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         kinematic: bool = False,
         make_movable: bool = True,
         allow_detach: bool = False,
+        component_name: str = "",
     ) -> Dict[str, Any]:
         """
         Make an actor's body simulate physics, make it kinematic, or turn physics off.
 
-        Edits the actor's primitive component (its root, else its only one)
+        Edits one primitive component (``component_name``, else the actor's
+        root, else its only one)
         in one undoable editor transaction that marks the map dirty, so Save
         All writes it and one Undo reverts it. A simulated body falls under
         gravity and takes forces; a kinematic body keeps its physics collision,
         so simulated bodies hit it, but moves only when its transform is set;
         turning physics off stops the body simulating and keeps its collision
         and mobility. Both physical modes need a Movable body with physics
-        collision (QUERY_AND_PHYSICS or PHYSICS_ONLY) and, for a static mesh,
-        a mesh with simple collision; a simulated mesh may not use its render
+        collision (QUERY_AND_PHYSICS or PHYSICS_ONLY) whose responses block
+        at least one object type (an overlap preset such as OverlapAll keeps
+        overlapping everything when its mode is changed, and such a body fell
+        through the floor), and, for a static or dynamic mesh, simple
+        collision; a simulated mesh may not use its render
         triangles as simple collision. Unreal accepts the simulate flag on any
         body and reads it back as simulating even when the body never moves,
         so a body that cannot take the mode is refused with nothing changed
@@ -6078,22 +6076,30 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 physical modes need; False refuses such a body instead.
             allow_detach: Let a simulated body attached to a parent be
                 detached from it, as Unreal does; False refuses it.
+            component_name: The primitive component whose body to edit, by
+                name (StaticMeshComponent0) or path; empty picks the actor's
+                root primitive component, else its only one. An actor with
+                several and none at the root needs it (ValidationError
+                AMBIGUOUS_COMPONENT, the components listed in details).
 
         Returns:
             Dict with actor_path, world ("editor" or "simulation"),
             physics_enabled (the body simulates), physics_mode ("simulated",
             "kinematic", "static" or "none" without physics collision) and
             the body read back: component_path, simulate_physics, mobility,
-            collision_mode, collision_preset, mass_kg, mass_override_kg,
-            gravity_enabled, linear_damping, angular_damping, attach_parent;
+            collision_mode, collision_preset, blocked_object_types, mass_kg,
+            mass_override_kg, gravity_enabled, linear_damping,
+            angular_damping, attach_parent;
             mobility_changed_from and detached_from when this call changed
             them; warning. Or an IncompatibleBody envelope, or
             PhysicsNotApplied when the body did not read back as asked (every
-            value restored).
+            value restored), or a ValidationError for a component_name the
+            actor lacks or a multi-part actor without one.
         """
         mode = "off" if not enable else ("kinematic" if kinematic else "simulate")
         args = {
             "actor_path": actor_path,
+            "component_name": component_name or None,
             "mode": mode,
             "make_movable": bool(make_movable),
             "allow_detach": bool(allow_detach),
@@ -6101,7 +6107,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         }
         return await self._execute_json_script(
             f"args = {args!r}\n" + ENABLE_PHYSICS,
-            expected_errors=(INCOMPATIBLE_BODY, "PhysicsNotApplied"),
+            expected_errors=(INCOMPATIBLE_BODY, "PhysicsNotApplied", "ValidationError"),
         )
 
     async def set_collision(
@@ -6109,6 +6115,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_path: str,
         collision_preset: str = "",
         collision_enabled: Optional[bool] = None,
+        component_name: str = "",
     ) -> Dict[str, Any]:
         """
         Configure collision settings on an actor.
@@ -6129,7 +6136,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             collision_enabled: True for query and physics collision, False
                 for none. None keeps the collision mode the preset sets, or
                 the current one when no preset is given. Overriding a
-                preset's mode turns the preset into Custom.
+                preset's mode turns the preset into Custom and keeps its
+                responses: on an overlap preset (OverlapAll, Trigger) the body
+                still blocks nothing, and the reply's warning says so.
+            component_name: The primitive component whose body to edit, by
+                name (StaticMeshComponent0) or path; empty picks the actor's
+                root primitive component, else its only one. An actor with
+                several and none at the root needs it (ValidationError
+                AMBIGUOUS_COMPONENT, the components listed in details).
 
         Returns:
             Dict with actor_path, world, the collision_preset,
@@ -6138,19 +6152,22 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             mesh), the body's physics_mode and other values as
             ``enable_physics`` reads them, and warning (a simulated body left
             with query-only collision falls through everything, one with no
-            collision does not move at all); or a
-            ValidationError envelope for an unknown preset, or a
-            ``ScriptError`` envelope for an actor without one unambiguous
-            primitive component.
+            collision does not move at all, physics collision whose
+            responses block nothing collides with nothing); or a
+            ValidationError envelope for an unknown preset, a component_name
+            the actor lacks or a multi-part actor without one, or an
+            IncompatibleBody envelope for an actor without a primitive
+            component.
         """
         args = {
             "actor_path": actor_path,
+            "component_name": component_name or None,
             "preset": collision_preset or None,
             "enabled": collision_enabled,
             "transaction": "simul: set collision",
         }
         return await self._execute_json_script(
-            f"args = {args!r}\n" + SET_COLLISION, expected_errors=("ValidationError",)
+            f"args = {args!r}\n" + SET_COLLISION, expected_errors=("ValidationError", INCOMPATIBLE_BODY)
         )
 
     async def apply_force(
@@ -6165,6 +6182,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         location_z: Optional[float] = None,
         duration: float = 0.0,
         units: str = "unreal",
+        component_name: str = "",
     ) -> Dict[str, Any]:
         """
         Apply a force or impulse to an actor's body in the running simulation.
@@ -6209,6 +6227,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             duration: Seconds of physics time a force keeps acting, 0 to 600;
                 0 acts for one physics step. Not for an impulse.
             units: "unreal" (kg cm/s^2, kg cm/s) or "si" (N, N s).
+            component_name: The primitive component to push, by name or path;
+                empty picks the actor's root primitive component, else its
+                only one (a multi-part actor needs it: ValidationError
+                AMBIGUOUS_COMPONENT).
 
         Returns:
             Dict with actor_path, simulation_actor_path (the copy acted on),
@@ -6221,7 +6243,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             physics_step_limit_s, sim_time, ends_at_sim_time (when a continuous
             force ends if no frame is slower than the step limit), paused and
             warning; or a SimulationNotRunning, NotFoundError, NotInSimulation
-            or IncompatibleBody envelope.
+            (``details.hint``: a World Partition cell the simulation has not
+            streamed in), IncompatibleBody or ValidationError envelope.
 
         Raises:
             ArgumentError: Partial application coordinates, a value that is not
@@ -6264,6 +6287,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         applied = [v * scale for v in given]
         args = {
             "actor_path": actor_path,
+            "component_name": component_name or None,
             "vector": applied,
             "location": None if location_x is None else [float(v) for v in location],  # type: ignore[arg-type]
             "impulse": bool(is_impulse),
@@ -6271,7 +6295,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         }
         result = await self._execute_json_script(
             f"args = {args!r}\n" + APPLY_FORCE,
-            expected_errors=(SIMULATION_NOT_RUNNING, NOT_IN_SIMULATION, INCOMPATIBLE_BODY),
+            expected_errors=(SIMULATION_NOT_RUNNING, NOT_IN_SIMULATION, INCOMPATIBLE_BODY, "ValidationError"),
         )
         if result.get("error"):
             return result
@@ -6291,6 +6315,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         linear_damping: Optional[float] = None,
         angular_damping: Optional[float] = None,
         enable_gravity: Optional[bool] = None,
+        component_name: str = "",
     ) -> Dict[str, Any]:
         """
         Set physics body parameters on an actor and read them back.
@@ -6309,6 +6334,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             linear_damping: Linear damping, 0 to 1e6.
             angular_damping: Angular damping, 0 to 1e6.
             enable_gravity: Whether gravity affects this body.
+            component_name: The primitive component whose body to edit, by
+                name (StaticMeshComponent0) or path; empty picks the actor's
+                root primitive component, else its only one. An actor with
+                several and none at the root needs it (ValidationError
+                AMBIGUOUS_COMPONENT, the components listed in details).
 
         Returns:
             Dict with actor_path, world, applied (each value given, read back:
@@ -6324,9 +6354,15 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 ValidationError with ``details.code`` OUT_OF_RANGE).
         """
         values = _physics_values(mass, linear_damping, angular_damping, enable_gravity)
-        args = {"actor_path": actor_path, "values": values, "transaction": "simul: set physics params"}
+        args = {
+            "actor_path": actor_path,
+            "component_name": component_name or None,
+            "values": values,
+            "transaction": "simul: set physics params",
+        }
         return await self._execute_json_script(
-            f"args = {args!r}\n" + SET_PHYSICS_PARAMS, expected_errors=("PhysicsParamsNotApplied",)
+            f"args = {args!r}\n" + SET_PHYSICS_PARAMS,
+            expected_errors=("PhysicsParamsNotApplied", "ValidationError", INCOMPATIBLE_BODY),
         )
 
     async def setup_physics_bulk(
@@ -6453,14 +6489,21 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             editor world), bodies, count (on this page), total (every body
             matched), offset, next_offset (null on the last page), truncated,
             hint and not_found (the paths with no live actor, or no live copy
-            in the world read). Each body has name, class_name, editor_path,
+            in the world read) with warning (why a path can have no copy in the
+            running simulation, a World Partition cell it has not streamed in
+            included). Each body has name, class_name, editor_path,
             simulation_path, location (cm), rotation (pitch, yaw, roll,
             degrees) and, for an actor with a root or single primitive
             component, component_path, physics_mode, linear_velocity (cm/s),
             angular_velocity (degrees/s), speed, awake (null unless it
             simulates), mass_kg, center_of_mass (world cm), gravity_enabled
-            and simulate_physics. Unreal reports contacts only to hit-event
-            handlers, so none are listed.
+            and simulate_physics. A multi-part actor (several primitive
+            components, none the root) has a body per component: those
+            fields are null, components holds each one's (the first 20, with
+            component_name and its world location and rotation),
+            components_total counts them and note says so; an actor without
+            a primitive component has a note too. Unreal reports contacts
+            only to hit-event handlers, so none are listed.
 
         Raises:
             ArgumentError: Neither paths nor a tag, an unknown world, or
@@ -6655,27 +6698,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 },
             }
 
-    @staticmethod
-    def _names_unreal_content(entry: Dict[str, Any]) -> bool:
-        """Whether a path the composition check refused is an Unreal object path, which reads no file.
-
-        Unreal's USD exporter writes the source material of each mesh as an
-        asset-valued attribute holding a content path,
-        ``info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@``,
-        and its importer loads that object from the editor's content; it opens
-        no file by the name. Only such a value passes: an asset-valued
-        attribute (not a sublayer, reference, payload or clip) holding
-        ``/Engine``, ``/Game`` or ``/Script``, folders and
-        ``<Name>.<Name>``, where the suffix is no file extension
-        (``/Engine/x.usda`` stays a file), naming no file on disk.
-        """
-        if entry.get("kind") != "asset":
-            return False
-        match = _UNREAL_OBJECT_PATH.match(str(entry.get("asset_path", "")))
-        if match is None or match.group(1).lower() in _FILE_SUFFIXES:
-            return False
-        return not os.path.lexists(str(entry.get("location", "")))
-
     def _check_usd_composition(self, usd_path: str) -> None:
         """Refuse a USD file whose composition draws on files outside the sandbox.
 
@@ -6685,10 +6707,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         outside texture, and the editor read it. ``CompositionSandbox``
         walks the layers from the root the way composition finds them (every
         variant, value clips and asset-valued attributes too) before the file
-        reaches the editor; a refused file is never opened. A file pxr cannot
-        open here is refused too, since nothing then vouches for what it
-        names; a file the simul host does not have is left to the editor to
-        report.
+        reaches the editor; a refused file is never opened. An Unreal content
+        path Unreal's own exporter writes into an asset-valued attribute
+        (``info:unreal:sourceAsset = @/Engine/.../Name.Name@``) names an
+        editor object, not a file, and the sandbox lets it through
+        (``simul.usd.sandbox.is_unreal_content_path``), as the headless USD
+        tools do. A file pxr cannot open here is refused too, since nothing
+        then vouches for what it names; a file the simul host does not have
+        is left to the editor to report.
 
         Raises:
             SandboxDenied: With ``details.outside_sandbox`` (each path, its
@@ -6722,20 +6748,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         try:
             usd_sandbox.CompositionSandbox(self._path_policy).check_layers(layer)
         except SandboxDenied as exc:
-            entries = list(exc.details.get("outside_sandbox", []))
-            files = [entry for entry in entries if not self._names_unreal_content(entry)]
-            listed_all = exc.details.get("outside_count", len(entries)) == len(entries)
-            if not files and listed_all:
-                return  # only Unreal content paths, as in Unreal's own USD exports
-            if listed_all and len(files) < len(entries):
-                exc.details["outside_sandbox"] = files
-                exc.details["outside_count"] = len(files)
-                shown = ", ".join(entry["location"] for entry in files[:3])
-                more = f" and {len(files) - 3} more" if len(files) > 3 else ""
-                exc.error_message = (
-                    f"USD file {usd_path} draws on {len(files)} file(s) outside the sandbox: {shown}{more}"
-                )
-                exc.args = (exc.error_message,)
             exc.details["referenced_by"] = usd_path
             exc.details["references_outside"] = list(
                 dict.fromkeys(entry["location"] for entry in exc.details.get("outside_sandbox", []))
@@ -6874,9 +6886,15 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             Dict with imported_assets, actor_paths (actors added to the level),
             removed_actor_paths (actors the import replaced), warnings (the
             warnings and errors the editor logged during the import, and
-            saved import settings that differ from Unreal's defaults) and
+            saved import settings that differ from Unreal's defaults, and
+            imported meshes without physics collision),
             dirty_engine_packages (engine or plugin packages the editor
-            holds modified when it finishes), or an error envelope:
+            holds modified when it finishes), mesh_components (static mesh
+            components of the new actors) and actors_without_collision (the
+            first 20 new actors with a mesh simulated bodies pass through:
+            fallback_collision_type none, the default, gives a mesh whose
+            prim has no UsdPhysics collision none) with
+            actors_without_collision_count, or an error envelope:
             ``ValidationError`` for an option, value or folder Unreal does
             not take, ``SandboxError`` for a folder
             outside /Game, ``InvalidState`` when the folder already holds
@@ -7118,68 +7136,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             expected_errors=("InvalidState",),
         )
 
-    async def convert_to_simready(
-        self,
-        usd_path: str,
-        output_path: str,
-        add_physics: bool = True,
-        add_collision: bool = True,
-        add_semantic_labels: bool = True,
-        target_up_axis: str = "Z",
-        target_units: str = "meters",
-    ) -> Dict[str, Any]:
-        """
-        Compatibility entry point for unavailable SimReady conversion.
-
-        Returns UnsupportedOperation; no file is read or written.
-
-        Args:
-            usd_path: Source USD file.
-            output_path: Output SimReady USD.
-            add_physics: Add physics schema.
-            add_collision: Generate collision geometry.
-            add_semantic_labels: Add semantic labels.
-            target_up_axis: Target up axis.
-            target_units: Target unit system.
-
-        Returns:
-            Dict with output_path, conversions_applied, warnings.
-
-        Raises:
-            SandboxDenied: If either path is outside the sandbox.
-        """
-
-        self._path_policy.authorize(usd_path)
-        self._path_policy.authorize(output_path, write=True)
-        return {
-            "success": False,
-            "error_type": "UnsupportedOperation",
-            "error": "SimReady conversion is not implemented. Unreal Interchange has no ConvertToSimReady API.",
-        }
-
-    async def validate_simready_asset(
-        self,
-        usd_path: str,
-        checks: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Compatibility entry point for unavailable SimReady validation.
-
-        Args:
-            usd_path: USD file path to validate.
-            checks: Validation checks to run.
-
-        Returns:
-            Dict with is_valid, per-check results, errors, suggestions.
-        """
-
-        self._path_policy.authorize(usd_path)
-        return {
-            "success": False,
-            "error_type": "UnsupportedOperation",
-            "error": "SimReady validation is not implemented. Unreal Interchange has no ValidateSimReadyAsset API.",
-        }
-
     async def get_interchange_info(self) -> Dict[str, Any]:
         """
         Query supported Interchange formats and USD plugin availability.
@@ -7359,8 +7315,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         size. An instanced static mesh component (ISM, HISM, foliage) draws its
         mesh once per instance, so each instance is measured and classified by
         itself, with its ``instance_index`` and ``component_path``, up to 1000
-        instances per component; a component with more counts whole by its
-        world bounds (``instances``). The thresholds are
+        instances per component. A component with more is not classified:
+        it is listed in ``skipped_instance_components`` with its instance
+        count and world bounds, and ``warning`` says its instances may hold
+        floors or props this analysis does not list (counted whole, 1,500
+        scattered cubes read as one 2,523 m^2 floor). The thresholds are
         ``ROBOTICS_CRITERIA``, returned as ``criteria``:
 
         * traversability: floor-like surfaces a robot can stand on. Physics
@@ -7406,8 +7365,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             Dict with traversable_surfaces and graspable_objects (each entry
             name, path, class_name and size [x, y, z] in cm along its box's
             own axes, plus component_path and instance_index for an instance
-            of an instanced mesh, or component_path and instances for one
-            counted whole; surfaces add top_z, area_m2, tilt_degrees and
+            of an instanced mesh; surfaces add top_z, area_m2, tilt_degrees and
             normal, the top face's upward unit normal), totals (matches per
             category), returned (entries per category on this page), offset,
             max_results, next_offset (null on the last page), hint,
@@ -7420,8 +7378,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             simple_shapes, convex_hulls, complex_collision and
             missing_simple_collision are null, as is
             missing_simple_collision_actors: Unreal's StaticMeshEditorSubsystem
-            reports none then); or a ScriptError envelope when the editor
-            script failed.
+            reports none then), skipped_instance_components (the first 20
+            instanced components with more than 1000 instances: name, path,
+            class_name, component_path, instances, size, bounds_center),
+            skipped_instance_components_count and warning; or a ScriptError
+            envelope when the editor script failed.
 
         Raises:
             ArgumentError: An analysis type is not one of the three, or
@@ -8066,13 +8027,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         self,
         mesh_path: str,
         checks: Optional[List[str]] = None,
+        weld: bool = False,
     ) -> Dict[str, Any]:
         """
         Check a mesh.
 
         Reads only, so it also runs while Play In Editor runs (a StaticMesh
         asset path excepted: Unreal loads no assets then). No check finds
-        self-intersections.
+        self-intersections. A hard-edged mesh imported from glTF or FBX
+        stores each face's vertices apart, so read as it is its seams are
+        open edges and its faces separate pieces (a cube read as 6 pieces
+        with 24 open edges); ``weld`` checks a copy with its coincident open
+        edges welded, and without it such a mesh gets a warning.
 
         Args:
             mesh_path: A DynamicMeshActor, a StaticMeshActor or a StaticMesh
@@ -8084,9 +8050,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 positive volume, so its faces point out), compact (no ID
                 gaps), normals (a normals attribute), uvs (a UV channel, and
                 every triangle has UVs in channel 0).
+            weld: Check a copy whose open edges that coincide within
+                MESH_WELD_TOLERANCE_CM are welded first; the mesh itself is
+                not changed.
 
         Returns:
-            Dict with source_kind, is_valid (every check run passed), checks (per check:
+            Dict with source_kind, is_valid (every check run passed), welded, checks (per check:
             passed, count where it counts something, detail), issues, the
             triangle/vertex counts, connected_components, uv_channels, local
             bounds, surface_area, volume (null for an open mesh) and
@@ -8101,7 +8070,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 choices=list(VALIDATION_CHECKS),
             )
         ordered = [name for name in VALIDATION_CHECKS if name in names]
-        return await self._run_mesh_script(VALIDATE, mesh=mesh_path, checks=ordered)
+        return await self._run_mesh_script(
+            VALIDATE, mesh=mesh_path, checks=ordered, weld=bool(weld), weld_tolerance=MESH_WELD_TOLERANCE_CM
+        )
 
     async def convert_mesh_format(
         self,

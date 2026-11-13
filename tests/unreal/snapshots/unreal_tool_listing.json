@@ -1948,7 +1948,7 @@
   {
    "name": "enable_unreal_physics",
    "title": "Enable Unreal Physics",
-   "description": "Make an actor's body simulate physics (falls, takes forces), make it kinematic (physics collision, moved only by its transform), or turn physics off, in one undoable editor transaction that marks the map dirty. A Static body is made Movable unless make_movable is false; a body without physics collision or simple collision geometry is refused (IncompatibleBody, with the reasons). Unreal detaches a simulated body from its parent, so an attached one needs allow_detach. Returns the body read back: physics_mode, mobility, collision and mass.",
+   "description": "Make an actor's body simulate physics (falls, takes forces), make it kinematic (physics collision, moved only by its transform), or turn physics off, in one undoable editor transaction that marks the map dirty. A Static body is made Movable unless make_movable is false; a body without physics collision, whose collision responses block no object type (an overlap preset such as OverlapAll, even with collision_enabled true), or without simple collision geometry is refused (IncompatibleBody, with the reasons and the fix). Unreal detaches a simulated body from its parent, so an attached one needs allow_detach. Returns the body read back: physics_mode, mobility, collision, blocked_object_types and mass.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1976,6 +1976,11 @@
       "default": false,
       "description": "Let a body attached to a parent be detached from it as it starts simulating, keeping its world transform, as Unreal does (reported as detached_from; Undo reattaches it, turning physics off does not). False refuses an attached body.",
       "type": "boolean"
+     },
+     "component_name": {
+      "default": "",
+      "description": "Primitive component whose body to use, by name (StaticMeshComponent0) or path. Empty picks the actor's root primitive component, else its only one; an actor with several and none at the root needs it (ValidationError AMBIGUOUS_COMPONENT lists them).",
+      "type": "string"
      }
     },
     "required": [
@@ -2001,7 +2006,7 @@
   {
    "name": "set_unreal_collision",
    "title": "Set Unreal Collision",
-   "description": "Set an actor's collision preset and/or enable or disable its collision, in one undoable editor transaction that marks the map dirty; what is left out is kept and an unknown preset changes nothing. Returns the state read back.",
+   "description": "Set an actor's collision preset and/or enable or disable its collision, in one undoable editor transaction that marks the map dirty; what is left out is kept and an unknown preset changes nothing. Returns the state read back, with blocked_object_types: a body collides only with what it blocks, so for one that collides use a blocking preset (PhysicsActor for a simulated body, BlockAll for a static one).",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2025,7 +2030,12 @@
        }
       ],
       "default": null,
-      "description": "True for query and physics collision, False for none. None keeps the collision mode the preset sets, or the current one when no preset is given. Overriding a preset's mode turns the preset into Custom."
+      "description": "True turns on query and physics collision, false turns collision off; null keeps the mode. It keeps the preset's responses (the preset reads Custom), so on an overlap preset such as OverlapAll or Trigger the body still blocks nothing and nothing collides with it (the warning says so): set collision_preset instead."
+     },
+     "component_name": {
+      "default": "",
+      "description": "Primitive component whose body to use, by name (StaticMeshComponent0) or path. Empty picks the actor's root primitive component, else its only one; an actor with several and none at the root needs it (ValidationError AMBIGUOUS_COMPONENT lists them).",
+      "type": "string"
      }
     },
     "required": [
@@ -2131,6 +2141,11 @@
        "si"
       ],
       "type": "string"
+     },
+     "component_name": {
+      "default": "",
+      "description": "Primitive component whose body to use, by name (StaticMeshComponent0) or path. Empty picks the actor's root primitive component, else its only one; an actor with several and none at the root needs it (ValidationError AMBIGUOUS_COMPONENT lists them).",
+      "type": "string"
      }
     },
     "required": [
@@ -2212,6 +2227,11 @@
       ],
       "default": null,
       "description": "Whether gravity affects this body."
+     },
+     "component_name": {
+      "default": "",
+      "description": "Primitive component whose body to use, by name (StaticMeshComponent0) or path. Empty picks the actor's root primitive component, else its only one; an actor with several and none at the root needs it (ValidationError AMBIGUOUS_COMPONENT lists them).",
+      "type": "string"
      }
     },
     "required": [
@@ -2361,7 +2381,7 @@
   {
    "name": "get_unreal_physics_state",
    "title": "Get Unreal Physics State",
-   "description": "Read bodies' live physics state: location, rotation, linear and angular velocity, awake or asleep, mass and center of mass. While a simulation runs each actor is read through its copy there (the editor world's actors stay where they were placed), otherwise in the editor world; world picks one. Editor and simulation paths are both accepted, and each body lists both. Paged: total counts every body, next_offset starts the next page.",
+   "description": "Read bodies' live physics state: location, rotation, linear and angular velocity, awake or asleep, mass and center of mass. While a simulation runs each actor is read through its copy there (the editor world's actors stay where they were placed), otherwise in the editor world; world picks one. Editor and simulation paths are both accepted, and each body lists both. A multi-part actor (several primitive components, none the root) has a body per component, listed in components. Paged: total counts every body, next_offset starts the next page.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2499,7 +2519,7 @@
        }
       ],
       "default": null,
-      "description": "USDImporter options. Booleans: import_actors, import_geometry, import_materials, import_skeletal_animations, import_level_sequences, import_groom_assets, import_sparse_volume_textures, import_sounds, import_only_used_materials, use_prim_kinds_for_collapsing (merge a prim's meshes into one per kinds_to_collapse; false keeps a mesh per prim), merge_identical_material_slots, share_assets_for_identical_prims, prim_path_folder_structure, interpret_lods. kinds_to_collapse: list of USD kinds (model, component, group, assembly, subcomponent). fallback_collision_type: none (render triangles), convex_decomposition, convex_hull, sphere, cube, mesh_simplification, capsule, custom_mesh. nanite_triangle_threshold: int. prims_to_import: prim paths. meters_per_unit with up_axis (y or z), together, override the stage's own. Lights and cameras import as actors with import_actors. Unset options take Unreal's defaults."
+      "description": "USDImporter options. Booleans: import_actors, import_geometry, import_materials, import_skeletal_animations, import_level_sequences, import_groom_assets, import_sparse_volume_textures, import_sounds, import_only_used_materials, use_prim_kinds_for_collapsing (merge a prim's meshes into one per kinds_to_collapse; false keeps a mesh per prim), merge_identical_material_slots, share_assets_for_identical_prims, prim_path_folder_structure, interpret_lods. kinds_to_collapse: list of USD kinds (model, component, group, assembly, subcomponent). fallback_collision_type, the collision of a mesh whose prim has no UsdPhysics collision: none (the default: no collision at all, so bodies fall through the mesh; the reply lists such actors in actors_without_collision), convex_decomposition (concave meshes), convex_hull, sphere, cube, mesh_simplification, capsule, custom_mesh. nanite_triangle_threshold: int. prims_to_import: prim paths. meters_per_unit with up_axis (y or z), together, override the stage's own. Lights and cameras import as actors with import_actors. Unset options take Unreal's defaults."
      },
      "replace_existing": {
       "default": false,
@@ -2574,107 +2594,6 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": true,
-    "openWorldHint": null
-   },
-   "_meta": {
-    "fastmcp": {
-     "tags": []
-    }
-   }
-  },
-  {
-   "name": "convert_to_simready",
-   "title": "Convert To Simready",
-   "description": "Unavailable in Unreal: SimReady conversion returns UnsupportedOperation without writing files.",
-   "inputSchema": {
-    "type": "object",
-    "additionalProperties": false,
-    "properties": {
-     "usd_path": {
-      "description": "Source USD file; must be inside the sandbox.",
-      "type": "string"
-     },
-     "output_path": {
-      "description": "Output SimReady USD file path; must be inside the sandbox.",
-      "type": "string"
-     },
-     "add_physics": {
-      "default": true,
-      "description": "Add physics schemas (rigid body) to the output.",
-      "type": "boolean"
-     },
-     "add_collision": {
-      "default": true,
-      "description": "Generate collision geometry.",
-      "type": "boolean"
-     },
-     "add_semantic_labels": {
-      "default": true,
-      "description": "Attach semantic labels to the output prims.",
-      "type": "boolean"
-     },
-     "target_up_axis": {
-      "default": "Z",
-      "description": "Up axis written to the output stage (Y or Z).",
-      "type": "string"
-     },
-     "target_units": {
-      "default": "meters",
-      "description": "Unit system of the output stage (meters or centimeters).",
-      "type": "string"
-     }
-    },
-    "required": [
-     "usd_path",
-     "output_path"
-    ]
-   },
-   "execution": null,
-   "outputSchema": null,
-   "icons": null,
-   "annotations": {
-    "title": null,
-    "readOnlyHint": false,
-    "destructiveHint": true,
-    "idempotentHint": null,
-    "openWorldHint": null
-   },
-   "_meta": {
-    "fastmcp": {
-     "tags": []
-    }
-   }
-  },
-  {
-   "name": "validate_simready_asset",
-   "title": "Validate Simready Asset",
-   "description": "Unavailable in Unreal: SimReady validation returns UnsupportedOperation.",
-   "inputSchema": {
-    "type": "object",
-    "additionalProperties": false,
-    "properties": {
-     "usd_path": {
-      "description": "USD file path to validate; must be inside the sandbox.",
-      "type": "string"
-     },
-     "checks": {
-      "default": "",
-      "description": "Comma-separated validation checks to run (physics, collision, materials, scale, up_axis, semantics). Empty string runs every check.",
-      "type": "string"
-     }
-    },
-    "required": [
-     "usd_path"
-    ]
-   },
-   "execution": null,
-   "outputSchema": null,
-   "icons": null,
-   "annotations": {
-    "title": null,
-    "readOnlyHint": true,
-    "destructiveHint": null,
     "idempotentHint": true,
     "openWorldHint": null
    },
@@ -3581,6 +3500,11 @@
       "default": "",
       "description": "Comma-separated checks to run (closed, manifold, degenerate_triangles, orientation, compact, normals, uvs); empty runs all.",
       "type": "string"
+     },
+     "weld": {
+      "default": false,
+      "description": "Check a copy whose coincident open edges (within 0.001 cm) are welded first, the mesh unchanged. A hard-edged mesh imported from glTF or FBX stores each face's vertices apart, so unwelded its seams read as open edges and its faces as pieces (a cube: 6 pieces, 24 open edges); such a reading gets a warning.",
+      "type": "boolean"
      }
     },
     "required": [
@@ -3891,8 +3815,6 @@
    "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
-   "convert_to_simready",
-   "validate_simready_asset",
    "get_unreal_interchange_info",
    "batch_unreal_operations",
    "query_unreal_scene_graph",
@@ -3960,8 +3882,6 @@
    "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
-   "convert_to_simready",
-   "validate_simready_asset",
    "get_unreal_interchange_info",
    "batch_unreal_operations",
    "query_unreal_scene_graph",
@@ -4027,8 +3947,6 @@
    "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
-   "convert_to_simready",
-   "validate_simready_asset",
    "get_unreal_interchange_info",
    "query_unreal_scene_graph",
    "analyze_unreal_scene_for_robotics",
@@ -4093,8 +4011,6 @@
    "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
-   "convert_to_simready",
-   "validate_simready_asset",
    "get_unreal_interchange_info",
    "query_unreal_scene_graph",
    "analyze_unreal_scene_for_robotics",

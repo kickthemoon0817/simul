@@ -413,8 +413,11 @@ async def test_component_operations_and_missing_component(script_session):
         await session.set_collision(actor.path, "BlockAll"),
         await session.set_physics_params(actor.path, mass=9),
     ):
+        # Round-2 audit R2B-03: a typed refusal with a code, not a ScriptError traceback.
         assert result["success"] is False
-        assert "exactly one PrimitiveComponent" in result["error"]
+        assert result["error_type"] == "IncompatibleBody"
+        assert result["details"]["problems"][0]["code"] == "NO_PRIMITIVE_COMPONENT"
+        assert "no primitive component" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -467,12 +470,6 @@ async def test_usd_plugin_missing_and_simready_explicitly_unsupported(
     ):
         assert result["success"] is False
         assert result["error_type"] == "PluginUnavailable"
-    for result in (
-        await session.convert_to_simready(source, target),
-        await session.validate_simready_asset(source),
-    ):
-        assert result["success"] is False
-        assert result["error_type"] == "UnsupportedOperation"
 
 
 @pytest.mark.asyncio
