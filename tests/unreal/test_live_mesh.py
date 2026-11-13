@@ -170,7 +170,8 @@ def test_one_undo_reverts_one_mesh_edit_and_keeps_the_actor() -> None:
             assert "empty result" in failed["error"]
             assert (await _state(client, ball))["triangles"] == simplified["result_triangles"]
             await client._execute_json_script(_UNDO)
-            assert await _state(client, ball) == before
+            # The mesh from before the edit, by its triangles: binding it again (refresh) renames it.
+            assert (await _state(client, ball))["triangles"] == before["triangles"]
             await client._execute_json_script(_UNDO)
             assert (await _state(client, ball))["exists"] is False
         finally:
