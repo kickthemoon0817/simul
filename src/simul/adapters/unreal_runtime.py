@@ -19,6 +19,7 @@ import socket
 import tempfile
 import textwrap
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
@@ -31,18 +32,23 @@ from ..utils.asset_references import (
     interchange_outside_references,
 )
 from ..utils.paths import PathPolicy, SandboxDenied
+from ..utils.regex_guard import UNREAL_TAG_LENGTH, RegexRefused
 from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
 from ._unreal_errors import (
     CAMERA_NOT_APPLIED,
     CONNECTION_ERROR,
+    ENGINE_ERROR,
+    INSTANCE_BUSY,
     NOT_FOUND_ERROR,
     TIMEOUT_ERROR,
     VALIDATION_ERROR,
     UnrealConnectionError,
     UnrealError,
     UnrealTimeoutError,
+    UnrealValidationError,
+    parse_remote_control_json,
     remote_control_error,
     remote_control_error_type,
     remote_control_message,
@@ -96,9 +102,11 @@ from ._unreal_scripts import (
     ACTOR_HELPERS,
     ACTOR_INFO,
     ADD_COMPONENT,
+    APPLY_FORCE,
     ASSET_IMPORT,
     ASSET_SEARCH,
     ASSIGN_MATERIAL,
+    BULK_PHYSICS,
     CREATE_MATERIAL_INSTANCE,
     DELETE_ACTOR,
     EDITOR_RELATIVE_PATHS,
@@ -114,6 +122,8 @@ from ._unreal_scripts import (
     LISTED_CHILDREN,
     LOADED_MAP,
     MATERIAL_INFO,
+    NOT_IN_SIMULATION,
+    PHYSICS_STATE,
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
@@ -127,6 +137,9 @@ from ._unreal_scripts import (
     SET_LIGHT_PARAMS,
     SET_MATERIAL_PARAMS,
     SET_PHYSICS_PARAMS,
+    SIMULATION_ACTORS,
+    SIMULATION_NOT_RUNNING,
+    SIMULATION_START_HINT,
     SIMULATION_STATUS,
     SPAWN_ACTOR,
     USD_EXPORT,
@@ -156,6 +169,24 @@ ROBOTICS_CRITERIA: Dict[str, float] = {
 
 #: Most actor paths the collision summary lists; its counts cover every actor.
 ROBOTICS_LISTED_LIMIT = 50
+
+#: ``analyze_scene_for_robotics`` entries per category: the default and most per page.
+ROBOTICS_DEFAULT_RESULTS = 50
+ROBOTICS_MAX_RESULTS = 500
+
+#: Most bytes of JSON an analysis page holds. Under the server's 40 KB result
+#: budget, which would otherwise cut the largest list alone (a 5,000-actor level
+#: gave 494,853 bytes and lost every surface), with room for the envelope.
+ROBOTICS_PAGE_BYTES = 32_000
+
+#: Most instances of one instanced static mesh component the robotics analysis
+#: measures one by one; a component with more counts whole, by its world bounds.
+ROBOTICS_MAX_INSTANCES = 1000
+
+#: Seconds the robotics analysis keeps a scan for the pages after the first;
+#: offset 0 always scans. A 5,011-actor level took 13 to 99 s a page on a loaded
+#: machine when every page scanned the level again.
+ROBOTICS_SNAPSHOT_SECONDS = 600.0
 
 #: ``set_physics_params`` mass range, in kg. Unreal clamps a lighter override
 #: to 0.001 kg (FBodyInstance::MassInKgOverride's ClampMin); a body heavier than
@@ -240,10 +271,166 @@ USD_IMPORT_OPTIONS: Tuple[str, ...] = USD_IMPORT_BOOLEAN_OPTIONS + (
 # UE 5.7); an object name's are _INVALID_OBJECT_NAME_CHARACTERS, below.
 _INVALID_FOLDER_CHARACTERS = frozenset("\\:*?\"<>|' ,.&!~\n\r\t@#")
 
+#: Most actors ``setup_physics_bulk`` sets up in one call, and how many of the
+#: configured and failed actors its reply lists (it counts them all).
+PHYSICS_BULK_MAX_ACTORS = 1000
+PHYSICS_BULK_LISTED = 50
+
+#: ``set_light_params`` color temperature range, in Kelvin: what Unreal's
+#: blackbody color covers (FLinearColor::MakeFromColorTemperature clamps to it),
+#: so 100 K and 1e9 K, which it stored, rendered as these ends.
+LIGHT_MIN_TEMPERATURE_K = 1000.0
+LIGHT_MAX_TEMPERATURE_K = 15000.0
+
+#: Most light intensity ``set_light_params`` takes, in the light's unit. The
+#: sun is about 120,000 lux and a stadium floodlight about 1e6 lumens; 1e30 lux
+#: was stored, and 1e39 overflowed Unreal's 32-bit float.
+LIGHT_MAX_INTENSITY = 1e9
+
+#: ``control_simulation`` actions and start modes, as the tool's enums list them.
+SIMULATION_ACTIONS: Tuple[str, ...] = ("start", "stop", "pause", "resume", "step")
+SIMULATION_MODES: Tuple[str, ...] = ("simulate", "play")
+
+#: ``apply_force`` units and how many Unreal units (kg cm/s^2 for a force,
+#: kg cm/s for an impulse) one of each is.
+FORCE_UNITS: Tuple[str, ...] = ("unreal", "si")
+FORCE_UNIT_SCALE: Dict[str, float] = {"unreal": 1.0, "si": 100.0}
+
+#: Longest ``apply_force`` duration, in seconds of simulation time.
+FORCE_MAX_DURATION_S = 600.0
+
+#: ``get_physics_state`` worlds and its most bodies per call.
+PHYSICS_STATE_WORLDS: Tuple[str, ...] = ("auto", "simulation", "editor")
+PHYSICS_STATE_MAX_RESULTS = 1000
+
+#: Most actors ``list_simulation_actors`` returns per call.
+SIMULATION_ACTORS_MAX_RESULTS = 5000
+
+
+class ArgumentError(UnrealError, ValueError):
+    """A physics, simulation or light tool argument out of range, refused before anything is sent.
+
+    The envelope reports it as a ``ValidationError`` whose ``details.code``
+    names the problem, with the parameter, the value and the range in
+    ``details``; it is still a ``ValueError`` to ``except`` clauses.
+    """
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message, VALIDATION_ERROR, details={"code": code, **details})
+
+
+def _check_page_args(offset: int, max_results: int, most: int) -> None:
+    """Refuse a page size or offset out of range with an ArgumentError."""
+    if not 1 <= max_results <= most:
+        raise ArgumentError(
+            f"max_results must be from 1 to {most}, got {max_results}",
+            "OUT_OF_RANGE",
+            parameter="max_results",
+            value=max_results,
+            minimum=1,
+            maximum=most,
+        )
+    if offset < 0:
+        raise ArgumentError(
+            f"offset must be 0 or more, got {offset}", "OUT_OF_RANGE", parameter="offset", value=offset, minimum=0
+        )
+
+
+def _check_range(name: str, value: float, low: float, high: float, unit: str = "") -> float:
+    """``value`` as a float when it is finite and within [low, high], else an ArgumentError."""
+    if not (math.isfinite(value) and low <= value <= high):
+        raise ArgumentError(
+            f"{name} must be from {low:g} to {high:g}{unit}, got {value!r}",
+            "OUT_OF_RANGE",
+            parameter=name,
+            value=value if math.isfinite(value) else str(value),
+            minimum=low,
+            maximum=high,
+        )
+    return float(value)
+
+
 # UE's FMD5 hex output is lowercase. Accept either case from configured
 # input and normalize. Anything that isn't a clean 32-char hex digest is
 # treated as plaintext and MD5-hashed (UE's FMD5::HashAnsiString).
 _HEX32_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+#: The categories ``analyze_scene_for_robotics`` lists, paged together.
+ROBOTICS_LISTS: Tuple[str, ...] = ("traversable_surfaces", "graspable_objects")
+
+
+def _robotics_page(result: Dict[str, Any], offset: int, max_results: int) -> Dict[str, Any]:
+    """Fit an analysis page within ROBOTICS_PAGE_BYTES and say where the next starts.
+
+    Both lists keep the same number of entries, the most that fits (at least
+    one, so paging always moves on), so the next page at ``offset`` plus that
+    number continues both. A page over the budget used to be cut by the server
+    at its largest list alone, with a hint naming parameters this tool lacks.
+
+    Args:
+        result: The editor script's payload: each list cut to ``max_results``
+            from ``offset``, and ``totals``.
+        offset: The page's offset.
+        max_results: The most entries per category asked for.
+
+    Returns:
+        The payload with the lists cut to fit, ``returned``, ``offset``,
+        ``max_results``, ``next_offset`` and ``hint``.
+    """
+    counted = result.get("totals") or {}
+    totals = {name: int(counted.get(name, len(result.get(name) or []))) for name in ROBOTICS_LISTS}
+    lists = {name: list(result.get(name) or []) for name in ROBOTICS_LISTS}
+
+    def page(keep: int) -> Dict[str, Any]:
+        return {**result, **{name: items[:keep] for name, items in lists.items()}, "totals": totals}
+
+    keep = max(len(items) for items in lists.values())
+    while keep > 1 and len(json.dumps(page(keep))) > ROBOTICS_PAGE_BYTES:
+        keep = keep * 3 // 4 if keep > 4 else keep - 1
+    payload = page(keep)
+    end = offset + keep
+    more = any(totals[name] > end for name in ROBOTICS_LISTS)
+    hint = None
+    if more:
+        hint = (
+            f"Both lists are paged together, {keep} per category from offset {offset}; totals counts "
+            f"every match. Pass offset {end} for the next page, or narrow the query with actor_filter "
+            "or analysis_types."
+        )
+        if keep < max_results:
+            hint += f" This page holds {keep} rather than max_results {max_results} to fit the response budget."
+    payload.update(
+        returned={name: len(payload[name]) for name in ROBOTICS_LISTS},
+        offset=offset,
+        max_results=max_results,
+        next_offset=end if more else None,
+        hint=hint,
+    )
+    return payload
+
+
+def _physics_values(
+    mass: Optional[float],
+    linear_damping: Optional[float],
+    angular_damping: Optional[float],
+    enable_gravity: Optional[bool],
+) -> Dict[str, Any]:
+    """The body parameters given, checked against Unreal's ranges.
+
+    Raises:
+        ArgumentError: A value is not finite or out of its range (a
+            ValidationError with ``details.code`` OUT_OF_RANGE).
+    """
+    values: Dict[str, Any] = {}
+    if mass is not None:
+        values["mass"] = _check_range("mass", mass, PHYSICS_MIN_MASS_KG, PHYSICS_MAX_MASS_KG, " kg")
+    for name, value in (("linear_damping", linear_damping), ("angular_damping", angular_damping)):
+        if value is not None:
+            values[name] = _check_range(name, value, 0.0, PHYSICS_MAX_DAMPING)
+    if enable_gravity is not None:
+        values["enable_gravity"] = bool(enable_gravity)
+    return values
 
 
 def _passphrase_to_md5(value: Optional[str]) -> Optional[str]:
@@ -650,6 +837,452 @@ else:
     print(json.dumps({"known": True, "previous_value": previous,
                       "value": unreal.SystemLibrary.get_console_variable_string_value(args["name"])}))
 """
+
+
+#: Finds ``set_actor_property``'s target; expects ``args`` = {"path", "name"}.
+#: The actor is resolved with ACTOR_HELPERS' actor_at (a component through the
+#: actor it belongs to), so a path to nothing, a deleted actor, an actor of a
+#: map that is loaded but not open, or of the running Play In Editor world, is
+#: the same NotFoundError the other actor tools give, and nothing is loaded.
+#: An asset, a class, a class default object or a component template is a
+#: ValidationError with ``details.code``. Prints the target's class and, when
+#: the property is an array, set or map, its kind and whether the editor's
+#: Python API can replace it, probed with a write of the current value that
+#: sends no change notifications, so nothing is marked dirty; ``container`` is
+#: None when Python cannot read the property.
+PROPERTY_TARGET = ACTOR_HELPERS + """
+def refuse(code, message):
+    return {"success": False, "error_type": "ValidationError", "error": message, "details": {"code": code}}
+
+def owning_actor(component):
+    owner = component.get_owner()
+    outer = component.get_outer()
+    while owner is None and outer is not None:
+        if isinstance(outer, unreal.Actor):
+            owner = outer
+        outer = outer.get_outer()
+    return owner
+
+def property_target(path, name):
+    obj = unreal.find_object(None, path)
+    scope = (" set_unreal_actor_property edits actors, and their components, in the level open in the "
+             "editor, not assets, classes or engine objects")
+    if obj is not None and not isinstance(obj, (unreal.Actor, unreal.ActorComponent)):
+        return refuse("not_an_actor_or_component", path + " is a " + obj.get_class().get_name() + "." + scope)
+    if obj is not None and obj.get_name().startswith("Default__"):
+        return refuse("class_default_object", path + " is a class default object." + scope)
+    if isinstance(obj, unreal.ActorComponent):
+        owner = owning_actor(obj)
+        if owner is None:
+            return refuse("component_template", path + " is a component template, not part of a level." + scope)
+        if owner.get_name().startswith("Default__"):
+            return refuse("class_default_object", path + " belongs to a class default object." + scope)
+        actor_at(owner.get_path_name())
+        if not unreal.SystemLibrary.is_valid(obj):
+            raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path) + " (the component was removed)")
+    else:
+        actor_at(path)
+    found = {"target_class": obj.get_class().get_name(), "container": None, "replaceable": False}
+    try:
+        current = obj.get_editor_property(name)
+    except Exception:
+        return found
+    for kind in ("Array", "Set", "Map"):
+        if isinstance(current, getattr(unreal, kind)):
+            found["container"] = kind.lower()
+            try:
+                obj.set_editor_property(name, current, unreal.PropertyAccessChangeNotifyMode.NEVER)
+                found["replaceable"] = True
+            except Exception:
+                pass
+    return found
+
+print(json.dumps(property_target(args["path"], args["name"])))
+"""
+
+#: Where PROPERTY_BEGIN leaves, in the editor's sys.modules, what
+#: PROPERTY_DECIDE needs, by call token. Both run in the same Remote Control
+#: batch, so an entry lives only while that batch runs.
+PROPERTY_TRANSACTIONS = "_simul_property_transactions"
+
+#: Opens set_actor_property's write; expects ``args`` = {"token", "path",
+#: "name", "transaction", "empty"} (the container kind, or None).
+#:
+#: The entry is filed first, so PROPERTY_DECIDE closes whatever this opens
+#: even when it fails part way. The objects the write can change are recorded
+#: in the transaction with ``modify(False)``, which does not mark the level
+#: changed: for a property with a setter (a light's Intensity, Mobility,
+#: StaticMesh, RelativeLocation, Elements) Remote Control calls the setter
+#: with no transaction of its own and so never calls Modify (CreateRCCall,
+#: InvokeCall with ERCTransactionMode::NONE), and a setter can change the
+#: components attached below its target (SetMobility(Movable) moves them
+#: too). The previous value is kept, through the Python API, so that
+#: PROPERTY_DECIDE can put it back. A container is emptied with a fresh value
+#: so that Remote Control's write replaces it whole: the one
+#: get_editor_property returns is the property itself, and clearing it in
+#: place would change it before set_editor_property's PreEditChange records it.
+PROPERTY_BEGIN = f"""
+import json, sys, types, unreal
+
+def recorded(obj):
+    found = [obj]
+    children = getattr(obj, "get_children_components", None)
+    if children is not None:
+        found += list(children(True))
+    return found
+
+def begin(args):
+    registry = sys.modules.get({PROPERTY_TRANSACTIONS!r})
+    if registry is None:
+        registry = types.ModuleType({PROPERTY_TRANSACTIONS!r})
+        registry.open = {{}}
+        sys.modules[{PROPERTY_TRANSACTIONS!r}] = registry
+    obj = unreal.find_object(None, args["path"])
+    entry = {{"index": None, "path": args["path"], "name": args["name"], "readable": False, "previous": None}}
+    registry.open[args["token"]] = entry
+    if args["transaction"]:
+        index = unreal.SystemLibrary.begin_transaction("simul", "Set " + args["name"], obj)
+        entry["index"] = index if index >= 0 else None
+    for other in recorded(obj):
+        other.modify(False)
+    try:
+        current = obj.get_editor_property(args["name"])
+    except Exception:
+        current = None
+    else:
+        copy = getattr(current, "copy", None)
+        entry["previous"] = copy() if callable(copy) else current
+        entry["readable"] = True
+    if args["empty"]:
+        obj.set_editor_property(args["name"], {{}} if args["empty"] == "map" else [])
+    return {{"transaction": entry["index"], "readable": entry["readable"]}}
+
+print(json.dumps(begin(args)))
+"""
+
+#: Compares a property's value, as the editor's Python API reads it, with the
+#: JSON value written, as ``_json_value_matches`` compares Remote Control's
+#: read-back: True, False, or None when the two cannot be compared. An object
+#: compares by path, an enum by name (any case, the ``Type::`` part and
+#: underscores aside), a struct on the fields written, an array in order, a
+#: set in any order and a map whole.
+PROPERTY_MATCHES = """
+import math
+
+def _types(*names):
+    return tuple(t for t in (getattr(unreal, n, None) for n in names) if isinstance(t, type))
+
+_OBJECT, _ENUM, _STRUCT = _types("Object"), _types("EnumBase"), _types("StructBase")
+_ARRAY, _SET, _MAP, _NAMES = _types("Array"), _types("Set"), _types("Map"), _types("Name", "Text")
+
+def _same_text(wanted, got):
+    a, b = wanted.strip().lower(), got.strip().lower()
+    if a == b or a.endswith("::" + b) or b.endswith("::" + a):
+        return True
+    for short, full in ((a, b), (b, a)):
+        name = short.rsplit("/", 1)[-1]
+        if short.startswith("/") and "." not in name and full == short + "." + name:
+            return True
+    return False
+
+def _close(a, b):
+    return math.isclose(float(a), float(b), rel_tol=1e-5, abs_tol=1e-6)
+
+def _all(results):
+    if False in results:
+        return False
+    return None if None in results else True
+
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+def matches(wanted, got):
+    if _ENUM and isinstance(got, _ENUM):
+        if isinstance(wanted, str):
+            a = wanted.rsplit("::", 1)[-1].replace("_", "").lower()
+            b = str(got.name).replace("_", "").lower()
+            return bool(a) and (a == b or a.endswith(b) or b.endswith(a))
+        return None
+    if wanted is None or wanted == "":
+        if got is None:
+            return True
+        if isinstance(got, str) or (_NAMES and isinstance(got, _NAMES)):
+            return str(got) in ("", "None")
+        return False if _OBJECT and isinstance(got, _OBJECT) else None
+    if isinstance(wanted, (bool, int, float)):
+        if isinstance(got, (bool, int, float)):
+            return _close(wanted, got)
+        return None
+    if isinstance(wanted, str):
+        if got is None:
+            return False  # an object reference that loads nothing reads back as None
+        if _OBJECT and isinstance(got, _OBJECT):
+            return _same_text(wanted, got.get_path_name())
+        if isinstance(got, str) or (_NAMES and isinstance(got, _NAMES)):
+            return _same_text(wanted, str(got))
+        if _number(got):
+            try:
+                return _close(wanted, got)
+            except ValueError:
+                return None
+        return None
+    if isinstance(wanted, list):
+        if (_SET and isinstance(got, _SET)) or isinstance(got, (set, frozenset)):
+            items = list(got)
+            if len(items) != len(wanted):
+                return False
+            results = []
+            for item in wanted:
+                found = [matches(item, other) for other in items]
+                results.append(True if True in found else (None if None in found else False))
+            return _all(results)
+        if isinstance(got, (list, tuple)) or (_ARRAY and isinstance(got, _ARRAY)):
+            items = list(got)
+            if len(items) != len(wanted):
+                return False
+            return _all([matches(w, g) for w, g in zip(wanted, items)])
+        return None
+    if isinstance(wanted, dict):
+        if _MAP and isinstance(got, _MAP):
+            items = list(got.items())
+            if len(items) != len(wanted):
+                return False
+            results = []
+            for key, item in wanted.items():
+                found = [value for other, value in items if matches(key, other) is True]
+                if not found:
+                    return False
+                results.append(matches(item, found[0]))
+            return _all(results)
+        if _STRUCT and isinstance(got, _STRUCT):
+            results = []
+            for key, item in wanted.items():
+                try:
+                    results.append(matches(item, got.get_editor_property(key)))
+                except Exception:
+                    results.append(None)
+            return _all(results)
+        if isinstance(got, dict):
+            lowered = {str(key).lower(): value for key, value in got.items()}
+            return _all([matches(item, lowered[str(key).lower()]) if str(key).lower() in lowered else None
+                         for key, item in wanted.items()])
+    return None
+"""
+
+#: Finishes set_actor_property's write in the batch that made it; expects
+#: ``args`` = {"token", "expected"}. Being a function call, it first makes
+#: Remote Control finish the property write (TestOrFinalizeOngoingChange
+#: runs PostEditChangeProperty, which can correct the value). Then it reads
+#: the property and compares it with what was written. A value Unreal did
+#: not keep gets the previous value back and the transaction is cancelled
+#: (Unreal's Cancel reverts nothing, so the put-back comes first): the level
+#: is as it was, with no undo step. A value that stays marks the level changed
+#: (``modify()``, which Remote Control's setter path skips) and the
+#: transaction ends: one undo step. Only a transaction this call opened
+#: outermost is cancelled, as Cancel also cancels the transactions around it.
+#: Nothing spans two requests, so a concurrent call's write never lands in
+#: this transaction, nor this one's in theirs.
+PROPERTY_DECIDE = f"""
+import json, sys, unreal
+{PROPERTY_MATCHES}
+def decide(args):
+    registry = sys.modules.get({PROPERTY_TRANSACTIONS!r})
+    entry = registry.open.pop(args["token"], None) if registry is not None else None
+    if entry is None:
+        return {{"applied": None, "restored": False, "closed": None, "error": "the write was not prepared"}}
+    obj = unreal.find_object(None, entry["path"])
+    result = {{"applied": None, "restored": False, "closed": None}}
+    try:
+        if obj is not None and entry["readable"]:
+            result["applied"] = matches(args["expected"], obj.get_editor_property(entry["name"]))
+        if result["applied"] is False:
+            try:
+                obj.set_editor_property(entry["name"], entry["previous"])
+                result["restored"] = True
+            except Exception as exc:
+                result["restore_error"] = str(exc)
+        if not result["restored"] and obj is not None:
+            obj.modify()
+    finally:
+        if entry["index"] is not None:
+            if result["restored"] and entry["index"] == 0:
+                unreal.SystemLibrary.cancel_transaction(entry["index"])
+                result["closed"] = "cancelled"
+            else:
+                unreal.SystemLibrary.end_transaction()
+                result["closed"] = "ended"
+    return result
+
+print(json.dumps(decide(args)))
+"""
+
+#: Does nothing. Remote Control finishes a property write, running Unreal's
+#: PostEditChangeProperty, only when its next function call arrives
+#: (RemoteControl.EnableOngoingChangeOptimization, on by default), so this
+#: call goes between a write and the read that reports it.
+PROPERTY_FINISH = 'import json\nprint(json.dumps({"finished": True}))\n'
+
+
+#: What a container property's new value must be: the JSON type, how to say
+#: it, and the refusal's ``details.code``.
+_CONTAINER_VALUES: Dict[str, Tuple[type, str, str]] = {
+    "array": (list, "a JSON array ([] empties it)", "value_not_a_list"),
+    "set": (list, "a JSON array ([] empties it)", "value_not_a_list"),
+    "map": (dict, "a JSON object ({} empties it)", "value_not_an_object"),
+}
+
+
+def _batch_failure(answer: Dict[str, Any], route: str) -> Optional[UnrealError]:
+    """The error a batched request was answered with, or None when it succeeded."""
+    code = answer.get("ResponseCode", 500)
+    if isinstance(code, int) and code < 400:
+        return None
+    body = answer.get("ResponseBody")
+    text = body if isinstance(body, str) else json.dumps(body)
+    return remote_control_error(code if isinstance(code, int) else 500, text, "PUT", route)
+
+
+def _read_back(answer: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """A batched property read, as ``UnrealRuntimeSession._read_property`` returns one."""
+    failure = _batch_failure(answer, "/remote/object/property")
+    if failure is not None:
+        return {"warning": f"Wrote {name}, but Unreal would not read it back: {failure}"}
+    data = answer.get("ResponseBody")
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if str(key).lower() == name.lower():
+                return {"value": value}
+        if len(data) == 1:
+            return {"value": next(iter(data.values()))}
+    return {"warning": f"Wrote {name}, but Remote Control read back no value for it"}
+
+
+def _python_call(script: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """A ``/remote/object/call`` body that runs ``script`` in a dict of its own.
+
+    For the operations ``set_actor_property`` batches: the dict holds the
+    script's names, and nothing is left in the editor's shared console dict.
+    """
+    source = (f"args = {args!r}\n" if args is not None else "") + script
+    return {
+        "objectPath": "/Script/PythonScriptPlugin.Default__PythonScriptLibrary",
+        "functionName": "ExecutePythonCommandEx",
+        "parameters": {
+            "PythonCommand": f"exec({source!r}, {{'__name__': '__main__'}})",
+            "ExecutionMode": "ExecuteFile",
+            "FileExecutionScope": "Public",
+        },
+    }
+
+
+#: The asset whose thumbnail stands for an actor or component; expects
+#: ``args`` = {"path"}. Remote Control's thumbnail route serves assets only
+#: (an actor path got its class's SVG icon back). An instance of a Blueprint
+#: is shown by the Blueprint; anything else by its static or skeletal mesh, the
+#: root component's first. Found among loaded objects, never loaded.
+THUMBNAIL_ASSET = """
+import json, unreal
+
+def mesh_of(component):
+    if isinstance(component, unreal.StaticMeshComponent):
+        return component.static_mesh
+    if isinstance(component, unreal.SkeletalMeshComponent):
+        return component.get_editor_property("skeletal_mesh_asset")
+    return None
+
+def thumbnail_asset(path):
+    obj = unreal.find_object(None, path)
+    if obj is None:
+        return {"success": False, "error_type": "NotFoundError",
+                "error": "No object is loaded at " + path + ", and an actor path names no asset to show"}
+    if isinstance(obj, unreal.ActorComponent):
+        components = [obj]
+    elif isinstance(obj, unreal.Actor):
+        cls = obj.get_class()
+        if isinstance(cls, unreal.BlueprintGeneratedClass):
+            name = cls.get_path_name()
+            return {"asset": name[:-2] if name.endswith("_C") else name, "via": "blueprint"}
+        root = obj.root_component
+        components = ([root] if root else []) + list(obj.get_components_by_class(unreal.MeshComponent))
+    else:
+        return {"success": False, "error_type": "ValidationError",
+                "error": path + " is a " + obj.get_class().get_name() + ": pass an asset, or an actor or component"}
+    for component in components:
+        mesh = mesh_of(component)
+        if mesh is not None:
+            return {"asset": mesh.get_path_name(), "via": "mesh"}
+    return {"success": False, "error_type": "NotFoundError",
+            "error": path + " has no asset to show: it is not an instance of a Blueprint and has no static or "
+                     "skeletal mesh. Use focus_unreal_on_actor and capture_unreal_viewport to see it"}
+
+print(json.dumps(thumbnail_asset(args["path"])))
+"""
+
+#: Thumbnail sizes ``get_actor_thumbnail`` takes, in pixels per side.
+THUMBNAIL_MAX_SIZE = 1024
+
+
+def _same_text(wanted: str, got: str) -> bool:
+    """Whether two strings name the same value as Unreal reads it back.
+
+    Names and enums ignore case; an enum written by its short name may read
+    back qualified (``EComponentMobility::Movable``); an object written by its
+    package path reads back as ``Package.Name``.
+    """
+    a, b = wanted.strip().lower(), got.strip().lower()
+    if a == b or a.endswith("::" + b) or b.endswith("::" + a):
+        return True
+    for short, full in ((a, b), (b, a)):
+        name = short.rsplit("/", 1)[-1]
+        if short.startswith("/") and "." not in name and full == f"{short}.{name}":
+            return True
+    return False
+
+
+#: A key the value read back does not have.
+_MISSING = object()
+
+
+def _json_value_matches(wanted: Any, got: Any) -> Optional[bool]:
+    """Whether a property read back holds the JSON value written.
+
+    Args:
+        wanted: The value written.
+        got: The value Remote Control (or the Python API) read back.
+
+    Returns:
+        True or False, or None when the two cannot be compared (an enum
+        written as a number reads back by name). Numbers match within 32-bit
+        float precision; for an object written, only its keys are compared, as
+        Remote Control leaves a struct's other fields as they were; a null
+        object reads back as "".
+    """
+    if wanted is None or wanted == "":
+        return got in (None, "", "None")
+    if isinstance(wanted, (bool, int, float)) and isinstance(got, (bool, int, float)):
+        return math.isclose(float(wanted), float(got), rel_tol=1e-5, abs_tol=1e-6)
+    if isinstance(wanted, str) and isinstance(got, str):
+        return _same_text(wanted, got)
+    if isinstance(wanted, (list, dict)) and type(wanted) is type(got):
+        if isinstance(wanted, list):
+            if len(wanted) != len(got):
+                return False
+            pairs = list(zip(wanted, got))
+        elif isinstance(got, dict):
+            lowered = {str(key).lower(): item for key, item in got.items()}
+            pairs = [(item, lowered.get(str(key).lower(), _MISSING)) for key, item in wanted.items()]
+        else:
+            return None
+        results = [None if g is _MISSING else _json_value_matches(w, g) for w, g in pairs]
+        if False in results:
+            return False
+        return None if None in results else True
+    if isinstance(wanted, str) and isinstance(got, (int, float)) and not isinstance(got, bool):
+        try:
+            return math.isclose(float(wanted), float(got), rel_tol=1e-5, abs_tol=1e-6)
+        except ValueError:
+            return None
+    return None
 
 
 def _console_value_matches(read_back: str, requested: str) -> bool:
@@ -1211,6 +1844,14 @@ class UnrealRuntimeSession(LoggerMixin):
                 timeout=timeout_cfg,
                 headers=self._default_headers(),
             )
+            # aiohttp sends an idempotent method (PUT included) again when the
+            # connection drops before the answer (ClientSession._request's
+            # retry_persistent_connection). Remote Control sends every
+            # mutation and script as a PUT, so an editor that ran one and lost
+            # the answer ran it twice. _http_request decides what is retried;
+            # aiohttp's own test client turns this off the same way.
+            if hasattr(self._session, "_retry_connection"):
+                self._session._retry_connection = False
         return self._session
 
     async def _recycle_session(self) -> None:
@@ -1323,26 +1964,25 @@ class UnrealRuntimeSession(LoggerMixin):
                             resp.status, await _response_text(resp), method, path
                         )
                     if response_kind == "image":
-                        from io import BytesIO
-
-                        from PIL import Image
-
-                        image_bytes = await resp.read()
-                        with Image.open(BytesIO(image_bytes)) as image:
-                            image_format = (image.format or "").lower()
-                            if image_format not in {"png", "jpeg"}:
-                                raise ValueError(
-                                    f"Unsupported thumbnail format: {image_format}"
-                                )
-                            return {
-                                "image_base64": base64.b64encode(image_bytes).decode(
-                                    "ascii"
-                                ),
-                                "format": image_format,
-                                "width": image.width,
-                                "height": image.height,
-                            }
-                    data: Dict[str, Any] = await resp.json()
+                        # The caller decodes it: Remote Control may answer
+                        # with an icon that is not an image Pillow reads.
+                        return {
+                            "image_bytes": await resp.read(),
+                            "content_type": resp.headers.get("Content-Type", ""),
+                        }
+                    try:
+                        data: Dict[str, Any] = await resp.json()
+                    except ValueError:
+                        # A batch answer embeds Remote Control's error bodies
+                        # raw, unescaped messages and all.
+                        try:
+                            data = parse_remote_control_json(await _response_text(resp))
+                        except ValueError as exc:
+                            raise UnrealError(
+                                f"Remote Control answered {method} {path} with JSON simul cannot read: {exc}",
+                                ENGINE_ERROR,
+                                details={"route": path},
+                            ) from exc
                     return data
 
             except Exception as exc:
@@ -1465,10 +2105,17 @@ class UnrealRuntimeSession(LoggerMixin):
         if connection_failed:
             address = f"{self.host}:{self.port}"
             if aiohttp is not None and isinstance(exc, aiohttp.ServerDisconnectedError):
-                message = (
-                    f"The editor at {address} closed the connection without answering {method} {path}: "
-                    "it may have crashed or be shutting down"
-                )
+                if retry_safe:
+                    message = (
+                        f"The editor at {address} closed the connection without answering {method} {path}: "
+                        "it may have crashed or be shutting down"
+                    )
+                else:
+                    message = (
+                        f"The editor at {address} closed the connection without answering {method} {path}, "
+                        "so whether the request ran is unknown: check the editor's state before retrying "
+                        "(the editor may also have crashed or be shutting down)"
+                    )
             else:
                 message = f"Cannot reach Remote Control at {address} ({exc})"
             error = UnrealConnectionError(message, CONNECTION_ERROR, details=details)
@@ -1780,15 +2427,56 @@ class UnrealRuntimeSession(LoggerMixin):
             status = _http_status(exc)
             if status is not None:
                 failure["status"] = status
+            if isinstance(exc, UnrealError):
+                failure["error_type"] = exc.error_type
+            else:
+                failure["error_type"] = TIMEOUT_ERROR if isinstance(exc, asyncio.TimeoutError) else CONNECTION_ERROR
             not_sent = _not_sent(exc)
             if not_sent is not None:
                 failure["error"] = not_sent
                 failure["error_type"] = PROBE_NOT_SENT
+            elif isinstance(exc, asyncio.TimeoutError):
+                busy = await self._busy(self.ping_timeout)
+                if busy is not None:
+                    failure.update(busy)
             return failure
         return {
             "reachable": True,
             "address": address,
             "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+        }
+
+    async def _busy(self, waited: float) -> Optional[Dict[str, Any]]:
+        """The busy fields for an endpoint that timed out, or None when it is down.
+
+        Remote Control answers on the editor's game thread, so while a script,
+        a map load or a shader compile holds that thread nothing answers, but
+        the operating system still accepts connections on its listening port.
+        A port that accepts one is an editor that is up and busy (or hung); one
+        that refuses is down.
+
+        Args:
+            waited: How long the request waited, for the message.
+        """
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port), min(self.ping_timeout, 2.0)
+            )
+        except (OSError, asyncio.TimeoutError):
+            return None
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+        return {
+            "busy": True,
+            "error": (
+                f"The editor at {self.host}:{self.port} accepted the connection but Remote Control did not "
+                f"answer within {waited}s: it is busy (running a script, loading or compiling) or hung, "
+                "not down. Retry when it finishes"
+            ),
+            "error_type": INSTANCE_BUSY,
         }
 
     # ------------------------------------------------------------------
@@ -2131,10 +2819,22 @@ class UnrealRuntimeSession(LoggerMixin):
             and per-probe ``warnings`` (any non-fatal metadata-fetch errors).
             When Remote Control refuses the request (HTTP 401) it is
             ``reachable`` but not ``connected``, with ``ping``'s
-            authentication error.
+            authentication error. An editor that accepts the connection but
+            does not answer within ``unreal.ping_timeout`` (as ``ping``; the
+            metadata script then gets the full ``unreal.timeout``) is ``busy``
+            (``error_type`` ``InstanceBusy``), reported after that one attempt,
+            since a retry would wait on the same busy editor.
         """
+        probe_timeout = self.ping_timeout
         try:
-            await self._http_get("/remote/info")
+            try:
+                await self._http_get("/remote/info", timeout_override=probe_timeout, max_retries=0)
+            except UnrealConnectionError:
+                # Nothing listening yet may be an editor still starting up, so
+                # this one is retried. An error status or a timeout is not:
+                # a retry would get the same answer, or wait on the same busy
+                # editor.
+                await self._http_get("/remote/info", timeout_override=probe_timeout)
         except Exception as exc:
             refusal = _refusal(exc)
             if refusal is not None:
@@ -2143,13 +2843,14 @@ class UnrealRuntimeSession(LoggerMixin):
                 # still reading ``connected`` must not take it as usable.
                 return {"reachable": True, "connected": False, **refusal}
             # A timeout's text is empty; say what happened, as ping does.
-            error = str(exc) or f"No answer within {self.timeout}s"
-            self.logger.warning("Health check connectivity failed: %s", error)
-            return {
-                "reachable": False,
-                "connected": False,
-                "error": error,
-            }
+            error = str(exc) or f"No answer within {probe_timeout}s"
+            unreachable: Dict[str, Any] = {"reachable": False, "connected": False, "error": error}
+            if isinstance(exc, asyncio.TimeoutError):
+                busy = await self._busy(probe_timeout)
+                if busy is not None:
+                    unreachable.update(busy)
+            self.logger.warning("Health check connectivity failed: %s", unreachable["error"])
+            return unreachable
 
         # One script for all metadata: a single Remote Control round trip
         # instead of one per field. A failed or gated script leaves the
@@ -2222,7 +2923,15 @@ class UnrealRuntimeSession(LoggerMixin):
     # Phase 1 session methods — Scene Read Operations
     # ------------------------------------------------------------------
 
-    async def _paged_read(self, script: str, args: Dict[str, Any], noun: str, total_key: str) -> Dict[str, Any]:
+    async def _paged_read(
+        self,
+        script: str,
+        args: Dict[str, Any],
+        noun: str,
+        total_key: str,
+        *,
+        expected_errors: Sequence[str] = (),
+    ) -> Dict[str, Any]:
         """Run a paged scene read and say how to get the rest.
 
         The editor script renders one page (``_unreal_scripts.page``) and
@@ -2234,12 +2943,14 @@ class UnrealRuntimeSession(LoggerMixin):
             args: The script's arguments; ``budget`` is set here.
             noun: What the page lists, plural, for the hint.
             total_key: The result's key for every match.
+            expected_errors: ``error_type`` values the script reports for a
+                request it refused as asked (``_execute_json_script``).
 
         Returns:
             The script's result with ``truncated`` and ``hint``, or its error.
         """
         args = {**args, "budget": PAGE_BUDGET_BYTES}
-        result = await self._execute_json_script(f"args = {args!r}\n" + script)
+        result = await self._execute_json_script(f"args = {args!r}\n" + script, expected_errors=expected_errors)
         if result.get("error"):
             return result
         ended = result.pop("page_ended_by", None)
@@ -2269,7 +2980,7 @@ class UnrealRuntimeSession(LoggerMixin):
         self,
         class_filter: Optional[str] = None,
         tag_filter: Optional[str] = None,
-        max_results: int = 200,
+        max_results: Optional[int] = None,
         offset: int = 0,
         label_filter: Optional[str] = None,
         include_subclasses: bool = False,
@@ -2295,7 +3006,9 @@ class UnrealRuntimeSession(LoggerMixin):
                 (/Script/Engine.StaticMeshActor); None keeps every class.
             tag_filter: Keep actors with this actor tag (case-insensitive, as
                 Unreal compares tags); None keeps every actor.
-            max_results: Most actors in the page, 1 to 5000.
+            max_results: Most actors in the page, 1 to 5000; the
+                unreal.max_actors setting (UNREAL__MAX_ACTORS, 200 by default)
+                when not given.
             offset: Matching actors to skip before the page starts.
             label_filter: Keep actors whose label contains this text,
                 ignoring case; None keeps every actor.
@@ -2308,6 +3021,8 @@ class UnrealRuntimeSession(LoggerMixin):
             ``truncated``, ``hint`` (when more are left), ``warnings`` and
             ``pie_active``; or a ScriptError envelope.
         """
+        if max_results is None:
+            max_results = self.max_actors
         self._check_page(offset, max_results)
         args = {
             "class_filter": class_filter or None,
@@ -2458,19 +3173,36 @@ class UnrealRuntimeSession(LoggerMixin):
         Args:
             object_path: Full object path.
 
+        Remote Control's description carries no values, so they come from
+        one more request that reads every property it can (a property read
+        without a name). The ones it does not read, such as delegates and
+        protected properties without a getter, have no value.
+
         Returns:
-            Dictionary with ``object_path``, ``class_name``, ``properties``,
-            ``functions``.
+            Dictionary with ``object_path``, ``class_name``, ``properties``
+            (each with ``name``, ``type``, ``value`` and ``readable``) and
+            ``functions``; and a ``warning`` when no value could be read.
         """
         body: Dict[str, Any] = {"objectPath": object_path}
         data = await self._http_put("/remote/object/describe", body)
+        result: Dict[str, Any] = {}
+        try:
+            values = await self._http_put(
+                "/remote/object/property", {"objectPath": object_path, "access": "READ_ACCESS"}
+            )
+        except UnrealError as exc:
+            values = {}
+            result["warning"] = f"Property values unavailable: {exc}"
+        by_name = {str(name).lower(): value for name, value in values.items()}
 
         properties: list = []
         for prop in data.get("Properties", []):
+            name = prop.get("Name", "")
             properties.append({
-                "name": prop.get("Name", ""),
+                "name": name,
                 "type": prop.get("Type", ""),
-                "value": prop.get("Value"),
+                "value": by_name.get(name.lower()),
+                "readable": name.lower() in by_name,
             })
 
         functions: list = [f.get("Name", "") for f in data.get("Functions", [])]
@@ -2480,6 +3212,7 @@ class UnrealRuntimeSession(LoggerMixin):
             "class_name": data.get("Class", "Unknown"),
             "properties": properties,
             "functions": functions,
+            **result,
         }
 
     async def get_actor_thumbnail(
@@ -2489,26 +3222,91 @@ class UnrealRuntimeSession(LoggerMixin):
         height: int = 256,
     ) -> Dict[str, Any]:
         """
-        Get a thumbnail image for an asset.
+        Get the thumbnail Unreal stores for an asset, or for an actor's asset.
+
+        Remote Control serves the thumbnail saved with an asset, at the size
+        it was saved (256 x 256 for the editor's thumbnails), and takes no
+        size. It is scaled here to fit within ``width`` x ``height``, keeping
+        its proportions, and never enlarged. An actor or component in the
+        editor world is shown by its Blueprint, or else by its static or
+        skeletal mesh (``THUMBNAIL_ASSET``).
 
         Args:
-            asset_path: Full asset path.
-            width: Thumbnail width in pixels.
-            height: Thumbnail height in pixels.
+            asset_path: Asset path, or the path of an actor or component.
+            width: Largest width wanted, 1 to 1024 pixels.
+            height: Largest height wanted, 1 to 1024 pixels.
 
         Returns:
-            Dictionary with ``asset_path``, ``image_base64``, ``width``,
-            ``height``.
+            Dictionary with ``asset_path``, ``thumbnail_of`` (the asset
+            shown), ``image_base64``, ``format``, ``width`` and ``height`` (of
+            the image returned) and ``stored_width`` / ``stored_height``; a
+            ``NotFoundError`` when Unreal has no thumbnail image for it (it
+            answers with a class icon for assets without one).
         """
-        body: Dict[str, Any] = {
-            "objectPath": asset_path,
-            "Width": width,
-            "Height": height,
-        }
+        from io import BytesIO
+
+        from PIL import Image, UnidentifiedImageError
+
+        for name, pixels in (("width", width), ("height", height)):
+            if isinstance(pixels, bool) or not isinstance(pixels, int) or not 1 <= pixels <= THUMBNAIL_MAX_SIZE:
+                raise UnrealValidationError(
+                    f"{name} must be a whole number of pixels from 1 to {THUMBNAIL_MAX_SIZE}, got {pixels!r}",
+                    details={"code": "thumbnail_size_out_of_range"},
+                )
+        source = asset_path
+        if ":" in asset_path:
+            # An object inside a level (an actor or component), not an asset.
+            found = await self._execute_json_script(
+                f"args = {{'path': {asset_path!r}}}\n" + THUMBNAIL_ASSET,
+                expected_errors=(NOT_FOUND_ERROR, "ValidationError"),
+            )
+            if found.get("error"):
+                return {"asset_path": asset_path, **found}
+            source = found["asset"]
         data = await self._http_request(
-            "PUT", "/remote/object/thumbnail", body, response_kind="image"
+            "PUT", "/remote/object/thumbnail", {"objectPath": source}, response_kind="image"
         )
-        return {"asset_path": asset_path, **data}
+        raw: bytes = data["image_bytes"]
+        unavailable = {
+            "asset_path": asset_path,
+            "thumbnail_of": source,
+            "success": False,
+            "error": (
+                f"Unreal has no thumbnail image for {source}: it answered with "
+                f"{data.get('content_type') or 'an unknown type'} (the class icon an asset without a "
+                "thumbnail gets)"
+            ),
+            "error_type": NOT_FOUND_ERROR,
+        }
+        try:
+            image = Image.open(BytesIO(raw))
+        except UnidentifiedImageError:
+            return unavailable
+        with image:
+            image_format = (image.format or "").lower()
+            if image_format not in {"png", "jpeg"}:
+                return unavailable
+            stored = image.size
+            scale = min(width / image.width, height / image.height, 1.0)
+            size = stored
+            if scale < 1.0:
+                size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+                scaled = image.convert("RGB" if image_format == "jpeg" else "RGBA").resize(
+                    size, Image.Resampling.LANCZOS
+                )
+                out = BytesIO()
+                scaled.save(out, format=image.format, **({"quality": 90} if image_format == "jpeg" else {}))
+                raw = out.getvalue()
+        return {
+            "asset_path": asset_path,
+            "thumbnail_of": source,
+            "image_base64": base64.b64encode(raw).decode("ascii"),
+            "format": image_format,
+            "width": size[0],
+            "height": size[1],
+            "stored_width": stored[0],
+            "stored_height": stored[1],
+        }
 
     async def summarize_scene(self) -> Dict[str, Any]:
         """
@@ -2527,15 +3325,12 @@ class UnrealRuntimeSession(LoggerMixin):
         map_path: str = scene["map_path"]
         total_actors: int = scene["total_actors"]
         class_counts: Dict[str, int] = scene["actor_class_counts"]
-
-        # Keys are class path names (``/Script/Engine.StaticMeshActor``);
-        # compare the short name so the count isn't always zero.
-        static_meshes = sum(
-            v for k, v in class_counts.items()
-            if k.rsplit(".", 1)[-1] == "StaticMeshActor"
-        )
-        lights = sum(v for k, v in class_counts.items() if "Light" in k)
-        cameras = sum(v for k, v in class_counts.items() if "Camera" in k)
+        # Counted by class inside the editor (SCENE_SUMMARY), not by class
+        # name: "Light" in LightmassImportanceVolume and "Camera" in
+        # CameraBlockingVolume used to count them as a light and a camera.
+        static_meshes = int(scene["static_meshes"])
+        lights = int(scene["lights"])
+        cameras = int(scene["cameras"])
 
         pie_active = bool(scene.get("pie_active"))
         parts: list = [f"Map: {map_path}", f"Total actors: {total_actors}"]
@@ -3228,39 +4023,275 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         generate_transaction: bool = True,
     ) -> Dict[str, Any]:
         """
-        Set any writable property on an actor.
+        Set a property of an actor or component in the editor world, and read it back.
+
+        The target is resolved as the other actor tools resolve it (``actor_at``),
+        among loaded objects only, so an actor that is gone, belongs to a map
+        that is not open or to the running Play In Editor world is
+        NotFoundError and no map is loaded; an asset, class, class default
+        object or component template is ValidationError. Either way nothing
+        is written.
+
+        The write runs as one undo step, in one Remote Control batch (no editor
+        tick and no other request runs between its parts): the transaction
+        opens and records the target, an array, set or map is emptied so that
+        it is replaced whole, Remote Control writes the value (converting
+        structs, enums by name and objects by path, and calling the property's
+        setter when it has one), a function call makes Remote Control finish
+        the write (its PostEditChangeProperty runs only then), and the editor
+        compares what it holds with what was written. When Unreal holds
+        something else (a mesh path that loads nothing, materials past the
+        mesh's slots, an enum name it does not have, a write it refused), the
+        previous value is put back in the same transaction, which is then
+        cancelled: the level is as it was, with no undo step. The transaction
+        never spans two requests.
 
         Args:
-            actor_path: Full actor path.
-            property_name: Property name to set.
-            property_value: Property value as JSON string.
-            generate_transaction: Whether to generate an undo transaction.
+            actor_path: Full path of the actor or component.
+            property_name: Property name, as Unreal names it (Tags, bHidden).
+            property_value: The value as JSON text; text that is not JSON is
+                taken as a string.
+            generate_transaction: Whether the write can be undone.
 
         Returns:
-            Dictionary with actor_path, property_name.
+            ``actor_path``, ``property_name``, ``target_class``, ``value`` (read
+            back after the write), ``previous_value`` and ``applied`` (``value``
+            holds what was written; null, with a ``warning``, when Unreal would
+            not read it back or the two cannot be compared). A value that reads
+            back different fails with ``PropertyNotApplied``, ``restored`` and
+            ``details.expected`` / ``details.actual``.
         """
-        import json as json_lib
+        if not property_name.strip():
+            raise UnrealValidationError(
+                "property_name must name a property", details={"code": "empty_property_name"}
+            )
+        try:
+            parsed_value = json.loads(property_value)
+        except (json.JSONDecodeError, TypeError):
+            parsed_value = property_value
+        result: Dict[str, Any] = {"actor_path": actor_path, "property_name": property_name}
+
+        target = await self._execute_json_script(
+            f"args = {{'path': {actor_path!r}, 'name': {property_name!r}}}\n" + PROPERTY_TARGET,
+            expected_errors=(NOT_FOUND_ERROR, VALIDATION_ERROR),
+        )
+        if target.get("error"):
+            return {**result, **target}
+        result["target_class"] = target.get("target_class")
+        container = target.get("container")
+        previous = await self._read_property(actor_path, property_name)
+        if container and not target.get("replaceable"):
+            return {
+                **result,
+                "success": False,
+                "error": (
+                    f"{property_name} is a {container} the editor's Python API cannot replace, and Remote "
+                    "Control's own write only adds to a container, so it cannot be replaced whole. Nothing was "
+                    "written"
+                ),
+                "error_type": VALIDATION_ERROR,
+                "details": {"code": "container_not_replaceable"},
+            }
+        shape = _CONTAINER_VALUES.get(container or "")
+        if shape is not None and not isinstance(parsed_value, shape[0]):
+            # Remote Control writes what it can of a value of another shape (5
+            # into Tags held ['None']), and the container emptied for the write
+            # would be lost.
+            return {
+                **result,
+                "success": False,
+                "error": (
+                    f"{property_name} is {'a map' if container == 'map' else f'an {container}'}: give its new "
+                    f"contents as {shape[1]}. Nothing was written"
+                ),
+                "error_type": VALIDATION_ERROR,
+                "details": {"code": shape[2]},
+            }
+        if "value" in previous:
+            result["previous_value"] = previous["value"]
 
         try:
-            parsed_value = json_lib.loads(property_value)
-        except (json_lib.JSONDecodeError, TypeError):
-            parsed_value = property_value
+            parts = await self._property_write(
+                actor_path, property_name, parsed_value, container, generate_transaction
+            )
+        except UnrealError as exc:
+            if _not_sent(exc) is not None:
+                raise  # it never left this machine: nothing ran
+            # The batch may have run, compared and rolled back in the editor;
+            # its answer is lost or unreadable. Say what Unreal holds now.
+            now = await self._read_property(actor_path, property_name)
+            failed: Dict[str, Any] = {**result, "success": False, "error": str(exc), "error_type": exc.error_type}
+            if exc.details:
+                failed["details"] = exc.details
+            if "value" in now:
+                failed["value"] = now["value"]
+            return failed
+        return self._property_reply(result, property_name, parsed_value, parts)
 
-        access = (
-            "WRITE_TRANSACTION_ACCESS" if generate_transaction else "WRITE_ACCESS"
+    def _property_reply(
+        self, result: Dict[str, Any], name: str, value: Any, parts: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """set_actor_property's reply from its batch's answers (``_property_write``)."""
+        decided, written, held, final = parts["decided"], parts["written"], parts["held"], parts["final"]
+        if parts["failure"] is not None and decided.get("applied") is None:
+            # The write failed and could not be compared: nothing was emptied
+            # or written that needs putting back.
+            failure = parts["failure"]
+            failed = {**result, "success": False, "error": str(failure), "error_type": failure.error_type}
+            if failure.details:
+                failed["details"] = failure.details
+            return failed
+        now = final.get("value", held.get("value"))
+        applied = decided.get("applied")
+        if applied is None and "value" in held:
+            # The editor's Python could not compare (or read) the property;
+            # Remote Control's read-back still can.
+            applied = _json_value_matches(value, held["value"])
+            if applied is False:
+                return {
+                    **result,
+                    "value": now,
+                    "applied": False,
+                    "restored": False,
+                    "success": False,
+                    "error": (
+                        f"Unreal holds {json.dumps(held['value'])} for {name}, not {json.dumps(value)}, and the "
+                        "editor could not read or compare the property, so the previous value was not put back: "
+                        "check it, or undo the write"
+                    ),
+                    "error_type": "PropertyNotApplied",
+                    "details": {"expected": value, "actual": held["value"]},
+                }
+        if applied is False:
+            restored = bool(decided.get("restored"))
+            failure = written
+            failed = {
+                **result,
+                "value": now,
+                "applied": False,
+                "restored": restored,
+                "success": False,
+            }
+            tail = (
+                ", so the previous value was put back" if restored
+                else f", and the previous value could not be put back ({decided.get('restore_error')}): check it, "
+                "or undo the write"
+            )
+            if failure is not None:
+                failed.update(error=f"{failure}{tail}", error_type=failure.error_type)
+                if failure.details:
+                    failed["details"] = failure.details
+                return failed
+            actual = held.get("value")
+            failed.update(
+                error=(
+                    f"Unreal holds {json.dumps(actual)} for {name}, not {json.dumps(value)}: it did not take the "
+                    f"value as written{tail}"
+                ),
+                error_type="PropertyNotApplied",
+                details={"expected": value, "actual": actual},
+            )
+            return failed
+        if "value" not in final and "value" not in held:
+            warning = final.get("warning") or held.get("warning") or f"Remote Control read back no value for {name}"
+            return {**result, "applied": None, "value": None, "warning": warning}
+        done = {**result, "value": now, "applied": applied}
+        if applied is None:
+            done["warning"] = (
+                f"Wrote {name}, but its value read back ({json.dumps(now)}) cannot be compared with the one "
+                f"written ({json.dumps(value)}); check it"
+            )
+        if decided.get("error"):
+            done["warning"] = f"{done.get('warning', '')} {decided['error']}".strip()
+        return done
+
+    async def _property_write(
+        self,
+        path: str,
+        name: str,
+        value: Any,
+        container: Optional[str],
+        transaction: bool,
+    ) -> Dict[str, Any]:
+        """Write, finish, compare and keep or roll back one property, in one Remote Control batch.
+
+        Remote Control runs a batch's parts one after another, with no editor
+        tick and no other request between them, so the undo transaction opens
+        and closes inside it: it never spans two requests, and a concurrent
+        call's write never lands in it.
+
+        Returns:
+            ``failure`` (the UnrealError the write was answered with, or None),
+            ``written`` (the same), ``held`` (Remote Control's read-back once
+            the write is finished), ``decided`` (PROPERTY_DECIDE's verdict:
+            ``applied``, ``restored``, ``closed``) and ``final`` (the read-back
+            after it).
+        """
+        token = uuid.uuid4().hex
+        begin = {"token": token, "path": path, "name": name, "transaction": transaction, "empty": container}
+        read = {"objectPath": path, "propertyName": name, "access": "READ_ACCESS"}
+        responses = await self._property_batch(
+            [
+                ("/remote/object/call", _python_call(PROPERTY_BEGIN, begin)),
+                ("/remote/object/property", {
+                    "objectPath": path, "propertyName": name, "propertyValue": {name: value}, "access": "WRITE_ACCESS",
+                }),
+                ("/remote/object/call", _python_call(PROPERTY_FINISH)),
+                ("/remote/object/property", read),
+                ("/remote/object/call", _python_call(PROPERTY_DECIDE, {"token": token, "expected": value})),
+                ("/remote/object/property", read),
+            ]
         )
-        body: Dict[str, Any] = {
-            "objectPath": actor_path,
-            "propertyName": property_name,
-            "propertyValue": {property_name: parsed_value},
-            "access": access,
-        }
-        await self._http_put("/remote/object/property", body)
-
+        began = self._parse_python_json(responses[0].get("ResponseBody") or {})
+        written = _batch_failure(responses[1], "/remote/object/property")
+        decided = self._parse_python_json(responses[4].get("ResponseBody") or {})
+        failure = written
+        if began.get("error"):
+            failure = UnrealError(f"Could not prepare {name} for the write: {began['error']}", ENGINE_ERROR)
+        if decided.get("error") and "applied" not in decided:
+            # The verdict script itself failed: the transaction may be open.
+            failure = UnrealError(f"Could not finish the write of {name}: {decided['error']}", ENGINE_ERROR)
         return {
-            "actor_path": actor_path,
-            "property_name": property_name,
+            "failure": failure,
+            "written": written,
+            "held": _read_back(responses[3], name),
+            "decided": decided,
+            "final": _read_back(responses[5], name),
         }
+
+    async def _property_batch(self, operations: List[Tuple[str, Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """Send operations as one Remote Control batch and return the answers in order."""
+        requests = [
+            {"RequestId": index, "URL": url, "Verb": "PUT", "Body": body}
+            for index, (url, body) in enumerate(operations, 1)
+        ]
+        answer = await self._http_put("/remote/batch", {"Requests": requests})
+        by_id = {r.get("RequestId"): r for r in answer.get("Responses", []) if isinstance(r, dict)}
+        missing = [index for index in range(1, len(requests) + 1) if index not in by_id]
+        if missing:
+            raise UnrealError(f"Remote Control answered no part {missing} of the property write", ENGINE_ERROR)
+        return [by_id[index] for index in range(1, len(requests) + 1)]
+
+    async def _read_property(self, object_path: str, property_name: str) -> Dict[str, Any]:
+        """One property as Remote Control reads it.
+
+        Returns:
+            ``{"value": ...}``, or ``{"warning": ...}`` when Remote Control
+            refused to read it (a protected property without a getter).
+        """
+        try:
+            data = await self._http_put(
+                "/remote/object/property",
+                {"objectPath": object_path, "propertyName": property_name, "access": "READ_ACCESS"},
+            )
+        except UnrealError as exc:
+            return {"warning": f"Wrote {property_name}, but Unreal would not read it back: {exc}"}
+        for key, value in data.items():
+            if key.lower() == property_name.lower():
+                return {"value": value}
+        if len(data) == 1:
+            return {"value": next(iter(data.values()))}
+        return {"warning": f"Wrote {property_name}, but Remote Control read back no value for it"}
 
     async def call_actor_function(
         self,
@@ -3288,9 +4319,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             parameters: Parameters as JSON string.
 
         Returns:
-            Dictionary with actor_path, function_name, return_value. A
-            not-found error, before anything is called, when the path names
-            no live actor of the level open in the editor.
+            Dictionary with actor_path, function_name, return_value (the
+            function's ``ReturnValue`` as JSON, null for a function without
+            one) and outputs (every value Remote Control returned, out
+            parameters included). A not-found error, before anything is
+            called, when the path names no live actor of the level open in
+            the editor.
         """
         if not self.settings.security.allow_script_execution:
             return self._script_execution_denied()
@@ -3326,12 +4360,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             return found
         body["generateTransaction"] = True
         data = await self._http_put("/remote/object/call", body)
-        return_value = json_lib.dumps(data) if data else None
-
+        # The answer is already JSON; it used to come back re-encoded as a
+        # string inside the JSON reply.
         return {
             "actor_path": actor_path,
             "function_name": function_name,
-            "return_value": return_value,
+            "return_value": data.get("ReturnValue") if isinstance(data, dict) else None,
+            "outputs": data if isinstance(data, dict) else {},
         }
 
     async def set_actor_parent(
@@ -3753,56 +4788,98 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         cast_shadows: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Set light component parameters on a light actor.
+        Set a light's parameters and read them back.
 
-        Writes the actor's light component in one editor transaction and
-        reads every value back. A parameter left as None keeps its current
-        value.
+        Writes the actor's light component (a point, spot, rect or
+        directional light, or a SkyLight's intensity, color and shadows) in
+        one undoable editor transaction and reads every value back. Values are
+        checked before anything is written; a value Unreal still stores
+        differently is put back and reported. A parameter left as None keeps
+        its current value; with none given the light is only read.
+
+        Intensity is in the light's own unit, returned as ``intensity_unit``:
+        lux for a directional light, the light's Intensity Units for a point,
+        spot or rect light (candelas by default, or lumens, EV, nits or
+        unitless), and a plain multiplier for a SkyLight. When Unreal stores a
+        value differently, every value is put back, so a failed call changes
+        nothing. The color is sRGB: each channel
+        0-1, gamma-encoded as the color picker shows it, stored as the 8-bit
+        FColor Unreal keeps (channel x 255, rounded).
 
         Args:
             actor_path: Light actor path.
-            intensity: Light intensity.
-            color: Light color as [r, g, b], each channel 0-1; None keeps the
-                current color.
-            temperature: Color temperature in Kelvin.
+            intensity: Light intensity, 0 to 1e9, in the light's unit.
+            color: Light color as sRGB [r, g, b], each channel 0-1; None keeps
+                the current color.
+            temperature: Color temperature in Kelvin, 1000 to 15000, the
+                range Unreal's blackbody color covers (it clamps others);
+                applies with use_temperature.
             use_temperature: Use color temperature instead of direct color.
-            attenuation_radius: Light attenuation radius in cm (point and
-                spot lights only).
+            attenuation_radius: Light attenuation radius in cm, more than 0
+                (point, spot and rect lights only).
             cast_shadows: Enable shadow casting.
 
         Returns:
-            Dictionary with actor_path, component_path, params_set and the
-            read-back ``applied`` values, or a ``ScriptError`` envelope when
-            the actor has no light component, a property does not exist on
-            it, or Unreal did not apply a value.
+            Dictionary with actor_path, component_path, light_class,
+            intensity_unit, params_set, ``applied`` (the values given, read
+            back), ``current`` (every light value read back) and warning; or
+            a ValidationError envelope for an actor without a light
+            (details.code NOT_A_LIGHT) or a value the light class lacks
+            (PROPERTY_NOT_ON_LIGHT: a directional light's attenuation radius,
+            a SkyLight's temperature; nothing written), a
+            LightParamsNotApplied envelope for a value Unreal stored
+            differently (details.expected and details.actual; every value put
+            back), or a NotFoundError envelope when no actor is at the path.
 
         Raises:
-            ValueError: ``color`` is not three numbers between 0 and 1.
+            ArgumentError: ``color`` is not three numbers between 0 and 1, or
+                another value is not finite or out of its range (a
+                ValidationError with ``details.code``).
         """
-        # Python editor-property names on ULightComponent and subclasses.
+        # Python editor-property names on ULightComponentBase and subclasses.
         values: Dict[str, Any] = {}
         if intensity is not None:
-            values["intensity"] = intensity
+            values["intensity"] = _check_range("intensity", intensity, 0.0, LIGHT_MAX_INTENSITY)
         if color is not None:
-            rgb = _vector3("color", color, "r, g, b")
+            try:
+                rgb = _vector3("color", color, "r, g, b")
+            except ValueError as exc:
+                raise ArgumentError(str(exc), "NOT_A_COLOR", parameter="color", value=str(list(color))) from None
             if not all(0.0 <= channel <= 1.0 for channel in rgb):
-                raise ValueError(f"color channels must be between 0 and 1, got {list(color)!r}")
+                raise ArgumentError(
+                    f"color channels must be between 0 and 1, got {list(color)!r}",
+                    "OUT_OF_RANGE",
+                    parameter="color",
+                    value=list(rgb),
+                    minimum=0.0,
+                    maximum=1.0,
+                )
             # LightColor is an FColor: 0-255 channels.
             values["light_color"] = [round(channel * 255) for channel in rgb] + [255]
         if temperature is not None:
-            values["temperature"] = temperature
+            values["temperature"] = _check_range(
+                "temperature", temperature, LIGHT_MIN_TEMPERATURE_K, LIGHT_MAX_TEMPERATURE_K, " K"
+            )
         if use_temperature is not None:
             values["use_temperature"] = use_temperature
         if attenuation_radius is not None:
-            values["attenuation_radius"] = attenuation_radius
+            if not (math.isfinite(attenuation_radius) and attenuation_radius > 0):
+                raise ArgumentError(
+                    f"attenuation_radius must be a finite number above 0, got {attenuation_radius!r}",
+                    "OUT_OF_RANGE",
+                    parameter="attenuation_radius",
+                    value=attenuation_radius if math.isfinite(attenuation_radius) else str(attenuation_radius),
+                    minimum=0.0,
+                )
+            values["attenuation_radius"] = float(attenuation_radius)
         if cast_shadows is not None:
             values["cast_shadows"] = cast_shadows
 
-        if not values:
-            return {"actor_path": actor_path, "params_set": 0}
-
         args = {"actor_path": actor_path, "values": values}
-        result = await self._execute_json_script(f"args = {args!r}\n" + SET_LIGHT_PARAMS)
+        result = await self._execute_json_script(
+            f"args = {args!r}\n" + SET_LIGHT_PARAMS,
+            expected_errors=("ValidationError", "LightParamsNotApplied", "NotFoundError"),
+        )
         return {"actor_path": actor_path, **result}
 
     async def set_render_settings(
@@ -3832,13 +4909,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         # This is a fixed rendering tool, not another arbitrary console/code
         # dispatcher when SECURITY__ALLOW_SCRIPT_EXECUTION is false.
         if not re.fullmatch(r"(?:r|sg)\.[A-Za-z0-9_.]+", setting_name):
-            raise ValueError(
-                "setting_name must be an r.* or sg.* rendering console variable"
+            raise UnrealValidationError(
+                "setting_name must be an r.* or sg.* rendering console variable",
+                details={"code": "not_a_render_setting"},
             )
         if not re.fullmatch(
             r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", setting_value
         ):
-            raise ValueError("setting_value must be a single numeric value")
+            raise UnrealValidationError(
+                "setting_value must be a single numeric value", details={"code": "not_a_number"}
+            )
         args = {"name": setting_name, "value": setting_value}
         state = await self._execute_json_script(f"args = {args!r}\n" + SET_CONSOLE_VARIABLE)
         if state.get("error"):
@@ -3877,23 +4957,57 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
     # Phase 5: Physics & Simulation Control
     # ------------------------------------------------------------------
 
-    async def control_simulation(self, action: str) -> Dict[str, Any]:
+    async def control_simulation(self, action: str, mode: str = "simulate") -> Dict[str, Any]:
         """
-        Control a Play-In-Editor (PIE) session.
+        Start, stop, pause or resume the editor's simulation (Play In Editor).
 
-        Starting an already paused session resumes it. Commands targeting the
-        current state leave the session unchanged.
+        ``start`` begins Simulate In Editor by default: the level runs and its
+        physics steps with no player, the level viewport keeps the editor
+        camera. ``mode`` "play" begins a Play session instead, in the level
+        viewport: the game mode spawns and possesses the player's pawn, and
+        when it stops Unreal puts the game camera's last view in the viewport.
+        Starting a session that runs resumes it if paused and otherwise leaves
+        it as it is, whichever mode it runs in; the other actions leave a
+        session already in their state unchanged. While either mode runs the
+        editor world refuses spawns and deletes (PIEActive);
+        ``apply_force``, ``get_physics_state`` and ``list_simulation_actors``
+        act on and read the simulation's copies of the actors, while the
+        physics and collision edits given an editor path change the editor
+        world, which the running simulation does not see.
 
         Args:
-            action: One of start, stop, pause, resume, step.
+            action: start, stop, pause, resume or step (step is refused:
+                editor Python cannot advance one frame).
+            mode: For start: "simulate" (Simulate In Editor) or "play".
 
         Returns:
-            Dict with action executed and resulting state.
+            Dict with action, the resulting state (playing, paused or
+            stopped) and, for start, the mode it began in (null when a
+            session already ran); or a SimulationNotRunning envelope for
+            pause or resume with no session running.
+
+        Raises:
+            ArgumentError: An unknown action or mode (a ValidationError).
         """
 
         action = action.lower().strip()
-        if action not in {"start", "stop", "pause", "resume", "step"}:
-            raise ValueError(f"Invalid PIE action: {action}")
+        if action not in SIMULATION_ACTIONS:
+            raise ArgumentError(
+                f"Invalid PIE action: {action}; use {', '.join(SIMULATION_ACTIONS)}",
+                "UNKNOWN_ACTION",
+                parameter="action",
+                value=action,
+                allowed=list(SIMULATION_ACTIONS),
+            )
+        mode = mode.lower().strip()
+        if mode not in SIMULATION_MODES:
+            raise ArgumentError(
+                f"Invalid simulation mode: {mode}; use {', '.join(SIMULATION_MODES)}",
+                "UNKNOWN_MODE",
+                parameter="mode",
+                value=mode,
+                allowed=list(SIMULATION_MODES),
+            )
         if action == "step":
             return {
                 "success": False,
@@ -3906,11 +5020,15 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         if action in {"pause", "resume"} and not status["is_playing"]:
             return {
                 "success": False,
-                "error_type": "InvalidState",
-                "error": "PIE is not running",
+                "error_type": SIMULATION_NOT_RUNNING,
+                "error": f"No simulation is running, so there is nothing to {action}",
+                "details": {"code": "SIMULATION_NOT_RUNNING", "hint": SIMULATION_START_HINT},
             }
-        if action == "start" and not status["is_playing"]:
-            command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_play_simulate()"
+        started = action == "start" and not status["is_playing"]
+        if started:
+            command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)." + (
+                "editor_play_simulate()" if mode == "simulate" else "editor_request_begin_play()"
+            )
         elif action == "stop" and status["is_playing"]:
             command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_end_play()"
         elif action in {"start", "pause", "resume"} and status["is_paused"] != (
@@ -3948,7 +5066,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "resume": "playing",
             }[action]
             if state == target:
-                return {"action": action, "state": state}
+                result: Dict[str, Any] = {"action": action, "state": state}
+                if action == "start":
+                    result["mode"] = mode if started else None
+                return result
             if asyncio.get_running_loop().time() >= deadline:
                 return {
                     "success": False,
@@ -4098,51 +5219,126 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         location_x: Optional[float] = None,
         location_y: Optional[float] = None,
         location_z: Optional[float] = None,
+        duration: float = 0.0,
+        units: str = "unreal",
     ) -> Dict[str, Any]:
         """
-        Apply a force or impulse to an actor's physics body.
+        Apply a force or impulse to an actor's body in the running simulation.
+
+        Only the simulation's bodies step: the editor world's read as
+        simulating but never move, so an impulse on them was lost. The actor
+        (an editor or a simulation path) is mapped to its copy in the running
+        simulation and the force acts there; with no simulation running the
+        call is refused (``SimulationNotRunning``). The copy must simulate
+        physics (``enable_physics`` on the editor actor before the simulation
+        starts).
+
+        Units are Unreal's by default: a force in kg cm/s^2 (1 N is 100) and an
+        impulse in kg cm/s (1 N s is 100); ``units`` "si" takes newtons and
+        newton-seconds. The application point is a world location in cm, fixed
+        in the world for the whole duration as the body moves; without one the
+        force pushes the center of mass. An impulse changes the velocity at
+        once by impulse / mass. A force with ``duration`` 0 acts for one
+        physics step only, as Unreal clears a force after each step. A positive
+        ``duration`` keeps it on for that many seconds of physics time: every
+        frame the body gets, as an impulse, the force's momentum over the
+        physics time that frame simulated, the frame's game time capped at the
+        physics step limit (``physics_step_limit_s``, Unreal's
+        MaxPhysicsDeltaTime, 1/30 s by default). So the force keeps pace with
+        gravity at any frame rate, and frames slower than the limit stretch it
+        in game time as they slow Unreal's physics. Paused time adds nothing,
+        and the force ends early when the simulation stops. Forces add up, so a
+        second call acts with the first.
 
         Args:
-            actor_path: Full actor object path.
-            force_x: Force X component.
-            force_y: Force Y component.
-            force_z: Force Z component.
-            is_impulse: True for impulse, False for continuous force.
-            location_x: Application point X (None = center of mass).
+            actor_path: Full actor object path, in the editor or the
+                simulation's world.
+            force_x: Force or impulse X component.
+            force_y: Force or impulse Y component.
+            force_z: Force or impulse Z component.
+            is_impulse: True for an impulse (instant change of momentum),
+                False for a force.
+            location_x: Application point X in world cm (None = center of
+                mass), fixed in the world for the whole duration.
             location_y: Application point Y.
             location_z: Application point Z.
+            duration: Seconds of physics time a force keeps acting, 0 to 600;
+                0 acts for one physics step. Not for an impulse.
+            units: "unreal" (kg cm/s^2, kg cm/s) or "si" (N, N s).
 
         Returns:
-            Dict with actor_path, force_applied, force_vector, is_impulse.
+            Dict with actor_path, simulation_actor_path (the copy acted on),
+            component_path, world ("simulation"), force_applied,
+            force_vector (as given, in ``units``), units, force_vector_unreal
+            (as applied), is_impulse, application ("impulse", "one_frame" or
+            "continuous"), duration_s, mass_kg, expected_delta_v (cm/s: the
+            change of linear velocity the impulse, or the force over its
+            duration, gives the body alone; null for one step),
+            physics_step_limit_s, sim_time, ends_at_sim_time (when a continuous
+            force ends if no frame is slower than the step limit), paused and
+            warning; or a SimulationNotRunning, NotFoundError, NotInSimulation
+            or IncompatibleBody envelope.
+
+        Raises:
+            ArgumentError: Partial application coordinates, a value that is not
+                finite, an unknown unit, or a duration out of range or given
+                with an impulse (a ValidationError with ``details.code``).
         """
 
         location = (location_x, location_y, location_z)
-        if any(v is not None for v in location) and not all(
-            v is not None for v in location
-        ):
-            raise ValueError("Provide all three force application coordinates or none")
-        name = "add_impulse" if is_impulse else "add_force"
-        args = (
-            f"unreal.Vector({float(force_x)!r}, {float(force_y)!r}, {float(force_z)!r})"
+        if any(v is not None for v in location) and not all(v is not None for v in location):
+            raise ArgumentError(
+                "Provide all three force application coordinates or none",
+                "PARTIAL_LOCATION",
+                parameter="location",
+                value=[v for v in location],
+            )
+        if units not in FORCE_UNITS:
+            raise ArgumentError(
+                f"units must be one of {', '.join(FORCE_UNITS)}, got {units!r}",
+                "UNKNOWN_UNITS",
+                parameter="units",
+                value=units,
+                allowed=list(FORCE_UNITS),
+            )
+        given = (float(force_x), float(force_y), float(force_z))
+        for name, value in zip(("force_x", "force_y", "force_z", "location_x", "location_y", "location_z"),
+                               given + location):
+            if value is not None and not math.isfinite(value):
+                raise ArgumentError(
+                    f"{name} must be a finite number, got {value!r}", "NOT_FINITE", parameter=name, value=str(value)
+                )
+        duration = _check_range("duration", duration, 0.0, FORCE_MAX_DURATION_S, " s")
+        if is_impulse and duration:
+            raise ArgumentError(
+                "duration applies to a force; an impulse acts at once",
+                "DURATION_WITH_IMPULSE",
+                parameter="duration",
+                value=duration,
+            )
+        scale = FORCE_UNIT_SCALE[units]
+        applied = [v * scale for v in given]
+        args = {
+            "actor_path": actor_path,
+            "vector": applied,
+            "location": None if location_x is None else [float(v) for v in location],  # type: ignore[arg-type]
+            "impulse": bool(is_impulse),
+            "duration": duration,
+        }
+        result = await self._execute_json_script(
+            f"args = {args!r}\n" + APPLY_FORCE,
+            expected_errors=(SIMULATION_NOT_RUNNING, NOT_IN_SIMULATION, INCOMPATIBLE_BODY),
         )
-        if location_x is not None and location_y is not None and location_z is not None:
-            name += "_at_location"
-            args += f", unreal.Vector({float(location_x)!r}, {float(location_y)!r}, {float(location_z)!r})"
-        code = (
-            "if not component.is_simulating_physics():\n"
-            "    raise RuntimeError('Component is not simulating physics')\n"
-            f"component.{name}({args})\n"
-        )
-        return await self._component_operation(
-            actor_path,
-            code,
-            {
-                "actor_path": actor_path,
-                "force_applied": True,
-                "force_vector": (force_x, force_y, force_z),
-                "is_impulse": is_impulse,
-            },
-        )
+        if result.get("error"):
+            return result
+        return {
+            **result,
+            "force_vector": list(given),
+            "units": units,
+            "force_vector_unreal": applied,
+            "is_impulse": bool(is_impulse),
+            "duration_s": duration,
+        }
 
     async def set_physics_params(
         self,
@@ -4180,25 +5376,214 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             written).
 
         Raises:
-            ValueError: A value is not finite or out of its range.
+            ArgumentError: A value is not finite or out of its range (a
+                ValidationError with ``details.code`` OUT_OF_RANGE).
         """
-        values: Dict[str, Any] = {}
-        if mass is not None:
-            if not (math.isfinite(mass) and PHYSICS_MIN_MASS_KG <= mass <= PHYSICS_MAX_MASS_KG):
-                raise ValueError(
-                    f"mass must be from {PHYSICS_MIN_MASS_KG:g} to {PHYSICS_MAX_MASS_KG:g} kg, got {mass!r}"
-                )
-            values["mass"] = float(mass)
-        for name, value in (("linear_damping", linear_damping), ("angular_damping", angular_damping)):
-            if value is not None:
-                if not (math.isfinite(value) and 0.0 <= value <= PHYSICS_MAX_DAMPING):
-                    raise ValueError(f"{name} must be from 0 to {PHYSICS_MAX_DAMPING:g}, got {value!r}")
-                values[name] = float(value)
-        if enable_gravity is not None:
-            values["enable_gravity"] = bool(enable_gravity)
+        values = _physics_values(mass, linear_damping, angular_damping, enable_gravity)
         args = {"actor_path": actor_path, "values": values, "transaction": "simul: set physics params"}
         return await self._execute_json_script(
             f"args = {args!r}\n" + SET_PHYSICS_PARAMS, expected_errors=("PhysicsParamsNotApplied",)
+        )
+
+    async def setup_physics_bulk(
+        self,
+        actor_paths: Optional[List[str]] = None,
+        tag: Optional[str] = None,
+        folder: Optional[str] = None,
+        actor_filter: Optional[str] = None,
+        enable: bool = True,
+        kinematic: bool = False,
+        make_movable: bool = True,
+        allow_detach: bool = False,
+        collision_preset: Optional[str] = None,
+        mass: Optional[float] = None,
+        linear_damping: Optional[float] = None,
+        angular_damping: Optional[float] = None,
+        enable_gravity: Optional[bool] = None,
+        skip_failures: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Set up physics on many editor actors in one call and one undoable transaction.
+
+        The actors are those at ``actor_paths`` plus every editor actor with
+        ``tag``, in the outliner ``folder`` (or a folder under it) and whose
+        label or path contains ``actor_filter``, each that is given (a
+        procedural scene's tag with actor_filter "_Box_" picks its props and
+        leaves its floor and walls), at most PHYSICS_BULK_MAX_ACTORS. Each
+        is set up as ``enable_physics``, ``set_collision`` (a preset only) and
+        ``set_physics_params`` would set it, checked first in the same way
+        with the preset's collision standing in for its own; unless
+        ``skip_failures``, one actor that cannot be set up refuses the whole
+        call with nothing changed. One Undo reverts the call. Setting up
+        props one call at a time ran into the rate limit (126 bodies took
+        116 s).
+
+        Args:
+            actor_paths: Editor actor paths.
+            tag: Also every editor actor with this actor tag.
+            folder: Also every editor actor in this outliner folder or one
+                under it (with ``tag``, only actors that have both).
+            actor_filter: Also every editor actor whose label or object path
+                contains this text, ignoring case (with ``tag`` or ``folder``,
+                only actors that match those too).
+            enable: As ``enable_physics``: False stops the bodies simulating.
+            kinematic: As ``enable_physics``: kinematic instead of simulated.
+            make_movable: As ``enable_physics``.
+            allow_detach: As ``enable_physics``.
+            collision_preset: A collision preset to set first, such as
+                PhysicsActor; empty keeps each actor's collision.
+            mass: Mass override in kg, as ``set_physics_params``.
+            linear_damping: As ``set_physics_params``.
+            angular_damping: As ``set_physics_params``.
+            enable_gravity: As ``set_physics_params``.
+            skip_failures: Set up the actors that can be and report the rest,
+                instead of refusing the call.
+
+        Returns:
+            Dict with world ("editor"), mode, matched, configured_count,
+            failed_count, configured (the first PHYSICS_BULK_LISTED: actor_path,
+            physics_mode, mobility_changed_from, detached_from, mass_kg),
+            failed (the first PHYSICS_BULK_LISTED: actor_path, error and, for a
+            body that cannot take the mode, its problem codes) and warning; or
+            an IncompatibleBody envelope listing the actors that cannot be set
+            up (nothing changed), or a ValidationError envelope for an unknown
+            preset, no match or too many.
+
+        Raises:
+            ValueError: No selection, or a parameter out of range.
+        """
+        paths = [path for path in (actor_paths or []) if path]
+        if not paths and not tag and not folder and not actor_filter:
+            raise ValueError("Give actor_paths, tag, folder or actor_filter to select the actors")
+        mode = "off" if not enable else ("kinematic" if kinematic else "simulate")
+        args = {
+            "paths": paths,
+            "tag": tag or None,
+            "folder": (folder or "").strip("/") or None,
+            "actor_filter": actor_filter or None,
+            "mode": mode,
+            "make_movable": bool(make_movable),
+            "allow_detach": bool(allow_detach),
+            "preset": collision_preset or None,
+            "values": _physics_values(mass, linear_damping, angular_damping, enable_gravity),
+            "skip_failures": bool(skip_failures),
+            "limit": PHYSICS_BULK_MAX_ACTORS,
+            "listed": PHYSICS_BULK_LISTED,
+            "transaction": "simul: set up physics",
+        }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + BULK_PHYSICS,
+            expected_errors=(INCOMPATIBLE_BODY, "ValidationError", "PhysicsNotApplied"),
+        )
+
+    async def get_physics_state(
+        self,
+        actor_paths: Optional[List[str]] = None,
+        tag_filter: Optional[str] = None,
+        world: str = "auto",
+        max_results: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Read bodies' live physics state, in the running simulation or the editor world.
+
+        While a simulation runs, the editor world's actors stand where they
+        were placed (a body resting at z 49.5 read z 300 there), so by
+        default (``world`` "auto") each actor is read in the running
+        simulation, through its copy there, and in the editor world
+        otherwise. Editor and simulation paths are both accepted, and a body
+        given by both is read once. The bodies are paged: the actors at
+        ``actor_paths`` first, then those with the tag, ``max_results`` at most
+        from ``offset``, and a page stops before 30,000 characters of bodies.
+
+        Args:
+            actor_paths: Actor paths, editor or simulation.
+            tag_filter: Also read every actor with this actor tag in the
+                world read.
+            world: "auto", "simulation" (refused when none runs) or "editor".
+            max_results: Most bodies on this page, 1 to 1000.
+            offset: Bodies to skip: the previous page's next_offset.
+
+        Returns:
+            Dict with world, pie_active, sim_time and paused (null for the
+            editor world), bodies, count (on this page), total (every body
+            matched), offset, next_offset (null on the last page), truncated,
+            hint and not_found (the paths with no live actor, or no live copy
+            in the world read). Each body has name, class_name, editor_path,
+            simulation_path, location (cm), rotation (pitch, yaw, roll,
+            degrees) and, for an actor with a root or single primitive
+            component, component_path, physics_mode, linear_velocity (cm/s),
+            angular_velocity (degrees/s), speed, awake (null unless it
+            simulates), mass_kg, center_of_mass (world cm), gravity_enabled
+            and simulate_physics. Unreal reports contacts only to hit-event
+            handlers, so none are listed.
+
+        Raises:
+            ArgumentError: Neither paths nor a tag, an unknown world, or
+                max_results or offset out of range (a ValidationError).
+        """
+        paths = [path for path in (actor_paths or []) if path]
+        if not paths and not tag_filter:
+            raise ArgumentError("Give actor_paths, tag_filter or both", "NO_SELECTION", parameter="actor_paths")
+        if world not in PHYSICS_STATE_WORLDS:
+            raise ArgumentError(
+                f"world must be one of {', '.join(PHYSICS_STATE_WORLDS)}, got {world!r}",
+                "UNKNOWN_WORLD",
+                parameter="world",
+                value=world,
+                allowed=list(PHYSICS_STATE_WORLDS),
+            )
+        _check_page_args(offset, max_results, PHYSICS_STATE_MAX_RESULTS)
+        args = {
+            "paths": paths,
+            "tag": tag_filter or None,
+            "world": world,
+            "offset": offset,
+            "max_results": max_results,
+        }
+        return await self._paged_read(
+            PHYSICS_STATE, args, "bodies", "total", expected_errors=(SIMULATION_NOT_RUNNING,)
+        )
+
+    async def list_simulation_actors(
+        self,
+        class_filter: Optional[str] = None,
+        tag_filter: Optional[str] = None,
+        simulating_only: bool = False,
+        max_results: int = 200,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        List the running simulation's actors with their editor counterparts, a page at a time.
+
+        Args:
+            class_filter: Only actors of this class (name or path).
+            tag_filter: Only actors with this actor tag.
+            simulating_only: Only actors with a body that simulates physics.
+            max_results: Most actors on this page, 1 to 5000; a page also
+                stops before 30,000 characters of entries.
+            offset: Actors to skip: the previous page's next_offset.
+
+        Returns:
+            Dict with world (the simulation's world), actors (name,
+            class_name, simulation_path, editor_path, null for an actor the
+            simulation spawned such as its player controller and pawn, and
+            simulating), count, total, offset, next_offset, truncated, hint and
+            sim_time; or a SimulationNotRunning envelope.
+
+        Raises:
+            ArgumentError: max_results or offset out of range (a ValidationError).
+        """
+        _check_page_args(offset, max_results, SIMULATION_ACTORS_MAX_RESULTS)
+        args = {
+            "class_filter": class_filter or None,
+            "tag_filter": tag_filter or None,
+            "simulating_only": bool(simulating_only),
+            "offset": offset,
+            "max_results": max_results,
+        }
+        return await self._paged_read(
+            SIMULATION_ACTORS, args, "simulation actors", "total", expected_errors=(SIMULATION_NOT_RUNNING,)
         )
 
     # ------------------------------------------------------------------
@@ -5006,22 +6391,33 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         self,
         analysis_types: Optional[List[str]] = None,
         actor_filter: Optional[str] = None,
+        max_results: int = ROBOTICS_DEFAULT_RESULTS,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
         Classify level actors for robotics from their collision setup.
 
         One editor script reads every actor loaded in the editor world. Only
-        primitive components with collision enabled count, an actor's size is
-        the bounding box of those components, and the thresholds are
+        primitive components with collision enabled count, and an actor is
+        measured by the oriented box of its physics-collision components (a
+        single component's box rotated and scaled with it; several components'
+        boxes in the actor's frame), so a rotated plank or slab keeps its real
+        size. An instanced static mesh component (ISM, HISM, foliage) draws its
+        mesh once per instance, so each instance is measured and classified by
+        itself, with its ``instance_index`` and ``component_path``, up to 1000
+        instances per component; a component with more counts whole by its
+        world bounds (``instances``). The thresholds are
         ``ROBOTICS_CRITERIA``, returned as ``criteria``:
 
         * traversability: floor-like surfaces a robot can stand on. Physics
-          collision, at least 1 m^2 in plan, no thicker than a quarter of the
-          shorter side and tilted at most 15 degrees. The bounding box decides,
-          so a landscape section counts whole, hills included.
-        * graspability: Movable actors with physics collision that fit in a
-          60 cm cube, with whether they simulate physics and their mass (null
-          while Unreal reports none).
+          collision, at least 1 m^2 of top face, no thicker than a quarter of
+          its shorter side and tilted at most 15 degrees; the top face is the
+          box face across its thinnest side, facing up, so a slab turned upside
+          down is still a floor. A landscape section counts whole, hills
+          included.
+        * graspability: Movable actors with physics collision whose box fits
+          in a 60 cm cube, with whether they simulate physics and their mass
+          (null while Unreal reports none).
         * collision_complexity: actors with collision and with physics
           collision, collision-enabled components by profile, landscape
           heightfields, and for static meshes the simple shapes and convex
@@ -5031,47 +6427,84 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
           bodies pass through them). The first 50 actors with that last
           problem are listed.
 
+        The two lists are paged together: surfaces largest first, graspable
+        objects by path, each cut to ``max_results`` from ``offset``, and
+        ``totals`` counts every match. A page whose JSON would exceed 32,000
+        characters holds fewer per category, the same number for both, so it
+        fits the response budget; ``next_offset`` is where the next page
+        starts, and ``hint`` says how to get it. Offset 0 scans the level and
+        keeps the scan in the editor for ten minutes: a later offset with the
+        same filter and analyses reads it instead of scanning again
+        (``snapshot_age_s``), so every page of a large level comes from one
+        snapshot and costs no scan.
+
         Args:
             analysis_types: Any of traversability, graspability and
                 collision_complexity; None or empty runs all three.
             actor_filter: Only analyze actors whose label or object path
                 contains this text, ignoring case; None or empty analyzes
                 every actor.
+            max_results: Most entries per category on this page, 1 to 500.
+            offset: Entries of each category to skip (the previous page's
+                next_offset).
 
         Returns:
             Dict with traversable_surfaces and graspable_objects (each entry
-            name, path, class_name and size [x, y, z] in cm; surfaces add
-            top_z, area_m2 and tilt_degrees), collision_summary (empty unless
-            collision_complexity ran), total_actors_analyzed, analysis_types
-            (those that ran), criteria and pie_active (while Play In Editor
-            runs, the editor world is read, as in ``list_actors``, and the
-            static mesh collision counts simple_shapes, convex_hulls,
-            complex_collision and missing_simple_collision are null, as is
+            name, path, class_name and size [x, y, z] in cm along its box's
+            own axes, plus component_path and instance_index for an instance
+            of an instanced mesh, or component_path and instances for one
+            counted whole; surfaces add top_z, area_m2, tilt_degrees and
+            normal, the top face's upward unit normal), totals (matches per
+            category), returned (entries per category on this page), offset,
+            max_results, next_offset (null on the last page), hint,
+            scanned_at and snapshot_age_s (the scan this page was cut from),
+            collision_summary
+            (empty unless collision_complexity ran), total_actors_analyzed,
+            analysis_types (those that ran), criteria and pie_active (while
+            Play In Editor runs, the editor world is read, as in
+            ``list_actors``, and the static mesh collision counts
+            simple_shapes, convex_hulls, complex_collision and
+            missing_simple_collision are null, as is
             missing_simple_collision_actors: Unreal's StaticMeshEditorSubsystem
             reports none then); or a ScriptError envelope when the editor
             script failed.
 
         Raises:
-            ValueError: An analysis type is not one of the three.
+            ArgumentError: An analysis type is not one of the three, or
+                max_results or offset is out of range (a ValidationError with
+                ``details.code``).
         """
         requested = [name.strip().lower() for name in analysis_types or [] if name.strip()]
         unknown = [name for name in requested if name not in ROBOTICS_ANALYSES]
         if unknown:
-            raise ValueError(
+            raise ArgumentError(
                 f"analysis_types: unknown {', '.join(map(repr, unknown))}; use "
-                f"{', '.join(ROBOTICS_ANALYSES)}"
+                f"{', '.join(ROBOTICS_ANALYSES)}",
+                "UNKNOWN_ANALYSIS",
+                parameter="analysis_types",
+                value=unknown,
+                allowed=list(ROBOTICS_ANALYSES),
             )
+        _check_page_args(offset, max_results, ROBOTICS_MAX_RESULTS)
         analyses = [name for name in ROBOTICS_ANALYSES if name in requested or not requested]
         args = {
             "analyses": analyses,
             "actor_filter": actor_filter or None,
             "criteria": ROBOTICS_CRITERIA,
             "listed_limit": ROBOTICS_LISTED_LIMIT,
+            "offset": offset,
+            "max_results": max_results,
+            "max_instances": ROBOTICS_MAX_INSTANCES,
+            "snapshot_seconds": ROBOTICS_SNAPSHOT_SECONDS,
         }
         result = await self._execute_json_script(f"args = {args!r}\n" + ROBOTICS_SCENE_ANALYSIS)
         if result.get("error"):
             return result
-        return {**result, "analysis_types": analyses, "criteria": dict(ROBOTICS_CRITERIA)}
+        return _robotics_page(
+            {**result, "analysis_types": analyses, "criteria": dict(ROBOTICS_CRITERIA)},
+            offset,
+            max_results,
+        )
 
     async def generate_procedural_scene(
         self,
@@ -5079,6 +6512,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         parameters: Optional[Dict[str, Any]] = None,
         bounds_min: Optional[List[float]] = None,
         bounds_max: Optional[List[float]] = None,
+        physics_props: bool = False,
     ) -> Dict[str, Any]:
         """
         Build a test scene from Engine basic shapes inside an axis-aligned box.
@@ -5105,11 +6539,17 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             bounds_min: Minimum corner [x, y, z] in cm; default [0, 0, 0].
             bounds_max: Maximum corner [x, y, z] in cm; default
                 [1000, 1000, 500].
+            physics_props: Make the props physics-ready: Movable,
+                PhysicsActor collision and simulating physics, so they fall
+                and take forces once the simulation starts. False leaves
+                them Movable with the mesh's BlockAll collision, not
+                simulating.
 
         Returns:
             Dict with actors_spawned (actor paths in spawn order),
-            total_spawned, scene_type, seed, tag (this call's own tag) and
-            folder; a SpawnError envelope, with nothing left in the level, when
+            total_spawned, scene_type, seed, tag (this call's own tag),
+            folder and physics_props (how many props were made
+            physics-ready); a SpawnError envelope, with nothing left in the level, when
             a spawn failed (``details.actors_left`` lists any actor rollback
             could not remove); or a PIEActive envelope while Play In Editor
             runs, when Unreal's editor spawns nothing.
@@ -5121,8 +6561,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         plan = plan_scene(scene_type, parameters, bounds_min, bounds_max)
         generation = new_generation()
         tag, folder = plan.tag(generation), plan.folder(generation)
+        pieces = [dict(piece.spawn_args(), physics=bool(physics_props and piece.movable)) for piece in plan.pieces]
         args = {
-            "pieces": [piece.spawn_args() for piece in plan.pieces],
+            "pieces": pieces,
             "folder": folder,
             "tags": ["simul_procedural", tag],
             "transaction": f"simul: generate {plan.scene_type} scene",
@@ -5142,6 +6583,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "seed": plan.seed,
             "tag": tag,
             "folder": folder,
+            "physics_props": sum(1 for piece in pieces if piece["physics"]),
         }
 
     async def get_actor_by_semantic_label(
@@ -5164,9 +6606,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             label: Semantic label (actor tag) to search for.
             match_mode: exact (a tag equals label), contains (a tag contains
                 label) or regex (label is a Python regular expression searched
-                for in each tag; a repeated group that holds a quantifier or
-                alternatives, as in (\\w+)+, is refused because it can run for
-                hours); every mode ignores case.
+                for in each tag, ignoring case; a pattern whose failing search can
+                run for long on a 1023-character tag is refused, such as a repeated
+                group that holds a quantifier or alternatives, as in (\\w+)+, or two
+                quantifiers that can divide the same characters between them, as in
+                .*.*x or A*a*x); every mode ignores case.
             max_results: Most actors in the page, 1 to 5000.
             offset: Matching actors to skip before the page starts.
 
@@ -5181,10 +6625,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         Raises:
             ValueError: match_mode is not exact, contains or regex; in regex
-                mode, label is not a valid regular expression or repeats a
-                group that holds a quantifier or alternatives (see
-                ``simul.utils.regex_guard``); or max_results or offset is out
-                of range.
+                mode, label is not a valid regular expression; or max_results
+                or offset is out of range.
+            RegexRefused: In regex mode, the label's search can backtrack for
+                long (``error_type`` ValidationError; see
+                ``simul.utils.regex_guard``).
         """
         modes = ("exact", "contains", "regex")
         if match_mode not in modes:
@@ -5199,13 +6644,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 raise ValueError(
                     f"label is not a valid regular expression: {exc}"
                 ) from exc
-            construct = _exponential_regex_construct(label)
+            # The editor script compiles the label with re.IGNORECASE and
+            # searches every tag on the game thread, where nothing can stop it.
+            construct = _exponential_regex_construct(label, re.IGNORECASE, UNREAL_TAG_LENGTH)
             if construct is not None:
-                raise ValueError(
-                    f"label has {construct}: a failing search for it can freeze "
-                    "the editor for hours, since every way of splitting a tag "
-                    "between the repetitions is tried. Repeat a plain character "
-                    "class instead (\\w+ rather than (\\w+)+), or use contains mode"
+                raise RegexRefused(
+                    f"label has {construct}. The editor searches each tag with Python's "
+                    "re on its game thread, where nothing can stop a search. Use one "
+                    "plain quantifier per stretch of the tag (\\w+ rather than (\\w+)+, "
+                    ".* rather than .*.*), anchor the pattern with ^, or use contains mode",
+                    construct,
                 )
         args = {
             "label": label,

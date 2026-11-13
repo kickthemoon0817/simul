@@ -69,6 +69,13 @@ class UnrealPingResponse(BaseModel):
     )
     address: str = Field(..., description="host:port that was probed")
     latency_ms: Optional[float] = Field(None, description="Round-trip time in milliseconds")
+    busy: bool = Field(
+        False,
+        description=(
+            "The editor accepted the connection but Remote Control did not answer in time: it is "
+            "running a script, loading or compiling (error_type InstanceBusy), not down"
+        ),
+    )
     error: Optional[str] = Field(None, description="Error message when success is False")
 
 
@@ -195,6 +202,17 @@ class UnrealHealthCheckResponse(BaseModel):
     project_name: Optional[str] = Field(None, description="Active project name")
     is_editor: Optional[bool] = Field(
         None, description="Whether the engine is running in editor mode"
+    )
+    busy: bool = Field(
+        False,
+        description=(
+            "The editor accepted the connection but did not answer in time: it is running a "
+            "script, loading or compiling (error_type InstanceBusy), not down"
+        ),
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Metadata that could not be read (engine_version, project_name), with the reason",
     )
     error: Optional[str] = Field(None, description="Error message when success is False")
 
@@ -470,7 +488,16 @@ class UnrealPropertyInfo(BaseModel):
 
     name: str = Field(..., description="Property name")
     type: str = Field(..., description="Property type string")
-    value: Optional[Any] = Field(None, description="Current value (if readable)")
+    value: Optional[Any] = Field(
+        None, description="Current value as Remote Control reads it; null when it is not readable"
+    )
+    readable: bool = Field(
+        False,
+        description=(
+            "Whether Remote Control read the value: delegates and protected properties without a "
+            "getter are not readable"
+        ),
+    )
 
 
 class UnrealDescribeObjectResponse(BaseModel):
@@ -488,6 +515,7 @@ class UnrealDescribeObjectResponse(BaseModel):
     functions: List[str] = Field(
         default_factory=list, description="Callable function names"
     )
+    warning: Optional[str] = Field(None, description="Why no property value could be read")
 
 
 class UnrealGetThumbnailResponse(BaseModel):
@@ -502,7 +530,11 @@ class UnrealGetThumbnailResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    asset_path: str = Field(..., description="Asset path queried")
+    asset_path: str = Field(..., description="Asset, actor or component path queried")
+    thumbnail_of: Optional[str] = Field(
+        None,
+        description="The asset shown: asset_path itself, or an actor's Blueprint or mesh",
+    )
     image_base64: SkipJsonSchema[str] = Field(
         ..., description="Session-side image data, lifted into the image content block"
     )
@@ -511,8 +543,14 @@ class UnrealGetThumbnailResponse(BaseModel):
         description="True when the image was sent as an MCP image content block",
     )
     format: str = Field("png", description="Image format: png or jpeg")
-    width: int = Field(..., description="Image width in pixels")
-    height: int = Field(..., description="Image height in pixels")
+    width: int = Field(..., description="Width of the image returned, in pixels")
+    height: int = Field(..., description="Height of the image returned, in pixels")
+    stored_width: Optional[int] = Field(
+        None, description="Width of the thumbnail Unreal stores, the largest the tool returns"
+    )
+    stored_height: Optional[int] = Field(
+        None, description="Height of the thumbnail Unreal stores, the largest the tool returns"
+    )
 
 
 class UnrealSceneSummaryResponse(BaseModel):
@@ -527,9 +565,11 @@ class UnrealSceneSummaryResponse(BaseModel):
     actor_class_counts: Dict[str, int] = Field(
         default_factory=dict, description="Actor count per UClass"
     )
-    static_meshes: int = Field(0, description="Number of StaticMeshActors")
-    lights: int = Field(0, description="Number of light actors")
-    cameras: int = Field(0, description="Number of camera actors")
+    static_meshes: int = Field(0, description="Number of StaticMeshActors, subclasses included")
+    lights: int = Field(
+        0, description="Number of light actors: directional, point, spot and rect lights, and SkyLights"
+    )
+    cameras: int = Field(0, description="Number of CameraActors, CineCameraActors included")
     summary_text: str = Field(
         "", description="Human-readable scene summary for LLM consumption"
     )
@@ -747,8 +787,27 @@ class UnrealSetActorPropertyResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    actor_path: str = Field(..., description="Actor whose property was set")
+    actor_path: str = Field(..., description="Actor or component whose property was set")
     property_name: str = Field(..., description="Property that was set")
+    target_class: Optional[str] = Field(None, description="Class of the object written")
+    value: Optional[Any] = Field(
+        None,
+        description=(
+            "The property read back once Unreal finished the write (its PostEditChangeProperty ran), "
+            "as Remote Control reads it"
+        ),
+    )
+    previous_value: Optional[Any] = Field(
+        None, description="The property before the write, as Remote Control read it"
+    )
+    applied: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether value holds what was written; null, with warning, when Unreal would not "
+            "read it back or the two cannot be compared"
+        ),
+    )
+    warning: Optional[str] = Field(None, description="Why applied is null")
 
 
 class UnrealCallActorFunctionResponse(BaseModel):
@@ -760,7 +819,13 @@ class UnrealCallActorFunctionResponse(BaseModel):
     )
     actor_path: str = Field(..., description="Actor on which function was called")
     function_name: str = Field(..., description="Function that was called")
-    return_value: Optional[str] = Field(None, description="Return value as JSON string")
+    return_value: Optional[Any] = Field(
+        None, description="The function's ReturnValue as JSON; null for a function without one"
+    )
+    outputs: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Everything Remote Control returned: ReturnValue and the out parameters",
+    )
 
 
 class UnrealSetActorParentResponse(BaseModel):
@@ -1010,6 +1075,23 @@ class UnrealSetLightParamsResponse(BaseModel):
     applied: Optional[Dict[str, Any]] = Field(
         None, description="Values read back from the light component after the write"
     )
+    light_class: Optional[str] = Field(
+        None, description="Light component class, e.g. PointLightComponent or SkyLightComponent"
+    )
+    intensity_unit: Optional[str] = Field(
+        None,
+        description=(
+            "Unit of intensity: lux (directional), the light's Intensity Units for a point, spot or "
+            "rect light (candelas, lumens, ev or unitless), scale for a SkyLight"
+        ),
+    )
+    current: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Every light value read back after the call; light_color as sRGB [r, g, b, a] bytes"
+        ),
+    )
+    warning: Optional[str] = Field(None, description="What to know about the result, e.g. an edit during PIE")
 
 
 class UnrealSetRenderSettingsResponse(BaseModel):
@@ -1047,6 +1129,13 @@ class UnrealControlSimulationResponse(BaseModel):
     state: str = Field(
         ...,
         description="Resulting PIE state: playing, paused, or stopped",
+    )
+    mode: Optional[str] = Field(
+        None,
+        description=(
+            "For start: the mode the session began in, simulate or play; null when a session "
+            "already ran (start then resumes it) and for the other actions"
+        ),
     )
 
 
@@ -1152,10 +1241,53 @@ class UnrealApplyForceResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    actor_path: str = Field(..., description="Actor the force was applied to")
+    actor_path: str = Field(..., description="Actor path given")
+    simulation_actor_path: Optional[str] = Field(
+        None, description="The actor's copy in the running simulation, which the force acted on"
+    )
+    component_path: Optional[str] = Field(None, description="Body the force acted on")
+    world: str = Field("simulation", description="World acted on: always the running simulation")
     force_applied: bool = Field(True, description="Whether force was applied")
-    force_vector: List[float] = Field(..., description="Applied force vector [x, y, z]")
+    force_vector: List[float] = Field(..., description="Force or impulse [x, y, z] as given, in units")
+    units: str = Field("unreal", description="unreal (kg cm/s^2 or kg cm/s) or si (N or N s)")
+    force_vector_unreal: Optional[List[float]] = Field(
+        None, description="Force (kg cm/s^2) or impulse (kg cm/s) applied, in Unreal units"
+    )
     is_impulse: bool = Field(..., description="Whether an impulse was applied")
+    application: Optional[str] = Field(
+        None,
+        description=(
+            "impulse (instant), one_frame (a force with duration 0, acting for one physics step) or "
+            "continuous (each frame an impulse carrying the force over the physics time that frame "
+            "simulated, for duration_s of physics time)"
+        ),
+    )
+    duration_s: float = Field(0.0, description="Seconds of physics time a continuous force acts")
+    mass_kg: Optional[float] = Field(None, description="Mass of the body in the simulation")
+    expected_delta_v: Optional[List[float]] = Field(
+        None,
+        description=(
+            "Change of linear velocity in cm/s the impulse, or the force over its duration, gives "
+            "the body alone (gravity, contacts and damping add to it); null for one frame"
+        ),
+    )
+    physics_step_limit_s: Optional[float] = Field(
+        None,
+        description=(
+            "Longest physics step Unreal takes in one frame (MaxPhysicsDeltaTime, 1/30 s by default); a "
+            "slower frame advances physics by this much only. Null when Unreal sets no limit"
+        ),
+    )
+    sim_time: Optional[float] = Field(None, description="Simulation game time when applied, s")
+    ends_at_sim_time: Optional[float] = Field(
+        None,
+        description=(
+            "Simulation game time a continuous force stops at when no frame is slower than "
+            "physics_step_limit_s; slower frames stretch it"
+        ),
+    )
+    paused: bool = Field(False, description="Whether the simulation was paused (the force acts on resume)")
+    warning: Optional[str] = Field(None, description="What to know about the result")
 
 
 class UnrealSetPhysicsParamsResponse(UnrealPhysicsBody):
@@ -1166,6 +1298,108 @@ class UnrealSetPhysicsParamsResponse(UnrealPhysicsBody):
         default_factory=dict,
         description="Each parameter given, read back (mass as the override, as the 32-bit float stored)",
     )
+
+
+class UnrealSetupPhysicsBulkResponse(BaseModel):
+    """Response after setting up physics on many actors in one transaction."""
+
+    success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    world: str = Field("editor", description="World edited: the editor world, as one undoable transaction")
+    mode: str = Field(..., description="simulate, kinematic or off")
+    matched: int = Field(0, description="Actors the paths, tag and folder selected")
+    configured_count: int = Field(0, description="Actors set up")
+    failed_count: int = Field(0, description="Actors not set up")
+    configured: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "The first 50 actors set up: actor_path, physics_mode, mobility_changed_from, detached_from, "
+            "mass_kg"
+        ),
+    )
+    failed: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="The first 50 actors not set up: actor_path, error and, for a body, its problem codes",
+    )
+    warning: Optional[str] = Field(None, description="What to know about the result: detaches, an edit during PIE")
+
+
+class UnrealBodyState(BaseModel):
+    """One actor's body as ``get_unreal_physics_state`` reads it."""
+
+    name: str = Field(..., description="Actor label")
+    class_name: str = Field(..., description="Actor class")
+    editor_path: Optional[str] = Field(
+        None, description="The actor in the editor world; null for one the simulation spawned"
+    )
+    simulation_path: Optional[str] = Field(
+        None, description="The actor's copy in the running simulation; null when the editor world was read"
+    )
+    location: List[float] = Field(..., description="World location [x, y, z] in cm")
+    rotation: List[float] = Field(..., description="Rotation [pitch, yaw, roll] in degrees")
+    component_path: Optional[str] = Field(
+        None, description="Root (or only) primitive component read; null when the actor has none"
+    )
+    physics_mode: Optional[str] = Field(None, description="simulated, kinematic, static or none")
+    linear_velocity: Optional[List[float]] = Field(None, description="Linear velocity [x, y, z], cm/s")
+    angular_velocity: Optional[List[float]] = Field(None, description="Angular velocity [x, y, z], degrees/s")
+    speed: Optional[float] = Field(None, description="Linear speed, cm/s")
+    awake: Optional[bool] = Field(
+        None, description="Whether the simulated body is awake (false: asleep); null unless it simulates"
+    )
+    mass_kg: Optional[float] = Field(None, description="Mass Unreal computes for the body")
+    center_of_mass: Optional[List[float]] = Field(None, description="World center of mass [x, y, z], cm")
+    gravity_enabled: Optional[bool] = Field(None, description="Whether gravity affects the body")
+    simulate_physics: Optional[bool] = Field(None, description="The body's Simulate Physics flag")
+
+
+class UnrealPhysicsStateResponse(BaseModel):
+    """Response with bodies' physics state, in the running simulation or the editor world."""
+
+    success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    world: str = Field(..., description="World read: simulation (while one runs) or editor")
+    pie_active: bool = Field(False, description="Whether a simulation (Play or Simulate In Editor) runs")
+    sim_time: Optional[float] = Field(None, description="Simulation game time, s; null for the editor world")
+    paused: Optional[bool] = Field(None, description="Whether the simulation is paused; null for the editor")
+    bodies: List[UnrealBodyState] = Field(default_factory=list, description="The bodies on this page")
+    count: int = Field(0, description="Bodies on this page")
+    total: int = Field(0, description="Bodies matched, on every page")
+    offset: int = Field(0, description="Bodies skipped before this page")
+    next_offset: Optional[int] = _next_offset_field()
+    truncated: bool = Field(False, description="Whether more bodies are left after this page")
+    hint: Optional[str] = _page_hint_field()
+    not_found: List[str] = Field(
+        default_factory=list, description="Paths with no actor, or no copy in the world read"
+    )
+
+
+class UnrealSimulationActor(BaseModel):
+    """One actor of the running simulation."""
+
+    name: str = Field(..., description="Actor label")
+    class_name: str = Field(..., description="Actor class")
+    simulation_path: str = Field(..., description="Path in the simulation's world")
+    editor_path: Optional[str] = Field(
+        None, description="The editor actor it copies; null for one the simulation spawned"
+    )
+    simulating: bool = Field(False, description="Whether a body of it simulates physics")
+
+
+class UnrealListSimulationActorsResponse(BaseModel):
+    """Response listing the running simulation's actors."""
+
+    success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    world: str = Field(..., description="The simulation's world")
+    actors: List[UnrealSimulationActor] = Field(default_factory=list, description="The actors on this page")
+    count: int = Field(0, description="Actors on this page")
+    total: int = Field(0, description="Actors matched, on every page")
+    offset: int = Field(0, description="Actors skipped before this page")
+    next_offset: Optional[int] = _next_offset_field()
+    truncated: bool = Field(False, description="Whether more actors are left after this page")
+    hint: Optional[str] = _page_hint_field()
+    sim_time: Optional[float] = Field(None, description="Simulation game time, s")
 
 
 # ----------------------------------------------------------------------
@@ -1427,16 +1661,41 @@ class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
     traversable_surfaces: List[Dict[str, Any]] = Field(
         default_factory=list,
         description=(
-            "Floor-like surfaces a robot can stand on: name, path, class_name, "
-            "size [x, y, z] cm, top_z cm, area_m2, tilt_degrees"
+            "Floor-like surfaces a robot can stand on, largest first: name, path, class_name, "
+            "size [x, y, z] cm along the box's own axes, top_z cm, area_m2 (of the top face), "
+            "tilt_degrees, normal (the top face's upward unit normal); an instance of an instanced "
+            "mesh adds component_path and instance_index, and a component with too many instances "
+            "to measure one by one component_path and instances"
         ),
     )
     graspable_objects: List[Dict[str, Any]] = Field(
         default_factory=list,
         description=(
-            "Movable actors with physics collision small enough to grasp: name, "
-            "path, class_name, size [x, y, z] cm, simulate_physics, mass_kg"
+            "Movable actors with physics collision small enough to grasp, by path: name, "
+            "path, class_name, size [x, y, z] cm along the box's own axes, simulate_physics, mass_kg "
+            "(null for an instance); instances add component_path and instance_index"
         ),
+    )
+    scanned_at: Optional[float] = Field(
+        None, description="When the scan this page was cut from ran, as Unix time on the editor host"
+    )
+    snapshot_age_s: Optional[float] = Field(
+        None,
+        description="Seconds since that scan; pages after the first read the first page's scan",
+    )
+    totals: Dict[str, int] = Field(
+        default_factory=dict, description="Matches per category, every page included"
+    )
+    returned: Dict[str, int] = Field(
+        default_factory=dict, description="Entries per category on this page"
+    )
+    offset: int = Field(0, description="Entries of each category this page skipped")
+    max_results: int = Field(50, description="Most entries per category asked for")
+    next_offset: Optional[int] = Field(
+        None, description="Offset of the next page, null on the last page"
+    )
+    hint: Optional[str] = Field(
+        None, description="How to get the rest when more entries are left"
     )
     collision_summary: Dict[str, Any] = Field(
         default_factory=dict,
@@ -1476,6 +1735,9 @@ class UnrealGenerateProceduralSceneResponse(BaseModel):
         ...,
         description="Outliner folder this call filed its actors under, Simul/<Scene>_<seed>_<generation>; "
         "unique to the call",
+    )
+    physics_props: int = Field(
+        0, description="Props made physics-ready (PhysicsActor collision, simulating); 0 unless asked"
     )
 
 

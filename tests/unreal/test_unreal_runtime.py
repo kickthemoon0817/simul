@@ -478,7 +478,8 @@ class TestUnrealRuntimeSessionPhase1:
             requests.append(path)
             fn = (json or {}).get("functionName", "")
             if path == "/remote/object/call" and fn == "ExecutePythonCommandEx":
-                # Class keys are UClass path names, as UE 5.7 reports them.
+                # Class keys are UClass path names, as UE 5.7 reports them;
+                # the script counts static meshes, lights and cameras by class.
                 return python_json_response({
                     "map_path": "/Game/Maps/TestMap",
                     "total_actors": 3,
@@ -486,6 +487,9 @@ class TestUnrealRuntimeSessionPhase1:
                         "/Script/Engine.StaticMeshActor": 2,
                         "/Script/Engine.PointLight": 1,
                     },
+                    "static_meshes": 2,
+                    "lights": 1,
+                    "cameras": 0,
                 })
             return FakeResponse({}, 404)
 
@@ -1008,12 +1012,35 @@ class TestUnrealRuntimeSessionPhase3:
     # -- set_actor_property --
 
     def test_set_actor_property_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_property writes a named property."""
+        """set_actor_property checks the target, reads the previous value, then writes and reads back in a batch."""
         session = self._make_session(monkeypatch)
+        steps = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
+            if path == "/remote/batch":
+                parts = json["Requests"]
+                steps.append(["batch"] + [p["Body"].get("access", "call") for p in parts])
+                answers = [
+                    python_json_response({"transaction": 0, "readable": True})._json_data,
+                    {},
+                    python_json_response({"finished": True})._json_data,
+                    {"Mobility": "Movable"},
+                    python_json_response({"applied": True, "restored": False, "closed": "ended"})._json_data,
+                    {"Mobility": "Movable"},
+                ]
+                return FakeResponse({"Responses": [
+                    {"RequestId": p["RequestId"], "ResponseCode": 200, "ResponseBody": a}
+                    for p, a in zip(parts, answers)
+                ]})
+            if (json or {}).get("functionName") == "ExecutePythonCommandEx":
+                code = json["parameters"]["PythonCommand"]
+                steps.append("preflight" if "property_target(" in code else "close")
+                if "property_target(" in code:
+                    return python_json_response({"target_class": "StaticMeshComponent", "container": None})
+                return python_json_response({"closed": "ended", "restored": False})
             if path == "/remote/object/property":
-                return FakeResponse({})
+                steps.append(json["access"])
+                return FakeResponse({"Mobility": "Static"})
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
@@ -1024,8 +1051,18 @@ class TestUnrealRuntimeSessionPhase3:
             property_value='"Movable"',
         ))
 
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
-        assert result["property_name"] == "Mobility"
+        assert result == {
+            "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Cube_0",
+            "property_name": "Mobility",
+            "target_class": "StaticMeshComponent",
+            "previous_value": "Static",
+            "value": "Movable",
+            "applied": True,
+        }
+        assert steps == [
+            "preflight", "READ_ACCESS",
+            ["batch", "call", "WRITE_ACCESS", "call", "READ_ACCESS", "call", "READ_ACCESS"],
+        ]
 
     # -- call_actor_function --
 
@@ -1049,7 +1086,9 @@ class TestUnrealRuntimeSessionPhase3:
 
         assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
         assert result["function_name"] == "GetActorBounds"
-        assert result["return_value"] == '{"ReturnValue": 42}'
+        # JSON, not a JSON string inside the JSON reply.
+        assert result["return_value"] == 42
+        assert result["outputs"] == {"ReturnValue": 42}
 
     # set_actor_parent and add_component run editor scripts:
     # tests/unreal/test_actor_hierarchy.py runs them against a fake editor.
@@ -1197,7 +1236,8 @@ class TestUnrealRuntimeSessionPhase4:
         assert result["actor_path"].endswith("PointLight_0")
         assert result["params_set"] == 3  # Intensity + LightColor + CastShadows
         assert result["component_path"] == component
-        assert 'actor_component(actor_at(args["actor_path"]), unreal.LightComponent)' in scripts[0]
+        # LightComponentBase, so a SkyLight (not a LightComponent) is found too.
+        assert "actor.get_components_by_class(unreal.LightComponentBase)" in scripts[0]
         # LightColor is an FColor: 0-255 channels.
         assert (
             "'values': {'intensity': 5000.0, 'light_color': [255, 230, 204, 255], 'cast_shadows': True}"
@@ -1248,9 +1288,43 @@ class TestUnrealRuntimeSessionPhase4:
         assert result["success"] is False
         assert "attenuation_radius" in result["error"]
 
-    def test_set_light_params_with_nothing_to_set_makes_no_call(
+    def test_set_light_params_with_nothing_to_set_still_finds_the_light(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """U2-13: with nothing to set no request was made, so a missing actor
+        came back as success with params_set 0."""
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            return FakeResponse({
+                "ReturnValue": False,
+                "CommandResult": "ValueError: Actor not found: /Game/Maps/T.T:PersistentLevel.L",
+            })
+
+        session._session = SmartFakeClientSession(put_fn=put_fn)
+
+        result = asyncio.run(session.set_light_params(actor_path="/Game/Maps/T.T:PersistentLevel.L"))
+
+        assert result["success"] is False
+        assert "Actor not found" in result["error"]
+
+    @pytest.mark.parametrize(
+        "kwargs, message",
+        [
+            ({"intensity": -5.0}, "intensity"),
+            ({"intensity": float("inf")}, "intensity"),
+            ({"temperature": 100.0}, "temperature must be from 1000"),
+            ({"temperature": 1e9}, "temperature must be from 1000"),
+            ({"intensity": 1e30}, "intensity must be from 0 to 1e"),
+            ({"intensity": 1e39}, "intensity must be from 0 to 1e"),
+            ({"attenuation_radius": 0.0}, "attenuation_radius"),
+        ],
+    )
+    def test_set_light_params_checks_values_before_writing(
+        self, monkeypatch: pytest.MonkeyPatch, kwargs: Dict[str, float], message: str
+    ) -> None:
+        """U2-09/U2-13: intensity -5 turned the light to 0 while the reply said it
+        was not applied; temperatures of 100 K and 1e9 K were stored."""
         session = self._make_session(monkeypatch)
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
@@ -1258,9 +1332,10 @@ class TestUnrealRuntimeSessionPhase4:
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
-        result = asyncio.run(session.set_light_params(actor_path="/Game/Maps/T.T:PersistentLevel.L"))
-
-        assert result["params_set"] == 0
+        with pytest.raises(ValueError, match=message):
+            asyncio.run(session.set_light_params(
+                actor_path="/Game/Maps/T.T:PersistentLevel.L", **kwargs
+            ))
 
     def test_set_light_params_without_light_component_is_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1547,6 +1622,7 @@ class TestUnrealRuntimeSessionPhase7:
             "seed": 42,
             "tag": "simul_corridor_42_0badc0de",
             "folder": "Simul/Corridor_42_0badc0de",
+            "physics_props": 0,
         }
 
 

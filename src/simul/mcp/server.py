@@ -63,7 +63,7 @@ from .backends import ALL_BACKEND_NAMES, BACKENDS, NOT_SELECTED, backend_skip_re
 from .error_types import normalize_error_payload
 from .registration import register_stats_tools
 from .registration._helpers import apply_success_from_error
-from .result_budget import encode_result_budget
+from .result_budget import encode_result_budget, tool_result
 from .schemas.common import ErrorResponse
 from .session_manager import (
     CLAIM_TTL_SECONDS,
@@ -1821,7 +1821,9 @@ class SimulMCPServer(LoggerMixin):
                     str(error) if error else None,
                     error_type=payload.get("error_type"),
                 )
-            return self._as_text_result(payload)
+            # The budget pages a paged tool's result by its declaration.
+            with tool_result(tool_name):
+                return self._as_text_result(payload)
         except asyncio.CancelledError as cancelled:
             # The client gave up. The call is recorded all the same, saying
             # whether the engine ran it: an Isaac call has kept the instance
