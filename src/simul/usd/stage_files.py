@@ -114,8 +114,12 @@ def stamp(path: str) -> Stamp:
 
     The modification time alone misses a write in the same clock tick as the
     read (a coarse filesystem clock); the size and the inode (a save that
-    replaces the file gets a new one) catch most of those.
+    replaces the file gets a new one) catch most of those. A layer inside a
+    package (``/x/pkg.usdz[inner.usda]``) changes with its package, so it is
+    stamped by the package file.
     """
+    if Ar.IsPackageRelativePath(path):
+        path = Ar.SplitPackageRelativePathOuter(path)[0]
     try:
         info = os.stat(path)
     except OSError:

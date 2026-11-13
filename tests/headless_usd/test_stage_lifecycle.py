@@ -10,6 +10,7 @@ server relies on is tested without a server.
 from __future__ import annotations
 
 import os
+import secrets
 import stat
 import threading
 import time
@@ -734,6 +735,50 @@ def _package(directory: Path) -> Path:
     package.parent.mkdir()
     assert UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(str(source / "root.usda")), str(package))
     return package
+
+
+def _replace_package(package: Path, inner: str) -> None:
+    """Build a new ``package`` whose inner.usda is ``inner``, from a fresh source tree, and swap it in."""
+    source = package.parent.parent / f"pkg_src_{secrets.token_hex(4)}"
+    source.mkdir()
+    (source / "inner.usda").write_text(inner)
+    (source / "root.usda").write_text(
+        '#usda 1.0\n(\n    defaultPrim = "Pkg"\n    subLayers = [@./inner.usda@]\n)\n'
+    )
+    staged = package.with_name("staged.usdz")
+    assert UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(str(source / "root.usda")), str(staged))
+    os.replace(staged, package)
+    _touch_later(package)
+
+
+class TestChangedPackage:
+    """A layer inside a .usdz changes with its package file."""
+
+    def test_reload_rereads_the_layers_of_a_replaced_package(self, session, tmp_path) -> None:
+        package = _package(tmp_path)
+        stage_id = session.load_stage(package)
+        inner = f"{package.resolve()}[inner.usda]"
+        _replace_package(package, '#usda 1.0\ndef Xform "Pkg"\n{\n    def Xform "Replaced"\n    {\n    }\n}\n')
+
+        assert inner in session.stage_status(stage_id)["changed_on_disk"]
+        result = session.reload_stage(stage_id)
+
+        stage = session.get_stage(stage_id)
+        assert stage.GetPrimAtPath("/Pkg/Replaced") and not stage.GetPrimAtPath("/Pkg/FromSublayer")
+        assert inner in result["reloaded_files"]
+        assert session.stage_status(stage_id)["changed_on_disk"] == []
+
+    def test_validation_reads_a_replaced_package_from_disk(self, session, tmp_path) -> None:
+        package = _package(tmp_path)
+        session.load_stage(package)  # holds the package's inner layer
+        _replace_package(package, "#usda 1.0\n(\n    subLayers = [@./missing.usda@]\n)\n")
+
+        report = validation.validate_usd_file(
+            str(package.resolve()), Settings().usd, layer_is_current=session.layer_is_current
+        )
+
+        assert "MissingSublayer" in [issue.code for issue in report.issues]
+        assert not report.is_valid
 
 
 class TestUsdzExport:

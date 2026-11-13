@@ -778,10 +778,10 @@ class HeadlessUSDSession(LoggerMixin):
         Args:
             path: Real path of a file
         """
+        current = stage_files.stamp(path)
         with self._registry:
-            if path not in self._shared_stamps:
-                return False
-            return self._shared_stamps[path] == stage_files.stamp(path)
+            # A file that cannot be stat'ed now cannot be vouched for.
+            return current is not None and self._shared_stamps.get(path) == current
 
     def unsaved_stages_of(self, paths: List[str]) -> List[Tuple[str, str]]:
         """
