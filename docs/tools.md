@@ -131,8 +131,10 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
     codes divided by `timeCodesPerSecond`). The sample range is in stage time
     codes, as pxr composes them: each layer's samples are mapped through its
     sublayer offset and the offset and scale of every reference or payload
-    that brings it in, and value clips through their `times` and `active`.
-    The cost scales with the stage's arcs, not its prims;
+    that brings it in, and value clips through their `times` and `active`
+    (with or without a manifest). Mapping offsets costs the stage's arcs, not
+    its prims; finding clip sets reads each layer's prim specs once (about
+    0.25 s per 200,000 prims);
   - `warnings` for layers whose authored `upAxis` or `metersPerUnit` differs
     from the stage's (USD rescales and reorients nothing), one entry per
     mismatch and value with `layer_count` and up to 5 example `layers`;

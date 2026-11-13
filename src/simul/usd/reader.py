@@ -19,6 +19,7 @@ from ._pxr import Gf, Pcp, Sdf, Usd, UsdGeom, UsdShade
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import Timer, monitor_performance
 from .bbox import describe_bounds
+from .clips import clip_spec_paths
 from .search import count_prims, traversal_predicate
 from .stage_files import public_identifier
 from .timecode import resolve_time_code, time_code_value
@@ -168,29 +169,22 @@ def _layer_sample_times(cache: Any, layer: Any, root_stack: Any, low: float, hig
     return times
 
 
-def _clip_prim_paths(stage: Usd.Stage, cache: Any, layers: Iterable[Any]) -> List[Sdf.Path]:
+def _clip_prim_paths(cache: Any, clipped: Iterable[Any]) -> List[Sdf.Path]:
     """The stage prims a value clip set is authored on.
 
-    Every prim spec (in every variant) of each layer is checked for
-    ``clips``; a spec path is mapped to the stage prims composing it through
-    the layer's stacks.
+    Args:
+        cache: The stage's ``Pcp.Cache``.
+        clipped: ``(layer, spec paths)`` for each layer with prim specs
+            authoring ``clips`` (``clips.clip_spec_paths``); each spec path
+            is mapped to the stage prims composing it through the layer's
+            stacks.
     """
     found: Dict[str, Sdf.Path] = {}
     every = Pcp.DependencyTypeAnyNonVirtual
-    for layer in layers:
-        spec_paths: List[Sdf.Path] = []
-        pending = list(layer.rootPrims)
-        while pending:
-            spec = pending.pop()
-            if spec.HasInfo("clips"):
-                spec_paths.append(spec.path.StripAllVariantSelections())
-            pending.extend(spec.nameChildren)
-            for variant_set in spec.variantSets.values():
-                pending.extend(variant.primSpec for variant in variant_set.variants.values())
-        if not spec_paths:
-            continue
+    for layer, spec_paths in clipped:
+        prim_paths = {path.StripAllVariantSelections() for path in spec_paths}
         for stack in cache.FindAllLayerStacksUsingLayer(layer):
-            for path in spec_paths:
+            for path in prim_paths:
                 for dependency in cache.FindSiteDependencies(stack, path, every, False, False, True):
                     found.setdefault(dependency.indexPath.pathString, dependency.indexPath)
     return list(found.values())
@@ -218,7 +212,41 @@ def _clip_sample_range(stage: Usd.Stage, prim_paths: Iterable[Sdf.Path]) -> Opti
                 if times:
                     first = times[0] if first is None else min(first, times[0])
                     last = times[-1] if last is None else max(last, times[-1])
-    return [float(first), float(last)] if first is not None else None
+    if first is None or last is None:
+        return None
+    return [float(first), float(last)]
+
+
+def _composed_sample_times(stage: Usd.Stage, layers: List[Any]) -> List[float]:
+    """First and last sample times of ``layers`` and of the stage's value clips, in stage time codes."""
+    cache = stage._GetPcpCache()
+    root_stack = cache.layerStack
+    times: List[float] = []
+    clipped = []
+    for layer in layers:
+        samples = layer.ListAllTimeSamples()
+        if samples:
+            times.extend(_layer_sample_times(cache, layer, root_stack, min(samples), max(samples)))
+        # Gate on authored clip sets, not on opened clip layers: with a
+        # manifestAssetPath pxr opens the clip layers only on a first read.
+        spec_paths = clip_spec_paths(layer)
+        if spec_paths:
+            clipped.append((layer, spec_paths))
+    if clipped:
+        span = _clip_sample_range(stage, _clip_prim_paths(cache, clipped))
+        if span is not None:
+            times.extend(span)
+    return times
+
+
+def _own_sample_times(layers: List[Any]) -> List[float]:
+    """Each layer's first and last sample time in its own time codes (no offsets, no clips)."""
+    times: List[float] = []
+    for layer in layers:
+        samples = layer.ListAllTimeSamples()
+        if samples:
+            times.extend((min(samples), max(samples)))
+    return times
 
 
 def animation_range(stage: Usd.Stage) -> Dict[str, Any]:
@@ -231,10 +259,16 @@ def animation_range(stage: Usd.Stage) -> Dict[str, Any]:
     each range is mapped to stage time codes the way composition maps it:
     through the sublayer offset and every reference or payload offset that
     brings the layer in (``Pcp.Cache`` dependencies, so the cost is the
-    stage's arcs, not its prims; see ``_layer_sample_times``). Value clip layers hold samples in their own
-    clip time; when the stage uses any, the prims authoring clips are found
-    and pxr is asked for the composed sample times of the attributes under
-    them, so ``times``, ``active`` and offsets apply exactly as on a read.
+    stage's arcs, not its prims; see ``_layer_sample_times``). Value clip
+    layers hold samples in their own clip time. Each layer's prim specs are
+    scanned for ``clips`` (``clips.clip_spec_paths``, about 0.25 s per
+    200,000 prims); the prims authoring them are found and pxr is asked for
+    the composed sample times of the attributes under them, so ``times``,
+    ``active``, a manifest and offsets apply exactly as on a read.
+
+    The mapping reads pxr's ``Pcp.Cache`` through ``Usd.Stage._GetPcpCache``,
+    a private binding. Should it fail, the range falls back to each layer's
+    own sample times, and a warning is logged.
 
     Returns:
         ``has_animation`` (an authored range or samples spanning more than one
@@ -243,18 +277,17 @@ def animation_range(stage: Usd.Stage) -> Dict[str, Any]:
         codes, or None when nothing is sampled).
     """
     authored = bool(stage.HasAuthoredTimeCodeRange())
-    cache = stage._GetPcpCache()
-    root_stack = cache.layerStack
-    layers = stage.GetUsedLayers(includeClipLayers=False)
-    times: List[float] = []
-    for layer in layers:
-        samples = layer.ListAllTimeSamples()
-        if samples:
-            times.extend(_layer_sample_times(cache, layer, root_stack, min(samples), max(samples)))
-    if len(stage.GetUsedLayers(includeClipLayers=True)) > len(layers):
-        clipped = _clip_sample_range(stage, _clip_prim_paths(stage, cache, layers))
-        if clipped is not None:
-            times.extend(clipped)
+    layers = list(stage.GetUsedLayers(includeClipLayers=False))
+    try:
+        times = _composed_sample_times(stage, layers)
+    except Exception as exc:
+        logger.warning(
+            "Could not map time samples to stage time through composition (%s: %s); reporting each "
+            "layer's own sample times, without layer offsets or value clips",
+            type(exc).__name__,
+            exc,
+        )
+        times = _own_sample_times(layers)
     sampled = [float(min(times)), float(max(times))] if times else None
     ranged = authored and stage.GetEndTimeCode() > stage.GetStartTimeCode()
     # Samples at a single time are a pose, not motion: they need a span.

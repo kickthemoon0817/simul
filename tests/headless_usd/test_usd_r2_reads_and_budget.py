@@ -217,6 +217,61 @@ def test_m2_a_referenced_clipped_asset_is_offset_too(tmp_path: Path) -> None:
     assert animation_range(stage)["time_sample_range"] == [1100.0, 1120.0] == _pxr_range(stage)
 
 
+CLIPS_TEXT = """#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip_0.usda@, @./clip_1.usda@]
+            string primPath = "/Model"
+            double2[] active = [(100, 0), (110, 1)]
+            double2[] times = [(100, 0), (110, 10), (110, 0), (120, 10)]
+            asset manifestAssetPath = @./manifest.usda@
+        }
+    }
+)
+{
+    double v
+}
+"""
+
+
+def test_m2_clips_with_a_manifest_are_found_before_any_read(tmp_path: Path) -> None:
+    """With a manifest pxr opens clip layers only on a first read; the range must not wait for one (D3)."""
+    for index in range(2):
+        (tmp_path / f"clip_{index}.usda").write_text(
+            '#usda 1.0\nover "Model"\n{\n    double v.timeSamples = { 0: %d, 10: %d }\n}\n' % (index, index + 1)
+        )
+    (tmp_path / "manifest.usda").write_text('#usda 1.0\nover "Model"\n{\n    double v\n}\n')
+    (tmp_path / "clips.usda").write_text(CLIPS_TEXT)
+    stage = Usd.Stage.Open(str(tmp_path / "clips.usda"))
+
+    result = animation_range(stage)
+
+    assert result["time_sample_range"] == [100.0, 120.0] == _pxr_range(stage)
+    assert result["has_animation"] is True
+
+
+def test_m2_falls_back_to_each_layers_own_times_without_the_pcp_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The mapping reads a private pxr binding; if it breaks, the load still answers (D5)."""
+    _animated(tmp_path / "asset.usda")
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/Shifted").GetReferences().AddReference(
+        Sdf.Reference(str(tmp_path / "asset.usda"), layerOffset=Sdf.LayerOffset(100, 2))
+    )
+
+    def broken(_stage: Any) -> Any:
+        raise RuntimeError("no Pcp cache binding")
+
+    monkeypatch.setattr(Usd.Stage, "_GetPcpCache", broken)
+    with caplog.at_level("WARNING"):
+        result = animation_range(stage)
+
+    assert result["time_sample_range"] == [0.0, 10.0]
+    assert "no Pcp cache binding" in caplog.text
+
+
 def test_m2_summary_and_load_use_stage_time(usd_tools, tmp_path: Path) -> None:
     _animated(tmp_path / "asset.usda")
     scene = Usd.Stage.CreateNew(str(tmp_path / "scene.usda"))
