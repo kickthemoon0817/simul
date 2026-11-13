@@ -1750,7 +1750,12 @@ Behaviour worth knowing:
   (`/remote/preset/<preset>/function/<function>`), on its own or inside a
   `/remote/batch`, whose parameters pass a `PythonCommand` that is not the
   runner's, whatever object or function it names: a preset can expose
-  `ExecutePythonCommandEx` under a name of its own. Those are the routes
+  `ExecutePythonCommandEx` under a name of its own. A path below one of
+  these routes counts as the route, because Unreal hands
+  `/remote/object/call/x` to the object call handler and `/remote/batch/x`
+  to the batch handler: such a call runs in the runner, a `py` console
+  command there is refused, and `batch_unreal_operations` refuses
+  `/remote/batch/x` as a batch inside a batch. Those are the routes
   that pass function parameters; Python the editor runs some other way (a
   Blueprint, an editor utility) is outside what simul sends. The property
   write's batch used to embed the value in commands sent past the runner, so

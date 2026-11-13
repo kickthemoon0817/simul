@@ -94,10 +94,12 @@ from ._unreal_mesh_scripts import face_selection as parse_face_selection
 from ._unreal_mesh_scripts import game_asset_path, invalid_choice, mesh_script, primitive_dimensions, refusal
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_python import (
+    BATCH_ROUTE,
     PYTHON_LIBRARY,
     isolate,
     isolate_request,
     python_command,
+    remote_route,
     unisolated_commands,
 )
 from ._unreal_scripts import (
@@ -1550,8 +1552,9 @@ def _batch_requests(operations: Any) -> Tuple[List[Dict[str, Any]], Optional[str
         url = fields.get("URL")
         if not isinstance(url, str) or not url.startswith("/remote/"):
             return [], f"operation {index} needs URL, a Remote Control route such as /remote/object/call"
-        # Unreal's router may match routes ignoring case, so compare that way.
-        if url.split("?", 1)[0].rstrip("/").lower() == "/remote/batch":
+        # Compared as Unreal routes it: ignoring case, and a path below the
+        # batch route (/remote/batch/x) is the batch route.
+        if remote_route(url) == BATCH_ROUTE:
             return [], f"operation {index} is a batch: a batch cannot contain another"
         verb = fields.get("Verb")
         if not isinstance(verb, str) or verb.upper() not in BATCH_VERBS:
@@ -2272,7 +2275,7 @@ class UnrealRuntimeSession(LoggerMixin):
             passphrase (the session's default headers carry a configured one),
             otherwise nothing.
         """
-        if path == "/remote/batch" and not self._passphrase_md5:
+        if remote_route(path) == BATCH_ROUTE and not self._passphrase_md5:
             return {"Passphrase": BATCH_PASSPHRASE_PLACEHOLDER}
         return {}
 

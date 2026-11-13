@@ -42,6 +42,7 @@ from simul.adapters._unreal_python import (
     isolate,
     isolate_request,
     python_command,
+    remote_route,
     runner_command,
     unisolated_commands,
     unwrap,
@@ -920,3 +921,88 @@ def test_the_namespace_is_cleared_whatever_the_script_did_to_the_streams(unreal_
     exec(runner_command(DETACH + "sys.stderr = None\npkg = unreal.Probe()\n", "exec"), {})  # noqa: S102
 
     assert len(Probe.alive) == 0 and sys.stderr is None
+
+
+# -- a path below a route is that route ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "route"),
+    [
+        ("/remote/object/call", "/remote/object/call"),
+        ("/Remote/Object/Call/x?y=1", "/remote/object/call"),
+        ("/remote/object/call/x/y/", "/remote/object/call"),
+        ("/remote/batch/x", "/remote/batch"),
+        ("/remote/preset/Tools/function/RunPython/x", "/remote/preset/tools/function/runpython"),
+        ("/remote/object/callx", "/remote/object/callx"),
+        ("/remote/object/property/x", "/remote/object/property/x"),
+    ],
+)
+def test_remote_route_folds_a_path_below_a_route_into_it(url: str, route: str) -> None:
+    """Re-review of #355: Unreal hands /remote/object/call/x to the object call handler and /remote/batch/x
+    to the batch handler, which never read the rest of the path; simul compared routes exactly."""
+    assert remote_route(url) == route
+
+
+def _library_call(code: str) -> Dict[str, Any]:
+    return {"objectPath": PYTHON_LIBRARY, "functionName": "ExecutePythonCommandEx",
+            "parameters": {"PythonCommand": code, "ExecutionMode": "ExecuteFile"}}
+
+
+@pytest.mark.asyncio
+async def test_python_sent_to_a_path_below_the_object_call_route_runs_in_the_runner() -> None:
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            result = await session.batch_operations([
+                {"URL": "/remote/object/call/x", "Verb": "PUT", "Body": _library_call("print('see setup.py first')")},
+            ])
+
+    assert result.get("success", True) is True, result
+    (request,) = sent
+    (part,) = request["body"]["Requests"]
+    assert unwrap_command(part["Body"]["parameters"]["PythonCommand"]) == ("exec", "print('see setup.py first')", "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "message"),
+    [
+        (
+            {"URL": "/remote/object/call/x", "Verb": "PUT",
+             "Body": {"objectPath": KISMET, "functionName": "ExecuteConsoleCommand",
+                      "parameters": {"WorldContextObject": "", "Command": "py pkg = 1"}}},
+            "py console command",
+        ),
+        (
+            {"URL": "/remote/batch/x", "Verb": "PUT",
+             "Body": {"Requests": [{"RequestId": 7, "URL": "/remote/object/call", "Verb": "PUT",
+                                    "Body": _library_call("pkg = 1")}]}},
+            "a batch cannot contain another",
+        ),
+        (
+            {"URL": "/remote/preset/Tools/function/RunPython/x", "Verb": "PUT",
+             "Body": {"Parameters": {"PythonCommand": "pkg = 1"}}},
+            "passes a PythonCommand",
+        ),
+    ],
+)
+async def test_a_path_below_a_route_is_refused_as_the_route_is(operation: Dict[str, Any], message: str) -> None:
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            result = await session.batch_operations([operation])
+
+    assert (result["success"], result["error_type"]) == (False, "ValidationError")
+    assert message in result["error"] and sent == []
+
+
+@pytest.mark.asyncio
+async def test_raw_python_in_a_batch_nested_below_the_batch_route_is_never_sent() -> None:
+    nested = {"Requests": [{"RequestId": 1, "URL": "/remote/batch/x", "Verb": "PUT", "Body": {"Requests": [
+        {"RequestId": 7, "URL": "/remote/object/call/y", "Verb": "PUT", "Body": _library_call("pkg = 1")}]}}]}
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            with pytest.raises(Exception) as raised:
+                await session._http_put("/remote/batch", nested)
+
+    assert raised.value.details["code"] == "python_outside_runner"  # type: ignore[attr-defined]
+    assert sent == []

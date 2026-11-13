@@ -313,6 +313,35 @@ def _refuse_python_console(body: Dict[str, Any], function_key: str) -> None:
         )
 
 
+#: The route that calls a function on an object, the Python library's included.
+OBJECT_CALL_ROUTE = "/remote/object/call"
+#: The route that runs a list of Remote Control requests in one.
+BATCH_ROUTE = "/remote/batch"
+#: A Remote Control preset's exposed function: its body's ``Parameters`` are
+#: the function's, so a preset exposing ``ExecutePythonCommandEx`` takes a
+#: ``PythonCommand`` there, and the route does not say which function it is.
+_PRESET_FUNCTION = re.compile(r"(/remote/preset/[^/]+/function/[^/]+)(?:/.*)?")
+
+
+def remote_route(url: Any) -> str:
+    """The Remote Control route a request URL reaches, as every check here compares routes.
+
+    No query, no trailing slash, lower case (Unreal's router may match routes
+    ignoring case); and a path below a route is that route: Unreal's HTTP
+    router hands a request to the longest route its path starts with, and the
+    object call and batch handlers never look at what follows, so
+    ``/remote/object/call/x`` runs as an object call and ``/remote/batch/x``
+    as a batch (FHttpRouter, UE 5.7). A preset function's path is folded the
+    same way.
+    """
+    route = str(url).split("?", 1)[0].rstrip("/").lower()
+    for prefix in (OBJECT_CALL_ROUTE, BATCH_ROUTE):
+        if route.startswith(prefix + "/"):
+            return prefix
+    preset = _PRESET_FUNCTION.fullmatch(route)
+    return preset[1] if preset is not None else route
+
+
 def python_command(path: str, body: Optional[Dict[str, Any]]) -> Optional[Tuple[str, str, str]]:
     """What a request runs, when it runs Python source in the editor.
 
@@ -330,7 +359,7 @@ def python_command(path: str, body: Optional[Dict[str, Any]]) -> Optional[Tuple[
             is an ``ExecuteConsoleCommand`` of a ``py`` command, which no
             runner can isolate.
     """
-    if path.rstrip("/").lower() != "/remote/object/call" or not isinstance(body, dict):
+    if remote_route(path) != OBJECT_CALL_ROUTE or not isinstance(body, dict):
         return None
     object_key, function_key = _key(body, "objectPath"), _key(body, "functionName")
     if object_key is None or function_key is None:
@@ -469,15 +498,6 @@ def isolate(body: Dict[str, Any], guard: str = "") -> Dict[str, Any]:
     return {**body, parameters_key: parameters}
 
 
-#: The route that runs a list of Remote Control requests in one.
-BATCH_ROUTE = "/remote/batch"
-
-
-def _route(url: Any) -> str:
-    """A request URL as ``python_command`` compares routes: no query, no trailing slash, lower case."""
-    return str(url).split("?", 1)[0].rstrip("/").lower()
-
-
 def _batch_parts(body: Any) -> List[Dict[str, Any]]:
     """The requests of a ``/remote/batch`` body, each a dict; anything else is left out."""
     requests_key = _key(body, "Requests") if isinstance(body, dict) else None
@@ -504,7 +524,7 @@ def isolate_request(path: str, body: Optional[Dict[str, Any]], guard: str = "") 
     """
     if python_command(path, body) is not None:
         return isolate(body or {}, guard)
-    if _route(path) != BATCH_ROUTE or not isinstance(body, dict):
+    if remote_route(path) != BATCH_ROUTE or not isinstance(body, dict):
         return body
     requests_key = _key(body, "Requests")
     if requests_key is None or not isinstance(body[requests_key], list):
@@ -516,7 +536,7 @@ def isolate_request(path: str, body: Optional[Dict[str, Any]], guard: str = "") 
             url = part.get(url_key) if url_key is not None else None
             inner = part.get(body_key) if body_key is not None else None
             try:
-                runs_python = python_command(_route(url or ""), inner) is not None
+                runs_python = python_command(remote_route(url or ""), inner) is not None
             except ValueError as exc:
                 raise ValueError(f"operation {index}: {exc}") from exc
             if runs_python and body_key is not None and isinstance(inner, dict):
@@ -536,43 +556,41 @@ def _call_commands(body: Any) -> List[str]:
     return [command] if isinstance(command, str) else []
 
 
-#: A Remote Control preset's exposed function: its body's ``Parameters`` are
-#: the function's, so a preset exposing ``ExecutePythonCommandEx`` takes a
-#: ``PythonCommand`` there, and the route does not say which function it is.
-_PRESET_FUNCTION = re.compile(r"/remote/preset/[^/]+/function/[^/]+")
-
-
 def _calls_python_by_name(route: str) -> bool:
     """Whether a route calls a function with the parameters its body names: an object call or a preset function."""
-    return route == "/remote/object/call" or _PRESET_FUNCTION.fullmatch(route) is not None
+    return route == OBJECT_CALL_ROUTE or _PRESET_FUNCTION.fullmatch(route) is not None
 
 
-def unisolated_commands(path: str, body: Optional[Dict[str, Any]]) -> List[str]:
+def unisolated_commands(path: str, body: Optional[Dict[str, Any]], _depth: int = 0) -> List[str]:
     """The ``PythonCommand`` values a request would send outside the runner.
 
     Every ``/remote/object/call`` and every Remote Control preset function
     call (``/remote/preset/<preset>/function/<function>``), on its own or in
-    a ``/remote/batch``, whose parameters pass a ``PythonCommand`` that is not
-    a ``runner_command``, whatever object and function it names: a command
+    a ``/remote/batch`` (a batch inside a batch too, which Unreal runs),
+    whose parameters pass a ``PythonCommand`` that is not a
+    ``runner_command``, whatever object and function it names: a command
     ``python_command`` does not recognise is still one Remote Control could
-    hand to Python. Other routes pass no function parameters.
+    hand to Python. Routes are compared as ``remote_route`` folds them, so a
+    path below one of these is that route. Other routes pass no function
+    parameters.
 
     Args:
         path: The request's route.
         body: The request's body, as it is about to be sent.
 
     Returns:
-        The offending commands; empty when every one runs in the runner.
+        The offending commands, and a note standing for one in a batch nested
+        deeper than this looks; empty when every one runs in the runner.
     """
-    calls: List[Any]
-    if _calls_python_by_name(_route(path)):
-        calls = [body]
-    elif _route(path) == BATCH_ROUTE:
-        calls = [
-            part.get(_key(part, "Body") or "Body")
-            for part in _batch_parts(body)
-            if _calls_python_by_name(_route(part.get(_key(part, "URL") or "URL") or ""))
-        ]
-    else:
-        return []
-    return [command for call in calls for command in _call_commands(call) if unwrap_command(command) is None]
+    route = remote_route(path)
+    if _calls_python_by_name(route):
+        return [command for command in _call_commands(body) if unwrap_command(command) is None]
+    if route != BATCH_ROUTE or _depth > 8:
+        return [] if route != BATCH_ROUTE else ["a batch nested more than 8 deep"]
+    return [
+        command
+        for part in _batch_parts(body)
+        for command in unisolated_commands(
+            str(part.get(_key(part, "URL") or "URL") or ""), part.get(_key(part, "Body") or "Body"), _depth + 1
+        )
+    ]
