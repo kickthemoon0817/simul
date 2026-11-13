@@ -497,6 +497,10 @@ Notes:
   python_server, 5.x VS Code). It refuses `/persistent/` keys, which Kit saves
   for later sessions, unless `allow_persistent=true`. `get_isaac_carb_settings`
   reads `auth_token` values back as `***`.
+- `ping_isaac` does not wait for a call already running on the instance and
+  reports `busy` when one is. A call the client cancels keeps the instance
+  until Isaac Sim has finished it (the bridge is asked to interrupt it first);
+  see [isaac-sim.md](isaac-sim.md#transports).
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or
@@ -2225,10 +2229,15 @@ Arguments that do not fit the input schema are refused before the tool runs,
 but through the same envelope as every other failure: the call spends a
 rate-limit token and is recorded in the usage log and the audit log. A call to
 a tool that is not registered is a `NotFoundError`, recorded and rate limited
-under `<unknown tool>` with the name it gave in the record's parameters. On
-this version the audit row of a call that failed inside the envelope says
-`status: ok`, since it records only whether the MCP call raised; the usage log
-has the outcome.
+under `<unknown tool>` with the name it gave in the record's parameters. The
+audit row of every call states the envelope's outcome, `error_type` included
+(see [Audit log](configuration.md#audit-log)).
+
+A call the client cancels may still have run: cancelling the request does not
+stop the engine. Its usage and audit rows say `cancelled` and `executed`:
+`false` (it never started), `true` (Isaac: the server waited for the engine,
+and the row keeps the engine's outcome) or `"unknown"` (Unreal, Blender: the
+request had been sent). Check the scene before repeating a cancelled call.
 
 ## Annotations
 
