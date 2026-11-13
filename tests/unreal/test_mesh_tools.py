@@ -148,6 +148,13 @@ def test_a_touch_after_an_undo_binds_the_component_to_its_mesh_again(editor: Fak
     assert editor.events[0][1] == BODY and editor.events[1] == ("update_collision", BODY, False)
 
 
+def test_an_unsaved_level_is_bound_again_on_every_touch(editor: FakeEditor) -> None:
+    """A never-saved level's actors are in no dirty list, though an Undo there leaves them unbound."""
+    editor.package = "/Temp/__ExternalActors__/Untitled_1/6/X3/PUOGNFO1EKOSMJQ1T795XR"
+    _call(editor, "validate_unreal_mesh")
+    assert [event[0] for event in editor.events] == ["rebind", "update_collision"]
+
+
 def test_a_read_of_a_saved_level_dirties_nothing(editor: FakeEditor) -> None:
     """Binding the mesh again renames it and dirties the level, so a clean level is left alone."""
     mesh = editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh()

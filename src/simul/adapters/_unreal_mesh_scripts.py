@@ -305,7 +305,11 @@ def mesh_actor(path):
         raise MeshError("NotFoundError", str(missing))
 
 def package_dirty(actor):
+    # An actor of a level never saved (/Temp/Untitled_1, its external actors under /Temp/__ExternalActors__)
+    # has nothing clean to keep, and its external package is in no dirty list (UE 5.7.4).
     package = actor.get_outermost().get_name()
+    if package.startswith("/Temp/"):
+        return True
     utils = unreal.EditorLoadingAndSavingUtils
     dirty = list(utils.get_dirty_map_packages()) + list(utils.get_dirty_content_packages())
     return any(p.get_name() == package for p in dirty)
@@ -315,8 +319,8 @@ def refresh(component):
     # the component no longer listens to the mesh it got back, so an in-place edit of it outside simul
     # leaves the bounds and the render stale, and the physics keeps the collision from before (UE 5.7.4).
     # Setting the mesh it holds binds it again; it also renames the mesh and dirties the level, so it is
-    # done only where an Undo or Redo has left the level dirty already. Rebuilding the collision dirties
-    # nothing.
+    # done only where an Undo or Redo has left the actor's package dirty already (or the level was never
+    # saved). Rebuilding the collision dirties nothing.
     if package_dirty(component.get_owner()):
         component.set_dynamic_mesh(component.get_dynamic_mesh())
     component.update_collision(False)
