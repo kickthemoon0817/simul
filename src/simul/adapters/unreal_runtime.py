@@ -40,12 +40,16 @@ from ..utils.regex_guard import (
 from ._unreal_errors import (
     CAMERA_NOT_APPLIED,
     CONNECTION_ERROR,
+    ENGINE_ERROR,
+    INSTANCE_BUSY,
     NOT_FOUND_ERROR,
     TIMEOUT_ERROR,
     VALIDATION_ERROR,
     UnrealConnectionError,
     UnrealError,
     UnrealTimeoutError,
+    UnrealValidationError,
+    parse_remote_control_json,
     remote_control_error,
     remote_control_error_type,
     remote_control_message,
@@ -991,6 +995,452 @@ else:
 """
 
 
+#: Finds ``set_actor_property``'s target; expects ``args`` = {"path", "name"}.
+#: The actor is resolved with ACTOR_HELPERS' actor_at (a component through the
+#: actor it belongs to), so a path to nothing, a deleted actor, an actor of a
+#: map that is loaded but not open, or of the running Play In Editor world, is
+#: the same NotFoundError the other actor tools give, and nothing is loaded.
+#: An asset, a class, a class default object or a component template is a
+#: ValidationError with ``details.code``. Prints the target's class and, when
+#: the property is an array, set or map, its kind and whether the editor's
+#: Python API can replace it, probed with a write of the current value that
+#: sends no change notifications, so nothing is marked dirty; ``container`` is
+#: None when Python cannot read the property.
+PROPERTY_TARGET = ACTOR_HELPERS + """
+def refuse(code, message):
+    return {"success": False, "error_type": "ValidationError", "error": message, "details": {"code": code}}
+
+def owning_actor(component):
+    owner = component.get_owner()
+    outer = component.get_outer()
+    while owner is None and outer is not None:
+        if isinstance(outer, unreal.Actor):
+            owner = outer
+        outer = outer.get_outer()
+    return owner
+
+def property_target(path, name):
+    obj = unreal.find_object(None, path)
+    scope = (" set_unreal_actor_property edits actors, and their components, in the level open in the "
+             "editor, not assets, classes or engine objects")
+    if obj is not None and not isinstance(obj, (unreal.Actor, unreal.ActorComponent)):
+        return refuse("not_an_actor_or_component", path + " is a " + obj.get_class().get_name() + "." + scope)
+    if obj is not None and obj.get_name().startswith("Default__"):
+        return refuse("class_default_object", path + " is a class default object." + scope)
+    if isinstance(obj, unreal.ActorComponent):
+        owner = owning_actor(obj)
+        if owner is None:
+            return refuse("component_template", path + " is a component template, not part of a level." + scope)
+        if owner.get_name().startswith("Default__"):
+            return refuse("class_default_object", path + " belongs to a class default object." + scope)
+        actor_at(owner.get_path_name())
+        if not unreal.SystemLibrary.is_valid(obj):
+            raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path) + " (the component was removed)")
+    else:
+        actor_at(path)
+    found = {"target_class": obj.get_class().get_name(), "container": None, "replaceable": False}
+    try:
+        current = obj.get_editor_property(name)
+    except Exception:
+        return found
+    for kind in ("Array", "Set", "Map"):
+        if isinstance(current, getattr(unreal, kind)):
+            found["container"] = kind.lower()
+            try:
+                obj.set_editor_property(name, current, unreal.PropertyAccessChangeNotifyMode.NEVER)
+                found["replaceable"] = True
+            except Exception:
+                pass
+    return found
+
+print(json.dumps(property_target(args["path"], args["name"])))
+"""
+
+#: Where PROPERTY_BEGIN leaves, in the editor's sys.modules, what
+#: PROPERTY_DECIDE needs, by call token. Both run in the same Remote Control
+#: batch, so an entry lives only while that batch runs.
+PROPERTY_TRANSACTIONS = "_simul_property_transactions"
+
+#: Opens set_actor_property's write; expects ``args`` = {"token", "path",
+#: "name", "transaction", "empty"} (the container kind, or None).
+#:
+#: The entry is filed first, so PROPERTY_DECIDE closes whatever this opens
+#: even when it fails part way. The objects the write can change are recorded
+#: in the transaction with ``modify(False)``, which does not mark the level
+#: changed: for a property with a setter (a light's Intensity, Mobility,
+#: StaticMesh, RelativeLocation, Elements) Remote Control calls the setter
+#: with no transaction of its own and so never calls Modify (CreateRCCall,
+#: InvokeCall with ERCTransactionMode::NONE), and a setter can change the
+#: components attached below its target (SetMobility(Movable) moves them
+#: too). The previous value is kept, through the Python API, so that
+#: PROPERTY_DECIDE can put it back. A container is emptied with a fresh value
+#: so that Remote Control's write replaces it whole: the one
+#: get_editor_property returns is the property itself, and clearing it in
+#: place would change it before set_editor_property's PreEditChange records it.
+PROPERTY_BEGIN = f"""
+import json, sys, types, unreal
+
+def recorded(obj):
+    found = [obj]
+    children = getattr(obj, "get_children_components", None)
+    if children is not None:
+        found += list(children(True))
+    return found
+
+def begin(args):
+    registry = sys.modules.get({PROPERTY_TRANSACTIONS!r})
+    if registry is None:
+        registry = types.ModuleType({PROPERTY_TRANSACTIONS!r})
+        registry.open = {{}}
+        sys.modules[{PROPERTY_TRANSACTIONS!r}] = registry
+    obj = unreal.find_object(None, args["path"])
+    entry = {{"index": None, "path": args["path"], "name": args["name"], "readable": False, "previous": None}}
+    registry.open[args["token"]] = entry
+    if args["transaction"]:
+        index = unreal.SystemLibrary.begin_transaction("simul", "Set " + args["name"], obj)
+        entry["index"] = index if index >= 0 else None
+    for other in recorded(obj):
+        other.modify(False)
+    try:
+        current = obj.get_editor_property(args["name"])
+    except Exception:
+        current = None
+    else:
+        copy = getattr(current, "copy", None)
+        entry["previous"] = copy() if callable(copy) else current
+        entry["readable"] = True
+    if args["empty"]:
+        obj.set_editor_property(args["name"], {{}} if args["empty"] == "map" else [])
+    return {{"transaction": entry["index"], "readable": entry["readable"]}}
+
+print(json.dumps(begin(args)))
+"""
+
+#: Compares a property's value, as the editor's Python API reads it, with the
+#: JSON value written, as ``_json_value_matches`` compares Remote Control's
+#: read-back: True, False, or None when the two cannot be compared. An object
+#: compares by path, an enum by name (any case, the ``Type::`` part and
+#: underscores aside), a struct on the fields written, an array in order, a
+#: set in any order and a map whole.
+PROPERTY_MATCHES = """
+import math
+
+def _types(*names):
+    return tuple(t for t in (getattr(unreal, n, None) for n in names) if isinstance(t, type))
+
+_OBJECT, _ENUM, _STRUCT = _types("Object"), _types("EnumBase"), _types("StructBase")
+_ARRAY, _SET, _MAP, _NAMES = _types("Array"), _types("Set"), _types("Map"), _types("Name", "Text")
+
+def _same_text(wanted, got):
+    a, b = wanted.strip().lower(), got.strip().lower()
+    if a == b or a.endswith("::" + b) or b.endswith("::" + a):
+        return True
+    for short, full in ((a, b), (b, a)):
+        name = short.rsplit("/", 1)[-1]
+        if short.startswith("/") and "." not in name and full == short + "." + name:
+            return True
+    return False
+
+def _close(a, b):
+    return math.isclose(float(a), float(b), rel_tol=1e-5, abs_tol=1e-6)
+
+def _all(results):
+    if False in results:
+        return False
+    return None if None in results else True
+
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+def matches(wanted, got):
+    if _ENUM and isinstance(got, _ENUM):
+        if isinstance(wanted, str):
+            a = wanted.rsplit("::", 1)[-1].replace("_", "").lower()
+            b = str(got.name).replace("_", "").lower()
+            return bool(a) and (a == b or a.endswith(b) or b.endswith(a))
+        return None
+    if wanted is None or wanted == "":
+        if got is None:
+            return True
+        if isinstance(got, str) or (_NAMES and isinstance(got, _NAMES)):
+            return str(got) in ("", "None")
+        return False if _OBJECT and isinstance(got, _OBJECT) else None
+    if isinstance(wanted, (bool, int, float)):
+        if isinstance(got, (bool, int, float)):
+            return _close(wanted, got)
+        return None
+    if isinstance(wanted, str):
+        if got is None:
+            return False  # an object reference that loads nothing reads back as None
+        if _OBJECT and isinstance(got, _OBJECT):
+            return _same_text(wanted, got.get_path_name())
+        if isinstance(got, str) or (_NAMES and isinstance(got, _NAMES)):
+            return _same_text(wanted, str(got))
+        if _number(got):
+            try:
+                return _close(wanted, got)
+            except ValueError:
+                return None
+        return None
+    if isinstance(wanted, list):
+        if (_SET and isinstance(got, _SET)) or isinstance(got, (set, frozenset)):
+            items = list(got)
+            if len(items) != len(wanted):
+                return False
+            results = []
+            for item in wanted:
+                found = [matches(item, other) for other in items]
+                results.append(True if True in found else (None if None in found else False))
+            return _all(results)
+        if isinstance(got, (list, tuple)) or (_ARRAY and isinstance(got, _ARRAY)):
+            items = list(got)
+            if len(items) != len(wanted):
+                return False
+            return _all([matches(w, g) for w, g in zip(wanted, items)])
+        return None
+    if isinstance(wanted, dict):
+        if _MAP and isinstance(got, _MAP):
+            items = list(got.items())
+            if len(items) != len(wanted):
+                return False
+            results = []
+            for key, item in wanted.items():
+                found = [value for other, value in items if matches(key, other) is True]
+                if not found:
+                    return False
+                results.append(matches(item, found[0]))
+            return _all(results)
+        if _STRUCT and isinstance(got, _STRUCT):
+            results = []
+            for key, item in wanted.items():
+                try:
+                    results.append(matches(item, got.get_editor_property(key)))
+                except Exception:
+                    results.append(None)
+            return _all(results)
+        if isinstance(got, dict):
+            lowered = {str(key).lower(): value for key, value in got.items()}
+            return _all([matches(item, lowered[str(key).lower()]) if str(key).lower() in lowered else None
+                         for key, item in wanted.items()])
+    return None
+"""
+
+#: Finishes set_actor_property's write in the batch that made it; expects
+#: ``args`` = {"token", "expected"}. Being a function call, it first makes
+#: Remote Control finish the property write (TestOrFinalizeOngoingChange
+#: runs PostEditChangeProperty, which can correct the value). Then it reads
+#: the property and compares it with what was written. A value Unreal did
+#: not keep gets the previous value back and the transaction is cancelled
+#: (Unreal's Cancel reverts nothing, so the put-back comes first): the level
+#: is as it was, with no undo step. A value that stays marks the level changed
+#: (``modify()``, which Remote Control's setter path skips) and the
+#: transaction ends: one undo step. Only a transaction this call opened
+#: outermost is cancelled, as Cancel also cancels the transactions around it.
+#: Nothing spans two requests, so a concurrent call's write never lands in
+#: this transaction, nor this one's in theirs.
+PROPERTY_DECIDE = f"""
+import json, sys, unreal
+{PROPERTY_MATCHES}
+def decide(args):
+    registry = sys.modules.get({PROPERTY_TRANSACTIONS!r})
+    entry = registry.open.pop(args["token"], None) if registry is not None else None
+    if entry is None:
+        return {{"applied": None, "restored": False, "closed": None, "error": "the write was not prepared"}}
+    obj = unreal.find_object(None, entry["path"])
+    result = {{"applied": None, "restored": False, "closed": None}}
+    try:
+        if obj is not None and entry["readable"]:
+            result["applied"] = matches(args["expected"], obj.get_editor_property(entry["name"]))
+        if result["applied"] is False:
+            try:
+                obj.set_editor_property(entry["name"], entry["previous"])
+                result["restored"] = True
+            except Exception as exc:
+                result["restore_error"] = str(exc)
+        if not result["restored"] and obj is not None:
+            obj.modify()
+    finally:
+        if entry["index"] is not None:
+            if result["restored"] and entry["index"] == 0:
+                unreal.SystemLibrary.cancel_transaction(entry["index"])
+                result["closed"] = "cancelled"
+            else:
+                unreal.SystemLibrary.end_transaction()
+                result["closed"] = "ended"
+    return result
+
+print(json.dumps(decide(args)))
+"""
+
+#: Does nothing. Remote Control finishes a property write, running Unreal's
+#: PostEditChangeProperty, only when its next function call arrives
+#: (RemoteControl.EnableOngoingChangeOptimization, on by default), so this
+#: call goes between a write and the read that reports it.
+PROPERTY_FINISH = 'import json\nprint(json.dumps({"finished": True}))\n'
+
+
+#: What a container property's new value must be: the JSON type, how to say
+#: it, and the refusal's ``details.code``.
+_CONTAINER_VALUES: Dict[str, Tuple[type, str, str]] = {
+    "array": (list, "a JSON array ([] empties it)", "value_not_a_list"),
+    "set": (list, "a JSON array ([] empties it)", "value_not_a_list"),
+    "map": (dict, "a JSON object ({} empties it)", "value_not_an_object"),
+}
+
+
+def _batch_failure(answer: Dict[str, Any], route: str) -> Optional[UnrealError]:
+    """The error a batched request was answered with, or None when it succeeded."""
+    code = answer.get("ResponseCode", 500)
+    if isinstance(code, int) and code < 400:
+        return None
+    body = answer.get("ResponseBody")
+    text = body if isinstance(body, str) else json.dumps(body)
+    return remote_control_error(code if isinstance(code, int) else 500, text, "PUT", route)
+
+
+def _read_back(answer: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """A batched property read, as ``UnrealRuntimeSession._read_property`` returns one."""
+    failure = _batch_failure(answer, "/remote/object/property")
+    if failure is not None:
+        return {"warning": f"Wrote {name}, but Unreal would not read it back: {failure}"}
+    data = answer.get("ResponseBody")
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if str(key).lower() == name.lower():
+                return {"value": value}
+        if len(data) == 1:
+            return {"value": next(iter(data.values()))}
+    return {"warning": f"Wrote {name}, but Remote Control read back no value for it"}
+
+
+def _python_call(script: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """A ``/remote/object/call`` body that runs ``script`` in a dict of its own.
+
+    For the operations ``set_actor_property`` batches: the dict holds the
+    script's names, and nothing is left in the editor's shared console dict.
+    """
+    source = (f"args = {args!r}\n" if args is not None else "") + script
+    return {
+        "objectPath": "/Script/PythonScriptPlugin.Default__PythonScriptLibrary",
+        "functionName": "ExecutePythonCommandEx",
+        "parameters": {
+            "PythonCommand": f"exec({source!r}, {{'__name__': '__main__'}})",
+            "ExecutionMode": "ExecuteFile",
+            "FileExecutionScope": "Public",
+        },
+    }
+
+
+#: The asset whose thumbnail stands for an actor or component; expects
+#: ``args`` = {"path"}. Remote Control's thumbnail route serves assets only
+#: (an actor path got its class's SVG icon back). An instance of a Blueprint
+#: is shown by the Blueprint; anything else by its static or skeletal mesh, the
+#: root component's first. Found among loaded objects, never loaded.
+THUMBNAIL_ASSET = """
+import json, unreal
+
+def mesh_of(component):
+    if isinstance(component, unreal.StaticMeshComponent):
+        return component.static_mesh
+    if isinstance(component, unreal.SkeletalMeshComponent):
+        return component.get_editor_property("skeletal_mesh_asset")
+    return None
+
+def thumbnail_asset(path):
+    obj = unreal.find_object(None, path)
+    if obj is None:
+        return {"success": False, "error_type": "NotFoundError",
+                "error": "No object is loaded at " + path + ", and an actor path names no asset to show"}
+    if isinstance(obj, unreal.ActorComponent):
+        components = [obj]
+    elif isinstance(obj, unreal.Actor):
+        cls = obj.get_class()
+        if isinstance(cls, unreal.BlueprintGeneratedClass):
+            name = cls.get_path_name()
+            return {"asset": name[:-2] if name.endswith("_C") else name, "via": "blueprint"}
+        root = obj.root_component
+        components = ([root] if root else []) + list(obj.get_components_by_class(unreal.MeshComponent))
+    else:
+        return {"success": False, "error_type": "ValidationError",
+                "error": path + " is a " + obj.get_class().get_name() + ": pass an asset, or an actor or component"}
+    for component in components:
+        mesh = mesh_of(component)
+        if mesh is not None:
+            return {"asset": mesh.get_path_name(), "via": "mesh"}
+    return {"success": False, "error_type": "NotFoundError",
+            "error": path + " has no asset to show: it is not an instance of a Blueprint and has no static or "
+                     "skeletal mesh. Use focus_unreal_on_actor and capture_unreal_viewport to see it"}
+
+print(json.dumps(thumbnail_asset(args["path"])))
+"""
+
+#: Thumbnail sizes ``get_actor_thumbnail`` takes, in pixels per side.
+THUMBNAIL_MAX_SIZE = 1024
+
+
+def _same_text(wanted: str, got: str) -> bool:
+    """Whether two strings name the same value as Unreal reads it back.
+
+    Names and enums ignore case; an enum written by its short name may read
+    back qualified (``EComponentMobility::Movable``); an object written by its
+    package path reads back as ``Package.Name``.
+    """
+    a, b = wanted.strip().lower(), got.strip().lower()
+    if a == b or a.endswith("::" + b) or b.endswith("::" + a):
+        return True
+    for short, full in ((a, b), (b, a)):
+        name = short.rsplit("/", 1)[-1]
+        if short.startswith("/") and "." not in name and full == f"{short}.{name}":
+            return True
+    return False
+
+
+#: A key the value read back does not have.
+_MISSING = object()
+
+
+def _json_value_matches(wanted: Any, got: Any) -> Optional[bool]:
+    """Whether a property read back holds the JSON value written.
+
+    Args:
+        wanted: The value written.
+        got: The value Remote Control (or the Python API) read back.
+
+    Returns:
+        True or False, or None when the two cannot be compared (an enum
+        written as a number reads back by name). Numbers match within 32-bit
+        float precision; for an object written, only its keys are compared, as
+        Remote Control leaves a struct's other fields as they were; a null
+        object reads back as "".
+    """
+    if wanted is None or wanted == "":
+        return got in (None, "", "None")
+    if isinstance(wanted, (bool, int, float)) and isinstance(got, (bool, int, float)):
+        return math.isclose(float(wanted), float(got), rel_tol=1e-5, abs_tol=1e-6)
+    if isinstance(wanted, str) and isinstance(got, str):
+        return _same_text(wanted, got)
+    if isinstance(wanted, (list, dict)) and type(wanted) is type(got):
+        if isinstance(wanted, list):
+            if len(wanted) != len(got):
+                return False
+            pairs = list(zip(wanted, got))
+        elif isinstance(got, dict):
+            lowered = {str(key).lower(): item for key, item in got.items()}
+            pairs = [(item, lowered.get(str(key).lower(), _MISSING)) for key, item in wanted.items()]
+        else:
+            return None
+        results = [None if g is _MISSING else _json_value_matches(w, g) for w, g in pairs]
+        if False in results:
+            return False
+        return None if None in results else True
+    if isinstance(wanted, str) and isinstance(got, (int, float)) and not isinstance(got, bool):
+        try:
+            return math.isclose(float(wanted), float(got), rel_tol=1e-5, abs_tol=1e-6)
+        except ValueError:
+            return None
+    return None
+
+
 def _console_value_matches(read_back: str, requested: str) -> bool:
     """Whether a console variable read back holds the requested number.
 
@@ -1550,6 +2000,14 @@ class UnrealRuntimeSession(LoggerMixin):
                 timeout=timeout_cfg,
                 headers=self._default_headers(),
             )
+            # aiohttp sends an idempotent method (PUT included) again when the
+            # connection drops before the answer (ClientSession._request's
+            # retry_persistent_connection). Remote Control sends every
+            # mutation and script as a PUT, so an editor that ran one and lost
+            # the answer ran it twice. _http_request decides what is retried;
+            # aiohttp's own test client turns this off the same way.
+            if hasattr(self._session, "_retry_connection"):
+                self._session._retry_connection = False
         return self._session
 
     async def _recycle_session(self) -> None:
@@ -1662,26 +2120,25 @@ class UnrealRuntimeSession(LoggerMixin):
                             resp.status, await _response_text(resp), method, path
                         )
                     if response_kind == "image":
-                        from io import BytesIO
-
-                        from PIL import Image
-
-                        image_bytes = await resp.read()
-                        with Image.open(BytesIO(image_bytes)) as image:
-                            image_format = (image.format or "").lower()
-                            if image_format not in {"png", "jpeg"}:
-                                raise ValueError(
-                                    f"Unsupported thumbnail format: {image_format}"
-                                )
-                            return {
-                                "image_base64": base64.b64encode(image_bytes).decode(
-                                    "ascii"
-                                ),
-                                "format": image_format,
-                                "width": image.width,
-                                "height": image.height,
-                            }
-                    data: Dict[str, Any] = await resp.json()
+                        # The caller decodes it: Remote Control may answer
+                        # with an icon that is not an image Pillow reads.
+                        return {
+                            "image_bytes": await resp.read(),
+                            "content_type": resp.headers.get("Content-Type", ""),
+                        }
+                    try:
+                        data: Dict[str, Any] = await resp.json()
+                    except ValueError:
+                        # A batch answer embeds Remote Control's error bodies
+                        # raw, unescaped messages and all.
+                        try:
+                            data = parse_remote_control_json(await _response_text(resp))
+                        except ValueError as exc:
+                            raise UnrealError(
+                                f"Remote Control answered {method} {path} with JSON simul cannot read: {exc}",
+                                ENGINE_ERROR,
+                                details={"route": path},
+                            ) from exc
                     return data
 
             except Exception as exc:
@@ -1804,10 +2261,17 @@ class UnrealRuntimeSession(LoggerMixin):
         if connection_failed:
             address = f"{self.host}:{self.port}"
             if aiohttp is not None and isinstance(exc, aiohttp.ServerDisconnectedError):
-                message = (
-                    f"The editor at {address} closed the connection without answering {method} {path}: "
-                    "it may have crashed or be shutting down"
-                )
+                if retry_safe:
+                    message = (
+                        f"The editor at {address} closed the connection without answering {method} {path}: "
+                        "it may have crashed or be shutting down"
+                    )
+                else:
+                    message = (
+                        f"The editor at {address} closed the connection without answering {method} {path}, "
+                        "so whether the request ran is unknown: check the editor's state before retrying "
+                        "(the editor may also have crashed or be shutting down)"
+                    )
             else:
                 message = f"Cannot reach Remote Control at {address} ({exc})"
             error = UnrealConnectionError(message, CONNECTION_ERROR, details=details)
@@ -2119,15 +2583,56 @@ class UnrealRuntimeSession(LoggerMixin):
             status = _http_status(exc)
             if status is not None:
                 failure["status"] = status
+            if isinstance(exc, UnrealError):
+                failure["error_type"] = exc.error_type
+            else:
+                failure["error_type"] = TIMEOUT_ERROR if isinstance(exc, asyncio.TimeoutError) else CONNECTION_ERROR
             not_sent = _not_sent(exc)
             if not_sent is not None:
                 failure["error"] = not_sent
                 failure["error_type"] = PROBE_NOT_SENT
+            elif isinstance(exc, asyncio.TimeoutError):
+                busy = await self._busy(self.ping_timeout)
+                if busy is not None:
+                    failure.update(busy)
             return failure
         return {
             "reachable": True,
             "address": address,
             "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+        }
+
+    async def _busy(self, waited: float) -> Optional[Dict[str, Any]]:
+        """The busy fields for an endpoint that timed out, or None when it is down.
+
+        Remote Control answers on the editor's game thread, so while a script,
+        a map load or a shader compile holds that thread nothing answers, but
+        the operating system still accepts connections on its listening port.
+        A port that accepts one is an editor that is up and busy (or hung); one
+        that refuses is down.
+
+        Args:
+            waited: How long the request waited, for the message.
+        """
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port), min(self.ping_timeout, 2.0)
+            )
+        except (OSError, asyncio.TimeoutError):
+            return None
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+        return {
+            "busy": True,
+            "error": (
+                f"The editor at {self.host}:{self.port} accepted the connection but Remote Control did not "
+                f"answer within {waited}s: it is busy (running a script, loading or compiling) or hung, "
+                "not down. Retry when it finishes"
+            ),
+            "error_type": INSTANCE_BUSY,
         }
 
     # ------------------------------------------------------------------
@@ -2470,10 +2975,22 @@ class UnrealRuntimeSession(LoggerMixin):
             and per-probe ``warnings`` (any non-fatal metadata-fetch errors).
             When Remote Control refuses the request (HTTP 401) it is
             ``reachable`` but not ``connected``, with ``ping``'s
-            authentication error.
+            authentication error. An editor that accepts the connection but
+            does not answer within ``unreal.ping_timeout`` (as ``ping``; the
+            metadata script then gets the full ``unreal.timeout``) is ``busy``
+            (``error_type`` ``InstanceBusy``), reported after that one attempt,
+            since a retry would wait on the same busy editor.
         """
+        probe_timeout = self.ping_timeout
         try:
-            await self._http_get("/remote/info")
+            try:
+                await self._http_get("/remote/info", timeout_override=probe_timeout, max_retries=0)
+            except UnrealConnectionError:
+                # Nothing listening yet may be an editor still starting up, so
+                # this one is retried. An error status or a timeout is not:
+                # a retry would get the same answer, or wait on the same busy
+                # editor.
+                await self._http_get("/remote/info", timeout_override=probe_timeout)
         except Exception as exc:
             refusal = _refusal(exc)
             if refusal is not None:
@@ -2482,13 +2999,14 @@ class UnrealRuntimeSession(LoggerMixin):
                 # still reading ``connected`` must not take it as usable.
                 return {"reachable": True, "connected": False, **refusal}
             # A timeout's text is empty; say what happened, as ping does.
-            error = str(exc) or f"No answer within {self.timeout}s"
-            self.logger.warning("Health check connectivity failed: %s", error)
-            return {
-                "reachable": False,
-                "connected": False,
-                "error": error,
-            }
+            error = str(exc) or f"No answer within {probe_timeout}s"
+            unreachable: Dict[str, Any] = {"reachable": False, "connected": False, "error": error}
+            if isinstance(exc, asyncio.TimeoutError):
+                busy = await self._busy(probe_timeout)
+                if busy is not None:
+                    unreachable.update(busy)
+            self.logger.warning("Health check connectivity failed: %s", unreachable["error"])
+            return unreachable
 
         # One script for all metadata: a single Remote Control round trip
         # instead of one per field. A failed or gated script leaves the
@@ -2621,7 +3139,7 @@ class UnrealRuntimeSession(LoggerMixin):
         self,
         class_filter: Optional[str] = None,
         tag_filter: Optional[str] = None,
-        max_results: int = 200,
+        max_results: Optional[int] = None,
         offset: int = 0,
         label_filter: Optional[str] = None,
         include_subclasses: bool = False,
@@ -2647,7 +3165,9 @@ class UnrealRuntimeSession(LoggerMixin):
                 (/Script/Engine.StaticMeshActor); None keeps every class.
             tag_filter: Keep actors with this actor tag (case-insensitive, as
                 Unreal compares tags); None keeps every actor.
-            max_results: Most actors in the page, 1 to 5000.
+            max_results: Most actors in the page, 1 to 5000; the
+                unreal.max_actors setting (UNREAL__MAX_ACTORS, 200 by default)
+                when not given.
             offset: Matching actors to skip before the page starts.
             label_filter: Keep actors whose label contains this text,
                 ignoring case; None keeps every actor.
@@ -2660,6 +3180,8 @@ class UnrealRuntimeSession(LoggerMixin):
             ``truncated``, ``hint`` (when more are left), ``warnings`` and
             ``pie_active``; or a ScriptError envelope.
         """
+        if max_results is None:
+            max_results = self.max_actors
         self._check_page(offset, max_results)
         args = {
             "class_filter": class_filter or None,
@@ -2882,19 +3404,36 @@ class UnrealRuntimeSession(LoggerMixin):
         Args:
             object_path: Full object path.
 
+        Remote Control's description carries no values, so they come from
+        one more request that reads every property it can (a property read
+        without a name). The ones it does not read, such as delegates and
+        protected properties without a getter, have no value.
+
         Returns:
-            Dictionary with ``object_path``, ``class_name``, ``properties``,
-            ``functions``.
+            Dictionary with ``object_path``, ``class_name``, ``properties``
+            (each with ``name``, ``type``, ``value`` and ``readable``) and
+            ``functions``; and a ``warning`` when no value could be read.
         """
         body: Dict[str, Any] = {"objectPath": object_path}
         data = await self._http_put("/remote/object/describe", body)
+        result: Dict[str, Any] = {}
+        try:
+            values = await self._http_put(
+                "/remote/object/property", {"objectPath": object_path, "access": "READ_ACCESS"}
+            )
+        except UnrealError as exc:
+            values = {}
+            result["warning"] = f"Property values unavailable: {exc}"
+        by_name = {str(name).lower(): value for name, value in values.items()}
 
         properties: list = []
         for prop in data.get("Properties", []):
+            name = prop.get("Name", "")
             properties.append({
-                "name": prop.get("Name", ""),
+                "name": name,
                 "type": prop.get("Type", ""),
-                "value": prop.get("Value"),
+                "value": by_name.get(name.lower()),
+                "readable": name.lower() in by_name,
             })
 
         functions: list = [f.get("Name", "") for f in data.get("Functions", [])]
@@ -2904,6 +3443,7 @@ class UnrealRuntimeSession(LoggerMixin):
             "class_name": data.get("Class", "Unknown"),
             "properties": properties,
             "functions": functions,
+            **result,
         }
 
     async def get_actor_thumbnail(
@@ -2913,26 +3453,91 @@ class UnrealRuntimeSession(LoggerMixin):
         height: int = 256,
     ) -> Dict[str, Any]:
         """
-        Get a thumbnail image for an asset.
+        Get the thumbnail Unreal stores for an asset, or for an actor's asset.
+
+        Remote Control serves the thumbnail saved with an asset, at the size
+        it was saved (256 x 256 for the editor's thumbnails), and takes no
+        size. It is scaled here to fit within ``width`` x ``height``, keeping
+        its proportions, and never enlarged. An actor or component in the
+        editor world is shown by its Blueprint, or else by its static or
+        skeletal mesh (``THUMBNAIL_ASSET``).
 
         Args:
-            asset_path: Full asset path.
-            width: Thumbnail width in pixels.
-            height: Thumbnail height in pixels.
+            asset_path: Asset path, or the path of an actor or component.
+            width: Largest width wanted, 1 to 1024 pixels.
+            height: Largest height wanted, 1 to 1024 pixels.
 
         Returns:
-            Dictionary with ``asset_path``, ``image_base64``, ``width``,
-            ``height``.
+            Dictionary with ``asset_path``, ``thumbnail_of`` (the asset
+            shown), ``image_base64``, ``format``, ``width`` and ``height`` (of
+            the image returned) and ``stored_width`` / ``stored_height``; a
+            ``NotFoundError`` when Unreal has no thumbnail image for it (it
+            answers with a class icon for assets without one).
         """
-        body: Dict[str, Any] = {
-            "objectPath": asset_path,
-            "Width": width,
-            "Height": height,
-        }
+        from io import BytesIO
+
+        from PIL import Image, UnidentifiedImageError
+
+        for name, pixels in (("width", width), ("height", height)):
+            if isinstance(pixels, bool) or not isinstance(pixels, int) or not 1 <= pixels <= THUMBNAIL_MAX_SIZE:
+                raise UnrealValidationError(
+                    f"{name} must be a whole number of pixels from 1 to {THUMBNAIL_MAX_SIZE}, got {pixels!r}",
+                    details={"code": "thumbnail_size_out_of_range"},
+                )
+        source = asset_path
+        if ":" in asset_path:
+            # An object inside a level (an actor or component), not an asset.
+            found = await self._execute_json_script(
+                f"args = {{'path': {asset_path!r}}}\n" + THUMBNAIL_ASSET,
+                expected_errors=(NOT_FOUND_ERROR, "ValidationError"),
+            )
+            if found.get("error"):
+                return {"asset_path": asset_path, **found}
+            source = found["asset"]
         data = await self._http_request(
-            "PUT", "/remote/object/thumbnail", body, response_kind="image"
+            "PUT", "/remote/object/thumbnail", {"objectPath": source}, response_kind="image"
         )
-        return {"asset_path": asset_path, **data}
+        raw: bytes = data["image_bytes"]
+        unavailable = {
+            "asset_path": asset_path,
+            "thumbnail_of": source,
+            "success": False,
+            "error": (
+                f"Unreal has no thumbnail image for {source}: it answered with "
+                f"{data.get('content_type') or 'an unknown type'} (the class icon an asset without a "
+                "thumbnail gets)"
+            ),
+            "error_type": NOT_FOUND_ERROR,
+        }
+        try:
+            image = Image.open(BytesIO(raw))
+        except UnidentifiedImageError:
+            return unavailable
+        with image:
+            image_format = (image.format or "").lower()
+            if image_format not in {"png", "jpeg"}:
+                return unavailable
+            stored = image.size
+            scale = min(width / image.width, height / image.height, 1.0)
+            size = stored
+            if scale < 1.0:
+                size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+                scaled = image.convert("RGB" if image_format == "jpeg" else "RGBA").resize(
+                    size, Image.Resampling.LANCZOS
+                )
+                out = BytesIO()
+                scaled.save(out, format=image.format, **({"quality": 90} if image_format == "jpeg" else {}))
+                raw = out.getvalue()
+        return {
+            "asset_path": asset_path,
+            "thumbnail_of": source,
+            "image_base64": base64.b64encode(raw).decode("ascii"),
+            "format": image_format,
+            "width": size[0],
+            "height": size[1],
+            "stored_width": stored[0],
+            "stored_height": stored[1],
+        }
 
     async def summarize_scene(self) -> Dict[str, Any]:
         """
@@ -2951,15 +3556,12 @@ class UnrealRuntimeSession(LoggerMixin):
         map_path: str = scene["map_path"]
         total_actors: int = scene["total_actors"]
         class_counts: Dict[str, int] = scene["actor_class_counts"]
-
-        # Keys are class path names (``/Script/Engine.StaticMeshActor``);
-        # compare the short name so the count isn't always zero.
-        static_meshes = sum(
-            v for k, v in class_counts.items()
-            if k.rsplit(".", 1)[-1] == "StaticMeshActor"
-        )
-        lights = sum(v for k, v in class_counts.items() if "Light" in k)
-        cameras = sum(v for k, v in class_counts.items() if "Camera" in k)
+        # Counted by class inside the editor (SCENE_SUMMARY), not by class
+        # name: "Light" in LightmassImportanceVolume and "Camera" in
+        # CameraBlockingVolume used to count them as a light and a camera.
+        static_meshes = int(scene["static_meshes"])
+        lights = int(scene["lights"])
+        cameras = int(scene["cameras"])
 
         pie_active = bool(scene.get("pie_active"))
         parts: list = [f"Map: {map_path}", f"Total actors: {total_actors}"]
@@ -4165,39 +4767,275 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         generate_transaction: bool = True,
     ) -> Dict[str, Any]:
         """
-        Set any writable property on an actor.
+        Set a property of an actor or component in the editor world, and read it back.
+
+        The target is resolved as the other actor tools resolve it (``actor_at``),
+        among loaded objects only, so an actor that is gone, belongs to a map
+        that is not open or to the running Play In Editor world is
+        NotFoundError and no map is loaded; an asset, class, class default
+        object or component template is ValidationError. Either way nothing
+        is written.
+
+        The write runs as one undo step, in one Remote Control batch (no editor
+        tick and no other request runs between its parts): the transaction
+        opens and records the target, an array, set or map is emptied so that
+        it is replaced whole, Remote Control writes the value (converting
+        structs, enums by name and objects by path, and calling the property's
+        setter when it has one), a function call makes Remote Control finish
+        the write (its PostEditChangeProperty runs only then), and the editor
+        compares what it holds with what was written. When Unreal holds
+        something else (a mesh path that loads nothing, materials past the
+        mesh's slots, an enum name it does not have, a write it refused), the
+        previous value is put back in the same transaction, which is then
+        cancelled: the level is as it was, with no undo step. The transaction
+        never spans two requests.
 
         Args:
-            actor_path: Full actor path.
-            property_name: Property name to set.
-            property_value: Property value as JSON string.
-            generate_transaction: Whether to generate an undo transaction.
+            actor_path: Full path of the actor or component.
+            property_name: Property name, as Unreal names it (Tags, bHidden).
+            property_value: The value as JSON text; text that is not JSON is
+                taken as a string.
+            generate_transaction: Whether the write can be undone.
 
         Returns:
-            Dictionary with actor_path, property_name.
+            ``actor_path``, ``property_name``, ``target_class``, ``value`` (read
+            back after the write), ``previous_value`` and ``applied`` (``value``
+            holds what was written; null, with a ``warning``, when Unreal would
+            not read it back or the two cannot be compared). A value that reads
+            back different fails with ``PropertyNotApplied``, ``restored`` and
+            ``details.expected`` / ``details.actual``.
         """
-        import json as json_lib
+        if not property_name.strip():
+            raise UnrealValidationError(
+                "property_name must name a property", details={"code": "empty_property_name"}
+            )
+        try:
+            parsed_value = json.loads(property_value)
+        except (json.JSONDecodeError, TypeError):
+            parsed_value = property_value
+        result: Dict[str, Any] = {"actor_path": actor_path, "property_name": property_name}
+
+        target = await self._execute_json_script(
+            f"args = {{'path': {actor_path!r}, 'name': {property_name!r}}}\n" + PROPERTY_TARGET,
+            expected_errors=(NOT_FOUND_ERROR, VALIDATION_ERROR),
+        )
+        if target.get("error"):
+            return {**result, **target}
+        result["target_class"] = target.get("target_class")
+        container = target.get("container")
+        previous = await self._read_property(actor_path, property_name)
+        if container and not target.get("replaceable"):
+            return {
+                **result,
+                "success": False,
+                "error": (
+                    f"{property_name} is a {container} the editor's Python API cannot replace, and Remote "
+                    "Control's own write only adds to a container, so it cannot be replaced whole. Nothing was "
+                    "written"
+                ),
+                "error_type": VALIDATION_ERROR,
+                "details": {"code": "container_not_replaceable"},
+            }
+        shape = _CONTAINER_VALUES.get(container or "")
+        if shape is not None and not isinstance(parsed_value, shape[0]):
+            # Remote Control writes what it can of a value of another shape (5
+            # into Tags held ['None']), and the container emptied for the write
+            # would be lost.
+            return {
+                **result,
+                "success": False,
+                "error": (
+                    f"{property_name} is {'a map' if container == 'map' else f'an {container}'}: give its new "
+                    f"contents as {shape[1]}. Nothing was written"
+                ),
+                "error_type": VALIDATION_ERROR,
+                "details": {"code": shape[2]},
+            }
+        if "value" in previous:
+            result["previous_value"] = previous["value"]
 
         try:
-            parsed_value = json_lib.loads(property_value)
-        except (json_lib.JSONDecodeError, TypeError):
-            parsed_value = property_value
+            parts = await self._property_write(
+                actor_path, property_name, parsed_value, container, generate_transaction
+            )
+        except UnrealError as exc:
+            if _not_sent(exc) is not None:
+                raise  # it never left this machine: nothing ran
+            # The batch may have run, compared and rolled back in the editor;
+            # its answer is lost or unreadable. Say what Unreal holds now.
+            now = await self._read_property(actor_path, property_name)
+            failed: Dict[str, Any] = {**result, "success": False, "error": str(exc), "error_type": exc.error_type}
+            if exc.details:
+                failed["details"] = exc.details
+            if "value" in now:
+                failed["value"] = now["value"]
+            return failed
+        return self._property_reply(result, property_name, parsed_value, parts)
 
-        access = (
-            "WRITE_TRANSACTION_ACCESS" if generate_transaction else "WRITE_ACCESS"
+    def _property_reply(
+        self, result: Dict[str, Any], name: str, value: Any, parts: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """set_actor_property's reply from its batch's answers (``_property_write``)."""
+        decided, written, held, final = parts["decided"], parts["written"], parts["held"], parts["final"]
+        if parts["failure"] is not None and decided.get("applied") is None:
+            # The write failed and could not be compared: nothing was emptied
+            # or written that needs putting back.
+            failure = parts["failure"]
+            failed = {**result, "success": False, "error": str(failure), "error_type": failure.error_type}
+            if failure.details:
+                failed["details"] = failure.details
+            return failed
+        now = final.get("value", held.get("value"))
+        applied = decided.get("applied")
+        if applied is None and "value" in held:
+            # The editor's Python could not compare (or read) the property;
+            # Remote Control's read-back still can.
+            applied = _json_value_matches(value, held["value"])
+            if applied is False:
+                return {
+                    **result,
+                    "value": now,
+                    "applied": False,
+                    "restored": False,
+                    "success": False,
+                    "error": (
+                        f"Unreal holds {json.dumps(held['value'])} for {name}, not {json.dumps(value)}, and the "
+                        "editor could not read or compare the property, so the previous value was not put back: "
+                        "check it, or undo the write"
+                    ),
+                    "error_type": "PropertyNotApplied",
+                    "details": {"expected": value, "actual": held["value"]},
+                }
+        if applied is False:
+            restored = bool(decided.get("restored"))
+            failure = written
+            failed = {
+                **result,
+                "value": now,
+                "applied": False,
+                "restored": restored,
+                "success": False,
+            }
+            tail = (
+                ", so the previous value was put back" if restored
+                else f", and the previous value could not be put back ({decided.get('restore_error')}): check it, "
+                "or undo the write"
+            )
+            if failure is not None:
+                failed.update(error=f"{failure}{tail}", error_type=failure.error_type)
+                if failure.details:
+                    failed["details"] = failure.details
+                return failed
+            actual = held.get("value")
+            failed.update(
+                error=(
+                    f"Unreal holds {json.dumps(actual)} for {name}, not {json.dumps(value)}: it did not take the "
+                    f"value as written{tail}"
+                ),
+                error_type="PropertyNotApplied",
+                details={"expected": value, "actual": actual},
+            )
+            return failed
+        if "value" not in final and "value" not in held:
+            warning = final.get("warning") or held.get("warning") or f"Remote Control read back no value for {name}"
+            return {**result, "applied": None, "value": None, "warning": warning}
+        done = {**result, "value": now, "applied": applied}
+        if applied is None:
+            done["warning"] = (
+                f"Wrote {name}, but its value read back ({json.dumps(now)}) cannot be compared with the one "
+                f"written ({json.dumps(value)}); check it"
+            )
+        if decided.get("error"):
+            done["warning"] = f"{done.get('warning', '')} {decided['error']}".strip()
+        return done
+
+    async def _property_write(
+        self,
+        path: str,
+        name: str,
+        value: Any,
+        container: Optional[str],
+        transaction: bool,
+    ) -> Dict[str, Any]:
+        """Write, finish, compare and keep or roll back one property, in one Remote Control batch.
+
+        Remote Control runs a batch's parts one after another, with no editor
+        tick and no other request between them, so the undo transaction opens
+        and closes inside it: it never spans two requests, and a concurrent
+        call's write never lands in it.
+
+        Returns:
+            ``failure`` (the UnrealError the write was answered with, or None),
+            ``written`` (the same), ``held`` (Remote Control's read-back once
+            the write is finished), ``decided`` (PROPERTY_DECIDE's verdict:
+            ``applied``, ``restored``, ``closed``) and ``final`` (the read-back
+            after it).
+        """
+        token = uuid.uuid4().hex
+        begin = {"token": token, "path": path, "name": name, "transaction": transaction, "empty": container}
+        read = {"objectPath": path, "propertyName": name, "access": "READ_ACCESS"}
+        responses = await self._property_batch(
+            [
+                ("/remote/object/call", _python_call(PROPERTY_BEGIN, begin)),
+                ("/remote/object/property", {
+                    "objectPath": path, "propertyName": name, "propertyValue": {name: value}, "access": "WRITE_ACCESS",
+                }),
+                ("/remote/object/call", _python_call(PROPERTY_FINISH)),
+                ("/remote/object/property", read),
+                ("/remote/object/call", _python_call(PROPERTY_DECIDE, {"token": token, "expected": value})),
+                ("/remote/object/property", read),
+            ]
         )
-        body: Dict[str, Any] = {
-            "objectPath": actor_path,
-            "propertyName": property_name,
-            "propertyValue": {property_name: parsed_value},
-            "access": access,
-        }
-        await self._http_put("/remote/object/property", body)
-
+        began = self._parse_python_json(responses[0].get("ResponseBody") or {})
+        written = _batch_failure(responses[1], "/remote/object/property")
+        decided = self._parse_python_json(responses[4].get("ResponseBody") or {})
+        failure = written
+        if began.get("error"):
+            failure = UnrealError(f"Could not prepare {name} for the write: {began['error']}", ENGINE_ERROR)
+        if decided.get("error") and "applied" not in decided:
+            # The verdict script itself failed: the transaction may be open.
+            failure = UnrealError(f"Could not finish the write of {name}: {decided['error']}", ENGINE_ERROR)
         return {
-            "actor_path": actor_path,
-            "property_name": property_name,
+            "failure": failure,
+            "written": written,
+            "held": _read_back(responses[3], name),
+            "decided": decided,
+            "final": _read_back(responses[5], name),
         }
+
+    async def _property_batch(self, operations: List[Tuple[str, Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """Send operations as one Remote Control batch and return the answers in order."""
+        requests = [
+            {"RequestId": index, "URL": url, "Verb": "PUT", "Body": body}
+            for index, (url, body) in enumerate(operations, 1)
+        ]
+        answer = await self._http_put("/remote/batch", {"Requests": requests})
+        by_id = {r.get("RequestId"): r for r in answer.get("Responses", []) if isinstance(r, dict)}
+        missing = [index for index in range(1, len(requests) + 1) if index not in by_id]
+        if missing:
+            raise UnrealError(f"Remote Control answered no part {missing} of the property write", ENGINE_ERROR)
+        return [by_id[index] for index in range(1, len(requests) + 1)]
+
+    async def _read_property(self, object_path: str, property_name: str) -> Dict[str, Any]:
+        """One property as Remote Control reads it.
+
+        Returns:
+            ``{"value": ...}``, or ``{"warning": ...}`` when Remote Control
+            refused to read it (a protected property without a getter).
+        """
+        try:
+            data = await self._http_put(
+                "/remote/object/property",
+                {"objectPath": object_path, "propertyName": property_name, "access": "READ_ACCESS"},
+            )
+        except UnrealError as exc:
+            return {"warning": f"Wrote {property_name}, but Unreal would not read it back: {exc}"}
+        for key, value in data.items():
+            if key.lower() == property_name.lower():
+                return {"value": value}
+        if len(data) == 1:
+            return {"value": next(iter(data.values()))}
+        return {"warning": f"Wrote {property_name}, but Remote Control read back no value for it"}
 
     async def call_actor_function(
         self,
@@ -4225,9 +5063,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             parameters: Parameters as JSON string.
 
         Returns:
-            Dictionary with actor_path, function_name, return_value. A
-            not-found error, before anything is called, when the path names
-            no live actor of the level open in the editor.
+            Dictionary with actor_path, function_name, return_value (the
+            function's ``ReturnValue`` as JSON, null for a function without
+            one) and outputs (every value Remote Control returned, out
+            parameters included). A not-found error, before anything is
+            called, when the path names no live actor of the level open in
+            the editor.
         """
         if not self.settings.security.allow_script_execution:
             return self._script_execution_denied()
@@ -4263,12 +5104,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             return found
         body["generateTransaction"] = True
         data = await self._http_put("/remote/object/call", body)
-        return_value = json_lib.dumps(data) if data else None
-
+        # The answer is already JSON; it used to come back re-encoded as a
+        # string inside the JSON reply.
         return {
             "actor_path": actor_path,
             "function_name": function_name,
-            "return_value": return_value,
+            "return_value": data.get("ReturnValue") if isinstance(data, dict) else None,
+            "outputs": data if isinstance(data, dict) else {},
         }
 
     async def set_actor_parent(
@@ -4811,13 +5653,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         # This is a fixed rendering tool, not another arbitrary console/code
         # dispatcher when SECURITY__ALLOW_SCRIPT_EXECUTION is false.
         if not re.fullmatch(r"(?:r|sg)\.[A-Za-z0-9_.]+", setting_name):
-            raise ValueError(
-                "setting_name must be an r.* or sg.* rendering console variable"
+            raise UnrealValidationError(
+                "setting_name must be an r.* or sg.* rendering console variable",
+                details={"code": "not_a_render_setting"},
             )
         if not re.fullmatch(
             r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", setting_value
         ):
-            raise ValueError("setting_value must be a single numeric value")
+            raise UnrealValidationError(
+                "setting_value must be a single numeric value", details={"code": "not_a_number"}
+            )
         args = {"name": setting_name, "value": setting_value}
         state = await self._execute_json_script(f"args = {args!r}\n" + SET_CONSOLE_VARIABLE)
         if state.get("error"):

@@ -403,11 +403,18 @@
       "type": "string"
      },
      "max_results": {
-      "default": 200,
-      "description": "Most actors in the page, 1 to 5000.",
-      "maximum": 5000,
-      "minimum": 1,
-      "type": "integer"
+      "anyOf": [
+       {
+        "maximum": 5000,
+        "minimum": 1,
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Most actors in the page, 1 to 5000. Default: the unreal.max_actors setting (UNREAL__MAX_ACTORS, 200)."
      },
      "offset": {
       "default": 0,
@@ -721,23 +728,27 @@
   {
    "name": "get_unreal_actor_thumbnail",
    "title": "Get Unreal Actor Thumbnail",
-   "description": "Get a thumbnail image for an Unreal asset. The image arrives as an MCP image content block, followed by a JSON block with asset_path, format, width, height and image_attached=true.",
+   "description": "Get the thumbnail Unreal stores for an asset (mesh, material, texture, Blueprint), or for an actor or component in the editor world the thumbnail of its Blueprint or mesh. It is scaled down to fit width x height, keeping its proportions; Unreal stores 256 x 256, the largest returned. The image arrives as an MCP image content block, followed by a JSON block with asset_path, thumbnail_of, format, width, height and image_attached=true. An asset without a stored thumbnail is NotFoundError.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "asset_path": {
-      "description": "Full asset path.",
+      "description": "Asset path, or an actor's or component's path.",
       "type": "string"
      },
      "width": {
       "default": 256,
-      "description": "Thumbnail width in pixels.",
+      "description": "Largest width wanted, 1 to 1024 pixels.",
+      "maximum": 1024,
+      "minimum": 1,
       "type": "integer"
      },
      "height": {
       "default": 256,
-      "description": "Thumbnail height in pixels.",
+      "description": "Largest height wanted, 1 to 1024 pixels.",
+      "maximum": 1024,
+      "minimum": 1,
       "type": "integer"
      }
     },
@@ -1282,26 +1293,26 @@
   {
    "name": "set_unreal_actor_property",
    "title": "Set Unreal Actor Property",
-   "description": "Set a property on an Unreal actor by name and JSON value.",
+   "description": "Set a property of an actor, or of one of its components, in the level open in the editor by Unreal's property name (Tags, bHidden) and a JSON value. An array, set or map is replaced whole ([] empties it), struct arrays and setters included, and takes a JSON array (an object for a map); the write is one undo step even beside concurrent calls, marks the level changed and is compared once Unreal has finished it. The reply has value, previous_value and applied. A value Unreal does not keep (a mesh path that loads nothing, more materials than slots, an unknown enum name) fails with PropertyNotApplied, details.expected and details.actual, and the previous value is put back (restored), leaving no undo step; so is a write Unreal refuses, with its error_type. An actor that is gone, of another map or of Play In Editor is NotFoundError; an asset, class default object or component template, or a container value of another shape, is ValidationError (details.code); nothing is written.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
-      "description": "Full actor path.",
+      "description": "Full path of the actor or component.",
       "type": "string"
      },
      "property_name": {
-      "description": "Property name to set.",
+      "description": "Property name, as Unreal names it (Tags, bHidden).",
       "type": "string"
      },
      "property_value": {
-      "description": "Property value as JSON string.",
+      "description": "The value as JSON text; text that is not JSON is taken as a string.",
       "type": "string"
      },
      "generate_transaction": {
       "default": true,
-      "description": "Whether to generate an undo transaction.",
+      "description": "Whether the write can be undone.",
       "type": "boolean"
      }
     },
@@ -1330,7 +1341,7 @@
   {
    "name": "call_unreal_actor_function",
    "title": "Call Unreal Actor Function",
-   "description": "Call a BlueprintCallable UFUNCTION on an actor of the level open in the editor, as one undo step that records the actor and its root component first.",
+   "description": "Call a BlueprintCallable UFUNCTION on an actor of the level open in the editor, as one undo step that records the actor and its root component first. return_value is the function's ReturnValue as JSON; outputs holds everything Remote Control returned, out parameters included.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,

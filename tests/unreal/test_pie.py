@@ -303,7 +303,11 @@ class Editor:
             Class=_Class,
             Vector=_Vector,
             Rotator=lambda **kwargs: SimpleNamespace(**kwargs),
-            StaticMeshActor=_Class("StaticMeshActor"),
+            # Types, as Unreal's are: the scene summary counts with isinstance.
+            StaticMeshActor=type("StaticMeshActor", (), {"name": "StaticMeshActor"}),
+            Light=type("Light", (), {}),
+            SkyLight=type("SkyLight", (), {}),
+            CameraActor=type("CameraActor", (), {}),
             StaticMesh=type("StaticMesh", (), {}),
             EditorActorSubsystem="EditorActorSubsystem",
             LevelEditorSubsystem="LevelEditorSubsystem",

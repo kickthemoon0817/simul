@@ -708,7 +708,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 description="Keep actors with this actor tag, ignoring case (empty string = no filter).",
                 convert=_optional_text,
             ),
-            ToolParam("max_results", int, 200, description="Most actors in the page, 1 to 5000."),
+            ToolParam(
+                "max_results",
+                Optional[int],
+                None,
+                description=(
+                    "Most actors in the page, 1 to 5000. Default: the unreal.max_actors setting "
+                    "(UNREAL__MAX_ACTORS, 200)."
+                ),
+            ),
             ToolParam("offset", int, 0, description="Matching actors to skip: the previous page's next_offset."),
             ToolParam(
                 "label_filter",
@@ -918,18 +926,31 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="get_unreal_actor_thumbnail",
         description=(
-            "Get a thumbnail image for an Unreal asset. The image arrives as an "
-            "MCP image content block, followed by a JSON block with asset_path, "
-            "format, width, height and image_attached=true."
+            "Get the thumbnail Unreal stores for an asset (mesh, material, texture, Blueprint), or "
+            "for an actor or component in the editor world the thumbnail of its Blueprint or mesh. "
+            "It is scaled down to fit width x height, keeping its proportions; Unreal stores "
+            "256 x 256, the largest returned. The image arrives as an MCP image content block, "
+            "followed by a JSON block with asset_path, thumbnail_of, format, width, height and "
+            "image_attached=true. An asset without a stored thumbnail is NotFoundError."
         ),
         response=UnrealGetThumbnailResponse,
         read_only=True,
         idempotent=True,
         method="get_actor_thumbnail",
         params=(
-            ToolParam("asset_path", str, description="Full asset path."),
-            ToolParam("width", int, 256, description="Thumbnail width in pixels."),
-            ToolParam("height", int, 256, description="Thumbnail height in pixels."),
+            ToolParam("asset_path", str, description="Asset path, or an actor's or component's path."),
+            ToolParam(
+                "width",
+                Annotated[int, Field(ge=1, le=1024)],
+                256,
+                description="Largest width wanted, 1 to 1024 pixels.",
+            ),
+            ToolParam(
+                "height",
+                Annotated[int, Field(ge=1, le=1024)],
+                256,
+                description="Largest height wanted, 1 to 1024 pixels.",
+            ),
         ),
     ),
     UnrealTool(
@@ -1201,7 +1222,20 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_actor_property",
-        description="Set a property on an Unreal actor by name and JSON value.",
+        description=(
+            "Set a property of an actor, or of one of its components, in the level open in the "
+            "editor by Unreal's property name (Tags, bHidden) and a JSON value. An array, set or map "
+            "is replaced whole ([] empties it), struct arrays and setters included, and takes a JSON "
+            "array (an object for a map); the write is one undo step even beside concurrent calls, "
+            "marks the level changed and is compared once Unreal has finished it. The reply has "
+            "value, previous_value and applied. A value Unreal does not keep (a mesh path that loads "
+            "nothing, more materials than slots, an unknown enum name) fails with PropertyNotApplied, "
+            "details.expected and details.actual, and the previous value is put back (restored), "
+            "leaving no undo step; so is a write Unreal refuses, with its error_type. An actor "
+            "that is gone, of another map or of Play In Editor is NotFoundError; an asset, class "
+            "default object or component template, or a container value of another shape, is "
+            "ValidationError (details.code); nothing is written."
+        ),
         response=UnrealSetActorPropertyResponse,
         read_only=False,
         idempotent=True,
@@ -1218,7 +1252,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="call_unreal_actor_function",
         description=(
             "Call a BlueprintCallable UFUNCTION on an actor of the level open in the editor, as one undo step that "
-            "records the actor and its root component first."
+            "records the actor and its root component first. return_value is the function's ReturnValue as JSON; "
+            "outputs holds everything Remote Control returned, out parameters included."
         ),
         response=UnrealCallActorFunctionResponse,
         read_only=False,

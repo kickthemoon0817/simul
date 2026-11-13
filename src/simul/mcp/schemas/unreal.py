@@ -69,6 +69,13 @@ class UnrealPingResponse(BaseModel):
     )
     address: str = Field(..., description="host:port that was probed")
     latency_ms: Optional[float] = Field(None, description="Round-trip time in milliseconds")
+    busy: bool = Field(
+        False,
+        description=(
+            "The editor accepted the connection but Remote Control did not answer in time: it is "
+            "running a script, loading or compiling (error_type InstanceBusy), not down"
+        ),
+    )
     error: Optional[str] = Field(None, description="Error message when success is False")
 
 
@@ -195,6 +202,17 @@ class UnrealHealthCheckResponse(BaseModel):
     project_name: Optional[str] = Field(None, description="Active project name")
     is_editor: Optional[bool] = Field(
         None, description="Whether the engine is running in editor mode"
+    )
+    busy: bool = Field(
+        False,
+        description=(
+            "The editor accepted the connection but did not answer in time: it is running a "
+            "script, loading or compiling (error_type InstanceBusy), not down"
+        ),
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Metadata that could not be read (engine_version, project_name), with the reason",
     )
     error: Optional[str] = Field(None, description="Error message when success is False")
 
@@ -491,7 +509,16 @@ class UnrealPropertyInfo(BaseModel):
 
     name: str = Field(..., description="Property name")
     type: str = Field(..., description="Property type string")
-    value: Optional[Any] = Field(None, description="Current value (if readable)")
+    value: Optional[Any] = Field(
+        None, description="Current value as Remote Control reads it; null when it is not readable"
+    )
+    readable: bool = Field(
+        False,
+        description=(
+            "Whether Remote Control read the value: delegates and protected properties without a "
+            "getter are not readable"
+        ),
+    )
 
 
 class UnrealDescribeObjectResponse(BaseModel):
@@ -509,6 +536,7 @@ class UnrealDescribeObjectResponse(BaseModel):
     functions: List[str] = Field(
         default_factory=list, description="Callable function names"
     )
+    warning: Optional[str] = Field(None, description="Why no property value could be read")
 
 
 class UnrealGetThumbnailResponse(BaseModel):
@@ -523,7 +551,11 @@ class UnrealGetThumbnailResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    asset_path: str = Field(..., description="Asset path queried")
+    asset_path: str = Field(..., description="Asset, actor or component path queried")
+    thumbnail_of: Optional[str] = Field(
+        None,
+        description="The asset shown: asset_path itself, or an actor's Blueprint or mesh",
+    )
     image_base64: SkipJsonSchema[str] = Field(
         ..., description="Session-side image data, lifted into the image content block"
     )
@@ -532,8 +564,14 @@ class UnrealGetThumbnailResponse(BaseModel):
         description="True when the image was sent as an MCP image content block",
     )
     format: str = Field("png", description="Image format: png or jpeg")
-    width: int = Field(..., description="Image width in pixels")
-    height: int = Field(..., description="Image height in pixels")
+    width: int = Field(..., description="Width of the image returned, in pixels")
+    height: int = Field(..., description="Height of the image returned, in pixels")
+    stored_width: Optional[int] = Field(
+        None, description="Width of the thumbnail Unreal stores, the largest the tool returns"
+    )
+    stored_height: Optional[int] = Field(
+        None, description="Height of the thumbnail Unreal stores, the largest the tool returns"
+    )
 
 
 class UnrealSceneSummaryResponse(BaseModel):
@@ -548,9 +586,11 @@ class UnrealSceneSummaryResponse(BaseModel):
     actor_class_counts: Dict[str, int] = Field(
         default_factory=dict, description="Actor count per UClass"
     )
-    static_meshes: int = Field(0, description="Number of StaticMeshActors")
-    lights: int = Field(0, description="Number of light actors")
-    cameras: int = Field(0, description="Number of camera actors")
+    static_meshes: int = Field(0, description="Number of StaticMeshActors, subclasses included")
+    lights: int = Field(
+        0, description="Number of light actors: directional, point, spot and rect lights, and SkyLights"
+    )
+    cameras: int = Field(0, description="Number of CameraActors, CineCameraActors included")
     summary_text: str = Field(
         "", description="Human-readable scene summary for LLM consumption"
     )
@@ -897,8 +937,27 @@ class UnrealSetActorPropertyResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    actor_path: str = Field(..., description="Actor whose property was set")
+    actor_path: str = Field(..., description="Actor or component whose property was set")
     property_name: str = Field(..., description="Property that was set")
+    target_class: Optional[str] = Field(None, description="Class of the object written")
+    value: Optional[Any] = Field(
+        None,
+        description=(
+            "The property read back once Unreal finished the write (its PostEditChangeProperty ran), "
+            "as Remote Control reads it"
+        ),
+    )
+    previous_value: Optional[Any] = Field(
+        None, description="The property before the write, as Remote Control read it"
+    )
+    applied: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether value holds what was written; null, with warning, when Unreal would not "
+            "read it back or the two cannot be compared"
+        ),
+    )
+    warning: Optional[str] = Field(None, description="Why applied is null")
 
 
 class UnrealCallActorFunctionResponse(BaseModel):
@@ -910,7 +969,13 @@ class UnrealCallActorFunctionResponse(BaseModel):
     )
     actor_path: str = Field(..., description="Actor on which function was called")
     function_name: str = Field(..., description="Function that was called")
-    return_value: Optional[str] = Field(None, description="Return value as JSON string")
+    return_value: Optional[Any] = Field(
+        None, description="The function's ReturnValue as JSON; null for a function without one"
+    )
+    outputs: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Everything Remote Control returned: ReturnValue and the out parameters",
+    )
 
 
 class UnrealSetActorParentResponse(BaseModel):
