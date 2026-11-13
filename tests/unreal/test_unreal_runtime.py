@@ -10,6 +10,7 @@ from typing import Any, Dict
 import pytest
 
 from simul.adapters import unreal_runtime
+from simul.adapters._unreal_python import unwrap
 from simul.config import Settings
 from simul.utils.paths import SandboxDenied
 
@@ -373,7 +374,9 @@ class SmartFakeClientSession:
         if headers is not None:
             self.headers[path] = headers
         if self._put_fn:
-            return self._put_fn(path, json)
+            # The source the editor's runner executes: every Python call is
+            # sent wrapped in it (_unreal_python.isolate).
+            return self._put_fn(path, unwrap(json) if json is not None else json)
         return self._put_responses.get(path, FakeResponse({}, 404))
 
     def post(self, path: str, json: Any = None) -> FakeResponse:
@@ -1737,6 +1740,7 @@ class TestUnrealRuntimeSessionPhase8:
         result = asyncio.run(session.edit_mesh_topology(
             mesh_path="/Game/Maps/T.T:PersistentLevel.Body",
             operation="extrude_faces",
+            face_selection="normal:0,0,1",
             distance=20.0,
         ))
 
@@ -1806,7 +1810,8 @@ class TestUnrealRuntimeSessionPhase8:
             session.generate_mesh_primitive(primitive_type="not_a_real_type")
         )
         assert result["success"] is False
-        assert "Unsupported primitive type" in result["error"]
+        assert result["error_type"] == "ValidationError"
+        assert result["details"]["code"] == "UNKNOWN_PRIMITIVE"
         assert "not_a_real_type" in result["error"]
 
     def test_edit_mesh_topology_unsupported_operation_returns_success_false(
@@ -1821,7 +1826,8 @@ class TestUnrealRuntimeSessionPhase8:
             )
         )
         assert result["success"] is False
-        assert "Unsupported topology operation" in result["error"]
+        assert result["error_type"] == "ValidationError"
+        assert result["details"]["code"] == "UNKNOWN_OPERATION"
         assert "bogus_op" in result["error"]
 
     def test_convert_mesh_format_unsupported_target_returns_success_false(
@@ -1834,7 +1840,8 @@ class TestUnrealRuntimeSessionPhase8:
             target_format="invalid_format",
         ))
         assert result["success"] is False
-        assert "Unsupported target format" in result["error"]
+        assert result["error_type"] == "ValidationError"
+        assert result["details"]["code"] == "UNKNOWN_FORMAT"
         assert "invalid_format" in result["error"]
 
     def test_remesh_mesh_uniform(self, monkeypatch: pytest.MonkeyPatch) -> None:

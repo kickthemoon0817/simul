@@ -21,7 +21,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pytest
 
-from simul.mcp.paged_results import PagedList, tool_result
+from simul.mcp.paged_results import PAGED_RESULTS, PagedList, tool_result
 from simul.mcp.result_budget import (
     DEFAULT_RESULT_BUDGET_BYTES,
     apply_result_budget,
@@ -30,7 +30,7 @@ from simul.mcp.result_budget import (
 
 PRIMS = PagedList(("prims",))
 PHYSICS = PagedList(("rigid_bodies", "colliders", "joints"))
-TRAJECTORIES = PagedList(("trajectories[*].points",), limit_param="max_points")
+TRAJECTORIES = PAGED_RESULTS["get_blender_trajectories"]
 
 
 def _entries(count: int, start: int = 0, pad: int = 40) -> List[Dict[str, Any]]:
@@ -301,6 +301,7 @@ def test_declared_nested_lists_are_paged_by_their_own_offset() -> None:
         assert len(sent["trajectories"]) == targets
         lengths = {len(target["points"]) for target in sent["trajectories"]}
         assert len(lengths) == 1, "every target cut to the same index"
+        assert sent["point_count"] == lengths.pop()
         for target in sent["trajectories"]:
             frames.setdefault(target["bone_name"], []).extend(p["frame"] for p in target["points"])
         following = sent["next_offset"]
@@ -309,6 +310,19 @@ def test_declared_nested_lists_are_paged_by_their_own_offset() -> None:
 
     assert len(frames) == targets
     assert all(seen == list(range(1, points + 1)) for seen in frames.values())
+
+
+def test_a_cut_page_clears_cursors_into_its_last_entry() -> None:
+    """Blender keyframe pages: next_key_offset points into the page's last channel."""
+    channels = [{"data_path": f"pose.bones[\"b{i}\"].location", "keys": list(range(300))} for i in range(60)]
+    payload = {"offset": 0, "channels": channels, "next_offset": None, "next_key_offset": 120}
+
+    page = apply_result_budget(payload, paging=PAGED_RESULTS["get_blender_keyframes"])
+
+    assert 0 < len(page["channels"]) < 60
+    assert page["next_offset"] == len(page["channels"])
+    assert page["next_key_offset"] is None
+    assert "smaller limit" in page["truncation"]["hint"]
 
 
 def test_non_paged_list_of_a_declared_tool_is_reported_separately() -> None:

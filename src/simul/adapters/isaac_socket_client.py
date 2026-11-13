@@ -168,6 +168,10 @@ class ScriptResult:
         error_name: Exception class name if execution failed.
         error_value: Exception message if execution failed.
         traceback: Full traceback string if execution failed.
+        transport_failure: The client or the transport produced the failure
+            (an empty or undecodable reply, a script too large to send, a
+            timeout of the wait), rather than the script raising
+            ``error_name`` inside Isaac Sim.
     """
 
     success: bool
@@ -176,6 +180,7 @@ class ScriptResult:
     error_value: str = ""
     traceback: str = ""
     transport: str = ""
+    transport_failure: bool = False
 
 
 class IsaacSocketClient:
@@ -546,6 +551,7 @@ class IsaacSocketClient:
                 success=False,
                 output="",
                 error_name="ScriptTooLargeForSocket",
+                transport_failure=True,
                 error_value=(
                     f"Script is {len(payload_bytes)} bytes; Isaac Sim 5.x's "
                     f"{VSCODE_EXTENSION} socket at {self.vscode_address} executes each "
@@ -581,6 +587,7 @@ class IsaacSocketClient:
                     "waiting but does not stop the script, which keeps running "
                     f"inside Kit. {TIMEOUT_MAY_STILL_COMPLETE}"
                 ),
+                transport_failure=True,
             )
         return result
 
@@ -748,7 +755,8 @@ class IsaacSocketClient:
         error = response.get("error", {})
         error_name = str(error.get("name", "BridgeError"))
         error_value = str(error.get("message", "Bridge request failed"))
-        if error_name == "ScriptInterrupted" and error_value.startswith("timed out"):
+        timed_out = error_name == "ScriptInterrupted" and error_value.startswith("timed out")
+        if timed_out:
             error_value = (
                 f"Script {error_value} and was interrupted by the bridge. "
                 f"{TIMEOUT_MAY_STILL_COMPLETE}"
@@ -760,29 +768,47 @@ class IsaacSocketClient:
             error_value=error_value,
             traceback=str(error.get("traceback", "")),
             transport="bridge",
+            transport_failure=timed_out,
         )
 
     async def ping(self) -> bool:
         """
         Check if Isaac Sim is reachable by executing a trivial script.
 
+        Takes no request lock: each probe is its own connection, so a ping
+        does not wait behind a call already in flight on this client (it used
+        to queue behind a long script for as long as the script ran). Whether
+        the engine answers while it runs a script is up to the engine: the
+        bridge does between frames; a synchronous script blocks every
+        transport until it returns.
+
         Returns:
-            True if Isaac Sim responded successfully, False otherwise.
+            True if Isaac Sim responded successfully, False otherwise,
+            including when what answered sent a reply that is not the
+            protocol's (undecodable bytes, a malformed frame).
         """
-        async with self._lock:
-            if self._prefer_bridge:
-                try:
-                    response = await self._bridge_request("ping", {})
-                    if response.get("status") == "ok":
-                        return bool(response.get("payload", {}).get("reachable", True))
-                except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
-                    if not self._fallback_to_vscode:
-                        return False
+        if self._prefer_bridge:
             try:
-                result = await self._execute_vscode_unlocked("print('pong')")
-                return result.success and "pong" in result.output
-            except (ConnectionRefusedError, TimeoutError, OSError):
-                return False
+                response = await self._bridge_request("ping", {})
+                if response.get("status") == "ok":
+                    payload = response.get("payload", {})
+                    if not isinstance(payload, dict):
+                        return False
+                    return bool(payload.get("reachable", True))
+            except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
+                if not self._fallback_to_vscode:
+                    return False
+        try:
+            result = await self._execute_vscode_unlocked("print('pong')")
+            return result.success and "pong" in result.output
+        except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
+            # ValueError covers UnicodeDecodeError and an oversized reply.
+            return False
+
+    @property
+    def busy(self) -> bool:
+        """Whether a request (other than a ping) is in flight on this client."""
+        return self._lock.locked()
 
     async def bridge_request(
         self,
@@ -1041,6 +1067,7 @@ class IsaacSocketClient:
                 error_name="EmptyResponse",
                 error_value="No response from Isaac Sim",
                 transport="vscode",
+                transport_failure=True,
             )
 
         try:
@@ -1052,6 +1079,7 @@ class IsaacSocketClient:
                 error_name="JSONDecodeError",
                 error_value=str(exc),
                 transport="vscode",
+                transport_failure=True,
             )
 
         status = data.get("status", "error")

@@ -40,11 +40,18 @@ class PagedList:
         offset_param: The tool parameter that takes ``next_offset``.
         limit_param: The tool parameter that sets the page size, named in the
             hint when a page is cut; None when the tool has none.
+        count_fields: Result fields that count the entries of the page; one
+            equal to the page's length is restated to the entries kept.
+        reset_fields: Secondary cursors into the page's last entry (Blender's
+            ``next_key_offset``); a cut page ends on another entry, so they
+            are cleared to None.
     """
 
     fields: Tuple[str, ...]
     offset_param: str = "offset"
     limit_param: Optional[str] = "max_results"
+    count_fields: Tuple[str, ...] = ("count", "returned")
+    reset_fields: Tuple[str, ...] = ()
 
 
 #: Every paged tool's declaration, by registered tool name.
@@ -70,11 +77,22 @@ PAGED_RESULTS: Dict[str, PagedList] = {
     "list_blender_scene_objects": PagedList(("objects",), limit_param="max_items"),
     "search_blender_objects": PagedList(("objects",)),
     "validate_simready_compliance": PagedList(("issues",), limit_param="limit"),
+    # Channels from offset; key_offset pages the keys of the first channel.
+    "get_blender_keyframes": PagedList(
+        ("channels",), limit_param="limit", reset_fields=("next_key_offset",)
+    ),
+    # The offset counts trajectory points (samples), not targets: every
+    # target's points are one page.
+    "get_blender_object_trajectory": PagedList(("points",), limit_param="limit", count_fields=("point_count",)),
+    "get_blender_trajectories": PagedList(
+        ("trajectories[*].points",), limit_param="limit", count_fields=("point_count",)
+    ),
     # Unreal Engine
     "list_unreal_actors": PagedList(("actors",)),
     "list_unreal_actor_components": PagedList(("components",)),
     "get_unreal_actor_by_semantic_label": PagedList(("actors",)),
     "query_unreal_scene_graph": PagedList(("root.children",)),
+    "search_unreal_assets": PagedList(("assets",)),
 }
 
 _CURRENT_TOOL: ContextVar[Optional[str]] = ContextVar("simul_result_tool", default=None)

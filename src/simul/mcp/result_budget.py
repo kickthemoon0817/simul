@@ -389,11 +389,13 @@ def _trim_page(
     old_next = payload.get("next_offset")
     trimmed["next_offset"] = new_next
     trimmed["truncated"] = True
-    if len(lists) == 1:
-        for key in ("count", "returned"):
-            value = payload.get(key)
-            if isinstance(value, int) and not isinstance(value, bool) and value == len(lists[0][1]):
-                trimmed[key] = min(kept, value)
+    for key in paging.count_fields:
+        value = payload.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value == longest:
+            trimmed[key] = kept
+    for key in paging.reset_fields:
+        if key in trimmed:
+            trimmed[key] = None
     stale = payload.get("hint")
     if isinstance(old_next, int) and isinstance(stale, str) and f"offset={old_next}" in stale:
         trimmed["hint"] = stale.replace(f"offset={old_next}", f"offset={new_next}")

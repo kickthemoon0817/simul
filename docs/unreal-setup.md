@@ -1,20 +1,34 @@
 # Unreal Setup — what `simul unreal setup` actually configures
 
-When you run `simul unreal setup <project>.uproject`, the CLI patches **two
-plugins** and a single `.ini` section. "Remote Control" is overloaded in
+When you run `simul unreal setup <project>.uproject`, the CLI enables **three
+plugins** and patches a single `.ini` section. "Remote Control" is overloaded in
 the UE ecosystem, so this doc names exactly what is required, what is not,
 and what is sometimes confused for the same thing.
 
-## What gets enabled (the only two plugins required)
+## What gets enabled (the three plugins simul's tools need)
 
-Both are flipped to `Enabled: true` inside the `.uproject`'s `Plugins`
+Each is flipped to `Enabled: true` inside the `.uproject`'s `Plugins`
 list, idempotently — the patcher only writes when something is missing or
-different.
+different, and turns one back on when the project disabled it.
 
 | Plugin name (`.uproject` key) | Ships with UE | Why simul needs it |
 |---|---|---|
 | `RemoteControl` | Yes — `Engine/Plugins/Runtime/RemoteControl/` since UE 4.27 | Hosts the HTTP server (default port 30010) and WebSocket server (default 30020) that simul talks to. Settings live under `[/Script/RemoteControlCommon.RemoteControlSettings]` — the class is in the `RemoteControlCommon` module, and UE looks the section up by exact module-path match. |
 | `PythonScriptPlugin` | Yes — `Engine/Plugins/Experimental/PythonScriptPlugin/` | Provides the embedded Python interpreter that the `exec` endpoint dispatches to when `bEnableRemotePythonExecution=True`. Without it, `mcp__simul__execute_unreal_script` (and the entire scripting layer) cannot run. |
+| `GeometryScripting` | Yes — `Engine/Plugins/Runtime/GeometryScripting/` | The GeometryScript library the mesh tools run on (`generate_unreal_mesh_primitive`, `simplify_unreal_mesh` and the other `*_unreal_mesh*` tools). It ships as prebuilt binaries, so enabling it compiles nothing, even in a Blueprint-only project, and the plugins it depends on (GeometryProcessing, MeshModelingToolset, PlanarCut) are the ones the stock Modeling Mode already loads. Without it every mesh tool returns `error_type: UnsupportedOperation` with `details.code: GEOMETRY_SCRIPTING_DISABLED`. |
+
+Unreal loads plugins at startup. When setup enables one in a project whose
+editor is already running (`--no-launch`), restart the editor before using the
+tools that need it; for GeometryScripting setup says so in
+`patched.uproject.warnings` (not when setup launches the editor itself, which
+loads it).
+
+The GeometryScripting entry setup adds carries `"TargetAllowList": ["Editor"]`:
+the mesh tools run in the editor only, so a packaged game's plugin set stays as
+it was, and a Blueprint-only project still packages without a C++ build. A
+project whose game uses Geometry Script at runtime removes that line (or enables
+the plugin itself before running setup: setup leaves an existing entry's targets
+alone and only turns it on).
 
 ## What gets written into `Config/DefaultRemoteControl.ini`
 

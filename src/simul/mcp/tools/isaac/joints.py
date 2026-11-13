@@ -531,7 +531,7 @@ class JointsMixin:
                 if problem is not None:
                     break
         if problem is not None:
-            return ErrorResponse(error=problem, error_type="ValueError").model_dump()
+            return ErrorResponse(error=problem, error_type="ValidationError").model_dump()
         script = _compose_script(
             """\
             import json
@@ -596,7 +596,7 @@ class JointsMixin:
         else:
             problem = _finite_problem("lower", lower) or _finite_problem("upper", upper)
         if problem is not None:
-            return ErrorResponse(error=problem, error_type="ValueError").model_dump()
+            return ErrorResponse(error=problem, error_type="ValidationError").model_dump()
         script = _compose_script(
             """\
             import json

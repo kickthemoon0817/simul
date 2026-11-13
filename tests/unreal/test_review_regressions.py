@@ -166,7 +166,7 @@ async def test_render_setting_cannot_be_used_as_console_dispatch(name, value):
     [
         ("compute_convex_hull", {}),
         ("decompose_convex_hull", {}),
-        ("edit_mesh_topology", {"operation": "extrude_faces"}),
+        ("edit_mesh_topology", {"operation": "extrude_faces", "face_selection": "all"}),
         ("subdivide_mesh", {}),
         ("simplify_mesh", {}),
         ("cut_mesh_plane", {"plane_origin": [0, 0, 0], "plane_normal": [0, 0, 1]}),
@@ -206,10 +206,8 @@ async def test_generated_mesh_paths_are_data_not_python(method, kwargs):
 async def test_mesh_dimension_strings_cannot_inject_python():
     session = UnrealRuntimeSession()
     session._execute_python = AsyncMock()
-    with pytest.raises(ValueError):
-        await session.generate_mesh_primitive(
-            "box", dimensions={"width": "1); review_injected();#"}
-        )
+    refused = await session.generate_mesh_primitive("box", dimensions={"width": "1); review_injected();#"})
+    assert (refused["error_type"], refused["details"]["code"]) == ("ValidationError", "INVALID_DIMENSION")
     session._execute_python.assert_not_called()
 
 
@@ -575,24 +573,24 @@ async def test_capture_failed_transfer_preserves_existing_output(monkeypatch, tm
 @pytest.mark.asyncio
 async def test_mesh_ops_resolve_actors_with_actor_at():
     """Mesh ops find their actors by path (ACTOR_HELPERS.actor_at) instead of
-    scanning every level actor, and a missing actor is a script error."""
+    scanning every level actor or loading the path, and a path that names no
+    live actor is a NotFoundError."""
     session = UnrealRuntimeSession()
+    missing = "/Game/M.M:PersistentLevel.Missing"
     session._execute_python = AsyncMock(
         return_value={
-            "ReturnValue": False,
-            "CommandResult": "ValueError: Actor not found: /Game/M.M:PersistentLevel.Missing",
+            "ReturnValue": True,
+            "LogOutput": [{"Type": "Info", "Output": json.dumps(
+                {"success": False, "error_type": "NotFoundError", "error": "Actor not found: " + missing})}],
         }
     )
-    result = await session.apply_mesh_boolean(
-        "/Game/M.M:PersistentLevel.Body", "/Game/M.M:PersistentLevel.Missing", "union"
-    )
+    result = await session.apply_mesh_boolean("/Game/M.M:PersistentLevel.Body", missing, "union")
     script = session._execute_python.call_args.args[0]
+    body = script[script.index(ACTOR_HELPERS) + len(ACTOR_HELPERS):]
     # The helpers define level_actors(), which the operation never calls.
-    assert script.startswith(ACTOR_HELPERS)
-    assert "level_actors" not in script[len(ACTOR_HELPERS):]
-    assert "target_actor = actor_at('/Game/M.M:PersistentLevel.Body')" in script
-    assert "tool_actor = actor_at('/Game/M.M:PersistentLevel.Missing')" in script
+    assert "level_actors" not in body and "load_object" not in body
+    assert "return actor_at(path)" in body
+    assert "'target': '/Game/M.M:PersistentLevel.Body'" in script
+    assert "'tool': " + repr(missing) in script
     compile(script, "apply_mesh_boolean", "exec")
-    assert result["success"] is False
-    assert result["error_type"] == "ScriptError"
-    assert "Actor not found" in result["error"]
+    assert result == {"success": False, "error_type": "NotFoundError", "error": "Actor not found: " + missing}
