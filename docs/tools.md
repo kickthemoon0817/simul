@@ -1017,9 +1017,16 @@ Behaviour worth knowing:
   level viewport, with a warning, and `game` fails with `InvalidState`.
   Unreal cannot cancel that shot, so it may still be written later, to
   `details.pending_path`: every game shot is named for its own call
-  (`SimulShot_<token>.png`), so a late one is never taken for another
-  call's. During Simulate the level viewport is the view of the simulation,
-  so `editor` is the view to ask for. An editor HighResShot goes to
+  (`SimulShot_<token>.png`). During Simulate the level viewport is the view of
+  the simulation, so `editor` is the view to ask for. HighResShot keeps one
+  set of settings (size, file name) for the whole editor, and every viewport
+  that draws takes the next shot with them, so overlapping captures, from two
+  agents or servers, would take each other's shots. Each capture (and
+  `measure_size`) therefore holds an editor-wide lock from its trigger until
+  it has its file; another waits for it, up to 45 s, then fails with
+  `InstanceBusy`. A lock whose holder stops polling lapses after 20 s.
+  `capture_unreal_camera` renders through a scene capture instead and needs
+  no lock. An editor HighResShot goes to
   every level viewport pane that draws, while Unreal's camera calls
   (`set_unreal_camera_view`, `focus_unreal_on_actor`,
   `get_unreal_viewport_info`) read and move only the first perspective pane:
@@ -1051,10 +1058,15 @@ Behaviour worth knowing:
   copied. The image is written as PNG or JPEG into the editor's screenshot
   directory, and the capture actor is destroyed and its render target
   released. Outside PIE the capture actor is transient and its spawn and
-  removal run in a cancelled transaction, so the map stays unmodified and
-  nothing lands in the undo history (Undo never brings it back, and the undo
-  buffer holds no render target). The reply has the camera's pose, fields of
-  view and lens, and
+  removal run in one transaction. With no other transaction open it is
+  cancelled, so the map stays unmodified and nothing lands in the undo
+  history (Undo never brings the capture back, and the undo buffer holds no
+  render target). When an edit already holds one open (a drag in the viewport
+  or on a Details slider keeps one open across frames, which an attached
+  agent can capture during), cancelling would drop the user's edit too, so
+  the capture's spawn and removal fold into it instead: undoing that edit
+  still undoes it and leaves no capture actor. The reply has the camera's
+  pose, fields of view and lens, and
   `intrinsics`: the pinhole model of this image (square pixels, `cx`, `cy` at
   the image center in OpenCV's pixel-center convention; Unreal's camera +X is
   the optical axis, +Y image right, -Z image down; null for an orthographic

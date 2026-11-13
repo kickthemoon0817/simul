@@ -797,7 +797,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "an actor with a CameraComponent or SceneCaptureComponent2D) through a transient scene capture "
             "with its field of view and post-process settings, and return the image path, the camera pose "
             "and the image's pinhole intrinsics. During Play In Editor the running game's counterpart is "
-            "captured, or a game actor named by its PIE path. Leaves no undo entry. RGB only."
+            "captured, or a game actor named by its PIE path. Adds no undo entry of its own. RGB only."
         ),
         response=UnrealCaptureCameraResponse,
         read_only=False,

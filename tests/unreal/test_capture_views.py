@@ -19,6 +19,7 @@ captures green, so a test can tell which view an image came from.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -26,11 +27,12 @@ import math
 import os
 import re
 import sys
+import time
 import traceback
 from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from types import ModuleType, SimpleNamespace
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Tuple
 
 import pytest
 from aiohttp import web
@@ -57,6 +59,7 @@ from simul.mcp.schemas.unreal import (
 from simul.mcp.server import SimulMCPServer
 
 PYTHON_LIBRARY = "/Script/PythonScriptPlugin.Default__PythonScriptLibrary"
+CAPTURE_LOCK_MODULE = "_simul_capture_lock"
 SYSTEM_LIBRARY = "/Script/Engine.Default__KismetSystemLibrary"
 EDITOR_SUBSYSTEM = "/Script/UnrealEd.Default__UnrealEditorSubsystem"
 WORLD = "/Game/Maps/Lab.Lab"
@@ -241,6 +244,15 @@ class Editor:
         self.pending: Optional[Tuple[str, Tuple[int, int]]] = None
         # Called as an editor HighResShot fires, after the capture's directory listing.
         self.before_editor_shot: Optional[Any] = None
+        # HighResShot's one set of settings (the last command), and a game shot waiting for a frame.
+        self.shot_settings = ""
+        self.game_shot_pending = False
+        # Hold the first capture's listing until another request arrives, so two captures overlap.
+        self.overlap_captures = False
+        self.listing_held = False
+        # Open transactions, outermost first, each with the changes recorded in it, and the undo history.
+        self.open_transactions: List[Tuple[str, List[str]]] = []
+        self.undo_history: List[Tuple[str, List[str]]] = []
         self.camera = {"CameraLocation": {"X": -500.0, "Y": 0.0, "Z": 250.0},
                        "CameraRotation": {"Pitch": -15.0, "Yaw": 0.0, "Roll": 0.0}}
         self.actors: Dict[str, Actor] = {}
@@ -252,6 +264,38 @@ class Editor:
         )
 
     # -- actors -------------------------------------------------------------
+
+    # -- transactions, as UE 5.7's transaction buffer keeps them ----------------
+
+    def begin_transaction(self, description: str) -> int:
+        """Open a transaction; the index is how many were open (0: none)."""
+        index = len(self.open_transactions)
+        self.open_transactions.append((description, []))
+        self.events.append(f"begin {index}")
+        return index
+
+    def end_transaction(self) -> int:
+        """Close the innermost transaction; the outermost one closing goes into the undo history."""
+        description, records = self.open_transactions.pop()
+        if self.open_transactions:
+            self.open_transactions[-1][1].extend(records)
+        else:
+            self.undo_history.append((description, records))
+        self.events.append("end")
+        return len(self.open_transactions)
+
+    def cancel_transaction(self, index: int) -> None:
+        """Cancel from ``index``: UE 5.7 cancels a nested one partially not at all, but every open
+        transaction, the outer user edit with it ("Canceling transaction partially is unsupported")."""
+        self.open_transactions.clear()
+        self.events.append(f"cancel {index}")
+
+    def record(self, change: str) -> None:
+        """An editor change: into the open transaction, or an undo entry of its own."""
+        if self.open_transactions:
+            self.open_transactions[-1][1].append(change)
+        else:
+            self.undo_history.append((change, [change]))
 
     def add_actor(self, actor: Actor) -> Actor:
         self.actors[actor.path] = actor
@@ -295,24 +339,40 @@ class Editor:
         write_png(path, size, color, noise=self.noise)
 
     def editor_console_command(self, command: str) -> None:
-        """Remote Control's ExecuteConsoleCommand: every drawing level viewport pane takes the shot."""
+        """Remote Control's ExecuteConsoleCommand: every drawing level viewport pane takes the shot.
+
+        HighResShot keeps one set of settings for the editor, so the frame that
+        draws these panes also draws a game shot still pending, with the
+        settings this command just set (UE 5.7.4).
+        """
         self.commands.append(("editor", command))
         if self.before_editor_shot is not None:
             self.before_editor_shot()
+        self.shot_settings = command
+        self.draw_game_shot()
         for _ in range(self.panes_drawing):
             self.high_res_shot(command, EDITOR_BLUE, VIEWPORT_SIZE)
 
     def execute_console_command(self, world: Any, command: str) -> None:
         """SystemLibrary.execute_console_command: in the game world, to its game viewport.
 
-        During Simulate the shot is left pending, as the level viewport showing
-        the simulation wrote it late or not at all on UE 5.7.4.
+        In a Play session the game viewport takes the shot at its next frame,
+        with whatever HighResShot settings are then current. During Simulate
+        it is left pending, as the level viewport showing the simulation wrote
+        it late or not at all on UE 5.7.4.
         """
         self.commands.append(("game" if world is self.game_world else "other", command))
         if world is self.game_world and self.pie == "play":
-            self.high_res_shot(command, GAME_RED, GAME_VIEWPORT_SIZE)
+            self.shot_settings = command
+            self.game_shot_pending = True
         elif world is self.game_world and self.pie == "simulate":
             self.pending = self.shot_target(command, GAME_VIEWPORT_SIZE)
+
+    def draw_game_shot(self) -> None:
+        """A frame: the game viewport takes a pending shot with the current settings."""
+        if self.game_shot_pending:
+            self.game_shot_pending = False
+            self.high_res_shot(self.shot_settings, GAME_RED, GAME_VIEWPORT_SIZE)
 
     def flush_pending(self) -> Optional[str]:
         """The level viewport finally draws a pending Simulate shot."""
@@ -343,20 +403,23 @@ class Editor:
             actor = SceneCapture2D(editor, WORLD, location, rotation)
             editor.spawned.append(actor)
             editor.events.append("spawn")
+            editor.record("Add Actor " + actor.get_name())
             return actor
 
         def destroy_actor(actor: Any) -> bool:
             editor.destroyed.append(actor)
             editor.events.append("destroy")
+            editor.record("Delete Actors " + actor.get_name())
             return True
 
         def begin_transaction(context: str, description: str, primary: Any) -> int:
-            editor.events.append("begin")
-            return 7
+            return editor.begin_transaction(str(description))
+
+        def end_transaction() -> int:
+            return editor.end_transaction()
 
         def cancel_transaction(index: int) -> None:
-            assert index == 7, "cancelled with the index begin_transaction returned"
-            editor.events.append("cancel")
+            editor.cancel_transaction(index)
 
         def release_render_target2d(target: RenderTarget) -> None:
             editor.released.append(target)
@@ -442,6 +505,7 @@ class Editor:
                 execute_console_command=editor.execute_console_command,
                 is_valid=lambda obj: obj is not None,
                 begin_transaction=begin_transaction,
+                end_transaction=end_transaction,
                 cancel_transaction=cancel_transaction,
             ),
             Paths=SimpleNamespace(
@@ -460,7 +524,9 @@ class Editor:
         )
 
     def run_python(self, code: str) -> Dict[str, Any]:
-        """``ExecutePythonCommandEx`` in ExecuteFile mode."""
+        """``ExecutePythonCommandEx`` in ExecuteFile mode; a capture's poll comes a frame later."""
+        if "size_wanted" in code:
+            self.draw_game_shot()
         output = io.StringIO()
         try:
             with redirect_stdout(output):
@@ -475,25 +541,40 @@ class Editor:
 
 
 @pytest.fixture
-def editor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Editor:
+def editor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Editor]:
     level = Editor(tmp_path)
     monkeypatch.setitem(sys.modules, "unreal", level.module())
     # The poll interval and the game view's wait, shortened for the suite.
     monkeypatch.setattr(unreal_runtime, "_CAPTURE_POLL_SECONDS", 0.01)
     monkeypatch.setattr(unreal_runtime, "_GAME_VIEW_WAIT_SECONDS", 0.2)
-    return level
+    # The editor's capture lock lives in sys.modules, which the fake shares with the suite.
+    sys.modules.pop(CAPTURE_LOCK_MODULE, None)
+    yield level
+    sys.modules.pop(CAPTURE_LOCK_MODULE, None)
 
 
 @asynccontextmanager
 async def remote_control(editor: Editor) -> AsyncIterator[Settings]:
     """Serve Remote Control for ``editor``."""
 
+    editor.other_request = asyncio.Event()
+
     async def handler(request: web.Request) -> web.Response:
         body = await request.json()
         target, function = body.get("objectPath"), body.get("functionName")
         parameters = body.get("parameters", {})
         if target == PYTHON_LIBRARY and function == "ExecutePythonCommandEx":
-            return web.json_response(editor.run_python(parameters["PythonCommand"]))
+            code = parameters["PythonCommand"]
+            if editor.listing_held:
+                editor.other_request.set()
+            reply = editor.run_python(code)
+            if editor.overlap_captures and "'existing': numbered_shots()" in code and not editor.listing_held:
+                editor.listing_held = True
+                try:
+                    await asyncio.wait_for(editor.other_request.wait(), 1.0)
+                except asyncio.TimeoutError:
+                    pass
+            return web.json_response(reply)
         if target == SYSTEM_LIBRARY and function == "ExecuteConsoleCommand":
             editor.editor_console_command(parameters["Command"])
             return web.json_response({})
@@ -648,6 +729,78 @@ async def test_several_drawing_panes_are_warned_of(editor: Editor) -> None:
     assert "3 level viewport panes drew this HighResShot" in result["warnings"][0]
 
 
+async def overlapping(settings: Settings, first: Dict[str, Any], second: Dict[str, Any]) -> List[Any]:
+    """Two captures at once, from two MCP servers (two agents)."""
+    return list(
+        await asyncio.gather(
+            call_tool(settings, "capture_unreal_viewport", first),
+            call_tool(settings, "capture_unreal_viewport", second),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_game_and_an_editor_capture_at_once_each_get_their_own_view(editor: Editor) -> None:
+    """Overlapping, the editor's HighResShot took the pending game shot in the same
+    frame: the editor capture returned the game image with a false two-pane warning,
+    and the game capture failed blaming Simulate during Play (UE 5.7.4)."""
+    editor.pie = "play"
+    editor.overlap_captures = True
+    async with remote_control(editor) as settings:
+        (game, game_images), (other, other_images) = await overlapping(
+            settings,
+            {"resolution_x": 64, "resolution_y": 36, "inline": True, "view": "game"},
+            {"resolution_x": 64, "resolution_y": 36, "inline": True, "view": "editor"},
+        )
+    assert editor.listing_held, "the two captures overlapped"
+    assert (game["success"], game["view"]) == (True, "game"), game
+    assert near(color_of(game_images[0]), GAME_RED)
+    assert (other["success"], other["view"]) == (True, "editor"), other
+    assert near(color_of(other_images[0]), EDITOR_BLUE)
+    assert not any("panes drew" in warning for warning in game["warnings"] + other["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_two_editor_captures_of_one_size_at_once_each_get_their_own_file(editor: Editor) -> None:
+    """Both took the newest file, with a false two-pane warning, and the other was orphaned."""
+    editor.overlap_captures = True
+    request = {"resolution_x": 64, "resolution_y": 36, "view": "editor"}
+    async with remote_control(editor) as settings:
+        (first, _), (second, _) = await overlapping(settings, request, request)
+    assert editor.listing_held, "the two captures overlapped"
+    assert first["success"] and second["success"]
+    assert first["path"] != second["path"]
+    assert not any("panes drew" in warning for warning in first["warnings"] + second["warnings"])
+    # The lock is free again.
+    assert sys.modules[CAPTURE_LOCK_MODULE].owner is None
+
+
+@pytest.mark.asyncio
+async def test_a_capture_waits_for_the_lock_and_gives_up_as_busy(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(unreal_runtime, "_CAPTURE_LOCK_WAIT_SECONDS", 0.3)
+    lock = ModuleType(CAPTURE_LOCK_MODULE)
+    lock.owner, lock.expires = "another-capture", time.time() + 60  # type: ignore[attr-defined]
+    sys.modules[CAPTURE_LOCK_MODULE] = lock
+    async with remote_control(editor) as settings:
+        busy, _ = await call_tool(settings, "capture_unreal_viewport", {"resolution_x": 64, "resolution_y": 36})
+        # A lock its holder stopped renewing lapses.
+        lock.expires = time.time() - 1  # type: ignore[attr-defined]
+        taken, _ = await call_tool(settings, "capture_unreal_viewport", {"resolution_x": 64, "resolution_y": 36})
+    assert (busy["success"], busy["error_type"]) == (False, "InstanceBusy")
+    assert editor.commands[0] == ("editor", "HighResShot 64x36") and len(editor.commands) == 1
+    assert taken["success"] is True and lock.owner is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_capture_releases_the_lock(editor: Editor) -> None:
+    async with remote_control(editor) as settings:
+        refused, _ = await call_tool(settings, "capture_unreal_viewport", {"view": "game"})
+    assert refused["error_type"] == "InvalidState"
+    assert sys.modules[CAPTURE_LOCK_MODULE].owner is None
+
+
 # ---------------------------------------------------------------------------
 # capture_unreal_viewport: JPEG and scaled inline copies
 # ---------------------------------------------------------------------------
@@ -781,9 +934,49 @@ async def test_a_camera_actor_is_captured_through_a_transient_scene_capture(edit
     # The capture actor was transient and is gone, inside a transaction that was cancelled,
     # so Undo cannot bring it back; its render target was detached and released.
     assert editor.destroyed == editor.spawned and len(editor.spawned) == 1
-    assert editor.events == ["begin", "spawn", "capture", "release", "destroy", "cancel"]
+    assert editor.events == ["begin 0", "spawn", "capture", "release", "destroy", "cancel 0"]
+    assert (editor.open_transactions, editor.undo_history) == ([], [])
     assert capture.properties["texture_target"] is None and len(editor.released) == 1
     assert Path(payload["path"]).name.startswith("SimulCamera_Camera_")
+
+
+@pytest.mark.asyncio
+async def test_a_capture_during_an_open_user_edit_folds_into_it_instead_of_cancelling_it(editor: Editor) -> None:
+    """Cancelling the capture's nested transaction cancelled the user's edit too
+    (UE 5.7.4: a drag in the viewport or on a Details slider keeps one open)."""
+    cameras = editor.place_cameras()
+    assert editor.begin_transaction("user edit: raise cone") == 0
+    editor.record("Move Cone")
+    async with remote_control(editor) as settings:
+        payload, _ = await call_tool(
+            settings, "capture_unreal_camera", {"actor_path": cameras["Camera"].path, "resolution_x": 32}
+        )
+    assert payload["success"] is True, payload
+    assert editor.events == ["begin 0", "begin 1", "spawn", "capture", "release", "destroy", "end"]
+    # The user's edit is still open, with the capture's spawn and removal folded into it.
+    (description, records), = editor.open_transactions
+    assert description == "user edit: raise cone"
+    assert records == ["Move Cone", "Add Actor SceneCapture2D_99", "Delete Actors SceneCapture2D_99"]
+    editor.end_transaction()
+    assert [entry for entry, _ in editor.undo_history] == ["user edit: raise cone"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_capture_still_removes_its_actor_and_closes_its_transaction(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cameras = editor.place_cameras()
+
+    def fail_release(target: RenderTarget) -> None:
+        raise RuntimeError("release failed")
+
+    module = sys.modules["unreal"]
+    monkeypatch.setattr(module.RenderingLibrary, "release_render_target2d", fail_release)
+    async with remote_control(editor) as settings:
+        payload, _ = await call_tool(settings, "capture_unreal_camera", {"actor_path": cameras["Camera"].path})
+    assert payload["success"] is False and "release failed" in payload["error"]
+    assert editor.destroyed == editor.spawned and len(editor.spawned) == 1
+    assert editor.events[-2:] == ["destroy", "cancel 0"] and editor.open_transactions == []
 
 
 @pytest.mark.asyncio
@@ -877,6 +1070,20 @@ async def test_during_pie_the_same_name_in_two_cells_is_told_apart_by_guid(edito
     async with remote_control(editor) as settings:
         payload, _ = await call_tool(settings, "capture_unreal_camera", {"actor_path": cameras["Camera"].path})
     assert payload["captured_actor"] == "/Memory/UEDPIE_0_Lab_B.Lab:PersistentLevel.Camera"
+
+
+@pytest.mark.asyncio
+async def test_during_pie_a_game_actor_that_only_took_the_name_is_not_the_counterpart(editor: Editor) -> None:
+    """PIE copies keep the editor actor's GUID (UE 5.7.4); a game actor with the same
+    name and another GUID is a different actor, so the capture is refused."""
+    cameras = editor.place_cameras()
+    other = editor.add_actor(Actor(PIE_WORLD + ":PersistentLevel.Camera", "Camera", editor.game_world, guid="OTHER"))
+    other.components.append(CameraComponent(other, Vector(0, 0, 0), Rotator()))
+    editor.pie = "play"
+    async with remote_control(editor) as settings:
+        payload, _ = await call_tool(settings, "capture_unreal_camera", {"actor_path": cameras["Camera"].path})
+    assert payload["error_type"] == "PIEActive" and "no counterpart" in payload["error"]
+    assert editor.spawned == []
 
 
 @pytest.mark.asyncio

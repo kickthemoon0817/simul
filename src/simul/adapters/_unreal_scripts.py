@@ -1066,6 +1066,23 @@ def in_function(body: str) -> str:
     return "def _simul_run():\n" + textwrap.indent(body.strip("\n"), "    ") + "\n\n_simul_run()\n"
 
 
+# capture_lock(): the one HighResShot lock of the editor, a module in the
+# editor's sys.modules, which outlives every script's namespace. ``owner`` is
+# the token of the capture holding it, or None, and ``expires`` the time.time()
+# it lapses at unless its owner renews it. The editor runs one script at a time
+# on its game thread, so a script tests and takes it in one step.
+CAPTURE_LOCK_HELPERS = """
+import sys, time, types
+
+def capture_lock():
+    lock = sys.modules.get("_simul_capture_lock")
+    if lock is None:
+        lock = types.ModuleType("_simul_capture_lock")
+        lock.owner, lock.expires = None, 0.0
+        sys.modules["_simul_capture_lock"] = lock
+    return lock
+"""
+
 #: Most child actor paths a listing entry names; its ``child_count`` counts
 #: them all, and ``get_unreal_actor_info`` names more.
 LISTED_CHILDREN = 20
@@ -1393,7 +1410,7 @@ print(json.dumps({"actor_path": actor.get_path_name(), "components": entries, "c
 # Scene digest in one round trip. Class keys are UClass path names
 # (``/Script/Engine.StaticMeshActor``), the same strings Remote Control's
 # ``/remote/object/describe`` reports as ``Class``.
-SCENE_SUMMARY = EDITOR_WORLD + WORLD_PARTITION_HELPERS + """
+SCENE_SUMMARY = EDITOR_WORLD + WORLD_PARTITION_HELPERS + in_function("""
 world = editor_world()
 counts = {}
 total = 0
@@ -1408,7 +1425,7 @@ print(json.dumps({
     "pie_active": pie_active(),
     **world_partition_state(),
 }))
-"""
+""")
 
 # Expects ``args`` = {"parent", "name", "folder"}. EditorAssetLibrary loads the
 # parent, checks the destination and saves the instance, and while PIE runs it
@@ -2487,19 +2504,29 @@ print(json.dumps(change()))
 #
 # Outside PIE the capture is spawned in the editor world through
 # EditorActorSubsystem as a transient actor, which no listing shows, and
-# destroyed afterwards, all inside one transaction that is cancelled: spawning
-# and destroying are each an undoable editor transaction, and without the
-# cancel one Undo brought the capture actor back and the undo buffer kept its
-# component and render target alive until the map changed (UE 5.7.4: five
-# 3840x2160 captures held 158 MB). The render target is detached and released
-# once the image is written, in every world.
+# destroyed afterwards, all inside one transaction: spawning and destroying are
+# each an undoable editor transaction, and on their own one Undo brought the
+# capture actor back and the undo buffer kept its component and render target
+# alive until the map changed (UE 5.7.4: five 3840x2160 captures held 158 MB).
+# When no transaction was open (begin_transaction returned 0) it is cancelled,
+# leaving nothing in the undo history. When one was (an edit the user is
+# making, such as a drag in the viewport or on a Details slider, which keeps a
+# transaction open across frames), cancelling ours would cancel theirs with it
+# (UE 5.7.4 logs "Canceling transaction partially is unsupported" and drops the
+# whole edit), so ours is ended instead and the spawn and removal fold into
+# theirs, where undoing it undoes the user's edit and leaves no capture actor.
+# The render target is detached and released once the image is written, in
+# every world, and each step of the clean-up runs even if the one before it
+# raised.
 #
 # While PIE runs, a path of the running game's actor (as PIE names it) is
 # captured as given; an editor actor's counterpart in the game world is the
 # game actor with its object name, of its class, which also finds an actor
 # World Partition streamed into a cell level of its own
-# (/Memory/UEDPIE_0_<map>_<cell>.<map>:PersistentLevel.<name>), with the same
-# actor GUID when several share the name. The capture is spawned in the game
+# (/Memory/UEDPIE_0_<map>_<cell>.<map>:PersistentLevel.<name>), and with its
+# actor GUID when both have one (PIE copies keep it, observed on UE 5.7.4), so
+# a game actor that merely took the name is not taken; a name that is not
+# unique and that no GUID settles finds nothing. The capture is spawned in the game
 # world (GameplayStatics' deferred spawn, which Unreal's Python reaches only
 # through call_method) and destroyed; an editor actor without a counterpart
 # (not streamed in, or destroyed by the game) is refused, as the editor
@@ -2534,18 +2561,18 @@ def lens_of(actor):
 
 def guid_of(actor):
     try:
-        return actor.get_editor_property("actor_guid").to_string()
+        text = actor.get_editor_property("actor_guid").to_string()
     except Exception:
         return None
+    return text if text.strip("0") else None
 
 def counterpart(actor, game):
-    name = actor.get_name()
+    name, guid = actor.get_name(), guid_of(actor)
     found = [candidate for candidate in unreal.GameplayStatics.get_all_actors_of_class(game, actor.get_class())
              if candidate.get_name() == name]
-    if len(found) > 1:
-        guid = guid_of(actor)
-        found = [candidate for candidate in found if guid is not None and guid_of(candidate) == guid] or found
-    return found[0] if found else None
+    if guid is not None:
+        found = [candidate for candidate in found if guid_of(candidate) in (guid, None)]
+    return found[0] if len(found) == 1 else None
 
 def no_camera(source):
     return {"success": False, "error_type": "ValidationError",
@@ -2587,6 +2614,12 @@ def release(capture_component, target_texture):
     if target_texture is not None:
         unreal.RenderingLibrary.release_render_target2d(target_texture)
 
+def close_transaction(index):
+    if index == 0:
+        unreal.SystemLibrary.cancel_transaction(index)
+    else:
+        unreal.SystemLibrary.end_transaction()
+
 def capture_in_editor(world, target, lens, location, rotation, label):
     actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     transaction = unreal.SystemLibrary.begin_transaction("simul", "simul: capture camera", None)
@@ -2602,10 +2635,14 @@ def capture_in_editor(world, target, lens, location, rotation, label):
         configure(capture_component, lens, target, target_texture)
         return write_image(capture_component, target_texture, label)
     finally:
-        release(capture_component, target_texture)
-        if spawned is not None:
-            actors.destroy_actor(spawned)
-        unreal.SystemLibrary.cancel_transaction(transaction)
+        try:
+            release(capture_component, target_texture)
+        finally:
+            try:
+                if spawned is not None:
+                    actors.destroy_actor(spawned)
+            finally:
+                close_transaction(transaction)
 
 def capture_in_game(world, target, lens, location, rotation, label):
     transform = unreal.Transform(location=location, rotation=rotation, scale=unreal.Vector(1.0, 1.0, 1.0))
@@ -2624,8 +2661,10 @@ def capture_in_game(world, target, lens, location, rotation, label):
         statics.call_method("FinishSpawningActor", (spawned, transform))
         return write_image(capture_component, target_texture, label)
     finally:
-        release(capture_component, target_texture)
-        spawned.destroy_actor()
+        try:
+            release(capture_component, target_texture)
+        finally:
+            spawned.destroy_actor()
 
 def capture():
     pie = pie_active()

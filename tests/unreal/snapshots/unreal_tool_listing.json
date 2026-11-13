@@ -712,7 +712,7 @@
   {
    "name": "capture_unreal_camera",
    "title": "Capture Unreal Camera",
-   "description": "Render what a camera or sensor actor sees (CameraActor, CineCameraActor, SceneCapture2D, or an actor with a CameraComponent or SceneCaptureComponent2D) through a transient scene capture with its field of view and post-process settings, and return the image path, the camera pose and the image's pinhole intrinsics. During Play In Editor the running game's counterpart is captured, or a game actor named by its PIE path. Leaves no undo entry. RGB only.",
+   "description": "Render what a camera or sensor actor sees (CameraActor, CineCameraActor, SceneCapture2D, or an actor with a CameraComponent or SceneCaptureComponent2D) through a transient scene capture with its field of view and post-process settings, and return the image path, the camera pose and the image's pinhole intrinsics. During Play In Editor the running game's counterpart is captured, or a game actor named by its PIE path. Adds no undo entry of its own. RGB only.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,

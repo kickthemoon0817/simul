@@ -52,6 +52,7 @@ from ._unreal_scripts import (
     ADD_COMPONENT,
     ASSIGN_MATERIAL,
     CAMERA_CAPTURE,
+    CAPTURE_LOCK_HELPERS,
     CREATE_MATERIAL_INSTANCE,
     DELETE_ACTOR,
     EDITOR_WORLD,
@@ -208,6 +209,12 @@ _CAPTURE_CHUNK_BYTES = 2 * 1024 * 1024
 #: 2 ms an actor on UE 5.7.4, so some 20 s, within the import and export
 #: timeout the call waits.
 WORLD_PARTITION_MAX_ACTORS = 10_000
+
+#: Seconds a capture's hold on the editor's HighResShot lasts unless renewed;
+#: every poll renews it, so only a capture that stopped polling lets it lapse.
+_CAPTURE_LOCK_SECONDS = 20.0
+#: Seconds a capture waits for another capture's lock before InstanceBusy.
+_CAPTURE_LOCK_WAIT_SECONDS = 45.0
 
 # Largest capture file read to the server to scale an inline copy.
 _SCALED_INLINE_SOURCE_LIMIT = 64 * 1024 * 1024
@@ -2492,6 +2499,41 @@ class UnrealRuntimeSession(LoggerMixin):
         jpeg_quality: Optional[int] = None,
         inline_limit: int = 0,
     ) -> Dict[str, Any]:
+        """Take a HighResShot under the editor's capture lock (``_take_high_res_shot``).
+
+        HighResShot keeps one set of settings for the whole editor (size and
+        file name, FHighResScreenshotConfig) and every viewport that draws
+        takes the next shot with whatever they are then, so two captures that
+        overlap, from two clients, take each other's shots: an editor shot
+        replaced a pending game shot in the same frame, and two editor shots
+        of one size each took the newest file (UE 5.7.4). Each capture
+        therefore holds a lock kept in the editor's ``sys.modules``
+        (``_unreal_scripts.CAPTURE_LOCK_HELPERS``) from before its trigger
+        until it has its file, and releases it however the capture ends. A
+        lock its holder stops renewing expires after ``_CAPTURE_LOCK_SECONDS``.
+        """
+        token = uuid.uuid4().hex[:16]
+        try:
+            return await self._take_high_res_shot(token, resolution, view, jpeg_quality, inline_limit)
+        finally:
+            try:
+                await self._execute_python(CAPTURE_LOCK_HELPERS + in_function(f"""
+lock = capture_lock()
+if lock.owner == {token!r}:
+    lock.owner, lock.expires = None, 0.0
+"""))
+            except Exception as exc:
+                # It expires on its own; the capture's own result stands.
+                self.logger.debug("Could not release the capture lock: %s", exc)
+
+    async def _take_high_res_shot(
+        self,
+        token: str,
+        resolution: Optional[Tuple[int, int]],
+        view: str,
+        jpeg_quality: Optional[int] = None,
+        inline_limit: int = 0,
+    ) -> Dict[str, Any]:
         """Take a HighResShot and wait for the file it writes.
 
         ``view`` "editor" sends ``HighResShot`` through Remote Control's
@@ -2519,7 +2561,12 @@ class UnrealRuntimeSession(LoggerMixin):
         the newest, with ``others`` counting the rest. A PNG is complete once
         its IEND chunk is on disk.
 
+        The first script takes the capture lock for ``token``, waiting up to
+        ``_CAPTURE_LOCK_WAIT_SECONDS`` while another capture holds it (then an
+        InstanceBusy envelope), and every poll renews it.
+
         Args:
+            token: This capture's lock owner and game shot name.
             resolution: (width, height); None takes the viewport's own size
                 (``HighResShot 1``).
             view: "auto", "editor" or "game".
@@ -2533,15 +2580,14 @@ class UnrealRuntimeSession(LoggerMixin):
             ``path``, ``size_bytes``, ``others``, ``written`` (every new file
             of this shot), ``view``, ``fell_back``, ``pie_active``,
             ``player``, and ``image_base64`` or ``inline_skipped``; or a
-            CaptureError or InvalidState envelope.
+            CaptureError, InstanceBusy or InvalidState envelope.
         """
         marker = "@@SIMUL_SCREENSHOT@@"
         size_argument = f"{resolution[0]}x{resolution[1]}" if resolution is not None else "1"
-        token = uuid.uuid4().hex[:16]
         tagged = f"SimulShot_{token}"
         editor_command = f"HighResShot {size_argument}"
         game_command = f"HighResShot {size_argument} filename={tagged}"
-        prelude = f"""
+        prelude = CAPTURE_LOCK_HELPERS + f"""
 import os, base64, json, struct, unreal
 SUBDIRS = {_SCREENSHOT_SUBDIRS!r}
 
@@ -2560,6 +2606,12 @@ def numbered_shots():
     return found
 """
         snapshot_code = prelude + in_function(f"""
+lock = capture_lock()
+now = time.time()
+if lock.owner not in (None, {token!r}) and now < lock.expires:
+    print({marker!r} + json.dumps({{'busy': True}}))
+    return
+lock.owner, lock.expires = {token!r}, now + {_CAPTURE_LOCK_SECONDS!r}
 level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
 pie = bool(level.is_in_play_in_editor())
 game = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world() if pie else None
@@ -2574,12 +2626,26 @@ if view == 'game' and player:
     unreal.SystemLibrary.execute_console_command(game, {game_command!r})
 print({marker!r} + json.dumps(payload))
 """)
-        try:
-            snapshot = self._parse_marker_json(
-                await self._execute_python(snapshot_code, mode="ExecuteFile"), marker
-            )
-        except Exception as exc:
-            snapshot = {"error": str(exc)}
+        deadline = asyncio.get_event_loop().time() + _CAPTURE_LOCK_WAIT_SECONDS
+        while True:
+            try:
+                snapshot = self._parse_marker_json(
+                    await self._execute_python(snapshot_code, mode="ExecuteFile"), marker
+                )
+            except Exception as exc:
+                snapshot = {"error": str(exc)}
+            if not snapshot.get("busy"):
+                break
+            if asyncio.get_event_loop().time() >= deadline:
+                return {
+                    "success": False,
+                    "error_type": "InstanceBusy",
+                    "error": (
+                        f"Another capture kept the editor's screenshot busy for {_CAPTURE_LOCK_WAIT_SECONDS:g} s; "
+                        "retry shortly"
+                    ),
+                }
+            await asyncio.sleep(_CAPTURE_POLL_SECONDS)
         if "existing" not in snapshot:
             return {
                 "success": False,
@@ -2615,6 +2681,9 @@ print({marker!r} + json.dumps(payload))
 
         def read_code(game_shot: bool) -> str:
             return prelude + EDITOR_WORLD + in_function(f"""
+lock = capture_lock()
+if lock.owner == {token!r}:
+    lock.expires = time.time() + {_CAPTURE_LOCK_SECONDS!r}
 size_wanted = {list(resolution) if resolution is not None else None!r}
 quality = {jpeg_quality!r}
 inline_limit = {inline_limit!r}
@@ -2970,11 +3039,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         mapped) and writes the image into the editor's screenshot directory.
         The actor itself is hidden from the capture; the source's show-only
         and hidden actor lists and show flags are not copied. Outside PIE the
-        capture actor's spawn and removal run in a cancelled transaction, so
-        nothing lands in the undo history, and its render target is released.
-        During Play In Editor the actor's counterpart in the running game
-        (the game actor of the same name and class, also in a World
-        Partition cell) is captured, or the game's actor itself when
+        capture actor's spawn and removal run in one transaction, cancelled
+        when no other was open (nothing lands in the undo history) and folded
+        into the user's edit when one was (cancelling it would drop that
+        edit), and its render target is released. During Play In Editor the
+        actor's counterpart in the running game (the game actor of the same
+        name, class and actor GUID, also in a World Partition cell) is
+        captured, or the game's actor itself when
         ``actor_path`` names one. The capture has the field of view across
         its width, so ``intrinsics`` is the pinhole model of this image
         (square pixels, principal point at the center).
