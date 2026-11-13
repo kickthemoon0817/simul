@@ -22,6 +22,7 @@ from PIL import Image
 
 from simul.adapters import unreal_runtime
 from simul.adapters._unreal_errors import UnrealValidationError
+from simul.adapters._unreal_python import unwrap
 from simul.adapters._unreal_scripts import SCENE_SUMMARY
 from simul.adapters.unreal_connection import discover_instances
 from simul.adapters.unreal_runtime import THUMBNAIL_ASSET, UnrealRuntimeSession
@@ -629,7 +630,7 @@ async def test_list_actors_defaults_to_max_actors() -> None:
     scripts: List[str] = []
 
     async def handler(request: web.Request) -> web.Response:
-        scripts.append((await request.json())["parameters"]["PythonCommand"])
+        scripts.append(unwrap(await request.json())["parameters"]["PythonCommand"])
         printed = {"actors": [], "count": 0, "truncated": False, "pie_active": False}
         return web.json_response(
             {

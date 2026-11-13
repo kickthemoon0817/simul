@@ -792,6 +792,8 @@ def matches(wanted, got):
             return _close(wanted, got)
         return None
     if isinstance(wanted, str):
+        if got is None:
+            return False  # an object reference that loads nothing reads back as None
         if _OBJECT and isinstance(got, _OBJECT):
             return _same_text(wanted, got.get_path_name())
         if isinstance(got, str) or (_NAMES and isinstance(got, _NAMES)):
@@ -3907,8 +3909,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                     "success": False,
                     "error": (
                         f"Unreal holds {json.dumps(held['value'])} for {name}, not {json.dumps(value)}, and the "
-                        "editor's Python cannot read the property to put the previous value back: check it, or "
-                        "undo the write"
+                        "editor could not read or compare the property, so the previous value was not put back: "
+                        "check it, or undo the write"
                     ),
                     "error_type": "PropertyNotApplied",
                     "details": {"expected": value, "actual": held["value"]},

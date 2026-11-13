@@ -119,6 +119,8 @@ class Obj:
     def get_editor_property(self, name: str) -> Any:
         if name not in self.props or self.meta.get(name, {}).get("python_hidden"):
             raise Exception(f"Failed to find property '{name}'")
+        if self.meta.get(name, {}).get("object") and self.props[name] == "":
+            return None  # Remote Control reads a null object as "", Python as None
         return self.props[name]  # the property itself, as UE returns a container
 
     def modify(self, always_mark_dirty: bool = True) -> bool:
