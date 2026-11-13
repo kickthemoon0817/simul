@@ -1408,6 +1408,15 @@ Behaviour worth knowing:
   captures, saves, exports, playback and editor-only `control_blender_ui`
   actions record no step. Details:
   [blender-attachment.md](blender-attachment.md#undo-and-unsaved-changes).
+- In attached mode calls sent together wait their turn on Blender's main thread
+  instead of failing. When one gets no answer, its error (`TimeoutError` or
+  `ConnectionError`) says in `details.executed` whether it ran: `false` is safe
+  to retry. A bridge holding 64 MiB of requests refuses another with
+  `InstanceBusy` (`details.code: "bridge_busy"`) before reading it, and Simul
+  retries that while its timeout allows. A script past its own timeout reports `timed_out: true`, as in
+  embedded mode. Requests up to 32 MiB of JSON are read however long they take
+  to arrive. Details:
+  [blender-attachment.md](blender-attachment.md#concurrent-calls-timeouts-and-large-requests).
 - `open_blender_file` refuses with `UnsavedChangesError` while the open file has
   unsaved changes; save them with `save_blender_file`, or pass
   `discard_unsaved: true`. Headless (embedded) Blender does not track unsaved
@@ -2238,11 +2247,29 @@ Behaviour worth knowing:
   the pose is the simulation's result for the frame, and `warning` explains
   when it is not. An add-on built before this report answers without these
   fields, and the server returns them as `null`.
-- `search_blender_objects` refuses a `name_pattern` that repeats a group holding
-  a quantifier or alternatives, such as `(\w+)+`: Python's regex search
-  backtracks, and on a long object name such a pattern runs for hours on
-  Blender's main thread. `get_unreal_actor_by_semantic_label` refuses the same
-  patterns in regex mode.
+- `search_blender_objects` searches a `name_pattern` that Python's `re`
+  could backtrack on for long, such as `(\w+)+`, `.*.*.*x` or
+  `.*left.*front.*wheel.*joint`, with a Thompson-NFA simulation instead, whose
+  time grows linearly with the name, so Blender's main thread cannot freeze on
+  it. Which patterns `re` may search is bounded in `simul.utils.regex_guard`:
+  every quantifier, optional element and alternative is a choice, quantifiers
+  that can divide the same characters between them multiply each other's
+  choices (through quantifiers that can match nothing and optional groups too),
+  and an unanchored search adds one for where it starts. What a lookaround
+  holds is counted where the search reaches it, as if the pattern went on into
+  it there, since `re` matches it again on every arrival. The steps are counted
+  for a 255-character name, Blender 5's limit. A pattern that also needs a
+  back-reference, an atomic group, a possessive quantifier, a conditional or a
+  lookaround that itself backtracks for long (`(?=.*.*.*\d)`), which the
+  linear-time search lacks, is refused with `error_type: "ValidationError"`
+  and `details.code: "regex_backtracking"`. A pattern with more than 32
+  quantifiers in a row goes to the linear-time search without being bounded,
+  and one over 512 characters is refused with `details.code:
+  "pattern_too_long"`.
+  `get_unreal_actor_by_semantic_label` searches tags in the editor with `re`
+  and `re.IGNORECASE`, so in regex mode it refuses the patterns that bound does
+  not allow for a 1023-character tag under IGNORECASE (`.*.*x`, `A*a*x`,
+  `\w*(?=\w*\d)`), with the same error; contains mode takes any label.
 - `execute_blender_script` returns the first `max_output_chars` characters of
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a
@@ -2305,7 +2332,7 @@ script the bridge stopped at its timeout (`TimeoutError`).
 | `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
 | `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
 | `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a non-domain exception, a reply that does not parse or does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
-| `InstanceBusy` | The Isaac instance is serving another call | Retry shortly |
+| `InstanceBusy` | The Isaac instance is serving another call; a Blender instance is busy (`attach_blender_window`) or its bridge holds as many waiting requests as it takes (`bridge_busy`) | Retry shortly |
 | `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
 
 Domain types of the server:

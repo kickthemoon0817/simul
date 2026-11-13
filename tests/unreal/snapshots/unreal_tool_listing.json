@@ -2495,7 +2495,7 @@
      },
      "match_mode": {
       "default": "exact",
-      "description": "exact (a tag equals label), contains (a tag contains label) or regex (label is a Python regular expression searched for in each tag; a repeated group that holds a quantifier or alternatives, as in (\\w+)+, is refused because it can run for hours); every mode ignores case.",
+      "description": "exact (a tag equals label), contains (a tag contains label) or regex (label is a Python regular expression searched for in each tag, ignoring case; a pattern whose failing search can run for long on a 1023-character tag is refused, such as a repeated group that holds a quantifier or alternatives, as in (\\w+)+, or two quantifiers that can divide the same characters between them, as in .*.*x or A*a*x); every mode ignores case.",
       "enum": [
        "exact",
        "contains",
