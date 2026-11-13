@@ -312,16 +312,6 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "export_options": {"export_sublayers": True},
         "overwrite": True,
     },
-    "convert_to_simready": {
-        "usd_path": "/tmp/in.usd",
-        "output_path": "/tmp/out.usd",
-        "add_physics": False,
-        "add_collision": False,
-        "add_semantic_labels": False,
-        "target_up_axis": "Y",
-        "target_units": "centimeters",
-    },
-    "validate_simready_asset": {"usd_path": "/tmp/in.usd", "checks": "physics, ,scale"},
     "get_unreal_interchange_info": {},
     "batch_unreal_operations": {"operations": BATCH},
     "query_unreal_scene_graph": {

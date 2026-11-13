@@ -1581,7 +1581,7 @@ class UnrealListSimulationActorsResponse(BaseModel):
 
 
 # ----------------------------------------------------------------------
-# Phase 6: USD / SimReady Bridge
+# Phase 6: USD Bridge
 # ----------------------------------------------------------------------
 
 
@@ -1710,34 +1710,6 @@ class UnrealSaveAssetsResponse(BaseModel):
     )
     level_package: Optional[str] = Field(None, description="The level being edited")
     dry_run: bool = Field(False, description="Whether nothing was saved")
-
-
-class UnrealConvertToSimreadyResponse(BaseModel):
-    """Response after SimReady conversion."""
-
-    success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    output_path: str = Field(..., description="SimReady USD path")
-    conversions_applied: List[str] = Field(
-        ..., description="List of conversions applied"
-    )
-    warnings: List[str] = Field(default_factory=list, description="Conversion warnings")
-
-
-class UnrealValidateSimreadyResponse(BaseModel):
-    """Response after SimReady validation."""
-
-    success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    usd_path: str = Field(..., description="Validated USD path")
-    is_valid: bool = Field(..., description="Overall validation result")
-    checks: Dict[str, bool] = Field(..., description="Per-check pass/fail results")
-    errors: List[str] = Field(default_factory=list, description="Validation errors")
-    suggestions: List[str] = Field(default_factory=list, description="Fix suggestions")
 
 
 class UnrealGetInterchangeInfoResponse(BaseModel):
@@ -2370,8 +2342,6 @@ __all__ = [
     "UnrealSetPhysicsParamsResponse",
     "UnrealImportUsdResponse",
     "UnrealExportUsdResponse",
-    "UnrealConvertToSimreadyResponse",
-    "UnrealValidateSimreadyResponse",
     "UnrealGetInterchangeInfoResponse",
     "UnrealBatchOperationsResponse",
     "UnrealQuerySceneGraphResponse",

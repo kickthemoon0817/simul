@@ -157,7 +157,6 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "compute_unreal_mesh_uv": (DESTRUCTIVE, False, True),
     "control_unreal_simulation": (RW, False, True),
     "control_unreal_ui": (RW, False, True),
-    "convert_to_simready": (RO, True, True),  # always UnsupportedOperation: writes nothing
     "convert_unreal_mesh_format": (DESTRUCTIVE, False, True),
     "create_unreal_material_instance": (RW, False, True),
     "cut_unreal_mesh_plane": (DESTRUCTIVE, False, True),
@@ -210,7 +209,6 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "subdivide_unreal_mesh": (DESTRUCTIVE, False, True),
     "summarize_unreal_scene": (RO, True, True),
     "unreal_health_check": (RO, True, True),
-    "validate_simready_asset": (RO, True, True),
     "validate_unreal_mesh": (RO, True, True),
     # Blender (full surface)
     "add_blender_force_field": (RW, False, True),

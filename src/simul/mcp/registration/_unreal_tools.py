@@ -55,7 +55,6 @@ from ..schemas.unreal import (
     UnrealComputeMeshUvResponse,
     UnrealControlSimulationResponse,
     UnrealConvertMeshFormatResponse,
-    UnrealConvertToSimreadyResponse,
     UnrealCreateMaterialInstanceResponse,
     UnrealCutMeshPlaneResponse,
     UnrealDecomposeConvexHullResponse,
@@ -106,7 +105,6 @@ from ..schemas.unreal import (
     UnrealSpawnActorResponse,
     UnrealSubdivideMeshResponse,
     UnrealValidateMeshResponse,
-    UnrealValidateSimreadyResponse,
     UnrealViewportInfoResponse,
     Vector3,
 )
@@ -1940,7 +1938,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("offset", int, 0, description="Actors to skip: the previous page's next_offset."),
         ),
     ),
-    # -- USD and SimReady ----------------------------------------------------------
+    # -- USD ----------------------------------------------------------
     UnrealTool(
         name="import_unreal_usd",
         description=(
@@ -2030,41 +2028,6 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "exists. Every file written is listed in written_files."
                 ),
             ),
-        ),
-    ),
-    UnrealTool(
-        name="convert_to_simready",
-        description=(
-            "Unavailable in Unreal: every call returns UnsupportedOperation, reads and writes no file and "
-            "changes nothing; the parameters are ignored."
-        ),
-        response=UnrealConvertToSimreadyResponse,
-        read_only=True,
-        idempotent=True,
-        method="convert_to_simready",
-        params=(
-            ToolParam("usd_path", str, description="Ignored: source USD file; must be inside the sandbox."),
-            ToolParam("output_path", str, description="Ignored, nothing is written; must be inside the sandbox."),
-            ToolParam("add_physics", bool, True, description="Ignored."),
-            ToolParam("add_collision", bool, True, description="Ignored."),
-            ToolParam("add_semantic_labels", bool, True, description="Ignored."),
-            ToolParam("target_up_axis", str, "Z", description="Ignored."),
-            ToolParam("target_units", str, "meters", description="Ignored."),
-        ),
-    ),
-    UnrealTool(
-        name="validate_simready_asset",
-        description=(
-            "Unavailable in Unreal: every call returns UnsupportedOperation and reads no file (the parameters "
-            "are ignored)."
-        ),
-        response=UnrealValidateSimreadyResponse,
-        read_only=True,
-        idempotent=True,
-        method="validate_simready_asset",
-        params=(
-            ToolParam("usd_path", str, description="Ignored: USD file path; must be inside the sandbox."),
-            ToolParam("checks", str, "", description="Ignored.", convert=_name_list),
         ),
     ),
     UnrealTool(

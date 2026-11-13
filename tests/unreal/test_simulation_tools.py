@@ -864,6 +864,34 @@ def test_a_multi_part_actor_s_force_is_a_validation_error_not_a_traceback(
     assert parts["Part0"].pushes == []
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+def test_a_force_takes_the_editor_component_path_of_a_part(monkeypatch: pytest.MonkeyPatch, streamed: bool) -> None:
+    """Review of #359: during Simulate the copy's component paths carry UEDPIE_<n>_, so
+    the editor component's path, which every other physics tool takes, was refused.
+    It names the copy's part of the same name, also in a World Partition cell level."""
+    editor = Editor()
+    robot = editor.multi_part_actor("Robot")
+    for part in robot.components[2:]:
+        part.body["simulate_physics"] = True
+        part.body["enable_gravity"] = False
+    editor.start()
+    copy = editor.actors.pop(PIE_LEVEL + robot.name)
+    if streamed:
+        copy.level = "/Game/Maps/UEDPIE_0_Lab_MainGrid_L0_X0_Y0.Lab_MainGrid_L0_X0_Y0:PersistentLevel."
+    editor.actors[copy.get_path_name()] = copy
+    session = physics_session(monkeypatch, editor)
+    editor_part = robot.get_path_name() + ".Part1"
+
+    by_editor_path = run(session.apply_force(robot.get_path_name(), force_z=5, is_impulse=True,
+                                             component_name=editor_part))
+    by_simulation_path = run(session.apply_force(copy.get_path_name(), force_z=5, is_impulse=True,
+                                                 component_name=editor_part))
+
+    for result in (by_editor_path, by_simulation_path):
+        assert result.get("success", True) is True, result
+        assert result["component_path"] == copy.get_path_name() + ".Part1"
+
+
 def test_a_multi_part_actor_s_state_lists_each_component_s_body(monkeypatch: pytest.MonkeyPatch) -> None:
     """Round-2 audit R2B-03: every physics field read null for a multi-part actor,
     with nothing saying why."""

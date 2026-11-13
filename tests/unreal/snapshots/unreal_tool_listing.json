@@ -2604,107 +2604,6 @@
    }
   },
   {
-   "name": "convert_to_simready",
-   "title": "Convert To Simready",
-   "description": "Unavailable in Unreal: every call returns UnsupportedOperation, reads and writes no file and changes nothing; the parameters are ignored.",
-   "inputSchema": {
-    "type": "object",
-    "additionalProperties": false,
-    "properties": {
-     "usd_path": {
-      "description": "Ignored: source USD file; must be inside the sandbox.",
-      "type": "string"
-     },
-     "output_path": {
-      "description": "Ignored, nothing is written; must be inside the sandbox.",
-      "type": "string"
-     },
-     "add_physics": {
-      "default": true,
-      "description": "Ignored.",
-      "type": "boolean"
-     },
-     "add_collision": {
-      "default": true,
-      "description": "Ignored.",
-      "type": "boolean"
-     },
-     "add_semantic_labels": {
-      "default": true,
-      "description": "Ignored.",
-      "type": "boolean"
-     },
-     "target_up_axis": {
-      "default": "Z",
-      "description": "Ignored.",
-      "type": "string"
-     },
-     "target_units": {
-      "default": "meters",
-      "description": "Ignored.",
-      "type": "string"
-     }
-    },
-    "required": [
-     "usd_path",
-     "output_path"
-    ]
-   },
-   "execution": null,
-   "outputSchema": null,
-   "icons": null,
-   "annotations": {
-    "title": null,
-    "readOnlyHint": true,
-    "destructiveHint": null,
-    "idempotentHint": true,
-    "openWorldHint": null
-   },
-   "_meta": {
-    "fastmcp": {
-     "tags": []
-    }
-   }
-  },
-  {
-   "name": "validate_simready_asset",
-   "title": "Validate Simready Asset",
-   "description": "Unavailable in Unreal: every call returns UnsupportedOperation and reads no file (the parameters are ignored).",
-   "inputSchema": {
-    "type": "object",
-    "additionalProperties": false,
-    "properties": {
-     "usd_path": {
-      "description": "Ignored: USD file path; must be inside the sandbox.",
-      "type": "string"
-     },
-     "checks": {
-      "default": "",
-      "description": "Ignored.",
-      "type": "string"
-     }
-    },
-    "required": [
-     "usd_path"
-    ]
-   },
-   "execution": null,
-   "outputSchema": null,
-   "icons": null,
-   "annotations": {
-    "title": null,
-    "readOnlyHint": true,
-    "destructiveHint": null,
-    "idempotentHint": true,
-    "openWorldHint": null
-   },
-   "_meta": {
-    "fastmcp": {
-     "tags": []
-    }
-   }
-  },
-  {
    "name": "get_unreal_interchange_info",
    "title": "Get Unreal Interchange Info",
    "description": "Interchange's supported formats by translator kind (assets, scenes, actors), the project's content and scene pipeline stacks, and whether USD import and export are available.",
@@ -3916,8 +3815,6 @@
    "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
-   "convert_to_simready",
-   "validate_simready_asset",
    "get_unreal_interchange_info",
    "batch_unreal_operations",
    "query_unreal_scene_graph",
@@ -3985,8 +3882,6 @@
    "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
-   "convert_to_simready",
-   "validate_simready_asset",
    "get_unreal_interchange_info",
    "batch_unreal_operations",
    "query_unreal_scene_graph",
@@ -4052,8 +3947,6 @@
    "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
-   "convert_to_simready",
-   "validate_simready_asset",
    "get_unreal_interchange_info",
    "query_unreal_scene_graph",
    "analyze_unreal_scene_for_robotics",
@@ -4118,8 +4011,6 @@
    "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
-   "convert_to_simready",
-   "validate_simready_asset",
    "get_unreal_interchange_info",
    "query_unreal_scene_graph",
    "analyze_unreal_scene_for_robotics",

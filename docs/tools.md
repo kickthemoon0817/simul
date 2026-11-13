@@ -609,7 +609,6 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 | Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `setup_unreal_physics_bulk`, `apply_unreal_force`, `get_unreal_physics_state`, `list_unreal_simulation_actors`, `control_unreal_simulation`, `get_unreal_simulation_status` |
 | Mesh operations | `generate_unreal_mesh_primitive`, `generate_unreal_procedural_scene`, `validate_unreal_mesh`, `simplify_unreal_mesh`, `remesh_unreal_mesh`, `subdivide_unreal_mesh`, `edit_unreal_mesh_topology`, `apply_unreal_mesh_boolean`, `cut_unreal_mesh_plane`, `compute_unreal_convex_hull`, `decompose_unreal_convex_hull`, `compute_unreal_mesh_uv`, `convert_unreal_mesh_format` |
 | USD interchange | `get_unreal_interchange_info`, `import_unreal_usd`, `export_unreal_usd` |
-| SimReady | `validate_simready_asset`, `convert_to_simready` |
 | Generic dispatch | `call_unreal_actor_function`, `batch_unreal_operations` |
 
 Behaviour worth knowing:
@@ -934,7 +933,8 @@ Behaviour worth knowing:
     it) returns `NotInSimulation` (`details.code: NOT_IN_SIMULATION`, with a
     `details.hint`), and a copy that does not simulate physics returns
     `IncompatibleBody`. A multi-part actor needs `component_name`, as the
-    physics edits below do.
+    physics edits below do: the part's name, or its component path in the
+    editor or in the simulation.
   - In a World Partition level the simulation streams in only the cells
     around the level viewport's camera, so an actor far from it has no copy:
     a cube 1 km from the camera was `NotInSimulation` until
@@ -1026,7 +1026,10 @@ Behaviour worth knowing:
     components in `details.components`), and an unknown name is
     `COMPONENT_NOT_FOUND`; an actor with no primitive component is an
     `IncompatibleBody` (`NO_PRIMITIVE_COMPONENT`). They used to answer with a
-    ScriptError traceback.
+    ScriptError traceback. `setup_unreal_physics_bulk` sets up one body an
+    actor, so it lists such an actor among the failed ones (problem
+    `AMBIGUOUS_COMPONENT`) and names `enable_unreal_physics` with
+    `component_name` for each part.
   - The collision mode alone does not make a body collide: Unreal makes two
     bodies collide only when each blocks the other's object type, and a
     preset keeps its responses when its mode is changed. OverlapAll,
@@ -1036,7 +1039,8 @@ Behaviour worth knowing:
     then simulated fell through the floor at about 2000 cm/s (UE 5.7.4).
     `set_unreal_collision` warns when the mode has physics but the responses
     block nothing, and names the preset to use instead (PhysicsActor for a
-    simulated body, BlockAll for a static one); NoCollision's responses
+    simulated body, BlockAllDynamic for a Movable one moved by its transform,
+    such as a kinematic body, BlockAll for a static one); NoCollision's responses
     block every object type, so `collision_enabled: true` is enough there.
   - `enable_unreal_physics` makes the body simulate (`enable` true), makes it
     kinematic (`kinematic` true: physics collision on, so simulated bodies hit
@@ -1336,11 +1340,12 @@ Behaviour worth knowing:
   changed fails with `InvalidState` and `details.reason`
   `"attachment_changed"`, having run nothing; run `simul unreal attach` again.
   It used to come back as the tool's own traceback.
-- SimReady conversion and validation are not implemented for Unreal.
-  `convert_to_simready` and `validate_simready_asset` return
-  `UnsupportedOperation`, read and write no file and ignore their other
-  parameters (only the paths are checked against the sandbox), so both are
-  annotated read-only and idempotent.
+- SimReady conversion and validation are not available for Unreal: author
+  and check a SimReady asset with Blender's SimReady tools
+  (`export_simready_usd`, `validate_simready_compliance`) and bring it into
+  the level with `import_unreal_usd`. The Unreal surface used to register
+  `convert_to_simready` and `validate_simready_asset`, which only ever
+  returned `UnsupportedOperation`.
 - `analyze_unreal_scene_for_robotics` classifies the actors loaded in the
   editor world by the oriented box of their physics-collision components: a
   single component's box rotated and scaled with it (a static mesh's bounds,

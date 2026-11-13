@@ -2567,12 +2567,17 @@ def body_components(actor):
     # BillboardComponent sprite an Actor spawned from the class gets (UE 5.7.4).
     return [c for c in actor.get_components_by_class(unreal.PrimitiveComponent) if not editor_only(c)]
 
+def unplayed(path):
+    # A path with the play world's UEDPIE_<n>_ prefix taken off its package name.
+    return re.sub("/" + _PIE_PACKAGE, "/", path, count=1)
+
 def physics_component(actor, component_name=None):
     components = body_components(actor)
     names = ", ".join(c.get_name() + " (" + c.get_class().get_name() + ")" for c in components[:COMPONENTS_LISTED])
     if component_name:
         for component in components:
-            if component_name in (component.get_name(), component.get_path_name()):
+            if (component_name in (component.get_name(), component.get_path_name())
+                    or unplayed(component_name) == unplayed(component.get_path_name())):
                 return component
         raise SimulRefusal({"success": False, "error_type": "ValidationError",
                             "error": actor.get_actor_label() + " has no primitive component named "
@@ -2809,8 +2814,9 @@ def expected_mode(mode):
     return {"simulate": "simulated", "kinematic": "kinematic"}.get(mode, "not simulating")
 
 def refusal(actor, what, problems, component):
+    part = "" if component == actor.root_component else " (component " + component.get_name() + ")"
     return {"success": False, "error_type": _INCOMPATIBLE_BODY,
-            "error": "Cannot " + what + " " + actor.get_actor_label() + ": "
+            "error": "Cannot " + what + " " + actor.get_actor_label() + part + ": "
                      + "; ".join(problem["message"] for problem in problems),
             "details": {"code": "INCOMPATIBLE_BODY", "problems": problems,
                         "component_path": component.get_path_name()}}
@@ -3019,8 +3025,9 @@ def set_collision():
                         + result["collision_preset"] + ", kept from the preset it had) overlap or ignore every object "
                         "type, so nothing collides with this body: physics bodies pass through it"
                         + (", and as it simulates it falls through the floor" if result["simulate_physics"] else "")
-                        + ". For a body that collides, set collision_preset PhysicsActor (a simulated body) or "
-                        "BlockAll (a static one).")
+                        + ". For a body that collides, set collision_preset PhysicsActor (a simulated body), "
+                        "BlockAllDynamic (a Movable one moved by its transform, such as a kinematic body) or BlockAll "
+                        "(a static one).")
     else:
         warnings.append(blocking_note(result) if result["simulate_physics"] else None)
     if preset or enabled is not None:
@@ -3105,6 +3112,17 @@ def setup():
     for actor in actors:
         try:
             component = physics_component(actor)
+        except SimulRefusal as refused:
+            details = refused.payload.get("details") or {}
+            error = refused.payload["error"]
+            if details.get("code") == "AMBIGUOUS_COMPONENT":
+                error = (actor.get_actor_label() + " has several primitive components and none is its root, so it "
+                         "has a body per component, and bulk setup sets up one body an actor: set up each part with "
+                         "enable_unreal_physics and component_name (" + ", ".join(
+                             c["component_name"] for c in details.get("components", [])) + ")")
+            failed.append({"actor_path": actor.get_path_name(), "error": error,
+                           "problems": [p["code"] for p in details.get("problems", [])] or [details.get("code")]})
+            continue
         except Exception as exc:
             failed.append({"actor_path": actor.get_path_name(), "error": str(exc)})
             continue
@@ -3334,11 +3352,19 @@ def apply():
                 "details": {"code": "NOT_IN_SIMULATION", "actor_path": args["actor_path"],
                             "hint": "For an actor of a World Partition level, call focus_unreal_on_actor on it and "
                                     "retry; for one added after the simulation started, stop and start it again."}}
-    component = physics_component(copy, args["component_name"])
+    name = args["component_name"]
+    if name and "/" in name:
+        # A component path of the editor actor names the copy's component of the same name, wherever
+        # World Partition streamed the copy (a cell level's path is not the editor's with a prefix).
+        for source in (actor, editor_counterpart(copy)):
+            if source is not None and source != copy:
+                name = next((c.get_name() for c in body_components(source) if c.get_path_name() == name), name)
+    component = physics_component(copy, name)
     mode = physics_mode(component)
     if mode != "simulated":
+        part = "" if component == copy.root_component else " (component " + component.get_name() + ")"
         return {"success": False, "error_type": _INCOMPATIBLE_BODY,
-                "error": copy.get_actor_label() + " does not simulate physics in the running simulation "
+                "error": copy.get_actor_label() + part + " does not simulate physics in the running simulation "
                          "(physics_mode " + mode + "), so a force moves nothing: enable_unreal_physics on the "
                          "editor actor and restart the simulation, or on the simulation path for this run",
                 "details": dict(physics_report(component), code="NOT_SIMULATING")}

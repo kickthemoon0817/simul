@@ -470,12 +470,6 @@ async def test_usd_plugin_missing_and_simready_explicitly_unsupported(
     ):
         assert result["success"] is False
         assert result["error_type"] == "PluginUnavailable"
-    for result in (
-        await session.convert_to_simready(source, target),
-        await session.validate_simready_asset(source),
-    ):
-        assert result["success"] is False
-        assert result["error_type"] == "UnsupportedOperation"
 
 
 @pytest.mark.asyncio

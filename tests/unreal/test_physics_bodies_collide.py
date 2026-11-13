@@ -60,7 +60,8 @@ def test_collision_enabled_on_an_overlap_preset_warns_and_physics_is_refused(
     assert (enabled["collision_mode"], enabled["collision_preset"]) == ("QUERY_AND_PHYSICS", "Custom")
     assert enabled["blocked_object_types"] == []
     assert "nothing collides with this body" in enabled["warning"]
-    assert "PhysicsActor" in enabled["warning"]
+    # A preset for each kind of body: simulated, Movable and moved by its transform, static.
+    assert all(preset in enabled["warning"] for preset in ("PhysicsActor", "BlockAllDynamic", "BlockAll "))
     assert refused["error_type"] == INCOMPATIBLE_BODY
     assert codes(refused) == ["NO_BLOCKING_RESPONSE"]
     assert "fall through the floor" in refused["error"]
@@ -247,6 +248,8 @@ def test_a_part_attached_to_the_root_needs_allow_detach(monkeypatch: pytest.Monk
     refused = run(session.enable_physics(robot.get_path_name(), component_name="Part0"))
 
     assert codes(refused) == ["ATTACHED"]
+    # The refusal names the part, not only the actor (review of #359).
+    assert refused["error"].startswith("Cannot simulate physics on Robot (component Part0): ")
 
 
 def test_the_editor_only_sprite_is_no_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -261,6 +264,26 @@ def test_the_editor_only_sprite_is_no_body(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert result["component_path"] == lamp.get_path_name() + ".Part0"
     assert state["bodies"][0]["component_path"] == lamp.get_path_name() + ".Part0"
+
+
+def test_bulk_setup_points_a_multi_part_actor_to_the_per_part_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #359: bulk setup told a multi-part actor to pass component_name,
+    which it does not take, and the failed entry carried no problem code."""
+    editor = Editor()
+    robot = editor.multi_part_actor("Robot")
+    robot.tags.append("props")
+    empty = editor.multi_part_actor("Empty", parts=0)
+    empty.tags.append("props")
+    session = physics_session(monkeypatch, editor)
+
+    result = run(session.setup_physics_bulk(tag="props"))
+
+    by_path = {entry["actor_path"]: entry for entry in result["details"]["failed"]}
+    ambiguous, bare = by_path[robot.get_path_name()], by_path[empty.get_path_name()]
+    assert ambiguous["problems"] == ["AMBIGUOUS_COMPONENT"]
+    assert "enable_unreal_physics and component_name (Part0, Part1)" in ambiguous["error"]
+    assert "pass component_name" not in ambiguous["error"]
+    assert bare["problems"] == ["NO_PRIMITIVE_COMPONENT"]
 
 
 def test_an_actor_without_a_primitive_component_is_an_incompatible_body(monkeypatch: pytest.MonkeyPatch) -> None:
