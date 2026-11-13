@@ -158,6 +158,11 @@ _POINT_RADIUS = 1.0
 # rounding to float32 changes a number by up to half of FLT_EPSILON of its size.
 _FLOAT32_EPSILON = 2.0**-23
 
+# The largest finite float32 (FLT_MAX). Mesh coordinates, F-curve keys and
+# transforms beyond it do not fit: Blender 5.0.1 stored a vertex coordinate of
+# 1e300 as 0 and a key value of inf as 3.4e38, without an error.
+_FLOAT32_MAX = 3.4028234663852886e38
+
 # A camera counts as evaluated where it was placed when its location is within
 # _PLACEMENT_LOCATION_PRECISION times the farthest distance from the origin
 # involved (_placement_extent), and its view and up axes within the angles of
@@ -448,6 +453,17 @@ class NotFoundError(ValueError):
         self.details: Dict[str, Any] = {"code": code, **details}
 
 
+class RefusedOperation(RuntimeError):
+    """The tool refuses an operation that would crash or damage the running Blender.
+
+    Its class name is the envelope's ``error_type``; ``details.code`` names why.
+    """
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = {"code": code, **details}
+
+
 class UnsavedChangesError(RuntimeError):
     """Opening a file would discard the open file's unsaved changes.
 
@@ -668,6 +684,23 @@ def _bpy_op(description: str, operator: Callable[..., Any], /, **properties: Any
     except Exception as exc:
         exc.add_note(description)
         raise
+
+
+def _synced_view_layer() -> Any:
+    """The context's view layer, first synced with its collections.
+
+    Blender fills ``view_layer.objects`` from the collections lazily, when the
+    depsgraph next evaluates. A GUI Blender does that between two calls; a
+    headless one (embedded mode) does not, so objects a script had just linked
+    were missing from it: the SimReady export skipped them as "not in the
+    active view layer" and reported success with an incomplete asset.
+    ``ViewLayer.update`` syncs and evaluates.
+    """
+    view_layer = bpy.context.view_layer
+    update = getattr(view_layer, "update", None)
+    if update is not None:
+        update()
+    return view_layer
 
 
 def _mathutils() -> Any:
@@ -1171,7 +1204,18 @@ def _property_owner(id_data: Any, data_path: str) -> Tuple[Any, str, bool]:
 
 
 def _like(current: Any, value: float) -> Any:
-    """``value`` as the property's element type: a bool or int property takes a whole number."""
+    """``value`` as the property's element type: a bool or int property takes a whole number.
+
+    A key value must be finite and fit float32, which F-curves store: Blender
+    5.0.1 keyed NaN as NaN and inf as 3.4e38 without an error.
+    """
+    if not isinstance(value, numbers.Real):
+        raise ValueError(f"{value!r} is not a number")
+    if not math.isfinite(value) or abs(value) > _FLOAT32_MAX:
+        raise ValueError(
+            f"{value!r} is not a finite number of at most {_FLOAT32_MAX:.7g} in size, "
+            "which a keyframe stores"
+        )
     if isinstance(current, (bool, int)):
         if not float(value).is_integer():
             raise ValueError(f"{value} is not a whole number, as the property needs")
@@ -1314,12 +1358,60 @@ TRAJECTORY_FIELDS = (
 )
 #: Most objects and bones get_trajectories samples in one call.
 MAX_TRAJECTORY_TARGETS = 32
-# Bodies times frames of unbaked rigid-body simulation a trajectory steps
-# through unasked. On Blender 5.0.1 (an M-series Mac) a body-frame took about
-# 35 microseconds headless and 61 in a GUI Blender, so this is some 12 s
-# there: well inside the 30 s an attached call waits by default
-# (BLENDER__CONNECTION_TIMEOUT). 400 000 took 24 s in the GUI.
-TRAJECTORY_SIMULATION_BUDGET = 200_000
+
+# -- What a simulated frame costs -------------------------------------------
+#
+# A bake, a physics-state read and a trajectory step the simulation frame by
+# frame on Blender's main thread, where nothing can stop it: a call that
+# outlasts the client's timeout (BLENDER__CONNECTION_TIMEOUT, 30 s by default)
+# reports a timeout while Blender keeps simulating, and the next calls wait
+# behind it. These rates estimate the seconds a frame takes. They were measured
+# with bake_simulation in headless Blender 5.0.1 on an Apple M-series Mac,
+# taking the slowest case of each kind:
+#
+# - Rigid bodies cost per body and Bullet substep, linearly in substeps from 1
+#   to 100: 1.8 us for 300 convex-hull cubes scattered on a ground plane and
+#   5.1 us for 300 piled up (10 solver iterations), less for box and mesh
+#   shapes. Solver iterations add to it: piles took 9.3 us at 50 iterations
+#   and 12.7 us at 100 (50 substeps). Only the bodies' count is known up front,
+#   so every body is costed as piled. A frame change itself took 7-35 us.
+# - Cloth costs per vertex and quality step: an 80x80 grid falling on a sphere
+#   took 2.1, 8.0 and 11.6 us per vertex a frame over its first 100 frames at
+#   quality 1, 5 and 10, and 9.2 us over 291 frames at quality 5, once it lay
+#   on the sphere. Self-collision added up to 19 %, collision quality 5 3 %;
+#   without a collider it took half as long.
+# - Soft bodies took 2.0 us per vertex a frame with a goal, 5.0 without, and
+#   11.4 with self-collision.
+# - Dynamic paint took 0.2 us per vertex of a vertex surface a frame; image
+#   surfaces have no point cache.
+# - Particles took 0.06 us per particle a frame, 0.07 colliding.
+#
+# Checked by baking what the estimate puts just under SIMULATION_SECONDS_BUDGET
+# (16 s): 300 piled cubes over 1000 frames took 16.2 s, at 100 substeps over
+# 100 frames 14.8 s (4.8 s scattered), at 100 solver iterations over 349 frames
+# 16.4 s, and the 80x80 cloth over 264 frames 15.1 s. The audit's runs that
+# passed the old bound, 300 bodies x 1000 frames at 100 substeps (62.7 s) and
+# the cloth over 1000 frames (55.6 s), are estimated at 160 s and 60 s. A GUI
+# Blender took up to 1.7 times as long as a headless one.
+_FRAME_SECONDS = 20e-6
+_RIGID_BODY_SUBSTEP_SECONDS = 4.2e-6
+_RIGID_BODY_ITERATION_SECONDS = 0.11e-6
+_CLOTH_VERTEX_SECONDS = 1.2e-6
+_CLOTH_STEP_SECONDS = 1.6e-6
+_CLOTH_SELF_COLLISION_FACTOR = 1.3
+#: Per vertex a frame at the default minimum of 10 steps; more steps cost more.
+_SOFT_BODY_VERTEX_SECONDS = 5.0e-6
+_SOFT_BODY_SELF_COLLISION_FACTOR = 2.5
+_DYNAMIC_PAINT_VERTEX_SECONDS = 0.5e-6
+_PARTICLE_SECONDS = 0.1e-6
+#: Estimated seconds of simulation a call runs without being asked:
+#: bake_simulation without allow_long_bake, and get_physics_state's stepping.
+#: Inside the 30 s an attached call waits by default, with room for a slower
+#: GUI Blender.
+SIMULATION_SECONDS_BUDGET = 16.0
+#: Estimated seconds of unbaked simulation a trajectory steps through unasked
+#: (max_simulated_frames raises it); it also reads every sample.
+TRAJECTORY_SIMULATION_SECONDS = 8.0
 # A rigid-body memory cache's info when it is up to date ("1,000 frames in
 # memory (1.2 MiB)."); an outdated one ends ", cache is outdated!".
 _CACHED_FRAMES = re.compile(r"\s*(\d[\d,]*) frames in memory \([^)]*\)\.")
@@ -1579,7 +1671,9 @@ def _finite_triple(value: Any, what: str) -> Tuple[float, float, float]:
     """Three finite coordinates as floats, or a ValueError naming ``what``.
 
     ``from_pydata`` flattens its vertex list before storing it, so a vertex
-    of two or four numbers shifted every later vertex instead of failing.
+    of two or four numbers shifted every later vertex instead of failing. A
+    coordinate beyond float32's range is refused too: Blender stores
+    coordinates in single precision and kept 1e300 as 0.
     """
     if isinstance(value, (str, bytes)) or not hasattr(value, "__len__"):
         raise ValueError(f"{what} must be [x, y, z], got {value!r}")
@@ -1591,6 +1685,11 @@ def _finite_triple(value: Any, what: str) -> Tuple[float, float, float]:
             raise ValueError(f"{what} coordinates must be numbers, got {component!r}")
         if not math.isfinite(component):
             raise ValueError(f"{what} coordinates must be finite, got {component!r}")
+        if abs(component) > _FLOAT32_MAX:
+            raise ValueError(
+                f"{what} coordinates must fit Blender's single precision (at most "
+                f"{_FLOAT32_MAX:.7g} in size), got {component!r}"
+            )
         triple.append(float(component))
     return (triple[0], triple[1], triple[2])
 
@@ -3221,7 +3320,9 @@ class BlenderRuntimeSession:
         Globally). The operator also resets the rigid-body cache of a deleted
         rigid body: removing the object directly left that cache in place, so
         another body evaluated after a frame jump took the deleted one's cached
-        positions.
+        positions. A rigid body constraint that joins the object is removed
+        first (its empty stays): Blender's Delete left it pointing at the freed
+        body, and the next restart of the simulation crashed Blender 5.0.1.
 
         Args:
             object_name: Name of the object to delete.
@@ -3229,8 +3330,10 @@ class BlenderRuntimeSession:
                 the current scene.
 
         Returns:
-            Dictionary with deleted_name, use_global, whether the object left
-            the file (removed_from_file) and the scenes that still link it.
+            Dictionary with deleted_name, use_global, removed_constraints (the
+            empties whose constraint joining the object was removed), whether
+            the object left the file (removed_from_file) and the scenes that
+            still link it.
 
         Raises:
             ValueError: Without use_global, the object is not in the current
@@ -3245,6 +3348,9 @@ class BlenderRuntimeSession:
                 f"Object '{object_name}' is not in scene '{scene.name}'; pass "
                 "use_global=true to delete it from every scene"
             )
+        removed_constraints = self._release_constraints(
+            list(blender_module.data.scenes) if use_global else [scene], obj
+        )
         operator = blender_module.ops.object.delete
         properties: Dict[str, Any] = {"use_global": use_global}
         if "confirm" in operator.get_rna_type().properties.keys():
@@ -3263,6 +3369,7 @@ class BlenderRuntimeSession:
         return {
             "deleted_name": object_name,
             "use_global": use_global,
+            "removed_constraints": removed_constraints,
             "removed_from_file": blender_module.data.objects.get(object_name) is None,
             "remaining_scenes": [
                 other.name
@@ -3270,6 +3377,44 @@ class BlenderRuntimeSession:
                 if other.objects.get(object_name) is not None
             ],
         }
+
+    @staticmethod
+    def _release_constraints(scenes: Sequence[Any], obj: Any) -> List[str]:
+        """Remove the rigid body constraints of ``scenes`` that join ``obj``, while it exists.
+
+        Removing a constraint takes it out of the Bullet world, which reads its
+        two bodies, so it is safe only before either goes.
+
+        Returns:
+            The names of the empties that carried them.
+        """
+        blender_module: Any = bpy
+        carriers: List[Any] = []
+        for scene in scenes:
+            world = getattr(scene, "rigidbody_world", None)
+            collection = getattr(world, "constraints", None) if world is not None else None
+            for carrier in getattr(collection, "all_objects", None) or ():
+                rbc = getattr(carrier, "rigid_body_constraint", None)
+                if rbc is not None and obj in (rbc.object1, rbc.object2) and carrier not in carriers:
+                    carriers.append(carrier)
+        if not carriers:
+            return []
+        view_layer = blender_module.context.view_layer
+        previous = view_layer.objects.active
+        removed: List[str] = []
+        try:
+            for carrier in carriers:
+                # constraint_remove acts on the view layer's active object.
+                view_layer.objects.active = carrier
+                _bpy_op(
+                    f"Could not remove the rigid body constraint on '{carrier.name}' that joins "
+                    f"'{obj.name}', so '{obj.name}' was not deleted",
+                    blender_module.ops.rigidbody.constraint_remove,
+                )
+                removed.append(str(carrier.name))
+        finally:
+            view_layer.objects.active = previous
+        return removed
 
     def set_object_mode(
         self, mode: str = "OBJECT", object_name: Optional[str] = None
@@ -4282,16 +4427,30 @@ class BlenderRuntimeSession:
 
     @staticmethod
     def _modifier_or_raise(obj: Any, modifier_name: str) -> Any:
-        """The object's modifier of that name, or a ValueError listing its modifiers."""
+        """The object's modifier of that name, or a NotFoundError listing its modifiers."""
         modifiers = getattr(obj, "modifiers", None)
         mod = None if modifiers is None else modifiers.get(modifier_name)
         if mod is None:
             names = [other.name for other in modifiers or []]
-            raise ValueError(
+            raise NotFoundError(
                 f"Object '{obj.name}' has no modifier '{modifier_name}'; "
-                + (f"its modifiers are: {', '.join(names)}" if names else "it has none")
+                + (f"its modifiers are: {', '.join(names)}" if names else "it has none"),
+                "modifier_not_found",
+                object_name=obj.name,
+                modifier_name=modifier_name,
+                modifiers=names,
             )
         return mod
+
+    @staticmethod
+    def _bone_not_found(armature_name: str, bone_name: str) -> "NotFoundError":
+        """The error for a bone an armature does not have."""
+        return NotFoundError(
+            f"Armature '{armature_name}' has no bone '{bone_name}'",
+            "bone_not_found",
+            object_name=armature_name,
+            bone_name=bone_name,
+        )
 
     @staticmethod
     def _require_object_mode(obj: Any, action: str) -> None:
@@ -5173,8 +5332,7 @@ class BlenderRuntimeSession:
                 f"frame_start ({frame_start}) is after frame_end ({frame_end})"
             )
 
-        blender_module: Any = bpy
-        view_layer = blender_module.context.view_layer
+        view_layer = _synced_view_layer()
         to_select: Optional[List[Any]] = None
         object_count: Optional[int] = None
         if selected_only:
@@ -5367,7 +5525,7 @@ class BlenderRuntimeSession:
                 "collection_not_found",
                 collection_name=collection_name,
             )
-        view_layer = blender_module.context.view_layer
+        view_layer = _synced_view_layer()
         objects = [o for o in collection.all_objects if o.name in view_layer.objects]
         if not objects:
             raise ValueError(
@@ -5641,6 +5799,23 @@ class BlenderRuntimeSession:
             written.insert(0, target)
         return written
 
+    @classmethod
+    def _simready_written_files(
+        cls, folder: Path, before: Dict[str, Tuple[int, int]], target: str
+    ) -> List[str]:
+        """The files a SimReady export wrote: the asset, then the textures it wrote beside it.
+
+        Blender's USD exporter writes nothing else there (its raw layer is
+        removed, and a .usdz packs its textures), so another file the folder
+        gained meanwhile, such as a log being written, is not the export's.
+        """
+        texture_dirs = {str(folder / name) for name in _EXPORT_TEXTURE_DIRS}
+        return [
+            path
+            for path in cls._written_files(folder, before, target)
+            if path == target or os.path.dirname(path) in texture_dirs
+        ]
+
     def _run_export(
         self,
         description: str,
@@ -5725,8 +5900,7 @@ class BlenderRuntimeSession:
         if objects is None:
             yield
             return
-        blender_module: Any = bpy
-        view_layer = blender_module.context.view_layer
+        view_layer = _synced_view_layer()
         # Right after bpy.data.objects.remove, Blender 5.0.1 yields None for the
         # removed object here until the view layer syncs again.
         previous = [o for o in view_layer.objects if o is not None and o.select_get()]
@@ -6572,7 +6746,7 @@ class BlenderRuntimeSession:
         self,
         object_name: str,
         data_path: str,
-        frame: int,
+        frame: float,
         index: int = -1,
     ) -> Dict[str, Any]:
         """
@@ -6581,36 +6755,77 @@ class BlenderRuntimeSession:
         Args:
             object_name: Name of the object.
             data_path: Property data path (e.g. 'location', 'rotation_euler').
-            frame: Frame number of the keyframe to delete.
+            frame: Frame of the keyframe to delete, a sub-frame such as 10.25
+                included (insert_blender_keyframes keys those); Blender takes
+                the key within 0.01 of it.
             index: Array index (-1 for all channels).
 
         Returns:
             Dict confirming the keyframe deletion.
 
         Raises:
-            ValueError: When no action animates the object, or no keyframe of
-                the property lies on that frame (or its F-curve is locked).
+            NotFoundError: When no action animates the object (``details.code``
+                not_animated), or no keyframe of the property lies on that frame
+                (keyframe_not_found).
+            ValidationError: When the frame is not finite, or the keyframe's
+                F-curve is locked (KeyframeLocked).
         """
+        frame_number = float(frame)
+        if not math.isfinite(frame_number):
+            raise ValidationError(
+                f"frame must be a finite number, got {frame!r}", "invalid_value", field="frame"
+            )
+        shown = int(frame_number) if frame_number.is_integer() else frame_number
         obj = self._get_object_or_raise(object_name)
         # The same test as get_keyframes' has_animation.
-        if action_fcurves(obj.animation_data, self._blender_version) is None:
-            raise ValueError(
+        fcurves = action_fcurves(obj.animation_data, self._blender_version)
+        if fcurves is None:
+            raise NotFoundError(
                 f"Object '{object_name}' is not animated, so it has no keyframe "
-                "to delete"
+                "to delete",
+                "not_animated",
+                object_name=object_name,
             )
         # Blender reports a frame without a deletable key by returning False.
-        if not obj.keyframe_delete(data_path, index=index, frame=frame):
-            raise ValueError(
-                f"Object '{object_name}' has no keyframe on "
-                f"{_channel_name(data_path, index)} at frame {frame} to delete, "
-                "or its F-curve is locked; get_blender_keyframes lists the keyed "
-                "channels"
+        if not obj.keyframe_delete(data_path, index=index, frame=frame_number):
+            channel = _channel_name(data_path, index)
+            if self._locked_key(fcurves, data_path, index, frame_number):
+                raise ValidationError(
+                    f"The keyframe of '{object_name}' {channel} at frame {shown:g} is on "
+                    "a locked F-curve (or one in a locked group), which Blender does not "
+                    "delete from; unlock it first",
+                    "KeyframeLocked",
+                    object_name=object_name,
+                    data_path=data_path,
+                    frame=shown,
+                )
+            raise NotFoundError(
+                f"Object '{object_name}' has no keyframe on {channel} at frame "
+                f"{shown:g} to delete; get_blender_keyframes lists the keyed channels "
+                "and, with include_keys, their frames",
+                "keyframe_not_found",
+                object_name=object_name,
+                data_path=data_path,
+                frame=shown,
             )
         return {
             "object_name": object_name,
             "data_path": data_path,
-            "frame": frame,
+            "frame": shown,
         }
+
+    @staticmethod
+    def _locked_key(fcurves: Any, data_path: str, index: int, frame: float) -> bool:
+        """Whether a key of the channel within Blender's 0.01 of ``frame`` is on a locked F-curve."""
+        for fcurve in fcurves:
+            if fcurve.data_path != data_path or (index >= 0 and fcurve.array_index != index):
+                continue
+            group = getattr(fcurve, "group", None)
+            if not (fcurve.lock or (group is not None and group.lock)):
+                continue
+            if any(abs(point.co[0] - frame) < KEY_MERGE_DISTANCE for point in fcurve.keyframe_points):
+                return True
+        return False
 
     def get_keyframes(
         self,
@@ -6765,7 +6980,7 @@ class BlenderRuntimeSession:
         if pose is None:
             raise ValueError(f"'{obj.name}' is not an armature, so it has no bone '{bone_name}'")
         if pose.bones.get(bone_name) is None:
-            raise ValueError(f"Armature '{obj.name}' has no bone '{bone_name}'")
+            raise self._bone_not_found(obj.name, bone_name)
         prefix = _bone_path(bone_name)
         if data_path is None:
             return None, prefix
@@ -6859,7 +7074,7 @@ class BlenderRuntimeSession:
             raise ValueError(f"'{object_name}' is not an armature, so it has no pose bones")
         bone = pose.bones.get(bone_name)
         if bone is None:
-            raise ValueError(f"Armature '{object_name}' has no bone '{bone_name}'")
+            raise self._bone_not_found(object_name, bone_name)
         if rotation_euler is not None and rotation_quaternion is not None:
             raise ValueError("Give either rotation_euler or rotation_quaternion, not both")
         new_location = None if location is None else _finite(location, 3, "location")
@@ -7392,8 +7607,10 @@ class BlenderRuntimeSession:
         Args:
             object_name: Name of the object.
             step_simulation: Step an unbaked rigid-body simulation from its
-                cache start to the current frame before reading the pose, at
-                most frames x bodies = 400 000; false reads the pose as it is.
+                cache start to the current frame before reading the pose, when
+                the frames to simulate are estimated at 16 s or less (from the
+                bodies, substeps and solver iterations, and the other unbaked
+                simulations that step along); false reads the pose as it is.
 
         Returns:
             Dict with object_name, frame, location, rotation_euler, is_active,
@@ -7511,8 +7728,9 @@ class BlenderRuntimeSession:
         else:
             reason = (
                 f"stepping {frame - start + 1} frames of "
-                f"{self._rigid_body_count(world)} bodies exceeds "
-                f"{self._STEP_WORK_BUDGET} body-frames"
+                f"{self._rigid_body_count(world)} bodies is estimated at "
+                f"{self._step_seconds(scene, world, frame):.1f} s, over the "
+                f"{self._STEP_SECONDS_BUDGET:g} s of simulation a call runs unasked"
             )
         return (
             "unknown",
@@ -7569,8 +7787,10 @@ class BlenderRuntimeSession:
             limit: Most samples to return; None returns as many as fit.
             max_simulated_frames: Most frames of unbaked rigid-body simulation
                 the call may step through; the page ends before a sample that
-                needs more. None allows up to 200 000 bodies times frames, and a
-                request whose first sample needs more is refused.
+                needs more. None allows the frames estimated at 8 s of
+                simulation (from the bodies, substeps and solver iterations, and
+                the other unbaked simulations that step along), and a request
+                whose first sample needs more is refused.
 
         Returns:
             Dict with object_name, bone_name, rotation_mode (the object's or
@@ -7638,7 +7858,7 @@ class BlenderRuntimeSession:
             limit: Most samples per target to return; None returns as many as fit.
             max_simulated_frames: Most frames of unbaked rigid-body simulation
                 the call may step through, as for get_object_trajectory; None
-                allows up to 200 000 bodies times frames.
+                allows the frames estimated at 8 s of simulation.
 
         Returns:
             Dict with fps, time_origin_frame, total_points, offset, point_count
@@ -7943,7 +8163,7 @@ class BlenderRuntimeSession:
                 )
             bone = pose.bones.get(bone_name)
             if bone is None:
-                raise ValueError(f"Armature '{object_name}' has no bone '{bone_name}'")
+                raise self._bone_not_found(object_name, bone_name)
             mode = bone.rotation_mode
         return {
             "obj": obj,
@@ -7988,7 +8208,8 @@ class BlenderRuntimeSession:
             scene: The scene to walk.
             samples: The frames to sample, ascending.
             max_simulated_frames: The confirmed most frames to simulate, or None
-                for the bodies x frames budget.
+                for the frames TRAJECTORY_SIMULATION_SECONDS of estimated
+                simulation (_simulation_cost) allows.
             seed: How many leading samples only seed the page (its velocity):
                 a walk that serves none of the rest is refused.
 
@@ -8010,10 +8231,11 @@ class BlenderRuntimeSession:
         usable = len(samples)
         if not cache.is_baked:
             bodies = self._rigid_bodies(world)
+            per_frame, _ = self._simulation_cost(scene, "rigid_body")
             allowed = (
                 max_simulated_frames
                 if max_simulated_frames is not None
-                else TRAJECTORY_SIMULATION_BUDGET // max(bodies, 1)
+                else int(TRAJECTORY_SIMULATION_SECONDS / per_frame)
             )
             usable = sum(
                 1 for frame in samples if max(0, min(frame, end) - resume) <= allowed
@@ -8025,14 +8247,14 @@ class BlenderRuntimeSession:
                 limit = (
                     f"max_simulated_frames is {max_simulated_frames}"
                     if max_simulated_frames is not None
-                    else f"that is over the {TRAJECTORY_SIMULATION_BUDGET} bodies x "
-                    "frames a call steps through unasked, and can take minutes on "
-                    "Blender's main thread"
+                    else f"that is over the {TRAJECTORY_SIMULATION_SECONDS:g} s of "
+                    f"simulation a call steps through unasked ({allowed} frames here), "
+                    "and can take minutes on Blender's main thread"
                 )
                 raise ValueError(
                     f"Sampling frame {samples[seed]} steps the unbaked rigid-body "
                     f"simulation through {needed} frames (frames {resume + 1}-{first}) "
-                    f"of {bodies} bodies, {needed * max(bodies, 1)} bodies x frames; "
+                    f"of {bodies} bodies, estimated at {needed * per_frame:.1f} s; "
                     f"{limit}. Bake it first with bake_blender_simulation, sample "
                     f"fewer frames, or pass max_simulated_frames={needed} or more to go "
                     f"ahead ({every} for every sample of this page); a walk that "
@@ -8051,6 +8273,8 @@ class BlenderRuntimeSession:
             return served, 0, warning, usable, resume
         last = min(served[-1], end)
         simulated = max(0, last - resume)
+        if simulated:
+            self._check_constraints_rebuildable(scene, "sampled")
         stepped = range(resume, last + 1) if simulated else range(0)
         return sorted(set(served) | set(stepped)), simulated, warning, usable, resume
 
@@ -8188,21 +8412,33 @@ class BlenderRuntimeSession:
                 in the scene, as Blender's Bake All Dynamics does: rigid bodies,
                 cloth, soft bodies and dynamic paint over frame_start-frame_end,
                 particle systems over the range their emission settings give.
-            allow_long_bake: Bake even above 20 000 frames or 400 000
-                body-frames (frames x bodies), which can outlast the client's
-                timeout while Blender keeps baking.
+            allow_long_bake: Bake even above 20 000 frames or an estimated
+                16 s, which can outlast the client's timeout while Blender keeps
+                baking. The estimate counts the frames times each simulation's
+                cost a frame: rigid bodies by count, substeps and solver
+                iterations; cloth, soft bodies and dynamic paint by vertices and
+                quality; particles by count.
 
         Returns:
             Dict with scope, frame_start, frame_end and frame_count of the
             rigid-body cache (null without one), rigid_body_cache, caches (each
             cache's owner, kind, range and bake state) and warnings.
+
+        Raises:
+            ValidationError: Over the work budget without allow_long_bake
+                (``details.code`` BakeOverBudget, with estimated_seconds and
+                frames_that_fit).
+            RefusedOperation: A rigid body constraint joins a deleted object or
+                one without a rigid body (ConstraintWithoutBody); restarting the
+                simulation would crash Blender.
         """
         blender_module: Any = bpy
         scope = self._bake_scope(scope)
         self._check_cache_range(int(frame_start), int(frame_end))
         scene = blender_module.context.scene
+        self._check_constraints_rebuildable(scene, "baked")
         if not allow_long_bake:
-            self._check_bake_work(scene, scope, frame_end - frame_start + 1)
+            self._check_bake_work(scene, scope, int(frame_start), int(frame_end))
         warnings: List[str] = []
         original_frame = int(scene.frame_current)
         if scope == "rigid_body":
@@ -8279,36 +8515,162 @@ class BlenderRuntimeSession:
             "warnings": [warning] if warning else [],
         }
 
-    #: Most a bake does without allow_long_bake: frames, and frames x bodies.
-    #: On Blender 5.0.1 a frame took about 0.3 ms plus 30-40 microseconds per
-    #: body in contact: 1000 bodies x 1000 frames took 29.4 s, against the
-    #: attached-mode client's 30 s timeout, and 401 cubes x 900 frames 14.8 s
-    #: headless (1000 frames 8.7 s in the GUI). The budget takes up to about
-    #: 16 s, inside that timeout.
+    #: Most frames a bake steps through without allow_long_bake, however cheap
+    #: each is; the estimated seconds are bounded by SIMULATION_SECONDS_BUDGET.
     _BAKE_FRAME_BUDGET = 20_000
-    _BAKE_WORK_BUDGET = 400_000
 
-    def _check_bake_work(self, scene: Any, scope: str, frames: int) -> None:
+    def _check_bake_work(
+        self, scene: Any, scope: str, frame_start: int, frame_end: int
+    ) -> None:
         """Refuse a bake likely to outlast the client's timeout on Blender's main thread."""
-        world = getattr(scene, "rigidbody_world", None)
-        bodies = self._rigid_body_count(world) if world is not None else 0
-        if scope == "all":
-            bodies += sum(
-                1 for entry, _ in self._point_caches(scene) if entry["kind"] != "RIGID_BODY"
-            )
-        work = frames * max(bodies, 1)
-        if frames <= self._BAKE_FRAME_BUDGET and work <= self._BAKE_WORK_BUDGET:
+        frames = frame_end - frame_start + 1
+        per_frame, parts = self._simulation_cost(scene, scope)
+        seconds = frames * per_frame
+        if frames <= self._BAKE_FRAME_BUDGET and seconds <= SIMULATION_SECONDS_BUDGET:
             return
-        raise ValueError(
-            f"Baking {frames} frames of {bodies} simulated objects is {work} body-frames, "
-            f"over this tool's limit of {self._BAKE_FRAME_BUDGET} frames and "
-            f"{self._BAKE_WORK_BUDGET} body-frames (up to about 16 s on Blender 5.0.1). A bake "
-            "runs on Blender's main thread and cannot be stopped once it starts: past "
-            "the client timeout (BLENDER__CONNECTION_TIMEOUT, 30 s by default) the call "
-            "reports a timeout while Blender keeps baking, and the next calls wait "
-            "behind it. Bake a shorter range, or raise the timeout and pass "
-            "allow_long_bake=true"
+        fitting = min(self._BAKE_FRAME_BUDGET, int(SIMULATION_SECONDS_BUDGET / per_frame))
+        raise ValidationError(
+            f"Baking frames {frame_start}-{frame_end} ({frames} frames) is estimated at "
+            f"{seconds:.1f} s on Blender's main thread ({'; '.join(parts) or 'no simulation'}), "
+            f"over this tool's limit of {SIMULATION_SECONDS_BUDGET:g} s and "
+            f"{self._BAKE_FRAME_BUDGET} frames (estimated as measured on headless Blender "
+            "5.0.1; a GUI Blender can take longer). A bake cannot be stopped once it "
+            "starts: past the client timeout (BLENDER__CONNECTION_TIMEOUT, 30 s by "
+            "default) the call reports a timeout while Blender keeps baking, and the "
+            f"next calls wait behind it. Bake a shorter range (about {fitting} frames fit), "
+            "lower substeps_per_frame, solver_iterations or the cloth quality, or raise "
+            "the timeout and pass allow_long_bake=true",
+            "BakeOverBudget",
+            estimated_seconds=round(seconds, 1),
+            limit_seconds=SIMULATION_SECONDS_BUDGET,
+            frame_limit=self._BAKE_FRAME_BUDGET,
+            frames_that_fit=fitting,
         )
+
+    def _simulation_cost(self, scene: Any, scope: str) -> Tuple[float, List[str]]:
+        """Estimated seconds one simulated frame takes on the main thread, and its parts.
+
+        The rates are the module's _*_SECONDS, measured on Blender 5.0.1: rigid
+        bodies by count, substeps and solver iterations; cloth, soft bodies
+        and dynamic paint by vertex count and their own quality settings;
+        particles by count.
+
+        Args:
+            scene: The scene whose simulations step.
+            scope: ``rigid_body`` costs the rigid-body world plus every other
+                cache that is not baked, since stepping the frames simulates
+                those along as playback does; ``all`` costs every cache, as a
+                Bake All re-simulates them all.
+
+        Returns:
+            Seconds a frame, and a description of each simulation that costs.
+        """
+        seconds = _FRAME_SECONDS
+        parts: List[str] = []
+
+        def add(cost: float, description: str) -> None:
+            nonlocal seconds
+            seconds += cost
+            parts.append(f"{description}: {cost * 1000:.3g} ms a frame")
+
+        world = getattr(scene, "rigidbody_world", None)
+        if world is not None and getattr(world, "enabled", True):
+            bodies = self._rigid_body_count(world)
+            if bodies:
+                substeps = max(int(getattr(world, "substeps_per_frame", 10)), 1)
+                iterations = max(int(getattr(world, "solver_iterations", 10)), 1)
+                add(
+                    bodies
+                    * substeps
+                    * (_RIGID_BODY_SUBSTEP_SECONDS + _RIGID_BODY_ITERATION_SECONDS * iterations),
+                    f"{bodies} rigid bodies at {substeps} substeps and {iterations} solver "
+                    "iterations",
+                )
+        for obj in scene.objects:
+            modifiers = list(getattr(obj, "modifiers", ()))
+            for position, modifier in enumerate(modifiers):
+                if modifier.type in self._CACHED_MODIFIER_TYPES:
+                    if scope == "rigid_body" and getattr(modifier.point_cache, "is_baked", False):
+                        continue
+                    points = self._simulated_points(obj, modifiers[:position])
+                    add(*self._modifier_cost(obj, modifier, points))
+                elif modifier.type == "DYNAMIC_PAINT":
+                    canvas = getattr(modifier, "canvas_settings", None)
+                    for surface in getattr(canvas, "canvas_surfaces", ()) or ():
+                        if getattr(surface, "surface_format", "VERTEX") != "VERTEX" or (
+                            scope == "rigid_body"
+                            and getattr(surface.point_cache, "is_baked", False)
+                        ):
+                            continue
+                        points = self._simulated_points(obj, modifiers[:position])
+                        add(
+                            points * _DYNAMIC_PAINT_VERTEX_SECONDS,
+                            f"dynamic paint surface '{surface.name}' on '{obj.name}' with "
+                            f"{points} vertices",
+                        )
+            for system in getattr(obj, "particle_systems", ()):
+                if scope == "rigid_body" and getattr(system.point_cache, "is_baked", False):
+                    continue
+                cost = self._particle_cost(system)
+                if cost is not None:
+                    add(*cost)
+        return seconds, parts
+
+    @staticmethod
+    def _simulated_points(obj: Any, before: Sequence[Any]) -> int:
+        """The vertices a simulation modifier gets: the object's, times each Subdivision before it.
+
+        Other modifiers before it are not evaluated for this estimate.
+        """
+        data = getattr(obj, "data", None)
+        points = len(getattr(data, "vertices", None) or getattr(data, "points", None) or ())
+        if not points and hasattr(data, "splines"):
+            points = sum(
+                len(spline.points) + len(spline.bezier_points) for spline in data.splines
+            )
+        for modifier in before:
+            if modifier.type == "SUBSURF" and getattr(modifier, "show_viewport", True):
+                points *= 4 ** max(int(getattr(modifier, "levels", 0)), 0)
+        return points
+
+    @staticmethod
+    def _modifier_cost(obj: Any, modifier: Any, points: int) -> Tuple[float, str]:
+        """A cloth or soft body's seconds a frame, and its description."""
+        settings = getattr(modifier, "settings", None)
+        if modifier.type == "CLOTH":
+            quality = max(int(getattr(settings, "quality", 5)), 1)
+            cost = points * (_CLOTH_VERTEX_SECONDS + _CLOTH_STEP_SECONDS * quality)
+            detail = f"quality {quality}"
+            collision = getattr(modifier, "collision_settings", None)
+            if getattr(collision, "use_self_collision", False):
+                cost *= _CLOTH_SELF_COLLISION_FACTOR
+                detail += " with self-collision"
+            return cost, f"cloth '{modifier.name}' on '{obj.name}' with {points} vertices at {detail}"
+        step_min = max(int(getattr(settings, "step_min", 10)), 1)
+        cost = points * _SOFT_BODY_VERTEX_SECONDS * max(step_min / 10, 1.0)
+        detail = f"at least {step_min} steps a frame"
+        if getattr(settings, "use_self_collision", False):
+            cost *= _SOFT_BODY_SELF_COLLISION_FACTOR
+            detail += " with self-collision"
+        return cost, f"soft body '{modifier.name}' on '{obj.name}' with {points} vertices, {detail}"
+
+    @staticmethod
+    def _particle_cost(system: Any) -> Optional[Tuple[float, str]]:
+        """A particle system's seconds a frame and description; None when nothing simulates."""
+        settings = getattr(system, "settings", None)
+        count = int(getattr(settings, "count", 0))
+        if getattr(settings, "type", "EMITTER") == "HAIR":
+            if not getattr(system, "use_hair_dynamics", False):
+                return None
+            # Hair dynamics is a cloth solver over every hair's points.
+            points = count * (int(getattr(settings, "hair_step", 5)) + 1)
+            cloth = getattr(system, "cloth", None)
+            quality = max(int(getattr(getattr(cloth, "settings", None), "quality", 5)), 1)
+            return (
+                points * (_CLOTH_VERTEX_SECONDS + _CLOTH_STEP_SECONDS * quality),
+                f"hair dynamics '{system.name}' with {points} points at quality {quality}",
+            )
+        return count * _PARTICLE_SECONDS, f"particle system '{system.name}' with {count} particles"
 
     def _bake_rigid_body_cache(
         self, scene: Any, world: Any, frame_start: int, frame_end: int
@@ -8419,11 +8781,10 @@ class BlenderRuntimeSession:
     _CACHE_FRAME_MIN = -1048574
     _CACHE_FRAME_MAX = 1048574
 
-    #: Most work get_physics_state steps an unbaked simulation through, in
-    #: body-frames (frames x rigid bodies), as _BAKE_WORK_BUDGET: up to 16 s of
-    #: simulation on Blender 5.0.1 when no frame is cached yet, inside the
-    #: attached-mode client's 30 s timeout. Cached frames are only read.
-    _STEP_WORK_BUDGET = 400_000
+    #: Most estimated seconds of simulation get_physics_state steps an unbaked
+    #: simulation through (_simulation_cost); frames its memory cache holds are
+    #: only read.
+    _STEP_SECONDS_BUDGET = SIMULATION_SECONDS_BUDGET
 
     @staticmethod
     def _in_rigid_body_world(world: Any, obj: Any) -> bool:
@@ -8445,8 +8806,8 @@ class BlenderRuntimeSession:
         so this visits every frame from the cache start, as playback would.
         Frames already cached are read, not simulated again. Past the cache
         end nothing more is simulated; the walk stops there and ends on
-        ``frame``. Nothing is stepped when the walk would exceed
-        ``_STEP_WORK_BUDGET``.
+        ``frame``. Nothing is stepped when the frames to simulate are estimated
+        at more than ``_STEP_SECONDS_BUDGET`` (``_step_seconds``).
 
         Returns:
             The number of frames visited, 0 when the walk was over budget.
@@ -8455,13 +8816,29 @@ class BlenderRuntimeSession:
         start = int(cache.frame_start)
         last = min(frame, int(cache.frame_end))
         frames = last - start + 1
-        if frames * max(self._rigid_body_count(world), 1) > self._STEP_WORK_BUDGET:
+        if self._step_seconds(scene, world, frame) > self._STEP_SECONDS_BUDGET:
             return 0
+        self._check_constraints_rebuildable(
+            scene, "stepped (pass step_simulation=false to read the pose as it is)"
+        )
         for step in range(start, last + 1):
             scene.frame_set(step)
         if last != frame:
             scene.frame_set(frame)
         return frames
+
+    def _step_seconds(self, scene: Any, world: Any, frame: int) -> float:
+        """Estimated seconds of simulation a walk from the cache start to ``frame`` takes.
+
+        Only the frames after those the memory cache holds are simulated; the
+        others are read.
+        """
+        cache = world.point_cache
+        last = min(frame, int(cache.frame_end))
+        simulated = last - max(self._cached_through(cache), int(cache.frame_start))
+        if simulated <= 0:
+            return 0.0
+        return simulated * self._simulation_cost(scene, "rigid_body")[0]
 
     @staticmethod
     def _cache_state(cache: Any, scene: Any) -> Dict[str, Any]:
@@ -8478,6 +8855,59 @@ class BlenderRuntimeSession:
         }
 
     @staticmethod
+    def _bodiless_constraints(scene: Any) -> List[str]:
+        """The rigid body constraints of the scene's world that join a missing object or one
+        without a rigid body."""
+        world = getattr(scene, "rigidbody_world", None)
+        collection = getattr(world, "constraints", None) if world is not None else None
+        broken: List[str] = []
+        for carrier in getattr(collection, "all_objects", None) or ():
+            rbc = getattr(carrier, "rigid_body_constraint", None)
+            if rbc is None:
+                continue
+            ends = (rbc.object1, rbc.object2)
+            if any(end is None or getattr(end, "rigid_body", None) is None for end in ends):
+                broken.append(str(carrier.name))
+        return sorted(broken)
+
+    def _check_constraints_rebuildable(self, scene: Any, action: str) -> None:
+        """Refuse to restart a simulation Blender would crash rebuilding.
+
+        Restarting a simulation from its first frame (a bake, or stepping an
+        outdated cache) makes Blender 5.0.1 rebuild its Bullet world, and the
+        rebuild first removes every constraint it built, which reads the
+        constraint's two bodies. Deleting one of them, or removing its rigid
+        body, frees that body but leaves the built constraint pointing at it,
+        with the constraint's object cleared: the rebuild then crashed Blender in
+        btDiscreteDynamicsWorld::removeConstraint, losing unsaved work (every
+        time with macOS MallocScribble; after a deleted body Blender's own
+        frame stepping crashed the same way). Blender builds constraints afresh
+        when it reads the file, so
+        saving and reopening it makes the restart safe. A memfile undo that
+        re-reads a jointed body leaves the same dangling constraint with both
+        objects set, which nothing here can see.
+
+        Raises:
+            RefusedOperation: ``details.code`` ConstraintWithoutBody, with the
+                constraints in ``details.constraints``.
+        """
+        broken = self._bodiless_constraints(scene)
+        if not broken:
+            return
+        raise RefusedOperation(
+            f"The simulation is not {action}: the rigid body constraint(s) "
+            f"{', '.join(broken)} join an object that was deleted or has no rigid body. "
+            "If such a constraint was simulated before its object went, Blender 5.0.1 "
+            "crashes when it restarts the simulation, as this would (it reads the freed "
+            "body), and the unsaved scene is lost; Blender's own playback from the first "
+            "frame can crash the same way. Save the file and open it again "
+            "(save_blender_file, then open_blender_file), which builds the constraints "
+            "afresh, then give each of them two rigid bodies or remove it",
+            "ConstraintWithoutBody",
+            constraints=broken,
+        )
+
+    @staticmethod
     def _invalidate_rigid_body_cache(world: Any) -> None:
         """Mark an unbaked rigid-body cache outdated, so the simulation restarts at its start.
 
@@ -8488,6 +8918,11 @@ class BlenderRuntimeSession:
         frame after. Without it the frames of an earlier simulation stay
         readable: on Blender 5.0.1, after a freed bake of frames 1-200, a bake
         of 10-50 read the old frames simulated from frame 1.
+
+        This is the reset any world setting change triggers, and the rebuild
+        is the only way Blender restarts a simulation, so it cannot be avoided;
+        a constraint left pointing at a freed body crashes it, which
+        _check_constraints_rebuildable refuses before.
         """
         world.time_scale = world.time_scale
 
@@ -9394,7 +9829,8 @@ class BlenderRuntimeSession:
         Create a mesh object from raw vertex, edge, and face data.
 
         Every argument is checked before anything is created: each vertex is
-        exactly three finite numbers, each index lies within the vertex list,
+        exactly three finite numbers within float32's range (Blender stores
+        coordinates in single precision), each index lies within the vertex list,
         no face repeats a vertex or the vertex set of an earlier face, and no
         edge joins a vertex to itself or repeats another edge. Such geometry
         is invalid in Blender and froze its Decimate. The collection must be
@@ -9404,7 +9840,8 @@ class BlenderRuntimeSession:
 
         Args:
             name: Desired object name.
-            vertices: Vertex positions, each exactly [x, y, z] finite numbers.
+            vertices: Vertex positions, each exactly [x, y, z] finite numbers
+                of at most 3.4e38 in size.
             edges: Loose edges as [v0, v1] pairs of two different vertices;
                 face edges are made from the faces.
             faces: Faces as lists of three or more vertex indices, each vertex
@@ -9704,6 +10141,7 @@ class BlenderRuntimeSession:
             "restitution": ("number", 0.0, 1.0),
             "density": ("number", 0.0, None),
             "is_rigid_body": ("flag",),
+            "is_kinematic": ("flag",),
         },
         "material": {
             "substrate_type": ("text",),
@@ -10430,14 +10868,32 @@ class BlenderRuntimeSession:
         """A rigid body's mass, colliders and nesting; a triangle-mesh collider on a body.
 
         ``jointed`` holds the body pairs (frozensets of names) an exported joint
-        joins: a rigid body nested in another is valid with one [RB.012].
+        joins: a rigid body nested in another is valid with one [RB.012]. A
+        kinematic body needs no mass and may collide as a triangle mesh. Where
+        the object's Blender rigid body disagrees with the metadata, which is
+        what the export writes, that is a warning.
         """
+
+        def kinematic(body: Any) -> bool:
+            return rigid(body) and field(body, "physics", "is_kinematic") is True
+
+        physics = {
+            name: field(obj, "physics", name)
+            for name in ("is_rigid_body", "is_kinematic", "mass_kg")
+        }
+        for message, suggestion in self._simready_blender_body_conflicts(obj, physics):
+            add(obj, "physics", "warning", message, suggestion)
+        if physics["is_kinematic"] is True and not rigid(obj):
+            add(obj, "physics", "warning",
+                "is_kinematic is set but is_rigid_body is not, so no kinematic body is exported",
+                "Set physics.is_rigid_body too, or clear is_kinematic")
         if obj.type == "MESH":
             source = nearest(obj, "physics", "collider_type")
             body = body_of(obj)
             if (
                 source is not None
                 and body is not None
+                and not kinematic(body)
                 and field(source, "physics", "collider_type") in self._SIMREADY_TRIANGLE_MESH
             ):
                 add(obj, "physics", "warning",
@@ -10446,7 +10902,11 @@ class BlenderRuntimeSession:
                     "Use collider_type convexHull or convexDecomposition")
         if not rigid(obj):
             return
-        if field(obj, "physics", "mass_kg") is None and field(obj, "physics", "density") is None:
+        if (
+            not kinematic(obj)
+            and field(obj, "physics", "mass_kg") is None
+            and field(obj, "physics", "density") is None
+        ):
             add(obj, "physics", "error",
                 "Rigid body without mass_kg or density",
                 "Set physics.mass_kg (or density) with apply_simready_metadata")
@@ -10461,6 +10921,67 @@ class BlenderRuntimeSession:
             add(obj, "physics", "error",
                 "Rigid body without a collider: no mesh of it has a collider_type",
                 "Set physics.collider_type on the body or its meshes")
+
+    @staticmethod
+    def _simready_blender_body_conflicts(
+        obj: Any, physics: Mapping[str, Any]
+    ) -> List[Tuple[str, str]]:
+        """Where the object's Blender rigid body disagrees with its SimReady physics metadata.
+
+        The export writes the metadata, not Blender's rigid body settings, so a
+        PASSIVE or animated Blender body tagged is_rigid_body came out as a
+        dynamic body that falls in a simulator, and a mass set only in Blender
+        was not exported, without a word.
+
+        Args:
+            obj: The Blender object.
+            physics: Its valid SimReady physics values (is_rigid_body,
+                is_kinematic, mass_kg).
+
+        Returns:
+            ``(message, suggestion)`` per disagreement.
+        """
+        body = getattr(obj, "rigid_body", None)
+        if body is None:
+            return []
+        rigid = physics.get("is_rigid_body") is True
+        kinematic = rigid and physics.get("is_kinematic") is True
+        if getattr(body, "kinematic", False) or body.type == "PASSIVE":
+            kind = "animated (kinematic)" if getattr(body, "kinematic", False) else "PASSIVE"
+            if rigid and not kinematic:
+                return [(
+                    f"Blender's rigid body is {kind}, so Blender's simulation does not move it, "
+                    "but its SimReady metadata (is_rigid_body without is_kinematic) exports a "
+                    "dynamic body, which falls in a simulator",
+                    "Set physics.is_kinematic true for a fixed or animated body, or "
+                    "is_rigid_body false for a static collider, with apply_simready_metadata",
+                )]
+            return []
+        if not rigid:
+            return [(
+                "Blender simulates it as an ACTIVE rigid body, but its SimReady metadata has "
+                "no is_rigid_body, so the export writes it static",
+                "Set physics.is_rigid_body (and mass_kg) with apply_simready_metadata, or make "
+                "the Blender body PASSIVE",
+            )]
+        if kinematic:
+            return [(
+                "Its SimReady metadata makes it kinematic (is_kinematic), but Blender simulates "
+                "it as an ACTIVE dynamic body",
+                "Clear physics.is_kinematic, or make the Blender body animated or PASSIVE",
+            )]
+        mass = physics.get("mass_kg")
+        blender_mass = float(getattr(body, "mass", 0.0))
+        if mass is not None and not math.isclose(
+            blender_mass, float(mass), rel_tol=1e-3, abs_tol=1e-6
+        ):
+            return [(
+                f"Blender's rigid body mass is {blender_mass:g} kg but SimReady mass_kg is "
+                f"{float(mass):g} kg; the export writes {float(mass):g} kg",
+                "Set the same mass in both: physics.mass_kg with apply_simready_metadata, or "
+                "mass with setup_blender_rigid_body",
+            )]
+        return []
 
     @staticmethod
     def _simready_constraint_empty(obj: Any) -> bool:
@@ -11071,6 +11592,12 @@ class BlenderRuntimeSession:
                 f"{obj.name}: stored {i['property']}={i['value']!r} {i['problem']}; not exported"
                 for i in invalid
             )
+            stored_problems.extend(
+                f"{obj.name}: {message}"
+                for message, _ in self._simready_blender_body_conflicts(
+                    obj, valid.get("physics", {})
+                )
+            )
         joints, joint_issues = self._simready_joint_plan(targets, self._simready_world_resolver())
         plan = {
             "objects": objects,
@@ -11159,7 +11686,7 @@ class BlenderRuntimeSession:
         )
         return {
             "file_path": file_path,
-            "files_written": self._written_files(main_file.parent, before, file_path),
+            "files_written": self._simready_written_files(main_file.parent, before, file_path),
             "object_count": len(prims),
             "default_prim": report["default_prim"],
             "prims": [{"object_name": n, "prim_path": p} for n, p in prims[:limit]],
@@ -11173,6 +11700,7 @@ class BlenderRuntimeSession:
                 "physics_material_count": len(report["physics_materials"]),
                 "joint_count": len(report["joints"]),
                 "rigid_bodies": report["rigid_bodies"][:limit],
+                "kinematic_bodies": report["kinematic_bodies"][:limit],
                 "colliders": report["colliders"][:limit],
                 "physics_materials": report["physics_materials"][:limit],
                 "joints": report["joints"][:limit],
@@ -11237,9 +11765,13 @@ class BlenderRuntimeSession:
         include_children: bool,
         include_lights_and_cameras: bool,
     ) -> Tuple[List[Any], set, List[Dict[str, str]]]:
-        """The objects to export, the listed ones' names, and the left-out ones with why."""
+        """The objects to export, the listed ones' names, and the left-out ones with why.
+
+        The view layer is synced first, so objects a script just linked count
+        as in it (_synced_view_layer).
+        """
         blender_module: Any = bpy
-        layer_objects = blender_module.context.view_layer.objects
+        layer_objects = _synced_view_layer().objects
         listed: List[Any] = []
         if object_names is None:
             candidates = [o for o in blender_module.context.scene.objects if o is not None]

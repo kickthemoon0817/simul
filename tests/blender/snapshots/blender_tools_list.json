@@ -758,7 +758,7 @@
     "delete_blender_object": {
       "name": "delete_blender_object",
       "title": "Delete Blender Object",
-      "description": "Delete an object from the current Blender scene with Blender's own Delete, which also resets a rigid body's cache. Another scene linking it keeps it (remaining_scenes); use_global=true deletes it from every scene and the file.",
+      "description": "Delete an object from the current Blender scene with Blender's own Delete, which also resets a rigid body's cache. Another scene linking it keeps it (remaining_scenes); use_global=true deletes it from every scene and the file. A rigid body constraint joining it is removed first (removed_constraints), since one left pointing at the deleted body crashes Blender when the simulation restarts.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1412,7 +1412,7 @@
     "delete_blender_keyframe": {
       "name": "delete_blender_keyframe",
       "title": "Delete Blender Keyframe",
-      "description": "Delete a keyframe from an object property.",
+      "description": "Delete a keyframe from an object property at a frame, a sub-frame key such as 10.25 (from insert_blender_keyframes) included. A missing key is NotFoundError.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1422,7 +1422,10 @@
             "description": "Property data path (e.g. 'location', 'rotation_euler').",
             "type": "string"
           },
-          "frame": {"description": "Frame number of the keyframe to delete.", "type": "integer"},
+          "frame": {
+            "description": "Frame of the keyframe to delete, a sub-frame such as 10.25 included (insert_blender_keyframes keys those); Blender takes the key within 0.01 of it.",
+            "type": "number"
+          },
           "index": {"default": -1, "description": "Array index (-1 for all channels).", "type": "integer"}
         },
         "required": ["object_name", "data_path", "frame"]
@@ -1555,7 +1558,7 @@
                   "type": "array"
                 },
                 "values": {
-                  "description": "One value per frame: a number for one channel, else one number per element",
+                  "description": "One value per frame: a number for one channel, else one number per element; finite and at most 3.4e38 in size, as an F-curve stores it",
                   "items": {"anyOf": [{"type": "number"}, {"items": {"type": "number"}, "type": "array"}]},
                   "minItems": 1,
                   "type": "array"
@@ -1901,7 +1904,7 @@
     "get_blender_physics_state": {
       "name": "get_blender_physics_state",
       "title": "Get Blender Physics State",
-      "description": "Get an object's world pose and rigid-body state at the current frame. An unbaked simulation advances one frame at a time, so after a frame jump a body sits where it was last simulated: by default the scene first steps from the cache start to the current frame, as playback would (up to 400 000 body-frames). pose_source and simulated_for_frame say whether the pose is the simulation's for this frame; frames past the cache end hold the bodies at its last frame (past_cache_end). rigid_body_cache reports the cache range and bake state.",
+      "description": "Get an object's world pose and rigid-body state at the current frame. An unbaked simulation advances one frame at a time, so after a frame jump a body sits where it was last simulated: by default the scene first steps from the cache start to the current frame, as playback would (when that is estimated at 16 s or less). pose_source and simulated_for_frame say whether the pose is the simulation's for this frame; frames past the cache end hold the bodies at its last frame (past_cache_end). rigid_body_cache reports the cache range and bake state.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1909,7 +1912,7 @@
           "object_name": {"description": "Name of the object.", "type": "string"},
           "step_simulation": {
             "default": true,
-            "description": "Step an unbaked rigid-body simulation from its cache start to the current frame before reading the pose, at most frames x bodies = 400 000; false reads the pose as it is.",
+            "description": "Step an unbaked rigid-body simulation from its cache start to the current frame before reading the pose, when the frames to simulate are estimated at 16 s or less (from the bodies, substeps and solver iterations, and the other unbaked simulations that step along); false reads the pose as it is.",
             "type": "boolean"
           }
         },
@@ -1921,7 +1924,7 @@
     "get_blender_object_trajectory": {
       "name": "get_blender_object_trajectory",
       "title": "Get Blender Object Trajectory",
-      "description": "Sample the world pose of an object, or of an armature's bone, over a frame range, a page at a time (next_offset continues). Not read-only: it steps the scene through the frames (frame-change handlers run, an unbaked rigid-body cache fills, more than 200 000 bodies x frames only with max_simulated_frames) and restores the current frame afterwards.",
+      "description": "Sample the world pose of an object, or of an armature's bone, over a frame range, a page at a time (next_offset continues). Not read-only: it steps the scene through the frames (frame-change handlers run, an unbaked rigid-body cache fills, more than an estimated 8 s of simulation only with max_simulated_frames) and restores the current frame afterwards.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1981,7 +1984,7 @@
           "max_simulated_frames": {
             "anyOf": [{"minimum": 0, "type": "integer"}, {"type": "null"}],
             "default": null,
-            "description": "Most frames of unbaked rigid-body simulation the call may step through; the page ends before a sample that needs more. None allows up to 200 000 bodies times frames, and a request whose first sample needs more is refused."
+            "description": "Most frames of unbaked rigid-body simulation the call may step through; the page ends before a sample that needs more. None allows the frames estimated at 8 s of simulation (from the bodies, substeps and solver iterations, and the other unbaked simulations that step along), and a request whose first sample needs more is refused."
           }
         },
         "required": ["object_name", "start_frame", "end_frame"]
@@ -2062,7 +2065,7 @@
           "max_simulated_frames": {
             "anyOf": [{"minimum": 0, "type": "integer"}, {"type": "null"}],
             "default": null,
-            "description": "Most frames of unbaked rigid-body simulation the call may step through, as for get_object_trajectory; None allows up to 200 000 bodies times frames."
+            "description": "Most frames of unbaked rigid-body simulation the call may step through, as for get_object_trajectory; None allows the frames estimated at 8 s of simulation."
           }
         },
         "required": ["targets", "start_frame", "end_frame"]
@@ -2073,7 +2076,7 @@
     "bake_blender_simulation": {
       "name": "bake_blender_simulation",
       "title": "Bake Blender Simulation",
-      "description": "Bake the physics simulation for frame_start-frame_end (start before end), replacing an earlier bake: the simulation restarts from frame_start with the bodies' current transforms. scope 'rigid_body' (default) bakes only the rigid-body world's cache; 'all' bakes every point cache (rigid bodies, cloth, soft bodies, dynamic paint, particles). Refused for a disabled rigid body world. The reply gives the range the cache holds and warns about scene frames it leaves out, where bodies hold their pose. A bake runs on Blender's main thread and cannot be stopped, so one over 20 000 frames or 400 000 body-frames (frames x bodies, up to about 16 s) is refused unless allow_long_bake=true; past the client timeout Blender keeps baking and the next calls wait behind it.",
+      "description": "Bake the physics simulation for frame_start-frame_end (start before end), replacing an earlier bake: the simulation restarts from frame_start with the bodies' current transforms. scope 'rigid_body' (default) bakes only the rigid-body world's cache; 'all' bakes every point cache (rigid bodies, cloth, soft bodies, dynamic paint, particles). Refused for a disabled rigid body world. The reply gives the range the cache holds and warns about scene frames it leaves out, where bodies hold their pose. A bake runs on Blender's main thread and cannot be stopped, so one over 20 000 frames or an estimated 16 s is refused unless allow_long_bake=true; the estimate counts rigid bodies x substeps x solver iterations, cloth and soft-body vertices x quality, and particles, and the refusal says how many frames fit. Past the client timeout Blender keeps baking and the next calls wait behind it. Refused (RefusedOperation) while a rigid body constraint joins a deleted object or one without a rigid body, since restarting that simulation crashes Blender 5.0.1; save and reopen the file first.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -2098,7 +2101,7 @@
           },
           "allow_long_bake": {
             "default": false,
-            "description": "Bake even above 20 000 frames or 400 000 body-frames (frames x bodies), which can outlast the client's timeout while Blender keeps baking.",
+            "description": "Bake even above 20 000 frames or an estimated 16 s, which can outlast the client's timeout while Blender keeps baking. The estimate counts the frames times each simulation's cost a frame: rigid bodies by count, substeps and solver iterations; cloth, soft bodies and dynamic paint by vertices and quality; particles by count.",
             "type": "boolean"
           }
         },
@@ -2225,14 +2228,14 @@
     "create_blender_mesh_from_data": {
       "name": "create_blender_mesh_from_data",
       "title": "Create Blender Mesh From Data",
-      "description": "Create a mesh object from raw vertex, edge, and face data. Use for procedural geometry. Each vertex is exactly [x, y, z] finite numbers; a face repeating a vertex or another face's vertex set, an edge joining a vertex to itself or repeating another, and a collection outside the current scene are refused before anything is created. The mesh is validated, and a failed call leaves no mesh or object behind.",
+      "description": "Create a mesh object from raw vertex, edge, and face data. Use for procedural geometry. Each vertex is exactly [x, y, z] finite numbers within float32 range (at most 3.4e38 in size); a face repeating a vertex or another face's vertex set, an edge joining a vertex to itself or repeating another, and a collection outside the current scene are refused before anything is created. The mesh is validated, and a failed call leaves no mesh or object behind.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "name": {"description": "Desired object name.", "minLength": 1, "type": "string"},
           "vertices": {
-            "description": "Vertex positions, each exactly [x, y, z] finite numbers.",
+            "description": "Vertex positions, each exactly [x, y, z] finite numbers of at most 3.4e38 in size.",
             "items": {"items": {"type": "number"}, "type": "array"},
             "type": "array"
           },
@@ -2452,6 +2455,11 @@
                             "anyOf": [{"type": "boolean"}, {"type": "null"}],
                             "default": null,
                             "description": "Whether the object is a rigid body; false clears an earlier true"
+                          },
+                          "is_kinematic": {
+                            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+                            "default": null,
+                            "description": "With is_rigid_body, a kinematic body (UsdPhysics kinematicEnabled): moved by its animation, not by the simulation, such as a robot's fixed base. It needs no mass. false clears an earlier true"
                           }
                         },
                         "type": "object"
@@ -2518,6 +2526,7 @@
                     "restitution",
                     "density",
                     "is_rigid_body",
+                    "is_kinematic",
                     "substrate_type",
                     "material_naming",
                     "shader_type",

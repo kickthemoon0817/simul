@@ -30,7 +30,8 @@ use the new version; Simul does not restart the editor automatically. A server
 and an add-on that speak different bridge protocols refuse each other with the
 `install-bridge` fix instead of misreading a call (`error_type:
 "BridgeProtocolError"`); protocol 5 is the first that records agent edits as undo
-steps, and protocol 13 the first whose requests start with their token.
+steps, protocol 13 the first whose requests start with their token, and protocol
+14 the first whose bake limit counts substeps, solver iterations and cloth size.
 
 ## Select and verify the target
 

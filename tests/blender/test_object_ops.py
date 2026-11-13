@@ -557,9 +557,43 @@ def test_delete_object_leaves_the_object_in_other_scenes(world: World) -> None:
     assert result == {
         "deleted_name": "SharedProp",
         "use_global": False,
+        "removed_constraints": [],
         "removed_from_file": False,
         "remaining_scenes": ["VariantB"],
     }
+
+
+def test_delete_object_removes_a_constraint_joining_it_first(world: World) -> None:
+    """Blender's Delete left the constraint pointing at the freed body: the next restart of
+    the simulation (a bake) crashed Blender 5.0.1 in btDiscreteDynamicsWorld::removeConstraint."""
+    body, other = world.add("Link"), world.add("Base")
+    carrier = world.add("RBC_Base_Link", object_type="EMPTY")
+    unrelated = world.add("RBC_Base_Base2", object_type="EMPTY")
+    carrier.rigid_body_constraint = SimpleNamespace(object1=other, object2=body)
+    unrelated.rigid_body_constraint = SimpleNamespace(object1=other, object2=None)
+    world.scene.rigidbody_world = SimpleNamespace(
+        constraints=SimpleNamespace(all_objects=[carrier, unrelated])
+    )
+    order: List[str] = []
+
+    def constraint_remove() -> set:
+        active = world.view_layer.objects.active
+        order.append(f"constraint_remove {active.name}")
+        assert "Link" in world.objects, "the body must still exist"
+        active.rigid_body_constraint = None
+        return {"FINISHED"}
+
+    world.bpy.ops.rigidbody = SimpleNamespace(constraint_remove=constraint_remove)
+    world.view_layer.objects.active = other
+
+    result = _session().delete_object("Link")
+
+    assert order == ["constraint_remove RBC_Base_Link"]
+    assert result["removed_constraints"] == ["RBC_Base_Link"]
+    assert "Link" not in world.objects and "RBC_Base_Link" in world.objects
+    assert unrelated.rigid_body_constraint is not None
+    # The user's active object is restored.
+    assert world.view_layer.objects.active is other
 
 
 def test_delete_object_globally_deletes_it_from_every_scene(world: World) -> None:

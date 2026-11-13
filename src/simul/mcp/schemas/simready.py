@@ -54,6 +54,7 @@ SimReadyClearName = Literal[
     "restitution",
     "density",
     "is_rigid_body",
+    "is_kinematic",
     "substrate_type",
     "material_naming",
     "shader_type",
@@ -200,6 +201,14 @@ class SimReadyPhysicsProperties(_StrictModel):
     is_rigid_body: Optional[bool] = Field(
         None,
         description="Whether the object is a rigid body; false clears an earlier true",
+    )
+    is_kinematic: Optional[bool] = Field(
+        None,
+        description=(
+            "With is_rigid_body, a kinematic body (UsdPhysics kinematicEnabled): moved by "
+            "its animation, not by the simulation, such as a robot's fixed base. It needs "
+            "no mass. false clears an earlier true"
+        ),
     )
 
 
@@ -490,6 +499,10 @@ class SimReadyExportPhysics(BaseModel):
         0, description="UsdPhysics joints written for rigid body constraints"
     )
     rigid_bodies: List[str] = Field(default_factory=list, description="Rigid body prims")
+    kinematic_bodies: List[str] = Field(
+        default_factory=list,
+        description="The rigid bodies written kinematic (kinematicEnabled), from is_kinematic",
+    )
     colliders: List[str] = Field(default_factory=list, description="Collider meshes")
     physics_materials: List[str] = Field(
         default_factory=list, description="Physics material prims"
@@ -526,8 +539,9 @@ class SimReadyExportResponse(BaseModel):
     files_written: List[str] = Field(
         default_factory=list,
         description=(
-            "Every file the export created or changed in file_path's folder and its "
-            "texture subfolders, file_path first"
+            "The files the export wrote: file_path, then the textures Blender's USD "
+            "exporter wrote to the textures folder beside it (a .usdz packs them). "
+            "Other files the folder gained meanwhile are not listed"
         ),
     )
     object_count: int = Field(..., description="Number of objects written")

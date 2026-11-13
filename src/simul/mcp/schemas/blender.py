@@ -1243,6 +1243,14 @@ class BlenderDeleteObjectResponse(BaseModel):
     use_global: Optional[bool] = Field(
         None, description="Whether it was deleted from every scene"
     )
+    removed_constraints: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Empties whose rigid body constraint joining the object was removed first; "
+            "Blender's Delete left it pointing at the freed body, which crashed Blender "
+            "when the simulation restarted"
+        ),
+    )
     removed_from_file: Optional[bool] = Field(
         None, description="Whether the object is gone from the file (no scene links it any more)"
     )
@@ -2184,12 +2192,13 @@ class BlenderInsertKeyframeRequest(BaseModel):
     )
     frame: int = Field(..., description="Frame number for the keyframe")
     index: int = Field(-1, description="Array index (-1 for all channels)")
-    value: Optional[Union[float, List[float]]] = Field(
+    value: Optional[Union[FiniteFloat, List[FiniteFloat]]] = Field(
         None,
         description=(
             "Value to key instead of the property's current one: one number for one "
-            "channel, else one per element. The keyed channels then show what their "
-            "F-curves give at the current frame; other channels keep their values"
+            "channel, else one per element; finite and at most 3.4e38 in size, as an "
+            "F-curve stores it. The keyed channels then show what their F-curves give "
+            "at the current frame; other channels keep their values"
         ),
     )
     interpolation: Optional[BlenderKeyframeInterpolation] = Field(
@@ -2248,7 +2257,13 @@ class BlenderDeleteKeyframeRequest(BaseModel):
     data_path: str = Field(
         ..., description="Property data path (e.g. 'location', 'rotation_euler')"
     )
-    frame: int = Field(..., description="Frame number of the keyframe to delete")
+    frame: FiniteFloat = Field(
+        ...,
+        description=(
+            "Frame of the keyframe to delete; a sub-frame such as 10.25 too (Blender "
+            "takes the key within 0.01 of it)"
+        ),
+    )
     index: int = Field(-1, description="Array index (-1 for all channels)")
 
 
@@ -2261,7 +2276,7 @@ class BlenderDeleteKeyframeResponse(BaseModel):
     )
     object_name: str = Field(..., description="Object name")
     data_path: str = Field(..., description="Property data path")
-    frame: int = Field(..., description="Frame number that was deleted")
+    frame: Union[int, float] = Field(..., description="Frame that was deleted")
 
 
 class BlenderGetKeyframesRequest(BaseModel):
@@ -2392,7 +2407,7 @@ class BlenderKeyframeChannelData(BaseModel):
 
     data_path: str = Field(..., description="Property data path, as for insert_blender_keyframe")
     index: int = Field(-1, description="Array index (-1 for all elements)")
-    frames: List[float] = Field(
+    frames: List[FiniteFloat] = Field(
         ...,
         min_length=1,
         description=(
@@ -2400,11 +2415,12 @@ class BlenderKeyframeChannelData(BaseModel):
             "key for keys closer than that"
         ),
     )
-    values: List[Union[float, List[float]]] = Field(
+    values: List[Union[FiniteFloat, List[FiniteFloat]]] = Field(
         ...,
         min_length=1,
         description=(
-            "One value per frame: a number for one channel, else one number per element"
+            "One value per frame: a number for one channel, else one number per element; "
+            "finite and at most 3.4e38 in size, as an F-curve stores it"
         ),
     )
 
@@ -3131,7 +3147,7 @@ class BlenderGetPhysicsStateRequest(BaseModel):
         True,
         description=(
             "Step an unbaked rigid-body simulation from its cache start to the current "
-            "frame before reading the pose, at most 400 000 body-frames"
+            "frame before reading the pose, when that is estimated at 16 s or less"
         ),
     )
 
@@ -3416,8 +3432,9 @@ class BlenderBakeSimulationRequest(BaseModel):
     allow_long_bake: bool = Field(
         False,
         description=(
-            "Bake above 20 000 frames or 400 000 body-frames, which can outlast the "
-            "client timeout while Blender keeps baking"
+            "Bake above 20 000 frames or an estimated 16 s (from the rigid bodies, "
+            "substeps, solver iterations, cloth and soft-body vertices and quality, and "
+            "particles), which can outlast the client timeout while Blender keeps baking"
         ),
     )
 
@@ -3694,7 +3711,10 @@ class BlenderCreateMeshFromDataRequest(BaseModel):
     )
     vertices: List[MeshVertex] = Field(
         ...,
-        description="List of vertex positions, each exactly [x, y, z] finite numbers",
+        description=(
+            "List of vertex positions, each exactly [x, y, z] finite numbers of at most "
+            "3.4e38 in size (Blender's single precision)"
+        ),
         min_length=1,
     )
     edges: List[MeshEdge] = Field(

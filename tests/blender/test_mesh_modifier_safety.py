@@ -67,6 +67,13 @@ class TestMeshVertices:
             ([[0, 0, 0], [1, 0, 0], [0, 1, math.nan]], "Vertex 2 coordinates must be finite"),
             ([[math.inf, 0, 0], [1, 0, 0], [0, 1, 0]], "Vertex 0 coordinates must be finite"),
             ([[0, 0, 0], [-math.inf, 0, 0], [0, 1, 0]], "Vertex 1 coordinates must be finite"),
+            # Round 2 (m-5): Blender stored 1e300 as 0, without a word.
+            (
+                [[0, 0, 0], [1, 0, 0], [0, 1e300, 0]],
+                r"Vertex 2 coordinates must fit Blender's single precision \(at most "
+                r"3.402823e\+38 in size\), got 1e\+300",
+            ),
+            ([[-3.5e38, 0, 0], [1, 0, 0], [0, 1, 0]], "Vertex 0 coordinates must fit"),
             ([[True, 0, 0], [1, 0, 0], [0, 1, 0]], "Vertex 0 coordinates must be numbers"),
             ([[0, 0, 0], "abc", [0, 1, 0]], "Vertex 1 must be"),
         ],
@@ -663,8 +670,18 @@ class TestApplyAndRemoveModifier:
         with pytest.raises(ValueError, match="Object 'box' has no modifier 'Weld'; it has none"):
             session.apply_modifier("box", "Weld")
         session.add_modifier("box", "TRIANGULATE")
-        with pytest.raises(ValueError, match="has no modifier 'Weld'; its modifiers are: Triangulate"):
+        with pytest.raises(
+            blender_runtime.NotFoundError,
+            match="has no modifier 'Weld'; its modifiers are: Triangulate",
+        ) as missing:
             session.apply_modifier("box", "Weld")
+        # Round 2 (m-6): the error vocabulary's NotFoundError, not a ValidationError.
+        assert missing.value.details == {
+            "code": "modifier_not_found",
+            "object_name": "box",
+            "modifier_name": "Weld",
+            "modifiers": ["Triangulate"],
+        }
 
     def test_apply_decimate_on_invalid_geometry_is_refused(
         self, fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession, box: Any
