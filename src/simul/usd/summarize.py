@@ -350,6 +350,7 @@ class SceneSummarizer(LoggerMixin):
             'meshes_with_uvs': 0,
             'meshes_with_colors': 0,
             'closed_meshes': 0,
+            'inconsistently_wound_meshes': 0,
             'invalid_topology_meshes': 0,
             'meshes_measured_at_first_sample': 0,
             'instanced_meshes': 0,
@@ -435,6 +436,7 @@ class SceneSummarizer(LoggerMixin):
                 stats['meshes_with_uvs'] += uses * bool(attributes.uv_sets)
                 stats['meshes_with_colors'] += uses * attributes.has_colors
                 stats['closed_meshes'] += uses * geometry.is_closed
+                stats['inconsistently_wound_meshes'] += uses * (geometry.consistently_oriented is False)
                 stats['invalid_topology_meshes'] += uses * (not geometry.topology_valid)
                 stats['total_surface_area'] += uses * (geometry.surface_area or 0.0)
                 stats['total_volume'] += uses * (geometry.volume or 0.0)

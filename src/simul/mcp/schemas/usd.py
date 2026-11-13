@@ -281,11 +281,22 @@ class MeshInfo(BaseModel):
     is_closed: Optional[bool] = Field(
         ..., description="Whether mesh is watertight; None when the mesh was not measured"
     )
+    consistently_oriented: Optional[bool] = Field(
+        None,
+        description=(
+            "For a closed mesh, whether the two faces sharing each edge run it in opposite "
+            "directions (no flipped face); None when the mesh is not closed"
+        ),
+    )
     surface_area: Optional[float] = Field(
         ..., description="Surface area in the mesh's own space (before transforms); None for invalid topology"
     )
     volume: Optional[float] = Field(
-        ..., description="Enclosed volume in the mesh's own space; None unless the mesh is closed"
+        ...,
+        description=(
+            "Enclosed volume in the mesh's own space; None unless the mesh is closed and "
+            "consistently oriented"
+        ),
     )
     bbox: Optional[BoundingBox] = Field(
         ..., description="Bounds of the points in the mesh's own space; None without points"
@@ -314,7 +325,9 @@ class MeshInfo(BaseModel):
     sampled_time_range: Optional[List[float]] = Field(
         None, description="[first, last] sample time of an unmeasured mesh's topology"
     )
-    note: Optional[str] = Field(None, description="Why the mesh was not measured")
+    note: Optional[str] = Field(
+        None, description="Why the mesh, or its volume, was not measured"
+    )
     time_code: Optional[float] = Field(
         None, description="Time code read; None for the default time"
     )

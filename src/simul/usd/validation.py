@@ -35,6 +35,7 @@ from pxr import Ar
 
 from ..utils.paths import PathPolicy
 from ._pxr import Sdf, Tf, Usd, UsdGeom
+from .stage_files import public_identifier
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import USDConfig
@@ -428,7 +429,7 @@ def composition_issues(stage: "Usd.Stage", severity: str = ERROR) -> List[Valida
         return []
     issues: List[ValidationIssue] = []
     for error in get_errors():
-        message = _PXR_NAMESPACE.sub("", str(error)).strip()
+        message = public_identifier(_PXR_NAMESPACE.sub("", str(error)).strip())
         asset = _ASSET_IN_MESSAGE.search(message)
         site = getattr(error, "rootSite", None)
         prim_path = str(site.path) if site is not None and site.path else None
@@ -437,7 +438,7 @@ def composition_issues(stage: "Usd.Stage", severity: str = ERROR) -> List[Valida
                 severity,
                 _pcp_code(error, message),
                 message,
-                layer=stage.GetRootLayer().identifier,
+                layer=public_identifier(stage.GetRootLayer().identifier),
                 prim_path=prim_path,
                 asset_path=asset.group(1) if asset else None,
             )
@@ -465,7 +466,7 @@ def metadata_issues(stage: "Usd.Stage", root_layer: "Sdf.Layer") -> List[Validat
     Returns:
         The metadata issues found.
     """
-    layer_id = root_layer.identifier
+    layer_id = public_identifier(root_layer.identifier)
     issues: List[ValidationIssue] = []
 
     authored_default = root_layer.defaultPrim
@@ -658,7 +659,7 @@ def _site_location(site: Any) -> Dict[str, Optional[str]]:
             location["property_path"] = str(prop.GetPath())
         layer = site.GetLayer()
         if layer:
-            location["layer"] = layer.identifier
+            location["layer"] = public_identifier(layer.identifier)
     except Exception:  # pragma: no cover - a malformed site keeps the message
         pass
     return location
@@ -755,9 +756,9 @@ def unsaved_edit_issues(stage: "Usd.Stage") -> List[ValidationIssue]:
         ValidationIssue(
             INFO,
             "UnsavedEdits",
-            f"Validated the in-memory copy of {layer.identifier}, which a loaded stage has "
-            "edited; the file on disk may differ.",
-            layer=layer.identifier,
+            f"Validated the in-memory copy of {public_identifier(layer.identifier)}, which a loaded "
+            "stage has edited; the file on disk may differ.",
+            layer=public_identifier(layer.identifier),
         )
         for layer in stage.GetUsedLayers()
         if not layer.anonymous and layer.dirty

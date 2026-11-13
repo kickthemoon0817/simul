@@ -418,9 +418,12 @@ The headless USD per-prim queries (`get_prim_info`, `get_mesh_info`,
 `get_bounding_box`, `search_prims`) count only against that per-agent cap.
 They are local reads an agent issues once per prim while it inspects an
 asset, and the per-tool burst refused most of a prim-by-prim pass over a
-small robot. Every other tool, including `load_usd_file`,
-`validate_usd_file`, `summarize_scene` and the USD edit tools, spends from
-both buckets.
+small robot. `get_prim_subtree` spends from its own bucket for a first page
+only: each later page (a nonzero `offset`) counts only against the
+per-agent cap, since a walk over a large stage is one request in pages, and
+25 pages used to draw 15 refusals. Every other tool, including
+`load_usd_file`, `validate_usd_file`, `summarize_scene` and the USD edit
+tools, spends from both buckets.
 
 The defaults are meant to stop a runaway loop, not parallel work: one tool
 takes `burst_size` (10) calls at once and then `requests_per_minute` (60, one

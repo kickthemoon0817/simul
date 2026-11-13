@@ -29,11 +29,17 @@ plus a notice).
   every entry once and always moves forward.
 - **Oversized entries.** An entry too large on its own is sent compacted to its
   identifying and small fields (`truncated_item`, `dropped_keys`), so the next
-  page starts after it.
+  page starts after it. A page that keeps all its entries, some compacted,
+  keeps the tool's `next_offset`, which is `null` on the last page.
+- **Bulk mappings.** A tool whose bulk is one mapping declares it
+  (`get_prim_info`'s `attributes`). That mapping is cut first, to its leading
+  entries, and named in `truncated_fields` with `returned`, `total`,
+  `first_omitted` and how to ask for the rest. The small fields and lists
+  beside it, such as the prim's `api_schemas`, arrive whole.
 - **Other lists.** Any other list cut to fit is listed in `truncated_fields` (or
   in `truncation` when the tool does not page), with `next_offset: "unchanged"`
   whenever the result is paged: its dropped entries will not come back on a
-  later page. The paged lists of each tool are declared in
+  later page. The paged lists and bulk mappings of each tool are declared in
   `simul.mcp.paged_results`.
 - **Hard limit.** Above 400 KB, the field carrying the excess is cut at any
   depth. A string becomes a `truncated_field` marker, and a list or mapping
@@ -69,6 +75,10 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   relationship as `{targets, authored}`, applied API schemas, and metadata:
   specifier, instanceable, composition arcs with `resolved`, variant sets
   and selections, the layers holding opinions, and other authored metadata.
+  Layers are named by their file path. When a prim's attributes exceed the
+  result budget, the leading ones that fit are sent and `truncated_fields`
+  says how many there are and where the cut fell. Narrow with
+  `attribute_filter` to read the rest.
   An array attribute carries its `length` and first `array_preview`
   elements (default 16, up to 10000), so a million-point mesh costs a few
   KB; `attribute_filter` takes glob patterns, `time_code` reads animated
@@ -91,6 +101,9 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   depth-first (path, type, depth, child count, API schemas), paged with
   `max_results`/`offset`. `include_properties` adds each prim's authored
   attributes and relationship targets, so a whole robot reads in one call.
+  The first page spends the tool's own rate-limit bucket. Each later page
+  (a nonzero `offset`) counts only against the per-agent ceiling, so walking
+  a large stage is not throttled page by page.
 - **Meshes.** `get_mesh_info` is computed with numpy over whole arrays (a
   million-vertex mesh in about 0.3 s). It reports normals from
   `primvars:normals` or `normals` (`normals_source`), `uv_sets`, and the
@@ -98,8 +111,12 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   `materialBind` subset's (also on the subset entry), plus a
   `physics_material` that carries `PhysicsMaterialAPI`. `surface_area`, `volume` and
   `bbox` are in the mesh's own space; `volume` is null unless the mesh is
-  closed, `surface_area` null for invalid topology, and `bbox` null without
-  points. Face areas use Newell's method, exact for planar faces, concave
+  closed and consistently oriented, `surface_area` null for invalid
+  topology, and `bbox` null without points. `consistently_oriented` says
+  whether the two faces sharing each edge run it in opposite directions. A
+  closed mesh with a flipped face reports `false`, with no volume, because
+  the divergence theorem over that winding gives a wrong number, and a
+  `note` says so. A prim that is not a Mesh is an `InvalidAssetType` error. Face areas use Newell's method, exact for planar faces, concave
   ones included. Faces listed in `holeIndices` add no area and leave their
   edges open. `time_code` reads a deforming mesh, and `points_time_samples`
   says whether it deforms. A mesh whose points or topology exist only as
@@ -111,11 +128,17 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   - `scene_size_meters` next to `scene_size`;
   - `has_animation` from an authored time range or time samples spanning
     more than one time (`time_sample_range`), with `duration_seconds` (time
-    codes divided by `timeCodesPerSecond`);
+    codes divided by `timeCodesPerSecond`). The sample range is in stage time
+    codes, as pxr composes them: each layer's samples are mapped through its
+    sublayer offset and the offset and scale of every reference or payload
+    that brings it in, and value clips through their `times` and `active`.
+    The cost scales with the stage's arcs, not its prims;
   - `warnings` for layers whose authored `upAxis` or `metersPerUnit` differs
     from the stage's (USD rescales and reorients nothing), one entry per
     mismatch and value with `layer_count` and up to 5 example `layers`;
     at most 10 groups, then a `MoreUnitMismatches` count;
+  - `inconsistently_wound_meshes` among the mesh totals: closed meshes
+    with a flipped face, whose volume is left out of `total_volume`;
   - `materials`, `root_prims` and their counts;
   - `(typeless)` as the type key of untyped prims.
 
@@ -194,7 +217,9 @@ changed nothing.
 Edit errors use the same types as the lookups above. Invalid input is a
 `ValidationError` whose `details.code` says which check failed
 (`InvalidPrimPath`, `UnknownPrimType`, `InvalidAttribute`,
-`InvalidTimeCode`). A missing stage or prim is a `NotFoundError`. A write
+`InvalidTimeCode`; `search_prims` reports a bad regular expression as
+`InvalidRegex`). A missing stage or prim is a `NotFoundError`, in
+`summarize_scene` too. A write
 that fails after the checks passed is an
 `EngineError` with `details.rolled_back: true`. A refusal that an explicit flag
 overrides is a `RefusedOperation` naming the flag in `details.override`, and
@@ -306,7 +331,9 @@ and unsaved edits are lost when the server exits.
   as one layer. A `.usdz` is packaged with the files it depends on. The
   stage stays bound to its own file and keeps its unsaved state.
 - **`reload_usd_stage`** rereads the root file and any changed sublayer or
-  referenced file, each held to the sandbox first as above.
+  referenced file, each held to the sandbox first as above. A reread that
+  fails is an `EngineError` with `details.code: ReloadFailed` (a failed save
+  or export says `SaveFailed`).
   **`unload_usd_stage`** closes the stage. Both refuse a stage with unsaved
   edits unless `discard_unsaved=true`.
 
