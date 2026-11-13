@@ -1038,6 +1038,8 @@ class FakeDepsgraph:
             rotation_euler=getattr(obj, "rotation_euler", None),
             rotation_quaternion=getattr(obj, "rotation_quaternion", None),
             rotation_axis_angle=getattr(obj, "rotation_axis_angle", None),
+            # An armature's pose bones, as they are after the evaluation.
+            pose=getattr(obj, "pose", None),
         )
 
 

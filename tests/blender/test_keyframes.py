@@ -15,6 +15,7 @@ functions each version ships.
 
 from __future__ import annotations
 
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -42,12 +43,22 @@ slotted_versions = pytest.mark.parametrize(
 
 
 class Keyframe:
-    """``bpy.types.Keyframe``: its (frame, value) point, interpolation and key type.
+    """``bpy.types.Keyframe``: its (frame, value) point, interpolation, key type and handles.
 
-    A new key interpolates as Blender's default preference does, Bezier.
+    A new key interpolates as Blender's default preference does, Bezier, with
+    automatic clamped handles a frame to either side.
     """
 
-    __slots__ = ("co", "interpolation", "type")
+    __slots__ = (
+        "co",
+        "interpolation",
+        "type",
+        "easing",
+        "handle_left",
+        "handle_right",
+        "handle_left_type",
+        "handle_right_type",
+    )
 
     def __init__(
         self, frame: float, value: float = 0.0, key_type: str = "KEYFRAME"
@@ -55,24 +66,58 @@ class Keyframe:
         self.co = [frame, value]
         self.interpolation = "BEZIER"
         self.type = key_type
+        self.easing = "AUTO"
+        self.handle_left = [frame - 1.0, value]
+        self.handle_right = [frame + 1.0, value]
+        self.handle_left_type = "AUTO_CLAMPED"
+        self.handle_right_type = "AUTO_CLAMPED"
+
+
+class KeyframePoints(list):
+    """``FCurveKeyframePoints``: the keys in order, and ``foreach_get`` of their points."""
+
+    def foreach_get(self, attribute: str, buffer: List[float]) -> None:
+        assert attribute == "co" and len(buffer) == 2 * len(self)
+        buffer[:] = [v for key in self for v in key.co]
 
 
 class FCurve:
-    """``bpy.types.FCurve``: what it animates, its keys, and ``evaluate``.
+    """``bpy.types.FCurve``: what it animates, its keys, whether Blender may key it, and ``evaluate``.
 
     ``evaluate`` holds a Constant key's value to the next key and goes in a
     straight line from any other, standing in for Blender's curves.
     """
 
-    __slots__ = ("data_path", "array_index", "keyframe_points", "group", "mute")
+    __slots__ = (
+        "data_path",
+        "array_index",
+        "_keyframe_points",
+        "lock",
+        "group",
+        "mute",
+        "sampled_points",
+        "modifiers",
+    )
 
     def __init__(self, data_path: str, array_index: int, *frames: float) -> None:
         self.data_path = data_path
         self.array_index = array_index
         self.keyframe_points = [Keyframe(frame) for frame in frames]
-        # An ActionGroup stand-in with ``mute``, or None.
+        self.lock = False
+        # An ActionGroup stand-in with ``lock`` and ``mute``, or None.
         self.group: Any = None
         self.mute = False
+        self.sampled_points: List[Any] = []
+        # FModifier stand-ins: type, mute, is_valid and, for a generator, use_additive.
+        self.modifiers: List[Any] = []
+
+    @property
+    def keyframe_points(self) -> KeyframePoints:
+        return self._keyframe_points
+
+    @keyframe_points.setter
+    def keyframe_points(self, keys: List[Keyframe]) -> None:
+        self._keyframe_points = KeyframePoints(keys)
 
     def evaluate(self, frame: float) -> float:
         keys = sorted(self.keyframe_points, key=lambda k: k.co[0])
@@ -265,6 +310,7 @@ class Object:
         "location",
         "props",
         "paths",
+        "pose",
         "tags",
     )
 
@@ -283,6 +329,8 @@ class Object:
         self.location: List[float] = [0.0, 0.0, 0.0]
         self.props: Dict[str, Any] = {}
         self.paths: Dict[str, Any] = {}
+        # An armature's pose: ``bones.get(name)`` finds a pose bone.
+        self.pose: Any = None
         # The refresh sets of update_tag calls the next evaluation applies.
         self.tags: List[set] = []
 
@@ -456,6 +504,13 @@ def channel_summary(result: Dict[str, Any]) -> List[Tuple[str, int, int, List[in
         (c["data_path"], c["array_index"], c["keyframe_count"], c["frame_range"])
         for c in result["channels"]
     ]
+
+
+def empty_page(result: Dict[str, Any]) -> Tuple[str, bool]:
+    """The object and has_animation of a reply that lists no channel, checked to be the last page."""
+    assert result["channels"] == [] and result["total_channels"] == 0
+    assert result["next_offset"] is None and result["truncated"] is False
+    return result["object_name"], result["has_animation"]
 
 
 # -- the doubles fail where Blender fails --------------------------------------
@@ -650,11 +705,7 @@ class TestGetKeyframes:
         self, monkeypatch: pytest.MonkeyPatch, version: Version
     ) -> None:
         session = session_on(monkeypatch, version, Object("Ball"))
-        assert session.get_keyframes("Ball") == {
-            "object_name": "Ball",
-            "has_animation": False,
-            "channels": [],
-        }
+        assert empty_page(session.get_keyframes("Ball")) == ("Ball", False)
 
     @slotted_versions
     def test_action_without_the_objects_slot(
@@ -665,22 +716,14 @@ class TestGetKeyframes:
         )
         ball = Object("Ball", bpy_types(version).AnimData(shared, None))
         session = session_on(monkeypatch, version, ball)
-        assert session.get_keyframes("Ball") == {
-            "object_name": "Ball",
-            "has_animation": False,
-            "channels": [],
-        }
+        assert empty_page(session.get_keyframes("Ball")) == ("Ball", False)
 
     @every_version
     def test_an_action_whose_keys_were_all_deleted(
         self, monkeypatch: pytest.MonkeyPatch, version: Version
     ) -> None:
         session = session_on(monkeypatch, version, keyed_ball(version))
-        assert session.get_keyframes("Ball") == {
-            "object_name": "Ball",
-            "has_animation": True,
-            "channels": [],
-        }
+        assert empty_page(session.get_keyframes("Ball")) == ("Ball", True)
 
     def test_object_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         session = session_on(monkeypatch, BLENDER_5_0)
@@ -729,9 +772,7 @@ class TestInsertKeyframe:
         ball.location = [1.0, 2.0, 3.0]
         session = session_on(monkeypatch, version, ball)
 
-        result = session.insert_keyframe(
-            "Ball", "location", 10, value=[4.0, 5.0, 6.0]
-        )
+        result = session.insert_keyframe("Ball", "location", 10, value=[4.0, 5.0, 6.0])
 
         assert result["value_source"] == "given"
         assert [(k["array_index"], k["value"]) for k in result["keyframes"]] == [
@@ -759,7 +800,11 @@ class TestInsertKeyframe:
 
         session.insert_keyframe("Ball", "location", 20, index=0, value=10.0)
 
-        assert [k.co for k in curve.keyframe_points] == [[1, 0.0], [20, 10.0], [30, 0.0]]
+        assert [k.co for k in curve.keyframe_points] == [
+            [1, 0.0],
+            [20, 10.0],
+            [30, 0.0],
+        ]
         # Frame 1 is on the first key, 0.
         assert ball.location == [0.0, 0.0, 0.0]
 
@@ -1171,3 +1216,570 @@ class TestDeleteKeyframe:
         assert channel_summary(session.get_keyframes("Ball")) == [
             ("location", 2, 1, [1, 1])
         ]
+
+
+# -- paging, filters and readback (B3-13) ------------------------------------------
+
+
+def rig(version: Version, bones: int, keys: Tuple[float, ...] = (1, 50, 100)) -> Object:
+    """An armature 'Rig' keyed on every bone's location, quaternion and scale: 10 channels a bone."""
+    curves = [
+        FCurve(f'pose.bones["B{bone:03d}"].{path}', index, *keys)
+        for bone in range(bones)
+        for path, size in (("location", 3), ("rotation_quaternion", 4), ("scale", 3))
+        for index in range(size)
+    ]
+    armature = keyed_ball(version, *curves)
+    armature.name = "Rig"
+    armature.pose = SimpleNamespace(
+        bones={
+            f"B{bone:03d}": SimpleNamespace(name=f"B{bone:03d}")
+            for bone in range(bones)
+        }
+    )
+    return armature
+
+
+def every_page(session: Any, name: str, **filters: Any) -> List[Dict[str, Any]]:
+    """Every page of get_keyframes, following next_offset and next_key_offset."""
+    pages, offset, key_offset = [], 0, 0
+    while True:
+        page = session.get_keyframes(
+            name, offset=offset, key_offset=key_offset, **filters
+        )
+        pages.append(page)
+        if page["next_offset"] is None:
+            return pages
+        offset, key_offset = page["next_offset"], page["next_key_offset"]
+
+
+class TestKeyframePages:
+    def test_pages_join_into_every_channel_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An 80-bone rig returned 301 of 800 channels, with a hint naming root_path and max_prims."""
+        armature = rig(BLENDER_5_0, 80)
+        session = session_on(monkeypatch, BLENDER_5_0, armature)
+
+        pages = every_page(session, "Rig")
+
+        listed = [
+            (c["data_path"], c["array_index"]) for p in pages for c in p["channels"]
+        ]
+        assert listed == [(c.data_path, c.array_index) for c in armature.fcurves]
+        assert len(pages) > 1
+        assert all(p["total_channels"] == 800 for p in pages)
+        assert all(
+            len(json.dumps(p)) <= blender_runtime.RESULT_PAGE_BYTES for p in pages
+        )
+        first = pages[0]
+        assert first["truncated"] is True
+        assert first["truncation"]["returned"] == len(first["channels"])
+        assert first["truncation"]["total"] == 800
+        hint = first["truncation"]["hint"]
+        assert f"offset={first['next_offset']}" in hint
+        assert "root_path" not in hint and "max_prims" not in hint
+        last = pages[-1]
+        assert (last["truncated"], last["truncation"], last["next_key_offset"]) == (
+            False,
+            None,
+            None,
+        )
+
+    def test_filters_by_bone_and_data_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = session_on(monkeypatch, BLENDER_5_0, rig(BLENDER_5_0, 3))
+
+        bone = session.get_keyframes("Rig", bone_name="B001")
+        quaternion = session.get_keyframes(
+            "Rig", bone_name="B001", data_path="rotation_quaternion"
+        )
+        exact = session.get_keyframes("Rig", data_path='pose.bones["B002"].scale')
+
+        assert bone["total_channels"] == 10
+        assert {c["bone_name"] for c in bone["channels"]} == {"B001"}
+        assert [c["array_index"] for c in quaternion["channels"]] == [0, 1, 2, 3]
+        assert {c["data_path"] for c in quaternion["channels"]} == {
+            'pose.bones["B001"].rotation_quaternion'
+        }
+        assert [c["data_path"] for c in exact["channels"]] == [
+            'pose.bones["B002"].scale'
+        ] * 3
+        with pytest.raises(ValueError, match="Armature 'Rig' has no bone 'B999'"):
+            session.get_keyframes("Rig", bone_name="B999")
+
+    def test_a_bone_filter_needs_an_armature(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = session_on(monkeypatch, BLENDER_5_0, keyed_ball(BLENDER_5_0))
+        with pytest.raises(ValueError, match="'Ball' is not an armature"):
+            session.get_keyframes("Ball", bone_name="Arm")
+
+    def test_limit_and_offset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        session = session_on(monkeypatch, BLENDER_5_0, rig(BLENDER_5_0, 2))
+
+        page = session.get_keyframes("Rig", offset=4, limit=3)
+
+        assert [c["data_path"] for c in page["channels"]] == [
+            'pose.bones["B000"].rotation_quaternion'
+        ] * 3
+        assert (page["offset"], page["next_offset"], page["next_key_offset"]) == (
+            4,
+            7,
+            0,
+        )
+        for bad in ({"offset": -1}, {"limit": 0}, {"key_offset": 2}):
+            with pytest.raises(ValueError):
+                session.get_keyframes("Rig", **bad)
+
+    def test_reads_every_key_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keys had no value, interpolation or handles to read back."""
+        curve = FCurve("location", 0, 1, 10, 20)
+        bezier, linear, eased = curve.keyframe_points
+        bezier.co, bezier.handle_left, bezier.handle_right = (
+            [1, 0.1],
+            [0, 0.1],
+            [4, 0.5],
+        )
+        linear.interpolation, linear.co = "LINEAR", [10, 2.5]
+        eased.interpolation, eased.easing, eased.type = "SINE", "EASE_IN", "BREAKDOWN"
+        session = session_on(monkeypatch, BLENDER_5_0, keyed_ball(BLENDER_5_0, curve))
+
+        (channel,) = session.get_keyframes("Ball", include_keys=True)["channels"]
+
+        assert channel["key_offset"] == 0
+        assert channel["keys"] == [
+            {
+                "frame": 1.0,
+                "value": 0.1,
+                "interpolation": "BEZIER",
+                "keyframe_type": "KEYFRAME",
+                "handle_left": [0.0, 0.1],
+                "handle_right": [4.0, 0.5],
+                "handle_left_type": "AUTO_CLAMPED",
+                "handle_right_type": "AUTO_CLAMPED",
+            },
+            {
+                "frame": 10.0,
+                "value": 2.5,
+                "interpolation": "LINEAR",
+                "keyframe_type": "KEYFRAME",
+            },
+            {
+                "frame": 20.0,
+                "value": 0.0,
+                "interpolation": "SINE",
+                "keyframe_type": "BREAKDOWN",
+                "easing": "EASE_IN",
+            },
+        ]
+
+    def test_key_offset_pages_through_one_long_channel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        frames = tuple(float(f) for f in range(3000))
+        session = session_on(
+            monkeypatch,
+            BLENDER_5_0,
+            keyed_ball(
+                BLENDER_5_0, FCurve("location", 0, *frames), FCurve("scale", 1, 5)
+            ),
+        )
+
+        pages = every_page(session, "Ball", include_keys=True)
+
+        location = [
+            (c["key_offset"], [k["frame"] for k in c["keys"]])
+            for p in pages
+            for c in p["channels"]
+            if c["data_path"] == "location"
+        ]
+        assert [f for _, keys in location for f in keys] == list(frames)
+        assert [offset for offset, _ in location][0] == 0
+        assert all(
+            later == earlier + len(keys)
+            for (earlier, keys), (later, _) in zip(location, location[1:])
+        )
+        assert pages[-1]["channels"][-1]["data_path"] == "scale"
+        assert all(
+            len(json.dumps(p)) <= blender_runtime.RESULT_PAGE_BYTES for p in pages
+        )
+
+    def test_float32_values_are_reported_in_their_shortest_form(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """0.1 as Blender stores it is 0.10000000149011612 in Python."""
+        curve = FCurve("location", 0, 1)
+        curve.keyframe_points[0].co = [120.9000015258789, 0.10000000149011612]
+        session = session_on(monkeypatch, BLENDER_5_0, keyed_ball(BLENDER_5_0, curve))
+
+        (channel,) = session.get_keyframes("Ball", include_keys=True)["channels"]
+
+        assert channel["frame_range"] == [120.9, 120.9]
+        assert (channel["keys"][0]["frame"], channel["keys"][0]["value"]) == (
+            120.9,
+            0.1,
+        )
+
+
+class TestInsertKeyframes:
+    def test_keys_every_frame_of_every_channel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 6-DOF arm over 1 000 frames took some 13 000 calls of one key each."""
+        ball = keyed_ball(BLENDER_5_0)
+        ball.location = [9.0, 9.0, 9.0]
+        ball.props["gear"] = 1
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframes(
+            "Ball",
+            [
+                {
+                    "data_path": "location",
+                    "frames": [1, 2, 3],
+                    "values": [[0, 0, 0], [1, 1, 1], [2, 2, 2]],
+                },
+                {"data_path": '["gear"]', "frames": [5], "values": [3]},
+            ],
+            interpolation="LINEAR",
+            keyframe_type="BREAKDOWN",
+        )
+
+        assert result["key_count"] == 10
+        assert result["frame_range"] == [1.0, 5.0]
+        assert [
+            (c["data_path"], c["array_index"], c["inserted"])
+            for c in result["channels"]
+        ] == [
+            ("location", 0, 3),
+            ("location", 1, 3),
+            ("location", 2, 3),
+            ('["gear"]', 0, 1),
+        ]
+        keys = {(c.data_path, c.array_index): c.keyframe_points for c in ball.fcurves}
+        assert [k.co for k in keys[("location", 1)]] == [[1, 0.0], [2, 1.0], [3, 2.0]]
+        assert {k.interpolation for points in keys.values() for k in points} == {
+            "LINEAR"
+        }
+        assert {k.type for points in keys.values() for k in points} == {"BREAKDOWN"}
+        # Each keyed channel shows its curve: frame 1's keys, and gear's only key.
+        assert ball.location == [0.0, 0.0, 0.0]
+        assert ball.props["gear"] == 3
+        assert "warning" not in result
+
+    def test_keeps_unkeyed_edits_on_the_channels_it_does_not_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-evaluating the object's animation put every animated channel back."""
+        curves = [curve("location", i, (1, 0.0), (10, 10.0)) for i in range(3)]
+        bones = [
+            curve(f'pose.bones["{bone}"].rotation_euler', i, (1, 0.0), (10, 1.0))
+            for bone in ("b0", "b1")
+            for i in range(3)
+        ]
+        ball = keyed_ball(BLENDER_5_0, *curves, *bones, curve('["gear"]', 0, (1, 1.0)))
+        b0 = SimpleNamespace(rotation_euler=[0.5, 0.25, 0.0])
+        b1 = SimpleNamespace(rotation_euler=[0.4, 0.125, 0.0])
+        ball.paths['pose.bones["b0"]'] = b0
+        ball.paths['pose.bones["b1"]'] = b1
+        ball.location = [5.0, 7.0, 2.0]
+        ball.props["gear"] = 3
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframes(
+            "Ball",
+            [
+                {"data_path": "location", "index": 2, "frames": [5], "values": [1.0]},
+                {
+                    "data_path": 'pose.bones["b1"].rotation_euler',
+                    "index": 0,
+                    "frames": [5, 7],
+                    "values": [0.75, 0.5],
+                },
+            ],
+        )
+
+        assert result["key_count"] == 3 and "warning" not in result
+        # The keyed channels show their curves at frame 1; the rest keep their edits.
+        assert ball.location == [5.0, 7.0, 0.0]
+        assert b0.rotation_euler == [0.5, 0.25, 0.0]
+        assert b1.rotation_euler == [0.0, 0.125, 0.0]
+        assert ball.props["gear"] == 3
+
+    def test_nla_tracks_leave_the_keyed_values_until_a_frame_change(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0, curve("location", 0, (1, 0.0), (10, 10.0)))
+        ball.animation_data.nla_tracks = [SimpleNamespace(name="NlaTrack")]
+        ball.location = [6.0, 0.0, 0.0]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframes(
+            "Ball", [{"data_path": "location", "index": 0, "frames": [5], "values": [1]}]
+        )
+
+        assert ball.location == [6.0, 0.0, 0.0]
+        assert "'Ball' has NLA tracks" in result["warning"]
+
+    def test_interpolation_reaches_a_key_merged_into_a_nearby_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blender 5.0.1 replaced a key 0.005 frames away and kept its frame."""
+        x = curve("location", 0, (1, 0.0), (4.995, 0.0))
+        ball = keyed_ball(BLENDER_5_0, x)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        session.insert_keyframes(
+            "Ball",
+            [{"data_path": "location", "index": 0, "frames": [5], "values": [2.0]}],
+            interpolation="LINEAR",
+        )
+
+        assert [(k.co, k.interpolation) for k in x.keyframe_points] == [
+            ([1, 0.0], "BEZIER"),
+            ([4.995, 2.0], "LINEAR"),
+        ]
+
+    def test_checks_every_entry_before_keying_any(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        good = {"data_path": "location", "frames": [1], "values": [[0, 0, 0]]}
+        bad_entries = [
+            (
+                {"data_path": "location", "frames": [1, 2], "values": [[0, 0, 0]]},
+                "2 frames but 1 values",
+            ),
+            (
+                {"data_path": "location", "frames": [1], "values": [[0, 0]]},
+                "has 3 elements",
+            ),
+            (
+                {
+                    "data_path": "location",
+                    "frames": [float("inf")],
+                    "values": [[0, 0, 0]],
+                },
+                "finite",
+            ),
+            (
+                {"data_path": "locaton", "frames": [1], "values": [1.0]},
+                "no property 'locaton'",
+            ),
+            ({"frames": [1], "values": [1.0]}, "data_path is required"),
+        ]
+        for entry, message in bad_entries:
+            with pytest.raises(ValueError, match=rf"channels\[1\]: .*{message}"):
+                session.insert_keyframes("Ball", [good, entry])
+        assert ball.calls == []
+
+    def test_refuses_a_locked_or_sampled_curve_before_keying(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        locked, sampled = FCurve("location", 2, 1), FCurve('["gear"]', 0, 1)
+        locked.lock = True
+        sampled.sampled_points = [object()]
+        ball = keyed_ball(BLENDER_5_0, locked, sampled)
+        ball.props["gear"] = 1
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        with pytest.raises(ValueError, match=r"location\[2\] is locked"):
+            session.insert_keyframes(
+                "Ball",
+                [{"data_path": "location", "frames": [4], "values": [[0, 0, 0]]}],
+            )
+        with pytest.raises(ValueError, match=r'\["gear"\] is sampled'):
+            session.insert_keyframes(
+                "Ball", [{"data_path": '["gear"]', "frames": [4], "values": [2]}]
+            )
+        assert ball.calls == []
+
+    def test_refuses_more_keys_than_one_call_takes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        frames = list(range(blender_runtime.MAX_KEYFRAMES_PER_CALL // 3 + 1))
+
+        with pytest.raises(ValueError, match="more than the 10000 one call inserts"):
+            session.insert_keyframes(
+                "Ball",
+                [
+                    {
+                        "data_path": "location",
+                        "frames": frames,
+                        "values": [[0, 0, 0]] * len(frames),
+                    }
+                ],
+            )
+        assert ball.calls == []
+
+    def test_a_refusal_part_way_says_what_went_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class RefusesTheThird(Object):
+            __slots__ = ()
+
+            def keyframe_insert(self, data_path: str, /, **kwargs: Any) -> bool:
+                if len(self.calls) == 2:
+                    self.calls.append(("refused", data_path))
+                    return False
+                return super().keyframe_insert(data_path, **kwargs)
+
+        keyed = keyed_ball(BLENDER_5_0)
+        ball = RefusesTheThird("Ball", keyed.animation_data, keyed.fcurves)
+        keyed.fcurves.append(curve('["gear"]', 0, (1, 1.0), (10, 5.0)))
+        ball.props["gear"] = 4
+        ball.location = [7.0, 7.0, 7.0]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        result = session.insert_keyframes(
+            "Ball",
+            [
+                {
+                    "data_path": "location",
+                    "frames": [3, 4, 5],
+                    "values": [[1, 1, 1]] * 3,
+                },
+                {"data_path": '["gear"]', "frames": [6], "values": [2]},
+            ],
+        )
+
+        # Returned, not raised: the keys stay, and an attached add-on records the
+        # completed call as an undo step.
+        assert result["success"] is False
+        assert result["error_type"] == "KeyframesPartlyInserted"
+        assert "after this call inserted 6 keys, which stay" in result["error"]
+        assert result["details"] == {
+            "inserted": 6,
+            "refused": {"data_path": "location", "index": -1, "frame": 5.0},
+        }
+        # The channels that got keys show them: frame 1 holds the first key, 1.
+        # gear, never reached, keeps its unkeyed value.
+        assert ball.location == [1.0, 1.0, 1.0]
+        assert ball.props["gear"] == 4
+        assert "warning" not in result
+
+    def test_refuses_a_channel_keyed_twice_on_one_frame(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The later key replaced the earlier, and key_count counted both."""
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        twice = {"data_path": "location", "frames": [2, 2], "values": [[0, 0, 0]] * 2}
+        whole = {"data_path": "location", "frames": [5], "values": [[1, 2, 3]]}
+        element = {"data_path": "location", "index": 1, "frames": [5], "values": [9]}
+
+        with pytest.raises(
+            ValueError, match=r"channels\[0\] keys location\[0\] at frame 2 twice"
+        ):
+            session.insert_keyframes("Ball", [twice])
+        with pytest.raises(
+            ValueError,
+            match=r"channels\[1\] and channels\[0\] both key location\[1\] at frame 5",
+        ):
+            session.insert_keyframes("Ball", [whole, element])
+        assert ball.calls == []
+        other = {"data_path": "location", "index": 1, "frames": [6], "values": [9]}
+        assert session.insert_keyframes("Ball", [whole, other])["key_count"] == 4
+
+    def test_refuses_frames_blender_would_merge_into_one_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blender keeps one key for keys within 0.01 frames: 2 and 2.005 made one."""
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        near = {"data_path": "location", "index": 0, "frames": [2.0, 2.005], "values": [1, 2]}
+        first = {"data_path": "location", "index": 0, "frames": [2.0], "values": [1]}
+        second = {"data_path": "location", "frames": [2.004], "values": [[2, 2, 2]]}
+
+        with pytest.raises(
+            ValueError,
+            match=r"channels\[0\] keys location\[0\] at frames 2 and 2\.005, which "
+            r"Blender keeps as one key",
+        ):
+            session.insert_keyframes("Ball", [near])
+        with pytest.raises(
+            ValueError,
+            match=r"channels\[1\] and channels\[0\] both key location\[0\] at frames "
+            r"2 and 2\.004",
+        ):
+            session.insert_keyframes("Ball", [first, second])
+        assert ball.calls == []
+        # 0.0101 apart, as 32-bit frames, is two keys in Blender.
+        apart = {"data_path": "location", "index": 0, "frames": [2.0, 2.0101], "values": [1, 2]}
+        assert session.insert_keyframes("Ball", [apart])["key_count"] == 2
+
+    @pytest.mark.parametrize(
+        ("modifier", "keyed"),
+        [
+            (SimpleNamespace(type="LIMITS", mute=False, is_valid=True), False),
+            (SimpleNamespace(type="ENVELOPE", mute=False, is_valid=True), False),
+            (SimpleNamespace(type="LIMITS", mute=True, is_valid=True), True),
+            (SimpleNamespace(type="LIMITS", mute=False, is_valid=False), True),
+            (SimpleNamespace(type="CYCLES", mute=False, is_valid=True), True),
+            (
+                SimpleNamespace(
+                    type="GENERATOR", mute=False, is_valid=True, use_additive=False
+                ),
+                False,
+            ),
+            (
+                SimpleNamespace(
+                    type="GENERATOR", mute=False, is_valid=True, use_additive=True
+                ),
+                True,
+            ),
+        ],
+        ids=[
+            "limits",
+            "envelope",
+            "muted-limits",
+            "invalid-limits",
+            "cycles",
+            "generator",
+            "additive-generator",
+        ],
+    )
+    def test_refuses_an_fcurve_an_fmodifier_overrides_before_keying(
+        self, monkeypatch: pytest.MonkeyPatch, modifier: Any, keyed: bool
+    ) -> None:
+        """A LIMITS modifier on location[2] let index 0 be keyed first; those keys stayed."""
+        blocked = FCurve("location", 2, 1)
+        blocked.modifiers = [modifier]
+        ball = keyed_ball(BLENDER_5_0, blocked)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        channels = [
+            {
+                "data_path": "location",
+                "index": 0,
+                "frames": [1, 2, 3],
+                "values": [1, 2, 3],
+            },
+            {"data_path": "location", "index": 2, "frames": [4], "values": [5]},
+        ]
+
+        if keyed:
+            assert session.insert_keyframes("Ball", channels)["key_count"] == 4
+            return
+        with pytest.raises(
+            ValueError,
+            match=rf"channels\[1\]: the F-curve of location\[2\] has a {modifier.type} "
+            "F-modifier that overrides its keys",
+        ):
+            session.insert_keyframes("Ball", channels)
+        assert ball.calls == []
+
+    def test_refuses_an_empty_call_and_unknown_choices(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = session_on(monkeypatch, BLENDER_5_0, keyed_ball(BLENDER_5_0))
+        with pytest.raises(ValueError, match="channels is empty"):
+            session.insert_keyframes("Ball", [])
+        with pytest.raises(ValueError, match="Invalid interpolation"):
+            session.insert_keyframes("Ball", [{}], interpolation="SMOOTH")
+        with pytest.raises(ValueError, match="Invalid keyframe_type"):
+            session.insert_keyframes("Ball", [{}], keyframe_type="KEY")
