@@ -187,6 +187,15 @@ mypy src/
 CI runs these as informational checks; the unit and packaging jobs are the
 gates. `scripts/isaac/dev_isort_black.sh` runs the formatters in one go.
 
+Those jobs install from `uv.lock`, but users install with `uv tool install`
+or `pip install` from git, which resolve the newest releases pyproject's
+ranges allow. The `Fresh dependencies` workflow
+(`.github/workflows/fresh-deps.yml`) installs that way on every PR, push to
+`main` and day, then runs the CLI and the unit tests. When it fails, an
+upstream release broke fresh installs: bound the dependency in
+`pyproject.toml`, run `uv lock`, and fix the code for the new release in a
+follow-up.
+
 ## Live verification of the MCP server
 
 An MCP server already running inside your agent session does not reload
