@@ -380,7 +380,9 @@ def map(
 def list_actors(
     actor_class: Optional[str] = typer.Option(None, "--class", "-c", help="Filter by actor class"),
     tag: Optional[str] = typer.Option(None, "--tag", help="Filter by actor tag"),
-    limit: int = typer.Option(200, "--limit", "-n", help="Max actors in the page"),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", "-n", help="Max actors in the page (default: unreal.max_actors, 200)"
+    ),
     offset: int = typer.Option(0, "--offset", help="Matching actors to skip (the previous page's next_offset)"),
     label: Optional[str] = typer.Option(None, "--label", help="Keep actors whose label contains this text"),
     subclasses: bool = typer.Option(False, "--subclasses", help="Also match classes derived from --class"),

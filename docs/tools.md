@@ -584,6 +584,8 @@ Behaviour worth knowing:
   backends share:
   - `ConnectionError`: nothing answered at the Remote Control endpoint, or
     the editor closed the connection without answering (it may have crashed).
+    For a change, whether it ran is then unknown: check the editor's state
+    before retrying. `ping_unreal` reports one with this type too.
   - `TimeoutError`: no answer within `UNREAL__TIMEOUT`. A script or a change
     may still be running in the editor, and Remote Control cannot cancel it,
     so check the editor's state before retrying.
@@ -720,6 +722,96 @@ Behaviour worth knowing:
   `ValidationError` and the camera does not move. The reply is the camera
   read back, location and rotation, also for a group left unchanged; a camera
   that reads back other than what was set is a `CameraNotApplied`.
+- `set_unreal_actor_property` edits an actor in the level open in the editor,
+  or one of its components, by Unreal's property name (`Tags`, `bHidden`).
+  - **Target.** The target is resolved as the other actor tools resolve it,
+    among loaded objects only, and nothing is written for a refusal:
+    - an actor that is gone, of another map, loaded or not, or of the running
+      Play In Editor world is `NotFoundError`, as above;
+    - an asset, a class default object or a component of one, and a component
+      template are `ValidationError`, with `details.code`
+      `not_an_actor_or_component`, `class_default_object` or
+      `component_template`.
+  - **Containers.** An array, set or map is replaced whole, so `[]` empties
+    it. That includes struct arrays and properties Remote Control writes
+    through a setter, such as a MaterialBillboard's `Elements`. Remote
+    Control's own write only adds to a container: by index, or appended for a
+    setter. So the editor's Python API empties the container first, and a
+    container Python cannot replace is refused (`container_not_replaceable`).
+    The new contents must be a JSON array for an array or set and a JSON
+    object for a map, or the call is refused before anything is emptied
+    (`value_not_a_list`, `value_not_an_object`): Remote Control wrote what it
+    could of another shape, `5` into `Tags` as `['None']`.
+  - **The write.** Remote Control does the write, converting structs, enums by
+    name and objects by path. The whole write is one Remote Control batch, so
+    no editor tick and no other request runs between its parts: the undo
+    transaction opens and records the target and the components attached
+    below it, the container is emptied, Remote Control writes, a function call
+    makes Remote Control finish the write (Unreal's `PostEditChangeProperty`
+    runs only on the next call), and the editor compares what it holds with
+    what was written, then keeps the write or puts the previous value back.
+    The transaction closes inside the batch, so two calls at once are two
+    undo steps and one undo reverts exactly one of them. A write that stays
+    is one undo step and marks the level changed. Remote Control's own write
+    of a property with a setter (a light's `Intensity`, `Mobility`,
+    `StaticMesh`, `RelativeLocation`) records nothing: it used to leave no
+    undo step, so the next undo reverted the edit before it, and a save of
+    the changed packages skipped it. A setter that changes objects other than
+    its target and the components attached below it (its actor's other
+    components, other actors) records only those two. `value` is what Unreal
+    kept, for example materials trimmed to the mesh's slots.
+  - **A value that does not stick.** A value Unreal does not keep fails with
+    `PropertyNotApplied`, with `details.expected` and `details.actual`.
+    Examples are an object path that loads nothing (written as None), more
+    materials than slots, or an enum name Unreal does not have. The previous
+    value is then put back through the editor's Python API in the same
+    transaction, which is cancelled, so the call leaves no undo step;
+    `restored` says whether it held. A write Remote Control refuses (an
+    `EditConst` or protected property) is put back the same way and fails
+    with Remote Control's error type, `ValidationError`, and `restored`. The
+    level stays marked changed after a put-back: Unreal marks it while it
+    writes, and offers no way to clear a map package's flag. When the
+    editor's Python cannot read the property, nothing can be put back, and a
+    value that does not stick is reported with `restored: false`.
+  - **A lost answer.** When the batch's answer is lost, the call fails with
+    `ConnectionError`: the batch may have run, kept or put back, in the
+    editor. The reply's `value` is the property read again afterwards.
+  - **The reply.** It has `value`, `previous_value` and `applied`. `applied`
+    is `null`, with a `warning`, when Unreal will not read the property back,
+    or when the two values cannot be compared (an enum written as a number). A
+    struct written in part is compared on the fields given.
+- `describe_unreal_object` reads every property's current `value` in one more
+  request. `readable` is false, and `value` null, for the properties Remote
+  Control does not read: delegates, and protected properties without a getter.
+- `get_unreal_actor_thumbnail` returns the thumbnail Unreal stores, at most at
+  its stored size (256 x 256). It is scaled down to fit `width` x `height`
+  (1 to 1024), keeping its proportions.
+  - For an actor or component path, the tool shows the actor's Blueprint, or
+    else its static or skeletal mesh, and names that asset in `thumbnail_of`.
+  - An actor with neither, such as a light, and an asset without a stored
+    thumbnail (Unreal answers those with a class icon) fail with
+    `NotFoundError`.
+- `summarize_unreal_scene` counts by class, subclasses included:
+  - `lights`: Light actors (directional, point, spot, rect) and SkyLights.
+  - `cameras`: CameraActors, CineCameraActors included.
+  - `static_meshes`: StaticMeshActors.
+
+  A LightmassImportanceVolume or CameraBlockingVolume is neither a light nor a
+  camera.
+- `ping_unreal` and `unreal_health_check` tell a busy editor from a down one.
+  An editor that accepts the connection but does not answer in time is
+  running a script, loading or compiling. It is reported with `busy: true` and
+  `error_type: InstanceBusy`, still `reachable: false`, and
+  `list_unreal_instances` lists it with that reason. Both probe Remote Control
+  with `UNREAL__PING_TIMEOUT` (3 s by default), so a busy editor is reported
+  within that time; `unreal_health_check` retries only a refused connection,
+  from an editor still starting up, and gives its metadata script the full
+  `UNREAL__TIMEOUT`.
+- `call_unreal_actor_function` returns `return_value` as JSON (the function's
+  `ReturnValue`) and `outputs`, everything Remote Control returned, out
+  parameters included.
+- `list_unreal_actors` lists at most `max_results` actors, by default the
+  `unreal.max_actors` setting (`UNREAL__MAX_ACTORS`, 200).
 - Actor inspection, physics, materials and simulation start/stop/pause/resume
   use editor Python APIs. `control_unreal_simulation` `start` begins Simulate
   In Editor by default (`mode: "simulate"`: the level runs and its physics
