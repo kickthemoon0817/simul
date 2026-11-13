@@ -196,6 +196,25 @@ parse error). The checks, in order:
 - pxr's UsdValidation validators, listed in `validators`; the usdz package
   rules (alignment, compression, file types) run only for a `.usdz`.
 
+The checks read the files as they are on disk. pxr keeps one in-memory copy
+of each file per process and gives it to every stage that opens the file,
+so a loaded stage (any session's) may hold a copy of the file, or of one it
+draws on, that is older than the file. Once the stage is composed, and
+before any check runs, each copy that was already in memory is compared
+with its file. When all of them match, the check runs in the server process
+as usual. When one changed since it was read, the whole check runs in a
+fresh process instead. That costs the time to start Python and pxr (a few
+tenths of a second) plus composing the file a second time, which for a
+large scene is most of the check. `usd.validation_timeout_seconds` (default
+300) caps that process; past it the call fails with `TimeoutError`. A
+process killed by a signal is pxr crashing on the file, reported as an
+`OpenFailed` error. If the process cannot start or ends without a result,
+the check runs in the server process anyway, with a `ValidatedInMemoryCopy`
+warning naming the files whose copies it used. Unsaved edits are never part
+of the check: an `info` issue `UnsavedEdits` names each stage of the calling
+session with unsaved edits to a checked file. Save or export them and
+validate the written file to check them.
+
 `load_usd_file` fails with `error_type: LoadError` and `details.reason` set
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
@@ -211,10 +230,14 @@ Every successful response carries `success: true`, like the other backends.
 The pxr work of each call runs on a worker thread, so a slow call does not
 hold up the server. Reads run concurrently, one at a time per stage, and an
 edit (`create_prim`, `update_prim_attributes`, `delete_prim`), a
-`load_usd_file` and a `reload_usd_stage` run alone, because pxr does not
-allow a write alongside reads of the same layers (a load or reload may reread
-a shared file in place). `save_usd_stage`, `export_usd_stage` and
-`unload_usd_stage` hold their stage like a read. A
+`load_usd_file` that reads files and a `reload_usd_stage` run alone, because
+pxr does not allow a write alongside reads of the same layers (a load or
+reload may reread a shared file in place). A `load_usd_file` that hands back
+a stage the session already holds, clean and current, reads nothing from
+disk and holds that stage like a read. `save_usd_stage`, `export_usd_stage`
+and `unload_usd_stage` hold their stage like a read, and a save or export
+also holds the file it writes, so two calls writing one file run one after
+the other. A
 call that cannot start within `server.timeout` seconds (default 30) fails
 with `StageBusy`; retry it. Python cannot stop pxr mid-call, so a call the
 client cancels or times out still finishes in the background and holds its
@@ -342,7 +365,13 @@ and unsaved edits are lost when the server exits.
   same `stage_id` while that stage has no unsaved edits and none of its
   files changed on disk. Otherwise the load opens a fresh stage from disk
   (rereading changed sublayers and references first), and the older stage
-  keeps its id and its edits.
+  keeps its id and its edits. One case follows from the private root: a file
+  that references, payloads or sublayers itself by file name
+  (`@./self.usda@</W/Proto>`, not the internal `</W/Proto>`) reads that arc
+  from its shared layer, the file as it is on disk, so the stage's unsaved
+  edits do not show through it until `save_usd_stage` and a
+  `reload_usd_stage`. Mapping that arc onto the private root would need a
+  custom asset resolver; the load lists a `SelfReference` warning instead.
 - **Rereads stay in the sandbox.** A changed sublayer or referenced file is
   shared, and rereading it updates every stage that composes it, including
   other sessions' stages. So its new content is read into a throwaway layer
@@ -350,9 +379,9 @@ and unsaved edits are lost when the server exits.
   sandbox, nothing is reread, the stages keep the old content, and the load
   or reload fails with `SandboxError` naming the file. A stage that reaches
   outside after a reread anyway (a file swapped between the check and the
-  reread) is unloaded. A load or reload runs alone, after the running calls
-  finish, since rereading a shared file changes stages other calls may be
-  reading.
+  reread) is unloaded. A load that reads files, or a reload, runs alone,
+  after the running calls finish, since rereading a shared file changes
+  stages other calls may be reading.
 - **Stages belong to the MCP session that loaded them.** Another session
   gets `NotFoundError` for the id and cannot read or edit the stage. Stage
   ids are random, not derived from the path. A stdio server has one
@@ -372,21 +401,46 @@ and unsaved edits are lost when the server exits.
   must be writable inside the sandbox. It refuses a `.usdz` root, which is a
   read-only package; export it instead. It also refuses a file that changed
   on disk after the stage read it, unless `overwrite_external_changes=true`.
-  `files_written` lists what was written; a stage with no unsaved edits
-  writes nothing.
+  Another stage's save of the same file counts as such a change: saves of
+  one file run one at a time, however each path spells it (case, or Unicode
+  NFC and NFD, on a filesystem that ignores them), so when two sessions save
+  it at once the second is refused instead of overwriting the first. Only
+  the root file is
+  written, so a sublayer or referenced file that changed on disk stays
+  listed in `changed_on_disk` after the save, and a later load of the file
+  rereads it. `files_written` lists what was written; a stage with no
+  unsaved edits writes nothing.
 - **`export_usd_stage`** writes a new `.usda`, `.usdc`, `.usd` or `.usdz`
   file (sandboxed, and refused if it exists unless `overwrite=true`). By
   default it writes the root layer with its composition arcs, and
   re-anchors relative asset paths (sublayers, references, textures) so they
   resolve from the new location. `flatten=true` writes the composed stage
-  as one layer. A `.usdz` is packaged with the files it depends on. The
-  stage stays bound to its own file and keeps its unsaved state.
+  as one layer. A `.usdz` is packaged with the files it depends on. A stage
+  loaded from a `.usdz` exports without `flatten` too. Its root layer keeps
+  drawing on the files inside the package: a `.usda` gets paths such as
+  `./pkg.usdz[inner_sub.usda]`, and a `.usdz` carries the original package
+  nested inside it. The file is written under a temporary name beside the
+  destination and moved
+  into place in one step, so a reader never sees half a file, and without
+  `overwrite` the destination is claimed exclusively: of two exports to one
+  new path, one succeeds and the other is refused. A relative `file_path`
+  resolves against `security.relative_path_base`, as for `load_usd_file`.
+  The stage stays bound to its own file and keeps its unsaved state.
 - **`reload_usd_stage`** rereads the root file and any changed sublayer or
-  referenced file, each held to the sandbox first as above. A reread that
-  fails is an `EngineError` with `details.code: ReloadFailed` (a failed save
-  or export says `SaveFailed`).
+  referenced file, each held to the sandbox first as above. Every file is
+  read and checked before anything is reread, so a refusal leaves the stage
+  as it was, unsaved edits included. A root file that cannot be reread is
+  an `EngineError` with `details.code: ReloadFailed` (a failed save or
+  export says `SaveFailed`). A changed sublayer or referenced file that pxr
+  cannot parse now is listed in `failed_files` with pxr's reason instead;
+  it keeps its previous content and stays in `changed_on_disk`. A load of a
+  file that composes it lists a `FileNotReread` warning, and while the file
+  stays the same a repeated load returns the same stage.
   **`unload_usd_stage`** closes the stage. Both refuse a stage with unsaved
   edits unless `discard_unsaved=true`.
+- **A session that ends during a load** gets no stage: the load checks the
+  session is still open as it registers the stage, so a disconnect mid-load
+  does not leave a stage that nothing can reach.
 
 ## Isaac Sim
 

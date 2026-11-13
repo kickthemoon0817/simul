@@ -93,6 +93,11 @@ usd:
       - ".usdz"
     max_file_size_mb: 500
 
+  # validate_usd_file runs in a separate process when a loaded stage holds
+  # an older copy of a file it checks; this caps that process.
+  validation:
+    timeout_seconds: 300
+
 # Viewport Configuration
 viewport:
   # Default capture settings

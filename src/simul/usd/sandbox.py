@@ -277,6 +277,21 @@ class CompositionSandbox:
         return self._policy.enabled
 
     @property
+    def policy(self) -> "PathPolicy":
+        """The path policy every location is judged by."""
+        return self._policy
+
+    def options(self) -> Dict[str, Any]:
+        """The constructor arguments, to build the same sandbox in another process.
+
+        Validation rebuilds the sandbox from these in a fresh process
+        (``simul.usd._validate_fresh``); an option added to ``__init__`` must
+        be added here too, or that process would not honour it. The Unreal
+        content-path exemption needs none: every sandbox applies it.
+        """
+        return {"policy": self._policy}
+
+    @property
     def content_paths(self) -> List[OutsidePath]:
         """The Unreal content paths the walks let through, in the order found.
 
