@@ -398,38 +398,43 @@ class TestUnrealRuntimeSessionPhase1:
 
     # -- search_assets --
 
-    def test_search_assets_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """search_assets returns parsed asset entries."""
+    def test_search_assets_runs_the_registry_script_with_the_filters(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """search_assets asks the editor's asset registry, not Remote Control's search route."""
         session = self._make_session(monkeypatch)
-        session._session = SmartFakeClientSession(put_responses={
-            "/remote/search/assets": FakeResponse({
-                "Assets": [
-                    {"Name": "SM_Chair", "Path": "/Game/Meshes/SM_Chair",
-                     "Class": "StaticMesh", "PackagePath": "/Game/Meshes"},
-                    {"Name": "M_Wood", "Path": "/Game/Materials/M_Wood",
-                     "Class": "Material", "PackagePath": "/Game/Materials"},
-                ],
-            }),
-        })
+        scripts: list = []
+        reply = {"assets": [], "count": 0, "total": 0, "offset": 5, "next_offset": None,
+                 "truncated": False, "class_paths": ["/Script/Engine.StaticMesh"]}
 
-        result = asyncio.run(session.search_assets(query="chair"))
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            assert path == "/remote/object/call"
+            scripts.append(json["parameters"]["PythonCommand"])
+            return python_json_response(reply)
 
-        assert result["count"] == 2
-        assert result["assets"][0]["name"] == "SM_Chair"
-        assert result["assets"][1]["class_name"] == "Material"
-        assert result["truncated"] is False
+        session._session = SmartFakeClientSession(put_fn=put_fn)
 
-    def test_search_assets_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """search_assets returns empty list when no matches."""
+        result = asyncio.run(session.search_assets(
+            query="chair", class_names=[" StaticMesh "], package_paths=["/Game/Props/"], max_results=7, offset=5,
+        ))
+
+        assert result == reply
+        (script,) = scripts
+        assert script.startswith(
+            "args = {'query': 'chair', 'class_names': ['StaticMesh'], 'package_paths': ['/Game/Props'], "
+            "'recursive_paths': True, 'include_subclasses': True, 'offset': 5, 'limit': 7}\n"
+        )
+        assert "get_asset_registry()" in script
+
+    def test_search_assets_reports_an_unknown_class_as_a_validation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         session = self._make_session(monkeypatch)
-        session._session = SmartFakeClientSession(put_responses={
-            "/remote/search/assets": FakeResponse({"Assets": []}),
-        })
+        refusal = {"success": False, "error_type": "ValidationError", "error": "Unknown asset class: Nope"}
+        session._session = SmartFakeClientSession(put_fn=lambda path, json=None: python_json_response(refusal))
 
-        result = asyncio.run(session.search_assets(query="nonexistent"))
+        result = asyncio.run(session.search_assets(class_names=["Nope"]))
 
-        assert result["count"] == 0
-        assert result["assets"] == []
+        assert result["error_type"] == "ValidationError"
+        assert result["error"] == "Unknown asset class: Nope"
 
     # -- describe_object --
 
