@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import shutil
+import struct
 import tempfile
 import time
 import uuid
