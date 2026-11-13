@@ -14,12 +14,15 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Union
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ._pxr import Gf, Pcp, Sdf, Usd, UsdGeom, UsdShade
+from ._pxr import Gf, Pcp, Sdf, Usd, UsdGeom
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import Timer, monitor_performance
 from .bbox import describe_bounds
+from .clips import clip_spec_paths
+from .pxr_errors import bound_material_path, relationship_targets
 from .search import count_prims, traversal_predicate
+from .stage_files import public_identifier
 from .timecode import resolve_time_code, time_code_value
 from .values import DEFAULT_ARRAY_PREVIEW, describe_attribute, to_json
 
@@ -107,31 +110,186 @@ class USDStageInfo:
     time_sample_range: Optional[List[float]] = None
 
 
+def _covers(layer: Any, site: Sdf.Path) -> bool:
+    """Whether an arc to ``site`` brings in every prim spec ``layer`` holds."""
+    if site == Sdf.Path.absoluteRootPath:
+        return True
+    roots = list(layer.rootPrims)
+    return len(roots) == 1 and roots[0].path == site
+
+
+def _subtree_samples(layer: Any, site: Sdf.Path) -> Optional[List[float]]:
+    """``[first, last]`` sample time of the attribute specs under ``site`` in ``layer``."""
+    found: List[float] = []
+
+    def visit(path: Sdf.Path) -> None:
+        if path.IsPropertyPath():
+            times = layer.ListTimeSamplesForPath(path)
+            if times:
+                found.extend((min(times), max(times)))
+
+    if layer.GetPrimAtPath(site):
+        layer.Traverse(site, visit)
+    return [min(found), max(found)] if found else None
+
+
+def _layer_sample_times(cache: Any, layer: Any, root_stack: Any, low: float, high: float) -> List[float]:
+    """``layer``'s first and last sample time mapped to stage time codes, by every route it composes.
+
+    A layer composes into the stage through each layer stack that holds it
+    (``FindAllLayerStacksUsingLayer``): at its sublayer offset within that
+    stack, then through every arc that brings the stack in, whose map
+    function carries the reference's or payload's offset. Only the arcs where
+    a stack is brought in (direct dependencies) are asked for, so a large
+    referenced asset costs its arcs, not its prims; its descendants share the
+    arc's offset. The root layer stack also composes as itself. An arc to a
+    part of the layer (an internal reference to ``/Proto``) maps only that
+    part's samples, read from the specs under it.
+    """
+    times: List[float] = []
+    direct = Pcp.DependencyTypeDirect | Pcp.DependencyTypeNonVirtual
+    partial: Dict[str, Optional[List[float]]] = {}
+    for stack in cache.FindAllLayerStacksUsingLayer(layer):
+        try:
+            within = stack.layerOffsets[list(stack.layers).index(layer)]
+        except (ValueError, IndexError):
+            continue
+        routes = [(within, (low, high))] if stack == root_stack else []
+        for dependency in cache.FindSiteDependencies(stack, Sdf.Path.absoluteRootPath, direct, True, False, True):
+            site = dependency.sitePath.GetPrimPath()
+            span: Optional[Any] = (low, high)
+            if not _covers(layer, site):
+                key = site.pathString
+                if key not in partial:
+                    partial[key] = _subtree_samples(layer, site)
+                span = partial[key]
+            if span is not None:
+                routes.append((dependency.mapFunc.timeOffset * within, span))
+        for offset, (first, last) in routes:
+            times.extend((offset * first, offset * last))
+    return times
+
+
+def _clip_prim_paths(cache: Any, clipped: Iterable[Any]) -> List[Sdf.Path]:
+    """The stage prims a value clip set is authored on.
+
+    Args:
+        cache: The stage's ``Pcp.Cache``.
+        clipped: ``(layer, spec paths)`` for each layer with prim specs
+            authoring ``clips`` (``clips.clip_spec_paths``); each spec path
+            is mapped to the stage prims composing it through the layer's
+            stacks.
+    """
+    found: Dict[str, Sdf.Path] = {}
+    every = Pcp.DependencyTypeAnyNonVirtual
+    for layer, spec_paths in clipped:
+        prim_paths = {path.StripAllVariantSelections() for path in spec_paths}
+        for stack in cache.FindAllLayerStacksUsingLayer(layer):
+            for path in prim_paths:
+                for dependency in cache.FindSiteDependencies(stack, path, every, False, False, True):
+                    found.setdefault(dependency.indexPath.pathString, dependency.indexPath)
+    return list(found.values())
+
+
+def _clip_sample_range(stage: Usd.Stage, prim_paths: Iterable[Sdf.Path]) -> Optional[List[float]]:
+    """The stage times of the samples value clips supply, as pxr maps them.
+
+    pxr maps each clip's own times through the clip set's ``times`` and
+    ``active`` and the layer offsets above it; the attributes under each
+    clipped prim are asked for their time samples, so whatever pxr composes
+    is what is reported.
+    """
+    first: Optional[float] = None
+    last: Optional[float] = None
+    for path in prim_paths:
+        prim = stage.GetPrimAtPath(path)
+        if not prim:
+            continue
+        for descendant in Usd.PrimRange(prim):
+            for attribute in descendant.GetAttributes():
+                if not attribute.ValueMightBeTimeVarying():
+                    continue
+                times = attribute.GetTimeSamples()
+                if times:
+                    first = times[0] if first is None else min(first, times[0])
+                    last = times[-1] if last is None else max(last, times[-1])
+    if first is None or last is None:
+        return None
+    return [float(first), float(last)]
+
+
+def _composed_sample_times(stage: Usd.Stage, layers: List[Any]) -> List[float]:
+    """First and last sample times of ``layers`` and of the stage's value clips, in stage time codes."""
+    cache = stage._GetPcpCache()
+    root_stack = cache.layerStack
+    times: List[float] = []
+    clipped = []
+    for layer in layers:
+        samples = layer.ListAllTimeSamples()
+        if samples:
+            times.extend(_layer_sample_times(cache, layer, root_stack, min(samples), max(samples)))
+        # Gate on authored clip sets, not on opened clip layers: with a
+        # manifestAssetPath pxr opens the clip layers only on a first read.
+        spec_paths = clip_spec_paths(layer)
+        if spec_paths:
+            clipped.append((layer, spec_paths))
+    if clipped:
+        span = _clip_sample_range(stage, _clip_prim_paths(cache, clipped))
+        if span is not None:
+            times.extend(span)
+    return times
+
+
+def _own_sample_times(layers: List[Any]) -> List[float]:
+    """Each layer's first and last sample time in its own time codes (no offsets, no clips)."""
+    times: List[float] = []
+    for layer in layers:
+        samples = layer.ListAllTimeSamples()
+        if samples:
+            times.extend((min(samples), max(samples)))
+    return times
+
+
 def animation_range(stage: Usd.Stage) -> Dict[str, Any]:
     """Say whether a stage animates, from its time range and its time samples.
 
     A stage can animate without authoring ``startTimeCode``/``endTimeCode``:
     the time samples on its attributes are the animation. Every layer the
-    stage uses is asked for its sample times (``Sdf.Layer.ListAllTimeSamples``,
-    in that layer's own time codes, so a layer offset on a reference is not
-    applied).
+    stage composes is asked for its sample times
+    (``Sdf.Layer.ListAllTimeSamples``, in the layer's own time codes), and
+    each range is mapped to stage time codes the way composition maps it:
+    through the sublayer offset and every reference or payload offset that
+    brings the layer in (``Pcp.Cache`` dependencies, so the cost is the
+    stage's arcs, not its prims; see ``_layer_sample_times``). Value clip
+    layers hold samples in their own clip time. Each layer's prim specs are
+    scanned for ``clips`` (``clips.clip_spec_paths``, about 0.25 s per
+    200,000 prims); the prims authoring them are found and pxr is asked for
+    the composed sample times of the attributes under them, so ``times``,
+    ``active``, a manifest and offsets apply exactly as on a read.
+
+    The mapping reads pxr's ``Pcp.Cache`` through ``Usd.Stage._GetPcpCache``,
+    a private binding. Should it fail, the range falls back to each layer's
+    own sample times, and a warning is logged.
 
     Returns:
         ``has_animation`` (an authored range or samples spanning more than one
         time), ``authored_time_range`` (the root layer sets a start/end) and
-        ``time_sample_range`` (``[first, last]`` sample time, or None when
-        nothing is sampled).
+        ``time_sample_range`` (``[first, last]`` sample time in stage time
+        codes, or None when nothing is sampled).
     """
     authored = bool(stage.HasAuthoredTimeCodeRange())
-    first: Optional[float] = None
-    last: Optional[float] = None
-    for layer in stage.GetUsedLayers():
-        times = layer.ListAllTimeSamples()
-        if times:
-            low, high = min(times), max(times)
-            first = low if first is None else min(first, low)
-            last = high if last is None else max(last, high)
-    sampled = [float(first), float(last)] if first is not None else None
+    layers = list(stage.GetUsedLayers(includeClipLayers=False))
+    try:
+        times = _composed_sample_times(stage, layers)
+    except Exception as exc:
+        logger.warning(
+            "Could not map time samples to stage time through composition (%s: %s); reporting each "
+            "layer's own sample times, without layer offsets or value clips",
+            type(exc).__name__,
+            exc,
+        )
+        times = _own_sample_times(layers)
+    sampled = [float(min(times)), float(max(times))] if times else None
     ranged = authored and stage.GetEndTimeCode() > stage.GetStartTimeCode()
     # Samples at a single time are a pose, not motion: they need a span.
     moving = sampled is not None and sampled[1] > sampled[0]
@@ -188,7 +346,7 @@ def describe_composition(prim: Usd.Prim) -> Dict[str, List[Dict[str, Any]]]:
 
     arcs: Dict[str, List[Dict[str, Any]]] = {}
     for spec in prim.GetPrimStack():
-        layer = spec.layer.identifier
+        layer = public_identifier(spec.layer.identifier)
         for kind, items in (("references", spec.referenceList), ("payloads", spec.payloadList)):
             for item in items.GetAddedOrExplicitItems():
                 arcs.setdefault(kind, []).append({
@@ -217,7 +375,9 @@ def describe_metadata(prim: Usd.Prim) -> Dict[str, Any]:
             }
             for name in variant_sets.GetNames()
         },
-        "opinion_layers": list(dict.fromkeys(spec.layer.identifier for spec in prim.GetPrimStack())),
+        "opinion_layers": list(
+            dict.fromkeys(public_identifier(spec.layer.identifier) for spec in prim.GetPrimStack())
+        ),
         "authored": {
             key: to_json(value)
             for key, value in prim.GetAllAuthoredMetadata().items()
@@ -227,15 +387,21 @@ def describe_metadata(prim: Usd.Prim) -> Dict[str, Any]:
     return metadata
 
 
-def describe_relationships(prim: Usd.Prim) -> Dict[str, Dict[str, Any]]:
-    """Map each relationship to its targets and whether they are authored."""
-    return {
-        rel.GetName(): {
-            "targets": [target.pathString for target in rel.GetTargets()],
-            "authored": bool(rel.HasAuthoredTargets()),
-        }
-        for rel in prim.GetRelationships()
-    }
+def describe_relationships(
+    prim: Usd.Prim, problems: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Dict[str, Any]]:
+    """Map each relationship to its targets and whether they are authored.
+
+    A relationship pxr cannot compose (a layer authors it as an attribute)
+    is left out, with a warning in ``problems``.
+    """
+    problems = [] if problems is None else problems
+    relationships: Dict[str, Dict[str, Any]] = {}
+    for rel in prim.GetRelationships():
+        targets = relationship_targets(rel, problems)
+        if targets is not None:
+            relationships[rel.GetName()] = {"targets": targets, "authored": bool(rel.HasAuthoredTargets())}
+    return relationships
 
 
 def _local_transform(prim: Usd.Prim, time: Usd.TimeCode) -> Optional[Dict[str, List[float]]]:
@@ -254,9 +420,9 @@ def _local_transform(prim: Usd.Prim, time: Usd.TimeCode) -> Optional[Dict[str, L
     }
 
 
-def _bound_material(prim: Usd.Prim) -> List[str]:
-    material, _relationship = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
-    return [str(material.GetPath())] if material else []
+def _bound_material(prim: Usd.Prim, problems: List[Dict[str, Any]]) -> List[str]:
+    material = bound_material_path(prim, problems=problems)
+    return [material] if material else []
 
 
 def describe_prim(
@@ -279,9 +445,12 @@ def describe_prim(
             whose name matches one are listed. None lists them all.
 
     Returns:
-        The fields of the ``PrimInfo`` response.
+        The fields of the ``PrimInfo`` response. ``warnings`` lists the
+        properties pxr could not read (a relationship or material binding
+        authored as an attribute); the rest of the prim is still described.
     """
     time = resolve_time_code(time_code)
+    problems: List[Dict[str, Any]] = []
     patterns = list(attribute_filter) if attribute_filter is not None else None
     attributes = prim.GetAttributes()
     listed = [
@@ -322,12 +491,13 @@ def describe_prim(
         "transform": _local_transform(prim, time),
         "children_count": len(children),
         "children_types": children_types,
-        "material_bindings": _bound_material(prim),
+        "material_bindings": _bound_material(prim, problems),
         "attribute_count": len(attributes),
         "attributes": {attr.GetName(): describe_attribute(attr, time, array_preview) for attr in listed},
-        "relationships": describe_relationships(prim),
+        "relationships": describe_relationships(prim, problems),
         "metadata": describe_metadata(prim),
         "time_code": time_code_value(time),
+        "warnings": problems,
     }
     if prim.IsInstance():
         info["prototype"] = prim.GetPrototype().GetPath().pathString
@@ -553,8 +723,7 @@ class USDReader(LoggerMixin):
                 for attr in prim.GetAttributes()
             },
             relationships={
-                rel.GetName(): [target.pathString for target in rel.GetTargets()]
-                for rel in prim.GetRelationships()
+                name: entry["targets"] for name, entry in describe_relationships(prim).items()
             },
             metadata=describe_metadata(prim),
             children=[child.GetName() for child in _children(prim)],

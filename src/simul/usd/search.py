@@ -20,6 +20,7 @@ import re
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from ._pxr import Usd
+from .pxr_errors import relationship_targets
 from .values import describe_attribute
 
 SEARCH_TYPES = ("by_name", "by_path", "by_type", "by_api_schema")
@@ -31,10 +32,23 @@ DEFAULT_SUBTREE_LIMIT = 150
 MAX_SUBTREE_LIMIT = 1000
 
 
+INVALID_REGEX = "InvalidRegex"
+
+
 class SearchQueryError(ValueError):
-    """A query the chosen match mode cannot use (an invalid regular expression)."""
+    """A query the chosen match mode cannot use (an invalid regular expression).
+
+    Reported as a ``ValidationError`` with ``details.code`` naming the check
+    (``InvalidRegex``), the query and pxr-independent reason, as the edit
+    tools report a failed check.
+    """
 
     error_type = "ValidationError"
+
+    def __init__(self, message: str, code: str = INVALID_REGEX, **details: Any) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = {"code": code}
+        self.details.update({key: value for key, value in details.items() if value is not None})
 
 
 def traversal_predicate(include_instance_proxies: bool = True) -> Any:
@@ -70,7 +84,9 @@ def _string_matcher(query: str, mode: str, case_sensitive: bool) -> Callable[[st
         try:
             pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE)
         except re.error as exc:
-            raise SearchQueryError(f"Invalid regular expression {query!r}: {exc}") from exc
+            raise SearchQueryError(
+                f"Invalid regular expression {query!r}: {exc}", query=query, reason=str(exc)
+            ) from exc
         return lambda text: pattern.search(text) is not None
     needle = query if case_sensitive else query.casefold()
 
@@ -205,12 +221,17 @@ def _authored_properties(prim: Usd.Prim, array_preview: int, patterns: Optional[
         for attr in prim.GetAuthoredAttributes()
         if wanted(attr.GetName())
     }
-    relationships = {
-        rel.GetName(): [target.pathString for target in rel.GetTargets()]
-        for rel in prim.GetAuthoredRelationships()
-        if wanted(rel.GetName())
-    }
-    return {"attributes": attributes, "relationships": relationships}
+    problems: List[Dict[str, Any]] = []
+    relationships = {}
+    for rel in prim.GetAuthoredRelationships():
+        if wanted(rel.GetName()):
+            targets = relationship_targets(rel, problems)
+            if targets is not None:
+                relationships[rel.GetName()] = targets
+    properties: Dict[str, Any] = {"attributes": attributes, "relationships": relationships}
+    if problems:
+        properties["warnings"] = problems
+    return properties
 
 
 def list_subtree(

@@ -721,6 +721,9 @@ class SimulMCPServer(LoggerMixin):
         # Tools that skip the per-tool bucket and spend only the agent's
         # ceiling; see exempt_from_per_tool_rate_limit.
         self._per_tool_rate_exempt: Set[str] = set()
+        # Paged tools whose follow-on pages (offset > 0) skip the per-tool
+        # bucket; see exempt_paging_continuations.
+        self._paging_continuation_exempt: Dict[str, str] = {}
         self._rate_limit_enabled = self.settings.security.rate_limiting_enabled
         self._rate_limit_rate = self.settings.security.requests_per_minute / 60.0
         self._rate_limit_burst = self.settings.security.burst_size
@@ -920,6 +923,35 @@ class SimulMCPServer(LoggerMixin):
         """
         self._per_tool_rate_exempt.update(tool_names)
 
+    def exempt_paging_continuations(self, tool_names: Iterable[str]) -> None:
+        """Count the follow-on pages of paged ``tool_names`` only against each agent's ceiling.
+
+        Walking a listing page by page is one request spread over many calls:
+        the first page spends a token from the tool's own bucket, and each
+        call carrying a nonzero offset (``next_offset`` of the page before,
+        the parameter ``paged_results.PAGED_RESULTS`` declares) counts only
+        against the per-agent ceiling (``security.global_requests_per_minute``),
+        which still stops a runaway loop. With the per-tool bucket alone a
+        25-page walk of a large stage was refused 15 times.
+
+        Args:
+            tool_names: Registered names of paged tools.
+        """
+        from .paged_results import paging_for
+
+        for name in tool_names:
+            paging = paging_for(name)
+            if paging is None:
+                raise ValueError(f"{name} declares no page in paged_results.PAGED_RESULTS")
+            self._paging_continuation_exempt[name] = paging.offset_param
+
+    def _is_paging_continuation(self, tool_name: str, params: Optional[Mapping[str, Any]]) -> bool:
+        offset_param = self._paging_continuation_exempt.get(tool_name)
+        if offset_param is None or not params:
+            return False
+        offset = params.get(offset_param)
+        return isinstance(offset, int) and not isinstance(offset, bool) and offset > 0
+
     def _sweep_idle_rate_limiters(self) -> None:
         """Drop the buckets that have refilled to their burst size.
 
@@ -1027,7 +1059,7 @@ class SimulMCPServer(LoggerMixin):
         self._session_end_hooks.append(hook)
 
     def _check_rate_limit(
-        self, tool_name: str, agent_id: Optional[str] = None
+        self, tool_name: str, agent_id: Optional[str] = None, continuation: bool = False
     ) -> Optional[Dict[str, Any]]:
         """Spend one token for ``tool_name`` on behalf of the calling agent.
 
@@ -1041,6 +1073,9 @@ class SimulMCPServer(LoggerMixin):
         Args:
             tool_name: Registered tool name.
             agent_id: Calling agent; resolved from the MCP session when omitted.
+            continuation: The call fetches a follow-on page of a tool
+                registered with ``exempt_paging_continuations``; only the
+                agent's ceiling applies.
 
         Returns:
             The RateLimitError payload carrying ``retry_after_seconds``, or
@@ -1051,7 +1086,7 @@ class SimulMCPServer(LoggerMixin):
         agent = agent_id or self._resolve_agent_id(None)
         tool_bucket = (
             None
-            if tool_name in self._per_tool_rate_exempt
+            if continuation or tool_name in self._per_tool_rate_exempt
             else self._get_rate_limiter(tool_name, agent)
         )
         # An anonymous HTTP client is named by its connection, so its per-tool
@@ -1811,7 +1846,10 @@ class SimulMCPServer(LoggerMixin):
             return self._as_text_result(refusal.payload)
 
         try:
-            rate_error = self._check_rate_limit(tool_name, agent_id)
+            if self._is_paging_continuation(tool_name, params):
+                rate_error = self._check_rate_limit(tool_name, agent_id, continuation=True)
+            else:
+                rate_error = self._check_rate_limit(tool_name, agent_id)
             if rate_error is not None:
                 return refuse(Refusal(rate_error, "rate_limited"))
             async with admission(tool_name) as refusal:

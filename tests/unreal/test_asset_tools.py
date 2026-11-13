@@ -203,6 +203,27 @@ class DynamicMeshComponent(MeshComponent):
     pass
 
 
+class StaticMeshComponent(MeshComponent):
+    """An imported mesh's component: its collision mode and its mesh's simple shapes.
+
+    UE 5.7.4's USD importer gave a mesh whose prim has no UsdPhysics collision the
+    fallback collision: with ``none`` (its default) no simple shape and a
+    NoCollision component; with ``convex_hull`` one hull and BlockAll."""
+
+    def __init__(self, path: str, editor: "Editor", shapes: int, collision: str) -> None:
+        super().__init__(path, editor)
+        self.mesh = SimpleNamespace(shapes=shapes)
+        self.collision = collision
+
+    def get_collision_enabled(self) -> Any:
+        return SimpleNamespace(name=self.collision)
+
+    def get_editor_property(self, name: str) -> Any:
+        if name == "static_mesh":
+            return self.mesh
+        raise AttributeError(name)
+
+
 class Level(UObject):
     def __init__(self, path: str, outer: World) -> None:
         super().__init__(path)
@@ -471,6 +492,9 @@ class Editor:
                 for path in existing:
                     del self.actors[path]
             scene = Actor(LEVEL + label + "_" + str(len(self.import_tasks)), self.world, self)
+            bare = options.fallback_collision_type.name == "NONE"
+            scene.components.append(StaticMeshComponent(
+                scene.path + ".SM_Root", self, 0 if bare else 1, "NO_COLLISION" if bare else "QUERY_AND_PHYSICS"))
             scene.get_actor_label = lambda label=label: label  # type: ignore[method-assign]
             scene.imported = True  # type: ignore[attr-defined]
             self.actors[scene.path] = scene
@@ -635,6 +659,11 @@ class Editor:
             ),
             "LayersSubsystem": SimpleNamespace(get_world=lambda: editor.world),
             "LevelEditorSubsystem": SimpleNamespace(is_in_play_in_editor=lambda: editor.pie),
+            "StaticMeshEditorSubsystem": SimpleNamespace(
+                get_simple_collision_count=lambda mesh: mesh.shapes,
+                get_convex_collision_count=lambda mesh: 0,
+                get_collision_complexity=lambda mesh: SimpleNamespace(name="CTF_USE_DEFAULT"),
+            ),
             "EditorActorSubsystem": SimpleNamespace(
                 get_all_level_actors=editor.level_actors,
                 get_selected_level_actors=lambda: list(editor.selection),
@@ -658,6 +687,7 @@ class Editor:
             Actor=Actor,
             MeshComponent=MeshComponent,
             DynamicMeshComponent=DynamicMeshComponent,
+            StaticMeshComponent=StaticMeshComponent,
             MaterialInterface=MaterialInterface,
             Material=Material,
             StaticMesh=StaticMesh,
@@ -1063,7 +1093,29 @@ def test_the_usd_import_reports_engine_packages_it_dirtied(editor: SimpleNamespa
     result = _import(editor)
 
     assert result["dirty_engine_packages"] == ["/InterchangeAssets/Materials/PBRSurfaceMaterial_MR"]
-    assert "Save All" in result["warnings"][-1]
+    assert any("Save All" in warning for warning in result["warnings"]), result["warnings"]
+
+
+def test_an_import_without_fallback_collision_lists_the_actors_bodies_pass_through(
+    editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 audit R2B-02: fallback_collision_type none, the default, gave the imported
+    meshes no collision at all (no simple shape, a NoCollision component), while the
+    docs said it used the render triangles; a round-tripped ground was no floor, and
+    the reply said nothing."""
+    arguments = {"usd_path": str(editor.tmp_path / "scene.usda"), "destination_path": "/Game/Imports"}
+    bare = json.loads(_call_tool(editor.session, monkeypatch, "import_unreal_usd", arguments).content[-1].text)
+    hull = _import(editor, destination_path="/Game/Hulls", import_options={"fallback_collision_type": "convex_hull"})
+
+    assert bare["success"] is True
+    assert bare["mesh_components"] == 1
+    assert bare["actors_without_collision"] == bare["actor_paths"]
+    assert bare["actors_without_collision_count"] == 1
+    (warning,) = [w for w in bare["warnings"] if "without physics collision" in w]
+    assert "fallback_collision_type none" in warning
+    assert "convex_decomposition" in warning and "replace_existing true" in warning
+    assert hull["actors_without_collision"] == [] and hull["actors_without_collision_count"] == 0
+    assert not any("without physics collision" in w for w in hull["warnings"])
 
 
 def test_an_import_saves_none_of_its_options_to_the_project_config(editor: SimpleNamespace) -> None:
@@ -1376,7 +1428,11 @@ def test_the_export_payload_reaches_the_agent_whole(editor: SimpleNamespace, mon
 
 
 def test_the_import_payload_reaches_the_agent_whole(editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
-    arguments = {"usd_path": str(editor.tmp_path / "scene.usda"), "destination_path": "/Game/Imports"}
+    arguments = {
+        "usd_path": str(editor.tmp_path / "scene.usda"),
+        "destination_path": "/Game/Imports",
+        "import_options": {"fallback_collision_type": "convex_hull"},
+    }
     first = json.loads(_call_tool(editor.session, monkeypatch, "import_unreal_usd", arguments).content[-1].text)
     refused = json.loads(_call_tool(editor.session, monkeypatch, "import_unreal_usd", arguments).content[-1].text)
     replaced = json.loads(_call_tool(
@@ -1594,7 +1650,7 @@ def test_the_warnings_are_what_the_editor_logged_during_the_import(editor: Simpl
     """warnings was always []."""
     editor.fake.import_log = ["Prim '/Root/Lamp' has no material binding"]
 
-    result = _import(editor)
+    result = _import(editor, import_options={"fallback_collision_type": "convex_hull"})
 
     assert result["warnings"] == ["LogUsd: Warning: Prim '/Root/Lamp' has no material binding"]
     assert "FLUSHLOG" in editor.fake.console_commands

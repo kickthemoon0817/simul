@@ -218,10 +218,11 @@ error names the prim, each rejected attribute and the reason.
 
 **Saving:** edits stay in memory until you write them, and are lost when the server exits.
 
-- `save_usd_stage` (`stage_id`) writes the edits back to the stage's own file. It refuses a `.usdz`, and a file that changed on disk since it was loaded unless `overwrite_external_changes: true`.
+- `save_usd_stage` (`stage_id`) writes the edits back to the stage's own file. It refuses a `.usdz`, and a file that changed on disk since it was loaded (including another session's save of it) unless `overwrite_external_changes: true`.
 - `export_usd_stage` (`stage_id`, `file_path`, optional `flatten`, `overwrite`) writes a new `.usda`/`.usdc`/`.usd`/`.usdz`.
 - `list_usd_stages` shows which stages have unsaved edits.
-- `reload_usd_stage` / `unload_usd_stage` take `discard_unsaved: true` to drop edits.
+- `reload_usd_stage` / `unload_usd_stage` take `discard_unsaved: true` to drop edits. A reload lists a changed sublayer that no longer parses in `failed_files`; fix the file and reload again.
+- A file that references itself by file name (`@./self.usda@</Proto>`) loads with a `SelfReference` warning: that arc shows the file on disk, so unsaved edits appear through it only after a save and a reload.
 
 ## Common Analysis Workflows
 

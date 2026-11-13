@@ -702,6 +702,32 @@ def test_no_tool_source_spells_a_type_outside_the_vocabulary() -> None:
     assert {"StageUnavailable", "UnsafeExecutionDisabled", "PrimNotFound"} <= bridge
 
 
+# Where a tool names its error_type by a constant, as the Unreal editor scripts
+# do (``"error_type": _NOT_IN_SIMULATION`` in a script, which an f-string sets
+# from the module's NOT_IN_SIMULATION).
+_ERROR_TYPE_CONSTANT = re.compile(r"""["']?error_type["']?\s*[:=]\s*_?([A-Z][A-Z0-9_]+)\b""")
+
+
+def test_no_tool_names_a_type_outside_the_vocabulary_by_a_constant() -> None:
+    """Round-2 audit R2B-04: apply_unreal_force's NotInSimulation was named by a
+    constant the literal scan above does not read, was outside the vocabulary, and
+    reached clients as EngineError."""
+    from simul.adapters import _unreal_errors, _unreal_mesh_scripts, _unreal_scripts, unreal_runtime
+
+    modules = (error_types, _unreal_scripts, _unreal_mesh_scripts, _unreal_errors, unreal_runtime)
+    found: Dict[str, List[str]] = {}
+    for source in sorted((_SRC / "adapters").glob("*unreal*.py")):
+        for constant in _ERROR_TYPE_CONSTANT.findall(source.read_text()):
+            found.setdefault(constant, []).append(str(source.relative_to(_SRC)))
+    assert "NOT_IN_SIMULATION" in found
+    values = {}
+    for constant in found:
+        owners = [getattr(module, constant) for module in modules if isinstance(getattr(module, constant, None), str)]
+        assert owners, f"{constant} ({found[constant]}) is not a constant of {[m.__name__ for m in modules]}"
+        values[constant] = owners[0]
+    assert {name: value for name, value in values.items() if not error_types.is_mapped(value)} == {}
+
+
 # Calls that name a failure by position: the bridge's BridgeResponse.failure(
 # request_id, name, message), UnrealError(message, error_type), and the
 # keyword forms ScriptResult(error_name=...) / failure(name=...).

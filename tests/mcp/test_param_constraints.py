@@ -359,7 +359,6 @@ _CHOICE_PROSE = re.compile(
 _PROSE_ONLY = {
     ("create_isaac_light", "color"),
     ("create_isaac_material", "diffuse_color"),
-    ("validate_simready_asset", "checks"),
     ("export_blender_file", "file_path"),
     ("export_simready_usd", "file_path"),
     ("search_prims", "query"),

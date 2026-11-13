@@ -70,7 +70,7 @@ def editor(monkeypatch):
         get_editor_subsystem=lambda name: (
             level
             if name == "level"
-            else SimpleNamespace(get_editor_world=lambda: world)
+            else SimpleNamespace(get_editor_world=lambda: world, get_game_world=lambda: None)
         ),
         Paths=SimpleNamespace(get_project_file_path=lambda: "/project/test.uproject"),
         SystemLibrary=SimpleNamespace(

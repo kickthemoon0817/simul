@@ -1345,6 +1345,15 @@ class UnrealPhysicsBody(BaseModel):
     collision_preset: Optional[str] = Field(
         None, description="Collision preset read back after the write (Custom once overridden)"
     )
+    blocked_object_types: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Object types the body's collision responses block (WorldStatic, WorldDynamic, Pawn, PhysicsBody, "
+            "Vehicle, Destructible). Two bodies collide only when each blocks the other, so a body that blocks "
+            "none collides with nothing, whatever its collision mode, and one that does not block WorldStatic "
+            "passes through the level's static floors"
+        ),
+    )
     mass_kg: Optional[float] = Field(
         None, description="Mass Unreal computes for the body; 0 for a Static or Stationary body"
     )
@@ -1510,6 +1519,18 @@ class UnrealBodyState(BaseModel):
     center_of_mass: Optional[List[float]] = Field(None, description="World center of mass [x, y, z], cm")
     gravity_enabled: Optional[bool] = Field(None, description="Whether gravity affects the body")
     simulate_physics: Optional[bool] = Field(None, description="The body's Simulate Physics flag")
+    components: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description=(
+            "For a multi-part actor (several primitive components, none the root), each component's body, "
+            "the first 20: component_name, component_path, location and rotation (the component's, in the "
+            "world) and the body fields above; null otherwise"
+        ),
+    )
+    components_total: Optional[int] = Field(
+        None, description="Primitive components of a multi-part actor, every one counted"
+    )
+    note: Optional[str] = Field(None, description="Why the body fields are null, when they are")
 
 
 class UnrealPhysicsStateResponse(BaseModel):
@@ -1530,6 +1551,13 @@ class UnrealPhysicsStateResponse(BaseModel):
     hint: Optional[str] = _page_hint_field()
     not_found: List[str] = Field(
         default_factory=list, description="Paths with no actor, or no copy in the world read"
+    )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Why a path can have no copy in the running simulation (a World Partition cell it has not "
+            "streamed in included); null when every path was found"
+        ),
     )
 
 
@@ -1562,7 +1590,7 @@ class UnrealListSimulationActorsResponse(BaseModel):
 
 
 # ----------------------------------------------------------------------
-# Phase 6: USD / SimReady Bridge
+# Phase 6: USD Bridge
 # ----------------------------------------------------------------------
 
 
@@ -1590,6 +1618,18 @@ class UnrealImportUsdResponse(BaseModel):
             "return); simul saves none of them, but the editor's Save All would write them into the "
             "engine install"
         ),
+    )
+    mesh_components: int = Field(0, description="Static mesh components of the actors the import added")
+    actors_without_collision: List[str] = Field(
+        default_factory=list,
+        description=(
+            "The first 20 added actors with a mesh simulated bodies pass through (no physics collision, or no "
+            "simple shape): fallback_collision_type none, the default, gives a mesh whose prim has no "
+            "UsdPhysics collision none"
+        ),
+    )
+    actors_without_collision_count: int = Field(
+        0, description="Added actors with a mesh simulated bodies pass through, every one counted"
     )
 
 
@@ -1679,34 +1719,6 @@ class UnrealSaveAssetsResponse(BaseModel):
     )
     level_package: Optional[str] = Field(None, description="The level being edited")
     dry_run: bool = Field(False, description="Whether nothing was saved")
-
-
-class UnrealConvertToSimreadyResponse(BaseModel):
-    """Response after SimReady conversion."""
-
-    success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    output_path: str = Field(..., description="SimReady USD path")
-    conversions_applied: List[str] = Field(
-        ..., description="List of conversions applied"
-    )
-    warnings: List[str] = Field(default_factory=list, description="Conversion warnings")
-
-
-class UnrealValidateSimreadyResponse(BaseModel):
-    """Response after SimReady validation."""
-
-    success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    usd_path: str = Field(..., description="Validated USD path")
-    is_valid: bool = Field(..., description="Overall validation result")
-    checks: Dict[str, bool] = Field(..., description="Per-check pass/fail results")
-    errors: List[str] = Field(default_factory=list, description="Validation errors")
-    suggestions: List[str] = Field(default_factory=list, description="Fix suggestions")
 
 
 class UnrealGetInterchangeInfoResponse(BaseModel):
@@ -1825,9 +1837,22 @@ class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
             "Floor-like surfaces a robot can stand on, largest first: name, path, class_name, "
             "size [x, y, z] cm along the box's own axes, top_z cm, area_m2 (of the top face), "
             "tilt_degrees, normal (the top face's upward unit normal); an instance of an instanced "
-            "mesh adds component_path and instance_index, and a component with too many instances "
-            "to measure one by one component_path and instances"
+            "mesh adds component_path and instance_index"
         ),
+    )
+    skipped_instance_components: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "The first 20 instanced mesh components with more than 1000 instances, too many to measure "
+            "one by one, so none of their instances is classified (they may hold floors or props): name, "
+            "path, class_name, component_path, instances, size and bounds_center (world-axis bounds, cm)"
+        ),
+    )
+    skipped_instance_components_count: int = Field(
+        0, description="Instanced mesh components skipped for having too many instances, every one counted"
+    )
+    warning: Optional[str] = Field(
+        None, description="What the analysis left out: instanced components it did not classify"
     )
     graspable_objects: List[Dict[str, Any]] = Field(
         default_factory=list,
@@ -2174,6 +2199,7 @@ class UnrealValidateMeshResponse(BaseModel):
     triangle_count: int = Field(..., description="Current triangle count")
     vertex_count: int = Field(..., description="Current vertex count")
     connected_components: int = Field(..., description="Separate connected pieces of the mesh")
+    welded: bool = Field(False, description="Whether the checks read a copy with coincident open edges welded")
     uv_channels: int = Field(..., description="UV channels on the mesh")
     bounds_min: List[float] = Field(..., description="Minimum corner of the local bounds [x, y, z] in cm")
     bounds_max: List[float] = Field(..., description="Maximum corner of the local bounds [x, y, z] in cm")
@@ -2325,8 +2351,6 @@ __all__ = [
     "UnrealSetPhysicsParamsResponse",
     "UnrealImportUsdResponse",
     "UnrealExportUsdResponse",
-    "UnrealConvertToSimreadyResponse",
-    "UnrealValidateSimreadyResponse",
     "UnrealGetInterchangeInfoResponse",
     "UnrealBatchOperationsResponse",
     "UnrealQuerySceneGraphResponse",
