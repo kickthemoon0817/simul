@@ -513,7 +513,10 @@
      "arguments": {
       "class_filter": null,
       "tag_filter": null,
-      "max_results": 200
+      "max_results": 200,
+      "offset": 0,
+      "label_filter": null,
+      "include_subclasses": false
      }
     }
    ],
@@ -536,7 +539,10 @@
    "arguments": {
     "class_filter": "StaticMeshActor",
     "tag_filter": "Prop",
-    "max_results": 5
+    "max_results": 5,
+    "offset": 10,
+    "label_filter": "Chair",
+    "include_subclasses": true
    },
    "envelope": [
     {
@@ -552,7 +558,10 @@
      "arguments": {
       "class_filter": "StaticMeshActor",
       "tag_filter": "Prop",
-      "max_results": 5
+      "max_results": 5,
+      "offset": 10,
+      "label_filter": "Chair",
+      "include_subclasses": true
      }
     }
    ],
@@ -605,6 +614,85 @@
    ]
   },
   {
+   "tool": "list_unreal_actor_components",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "list_unreal_actor_components",
+     "label": "Unreal",
+     "response_model": "UnrealListActorComponentsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "list_actor_components",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "class_filter": null,
+      "offset": 0,
+      "max_results": 200
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "list_actor_components"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_actor_components",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "class_filter": "PrimitiveComponent",
+    "offset": 2,
+    "max_results": 3
+   },
+   "envelope": [
+    {
+     "tool": "list_unreal_actor_components",
+     "label": "Unreal",
+     "response_model": "UnrealListActorComponentsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "list_actor_components",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "class_filter": "PrimitiveComponent",
+      "offset": 2,
+      "max_results": 3
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "list_actor_components"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
    "tool": "search_unreal_assets",
    "case": "required",
    "arguments": {},
@@ -623,7 +711,10 @@
       "query": "",
       "class_names": null,
       "package_paths": null,
-      "max_results": 100
+      "max_results": 100,
+      "offset": 0,
+      "recursive_paths": true,
+      "include_subclasses": true
      }
     }
    ],
@@ -647,7 +738,10 @@
     "query": "chair",
     "class_names": " StaticMesh, ,Material ",
     "package_paths": "/Game/Props,, /Game/Env ",
-    "max_results": 7
+    "max_results": 7,
+    "offset": 14,
+    "recursive_paths": false,
+    "include_subclasses": false
    },
    "envelope": [
     {
@@ -670,7 +764,10 @@
        "/Game/Props",
        "/Game/Env"
       ],
-      "max_results": 7
+      "max_results": 7,
+      "offset": 14,
+      "recursive_paths": false,
+      "include_subclasses": false
      }
     }
    ],
@@ -679,6 +776,165 @@
     "payload": {
      "success": true,
      "method": "search_assets"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "import_unreal_asset",
+   "case": "required",
+   "arguments": {
+    "file_path": "/tmp/simul-work/crate.fbx"
+   },
+   "envelope": [
+    {
+     "tool": "import_unreal_asset",
+     "label": "Unreal",
+     "response_model": "UnrealImportAssetResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "import_asset",
+     "arguments": {
+      "file_path": "/tmp/simul-work/crate.fbx",
+      "destination_path": "/Game/Imports",
+      "replace_existing": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "import_asset"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "import_unreal_asset",
+   "case": "every argument",
+   "arguments": {
+    "file_path": "/tmp/simul-work/crate.fbx",
+    "destination_path": "/Game/Props",
+    "replace_existing": true
+   },
+   "envelope": [
+    {
+     "tool": "import_unreal_asset",
+     "label": "Unreal",
+     "response_model": "UnrealImportAssetResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "import_asset",
+     "arguments": {
+      "file_path": "/tmp/simul-work/crate.fbx",
+      "destination_path": "/Game/Props",
+      "replace_existing": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "import_asset"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "save_unreal_assets",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "save_unreal_assets",
+     "label": "Unreal",
+     "response_model": "UnrealSaveAssetsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "save_assets",
+     "arguments": {
+      "asset_paths": null,
+      "save_level": false,
+      "all_dirty": false,
+      "allow_engine_content": false,
+      "dry_run": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "save_assets"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "save_unreal_assets",
+   "case": "every argument",
+   "arguments": {
+    "asset_paths": "/Game/Materials/MI_Wood, /Game/Props/SM_Chair",
+    "save_level": true,
+    "all_dirty": true,
+    "allow_engine_content": true,
+    "dry_run": true
+   },
+   "envelope": [
+    {
+     "tool": "save_unreal_assets",
+     "label": "Unreal",
+     "response_model": "UnrealSaveAssetsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "save_assets",
+     "arguments": {
+      "asset_paths": [
+       "/Game/Materials/MI_Wood",
+       "/Game/Props/SM_Chair"
+      ],
+      "save_level": true,
+      "all_dirty": true,
+      "allow_engine_content": true,
+      "dry_run": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "save_assets"
     }
    },
    "usage": [
@@ -1897,7 +2153,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "material_path": "/Game/Materials/M_Wood",
-      "slot_index": 0
+      "slot_index": 0,
+      "slot_name": "",
+      "component_name": ""
      }
     }
    ],
@@ -1920,7 +2178,9 @@
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "material_path": "/Game/Materials/M_Wood",
-    "slot_index": 2
+    "slot_index": 2,
+    "slot_name": "Wood",
+    "component_name": "Body"
    },
    "envelope": [
     {
@@ -1936,7 +2196,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "material_path": "/Game/Materials/M_Wood",
-      "slot_index": 2
+      "slot_index": 2,
+      "slot_name": "Wood",
+      "component_name": "Body"
      }
     }
    ],
@@ -2590,7 +2852,8 @@
        "/Game/Maps/Test.Test:PersistentLevel.Table_0"
       ],
       "output_path": "/tmp/out.usd",
-      "export_options": null
+      "export_options": null,
+      "overwrite": false
      }
     }
    ],
@@ -2615,7 +2878,8 @@
     "output_path": "/tmp/out.usd",
     "export_options": {
      "export_sublayers": true
-    }
+    },
+    "overwrite": true
    },
    "envelope": [
     {
@@ -2636,7 +2900,8 @@
       "output_path": "/tmp/out.usd",
       "export_options": {
        "export_sublayers": true
-      }
+      },
+      "overwrite": true
      }
     }
    ],
@@ -2903,7 +3168,10 @@
       "root_path": null,
       "max_depth": 10,
       "include_components": false,
-      "class_filter": null
+      "class_filter": null,
+      "include_subclasses": false,
+      "offset": 0,
+      "max_results": 100
      }
     }
    ],
@@ -2927,7 +3195,10 @@
     "root_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "max_depth": 3,
     "include_components": true,
-    "class_filter": "StaticMeshActor"
+    "class_filter": "StaticMeshActor",
+    "include_subclasses": true,
+    "offset": 6,
+    "max_results": 7
    },
    "envelope": [
     {
@@ -2944,7 +3215,10 @@
       "root_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "max_depth": 3,
       "include_components": true,
-      "class_filter": "StaticMeshActor"
+      "class_filter": "StaticMeshActor",
+      "include_subclasses": true,
+      "offset": 6,
+      "max_results": 7
      }
     }
    ],
@@ -3144,7 +3418,8 @@
      "arguments": {
       "label": "chair",
       "match_mode": "exact",
-      "max_results": 100
+      "max_results": 100,
+      "offset": 0
      }
     }
    ],
@@ -3167,7 +3442,8 @@
    "arguments": {
     "label": "chair",
     "match_mode": "contains",
-    "max_results": 9
+    "max_results": 9,
+    "offset": 4
    },
    "envelope": [
     {
@@ -3183,7 +3459,8 @@
      "arguments": {
       "label": "chair",
       "match_mode": "contains",
-      "max_results": 9
+      "max_results": 9,
+      "offset": 4
      }
     }
    ],
@@ -4735,15 +5012,23 @@
     "is_error": false,
     "payload": {
      "success": false,
-     "error": "could not convert string to float: 'x'",
-     "error_type": "ValueError",
-     "details": null
+     "error": "location: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not '1,x,3'",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "primitive_type": "box",
+       "dimensions": "{}",
+       "segments": 32,
+       "location": "1,x,3",
+       "actor_label": null
+      }
+     }
     }
    },
    "usage": [
     {
      "success": false,
-     "error": "could not convert string to float: 'x'"
+     "error": "location: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not '1,x,3'"
     }
    ]
   },
@@ -4768,15 +5053,24 @@
     "is_error": false,
     "payload": {
      "success": false,
-     "error": "could not convert string to float: 'up'",
-     "error_type": "ValueError",
-     "details": null
+     "error": "plane_normal: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not 'up'",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "mesh_path": "/Game/Meshes/SM_Chair",
+       "plane_origin": "0,0,0",
+       "plane_normal": "up",
+       "fill_holes": true,
+       "keep_both_sides": false,
+       "space": "world"
+      }
+     }
     }
    },
    "usage": [
     {
      "success": false,
-     "error": "could not convert string to float: 'up'"
+     "error": "plane_normal: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not 'up'"
     }
    ]
   }

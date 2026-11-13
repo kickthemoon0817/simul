@@ -702,6 +702,13 @@ class SecurityConfig(BaseModel):
         default_factory=list,
         description="URL schemes that may be written to; empty keeps writes local-only",
     )
+    relative_path_base: Optional[str] = Field(
+        default=None,
+        description=(
+            "Directory a relative path passed to a tool resolves against; unset uses "
+            "the directory the server was started in"
+        ),
+    )
     allow_script_execution: bool = Field(
         default=True,
         description=(
@@ -1041,6 +1048,7 @@ _YAML_GROUPS: Dict[str, Dict[str, Dict[str, str]]] = {
             "allowed_paths": "allowed_paths",
             "allowed_url_schemes": "allowed_url_schemes",
             "allowed_write_url_schemes": "allowed_write_url_schemes",
+            "relative_path_base": "relative_path_base",
         },
         "rate_limiting": {
             "enabled": "rate_limiting_enabled",

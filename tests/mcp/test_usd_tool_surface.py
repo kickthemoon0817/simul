@@ -68,8 +68,8 @@ def usd_driver() -> UsdToolDriver:
 
 
 def _assert_ok(payload: Dict[str, Any]) -> None:
-    """USD responses carry ``success`` only on some schemas, but every error does."""
-    assert payload.get("success", True) is True, payload
+    """Every USD response carries ``success``, as every other backend's does."""
+    assert payload["success"] is True, payload
     assert "error_type" not in payload, payload
 
 

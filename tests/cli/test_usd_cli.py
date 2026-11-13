@@ -144,3 +144,27 @@ def test_usd_info_lists_load_warnings(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     data = _json_line(result.stdout)
     assert "MissingReference" in {warning["code"] for warning in data["warnings"]}
+
+
+def test_usd_summary_json_reports_success(usda_file: Path) -> None:
+    result = runner.invoke(app, ["--json", "usd", "summary", str(usda_file)])
+
+    assert result.exit_code == 0, result.output
+    data = _json_line(result.stdout)
+    assert data["success"] is True
+    assert data["total_prims"] == 3
+
+
+def test_usd_validate_reads_config(tmp_path: Path) -> None:
+    """``--config`` reaches validate as it reaches info and summary."""
+    config = tmp_path / "simul.yaml"
+    config.write_text('usd:\n  files:\n    allowed_extensions: [".usda"]\n')
+    path = usd_fixtures.write_robot(tmp_path / "robot.usd")
+
+    plain = runner.invoke(app, ["--json", "usd", "validate", str(path)])
+    configured = runner.invoke(app, ["--json", "usd", "validate", str(path), "--config", str(config)])
+
+    assert plain.exit_code == 0, plain.output
+    assert configured.exit_code == 1
+    codes = [issue["code"] for issue in _json_line(configured.stdout)["issues"]]
+    assert codes == ["UnsupportedExtension"]

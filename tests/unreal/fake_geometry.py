@@ -16,7 +16,12 @@ Shapes the fake reproduces from UE 5.7.4:
 - GeometryScript reports a failure in the ``debug`` object it was given and
   returns normally (``fail`` names the functions that fail).
 - ``set_dynamic_mesh`` gives the new mesh to the component; the old one is
-  left as it was.
+  left as it was. Setting the mesh the component already holds renames it
+  and dirties the level (``Rename`` without ``REN_DoNotDirty``), the way a
+  component is bound to its mesh again after an Undo.
+- A transaction dirties the level; ``update_collision`` dirties nothing.
+- ``EditorAssetLibrary`` finds and loads nothing while PIE runs; the asset
+  registry still answers.
 - ``unreal.Rotator`` takes (roll, pitch, yaw) positionally; the fake takes
   keywords only.
 """
@@ -34,6 +39,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from tests.unreal.editor_world import World, is_valid
 
 LEVEL = "/Game/Maps/Mesh.Mesh:PersistentLevel."
+
+#: The package of the fake level.
+LEVEL_PACKAGE = "/Game/Maps/Mesh"
 
 
 class Vector:
@@ -261,23 +269,31 @@ class DynamicMeshComponent(Component):
     def __init__(self, owner: "Actor", mesh: DynamicMesh) -> None:
         super().__init__(owner)
         self.mesh = mesh
-        self.refreshed = 0
         self.collision = SimpleCollision()
         self.materials: List[Any] = [None]
 
     def get_materials(self) -> List[Any]:
         return list(self.materials)
 
+    def get_owner(self) -> "Actor":
+        return self.owner
+
     def get_dynamic_mesh(self) -> DynamicMesh:
         return self.mesh
 
     def set_dynamic_mesh(self, mesh: DynamicMesh) -> None:
+        if mesh is self.mesh:
+            DynamicMesh.count += 1
+            mesh.name = f"DynamicMesh_{DynamicMesh.count}"
+            self.owner.editor.dirty.add(LEVEL_PACKAGE)
+            self.owner.editor.record("rebind", self.owner.path, mesh.name)
+            return
         mesh.outer = self.get_path_name()
         self.mesh = mesh
         self.owner.editor.record("set_dynamic_mesh", self.owner.path, mesh.name)
 
-    def notify_mesh_modified(self) -> None:
-        self.refreshed += 1
+    def update_collision(self, only_if_pending: bool = True) -> None:
+        self.owner.editor.record("update_collision", self.owner.path, only_if_pending)
 
 
 class StaticMeshComponent(Component):
@@ -321,6 +337,9 @@ class Actor:
 
     def get_world(self) -> World:
         return self.world
+
+    def get_outermost(self) -> SimpleNamespace:
+        return SimpleNamespace(get_name=lambda: LEVEL_PACKAGE)
 
     def get_components_by_class(self, cls: type) -> List[Any]:
         return [c for c in self.components if isinstance(c, cls)]
@@ -378,11 +397,12 @@ class StaticMesh:
     def get_name(self) -> str:
         return self.path.rpartition("/")[2].partition(".")[0]
 
+    # With Nanite, LOD 0 is the fallback mesh: 316 of 1,920 triangles for a sphere (UE 5.7.4).
     def get_num_triangles(self, lod: int) -> int:
-        return self.stats["tris"]
+        return self.stats["tris"] // 6 if self.nanite_settings.enabled else self.stats["tris"]
 
     def get_num_vertices(self, lod: int) -> int:
-        return self.stats["verts"]
+        return self.stats["verts"] // 6 if self.nanite_settings.enabled else self.stats["verts"]
 
     def set_material(self, index: int, material: Any) -> None:
         self.materials[index] = material
@@ -407,6 +427,8 @@ class FakeEditor:
         arguments: function -> the positional arguments of its last call.
         transactions: Descriptions of the transactions that ended (not cancelled).
         events: What the scripts did to the level, in order.
+        dirty: The packages with unsaved changes.
+        namespace: The module namespace the last script ran in.
     """
 
     def __init__(self) -> None:
@@ -424,6 +446,8 @@ class FakeEditor:
         self.assets: Dict[str, Any] = {}
         self.saved: List[str] = []
         self.spawned = 0
+        self.dirty: set = set()
+        self.namespace: Dict[str, Any] = {}
 
     def add_asset(self, asset: "StaticMesh") -> "StaticMesh":
         package = asset.path.partition(".")[0]
@@ -692,15 +716,17 @@ class FakeEditor:
             def __exit__(self, *exc: Any) -> None:
                 if not self.cancelled:
                     editor.transactions.append(self.description)
+                    editor.dirty.add(LEVEL_PACKAGE)
 
             def cancel(self) -> None:
                 self.cancelled = True
 
-        def find_asset_data(path: str) -> SimpleNamespace:
-            asset = editor.assets.get(path) or editor.assets.get(path.partition(".")[0])
-            kind = type(asset).__name__ if asset is not None else None
-            return SimpleNamespace(is_valid=lambda: asset is not None,
-                                   asset_class_path=SimpleNamespace(asset_name=kind))
+        def assets_by_package_name(package: str) -> List[SimpleNamespace]:
+            asset = editor.assets.get(package)
+            if asset is None:
+                return []
+            return [SimpleNamespace(asset_name=package.rpartition("/")[2],
+                                    asset_class_path=SimpleNamespace(asset_name=type(asset).__name__))]
 
         def load_asset(path: str) -> Any:
             if editor.pie:
@@ -710,6 +736,9 @@ class FakeEditor:
         def save_asset(path: str, only_if_dirty: bool) -> bool:
             editor.saved.append(path)
             return True
+
+        def dirty_packages() -> List[SimpleNamespace]:
+            return [SimpleNamespace(get_name=lambda name=name: name) for name in sorted(editor.dirty)]
 
         subsystems = {
             "EditorActorSubsystem": EditorActorSubsystem(),
@@ -858,9 +887,12 @@ class FakeEditor:
             MathLibrary=SimpleNamespace(make_rot_from_z=lambda vector: Rotator()),
             SystemLibrary=SimpleNamespace(is_valid=is_valid),
             EditorAssetLibrary=SimpleNamespace(
-                find_asset_data=find_asset_data, load_asset=load_asset, save_asset=save_asset,
-                does_asset_exist=lambda path: path in editor.assets,
+                load_asset=load_asset, save_asset=save_asset, does_asset_exist=lambda path: path in editor.assets,
             ),
+            AssetRegistryHelpers=SimpleNamespace(get_asset_registry=lambda: SimpleNamespace(
+                get_assets_by_package_name=assets_by_package_name)),
+            EditorLoadingAndSavingUtils=SimpleNamespace(get_dirty_map_packages=dirty_packages,
+                                                        get_dirty_content_packages=lambda: []),
             Paths=SimpleNamespace(project_content_dir=lambda: "../../Project/Content/",
                                   convert_relative_path_to_full=lambda path: "/Projects/Mesh/Content/"),
             StaticMesh=StaticMesh,
@@ -882,9 +914,10 @@ class FakeEditor:
         previous = sys.modules.get("unreal")
         sys.modules["unreal"] = self.module()  # type: ignore[assignment]
         out = io.StringIO()
+        self.namespace = {"__name__": "__main__"}
         try:
             with redirect_stdout(out):
-                exec(code, {"__name__": "__main__"})
+                exec(code, self.namespace)
         except Exception as exc:  # surface script errors like UE does
             return {"ReturnValue": False, "CommandResult": f"Traceback ...\n{type(exc).__name__}: {exc}"}
         finally:

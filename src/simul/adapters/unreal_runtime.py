@@ -13,6 +13,7 @@ import importlib
 import json
 import logging
 import math
+import os
 import re
 import socket
 import tempfile
@@ -24,7 +25,12 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
-from ..utils.paths import PathPolicy
+from ..utils.asset_references import (
+    UncheckableReferences,
+    fbx_relative_file_names,
+    interchange_outside_references,
+)
+from ..utils.paths import PathPolicy, SandboxDenied
 from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
@@ -53,13 +59,18 @@ from ._unreal_mesh_scripts import (
     FACE_SELECTION_SYNTAX,
     GENERATE_PRIMITIVE,
     HULL_OUTPUTS,
+    MAX_REMESH_TARGET_TRIANGLES,
     MAX_RESULT_TRIANGLES,
+    MAX_SEGMENTS,
     MESH_BOOLEAN,
+    MESH_COMMIT_MARGIN_S,
     MESH_REFUSALS,
     MESH_SCRIPT_TIMEOUT_S,
+    MIN_SEGMENTS,
     PLANE_CUT,
     PRIMITIVE_TYPES,
     REMESH,
+    REMESH_OVERSHOOT,
     SIMPLIFY,
     STATIC_MESH_COLLISION,
     SUBDIVIDE,
@@ -70,30 +81,42 @@ from ._unreal_mesh_scripts import (
     VALIDATE,
     VALIDATION_CHECKS,
     attachment_refusal,
+    is_loopback,
+    mesh_timeout_error,
 )
 from ._unreal_mesh_scripts import edge_selection as parse_edge_selection
 from ._unreal_mesh_scripts import face_selection as parse_face_selection
 from ._unreal_mesh_scripts import game_asset_path, invalid_choice, mesh_script, primitive_dimensions, refusal
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_scripts import (
+    ACTOR_COMPONENTS,
     ACTOR_EXISTS,
     ACTOR_HELPERS,
+    ACTOR_INFO,
     ADD_COMPONENT,
+    ASSET_IMPORT,
+    ASSET_SEARCH,
     ASSIGN_MATERIAL,
     CREATE_MATERIAL_INSTANCE,
     DELETE_ACTOR,
+    EDITOR_RELATIVE_PATHS,
     EDITOR_WORLD,
     ENABLE_PHYSICS,
     ENGINE_METADATA,
     FIND_ACTORS_BY_TAG,
     FOCUS_ACTOR,
     INCOMPATIBLE_BODY,
+    INFO_CHILDREN,
     INTERCHANGE_INFO,
+    LIST_ACTORS,
+    LISTED_CHILDREN,
     LOADED_MAP,
     MATERIAL_INFO,
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
+    SAVE_ASSETS,
+    SCENE_GRAPH,
     SCENE_SUMMARY,
     SET_ACTOR_PARENT,
     SET_ACTOR_TRANSFORM,
@@ -159,6 +182,58 @@ PROJECT_CONTENT_ROOT = "/Game"
 #: ``/Game`` when no ``save_path`` is given.
 DEFAULT_MATERIAL_FOLDER = "/Game/Materials"
 
+#: File types ``import_asset`` imports through Interchange (UE 5.7's
+#: translators for them; USD has its own importer, ``import_usd``).
+ASSET_IMPORT_EXTENSIONS: Tuple[str, ...] = (".fbx", ".gltf", ".glb", ".obj")
+
+#: The boolean USD import options, by UsdStageImportOptions property name (UE 5.7).
+USD_IMPORT_BOOLEAN_OPTIONS: Tuple[str, ...] = (
+    "import_actors",
+    "import_geometry",
+    "import_materials",
+    "import_skeletal_animations",
+    "import_level_sequences",
+    "import_groom_assets",
+    "import_sparse_volume_textures",
+    "import_sounds",
+    "import_only_used_materials",
+    "use_prim_kinds_for_collapsing",
+    "merge_identical_material_slots",
+    "share_assets_for_identical_prims",
+    "prim_path_folder_structure",
+    "interpret_lods",
+)
+
+#: USD's model kinds and their EUsdDefaultKind bits (UE 5.7), for ``kinds_to_collapse``.
+USD_KINDS: Dict[str, int] = {"model": 1, "component": 2, "group": 4, "assembly": 8, "subcomponent": 16}
+
+#: EUsdCollisionType names (UE 5.7), for ``fallback_collision_type``: the
+#: collision of a mesh whose prim has no physics schema. ``none`` uses the
+#: render triangles as collision (no simple shapes).
+USD_COLLISION_TYPES: Tuple[str, ...] = (
+    "none",
+    "convex_decomposition",
+    "convex_hull",
+    "sphere",
+    "cube",
+    "mesh_simplification",
+    "capsule",
+    "custom_mesh",
+)
+
+#: ``up_axis`` values and their EUsdUpAxis names.
+_USD_UP_AXES: Dict[str, str] = {"y": "Y_AXIS", "z": "Z_AXIS"}
+
+#: Every option ``import_usd`` takes.
+USD_IMPORT_OPTIONS: Tuple[str, ...] = USD_IMPORT_BOOLEAN_OPTIONS + (
+    "kinds_to_collapse",
+    "fallback_collision_type",
+    "nanite_triangle_threshold",
+    "prims_to_import",
+    "meters_per_unit",
+    "up_axis",
+)
+
 # Characters Unreal does not allow in a folder name (INVALID_LONGPACKAGE_CHARACTERS,
 # UE 5.7); an object name's are _INVALID_OBJECT_NAME_CHARACTERS, below.
 _INVALID_FOLDER_CHARACTERS = frozenset("\\:*?\"<>|' ,.&!~\n\r\t@#")
@@ -210,6 +285,11 @@ logger = get_logger(__name__)
 # above this the caller gets the path on the editor host instead. Kept local to
 # the adapter so this layer does not depend on the MCP layer.
 MAX_INLINE_CAPTURE_BYTES = 262_144
+#: Characters of JSON a page of a scene read's entries may take. The MCP layer
+#: trims any result above 40,000 characters (``mcp.result_budget``), so a page
+#: stops here and leaves room for the rest of the reply; a page that fits needs
+#: no trim, and its count and next offset stay exact.
+PAGE_BUDGET_BYTES = 30_000
 # Editor-relative screenshot directories HighResShot writes into, per platform.
 _SCREENSHOT_SUBDIRS = ("MacEditor", "WindowsEditor", "LinuxEditor", "Mac", "Windows", "Linux")
 # Interval between screenshot polls; each poll is one cheap Remote Control call.
@@ -452,6 +532,48 @@ PASSPHRASE_REFUSED_ERROR = (
     "Remote Control refused the request (HTTP 401): set UNREAL__PASSPHRASE "
     "to the editor's passphrase"
 )
+
+#: What the attachment guard raises when the editor, map or viewport a session
+#: is attached to changed (``_unreal_attach_scripts`` ``verify`` and the
+#: active-viewport check ``_guard_attachment`` adds). It ran in the editor
+#: ahead of the tool's own script and came back as that script's traceback,
+#: typed ScriptError (or RuntimeError for a Remote Control call).
+_ATTACHMENT_REFUSAL = re.compile(
+    r"Unreal attachment changed \([a-z_]+\); run simul unreal attach again"
+    r"|Attached viewport is unavailable; run simul unreal attach again"
+    r"|This operation uses the active viewport; activate the attached viewport first"
+)
+
+#: The ``error_type`` of an attachment refusal: the editor is not in the state
+#: the attachment expects.
+ATTACHMENT_REFUSED = "InvalidState"
+
+
+def _attachment_refusal(failure: str) -> Optional[Dict[str, Any]]:
+    """The InvalidState envelope of an attachment guard refusal in ``failure``, or None."""
+    match = _ATTACHMENT_REFUSAL.search(failure)
+    if match is None:
+        return None
+    return {
+        "success": False,
+        "error_type": ATTACHMENT_REFUSED,
+        "error": match.group(0),
+        "details": {
+            "reason": "attachment_changed",
+            "hint": "Nothing was run. Run simul unreal attach again (or activate the attached viewport), then retry.",
+        },
+    }
+
+
+class UnrealAttachmentRefused(RuntimeError):
+    """The attached editor, map or viewport changed; named InvalidState in the envelope."""
+
+    error_type = ATTACHMENT_REFUSED
+
+    def __init__(self, envelope: Dict[str, Any]) -> None:
+        super().__init__(envelope["error"])
+        self.details = envelope["details"]
+
 
 #: ``ping`` ``error_type`` for a request that never left this machine. Its
 #: endpoint was not tried, so the failure says nothing about an editor there.
@@ -887,6 +1009,91 @@ def _outside_project_refusal(path: str, action: str, hint: str) -> Dict[str, Any
         ),
         "details": {"content_path": path, "allowed_root": PROJECT_CONTENT_ROOT, "hint": hint},
     }
+
+
+#: An Unreal object path as Unreal's USD exporter writes one into an asset-valued
+#: attribute: ``/Engine``, ``/Game`` or ``/Script``, folders, then
+#: ``<Name>.<Name>`` (a package and its asset of the same name).
+_UNREAL_OBJECT_PATH = re.compile(r"^/(?:Engine|Game|Script)(?:/[A-Za-z0-9_ -]+)*/([A-Za-z0-9_-]+)\.\1$")
+
+#: Suffixes that make ``<Name>.<Name>`` a file name rather than an object path.
+_FILE_SUFFIXES = frozenset(
+    {"usd", "usda", "usdc", "usdz", "png", "jpg", "jpeg", "exr", "tga", "tif", "tiff", "bmp", "hdr", "dds",
+     "tx", "psd", "mdl", "mtlx", "abc", "vdb", "obj", "fbx", "gltf", "glb", "bin", "json", "txt", "uasset",
+     "umap", "wav", "mp4", "mov"}
+)
+
+
+def _usd_import_options(options: Any) -> Tuple[Dict[str, Any], List[str]]:
+    """The USD importer settings for ``options``, and what is wrong with them.
+
+    Returns:
+        ``properties`` (UsdStageImportOptions property values), plus
+        ``fallback_collision_type``, ``prims_to_import`` and ``stage``
+        ({meters_per_unit, up_axis as an EUsdUpAxis name}) when given; and
+        one message per option that Unreal 5.7 does not take as given. Lights
+        and cameras have no options in 5.7 (``import_lights`` and
+        ``import_cameras`` failed with "Failed to find property"): they are
+        imported as actors with ``import_actors``.
+    """
+    values: Dict[str, Any] = {"properties": {}}
+    problems: List[str] = []
+    if not isinstance(options, dict):
+        return values, [f"import_options must be an object, got {options!r}"]
+    for key, value in options.items():
+        if key in ("import_lights", "import_cameras"):
+            problems.append(
+                f"{key} is not a USD import option in Unreal 5.7: lights and cameras are imported as "
+                "actors, with import_actors"
+            )
+        elif key in USD_IMPORT_BOOLEAN_OPTIONS:
+            if type(value) is bool:
+                values["properties"][key] = value
+            else:
+                problems.append(f"{key} must be true or false, got {value!r}")
+        elif key == "kinds_to_collapse":
+            if isinstance(value, list) and all(isinstance(kind, str) and kind.lower() in USD_KINDS for kind in value):
+                values["properties"][key] = sum({USD_KINDS[kind.lower()] for kind in value})
+            else:
+                problems.append(
+                    f"kinds_to_collapse must be a list of USD kinds from {sorted(USD_KINDS)}, got {value!r}"
+                )
+        elif key == "fallback_collision_type":
+            if isinstance(value, str) and value.lower() in USD_COLLISION_TYPES:
+                values[key] = value.lower()
+            else:
+                problems.append(f"fallback_collision_type must be one of {list(USD_COLLISION_TYPES)}, got {value!r}")
+        elif key == "nanite_triangle_threshold":
+            if type(value) is int and 0 <= value <= 2**31 - 1:
+                values["properties"][key] = value
+            else:
+                problems.append(f"nanite_triangle_threshold must be an integer from 0 to 2147483647, got {value!r}")
+        elif key == "prims_to_import":
+            if (
+                isinstance(value, list)
+                and value
+                and all(isinstance(prim, str) and prim.startswith("/") for prim in value)
+            ):
+                values[key] = list(value)
+            else:
+                problems.append(
+                    f"prims_to_import must be a non-empty list of prim paths such as /Root/Chair, got {value!r}"
+                )
+        elif key not in ("meters_per_unit", "up_axis"):
+            problems.append(f"Unknown USD import option {key!r}; the options are {list(USD_IMPORT_OPTIONS)}")
+    if "meters_per_unit" in options or "up_axis" in options:
+        meters, axis = options.get("meters_per_unit"), options.get("up_axis")
+        if meters is None or axis is None:
+            problems.append(
+                "meters_per_unit and up_axis override the stage's own units and up axis together: give both"
+            )
+        elif isinstance(meters, bool) or not isinstance(meters, (int, float)) or not 0 < meters < math.inf:
+            problems.append(f"meters_per_unit must be a number above 0 (0.01 for centimeters), got {meters!r}")
+        elif not isinstance(axis, str) or axis.lower() not in _USD_UP_AXES:
+            problems.append(f"up_axis must be 'y' or 'z', got {axis!r}")
+        else:
+            values["stage"] = {"meters_per_unit": float(meters), "up_axis": _USD_UP_AXES[axis.lower()]}
+    return values, problems
 
 
 def _sanitized_object_name(name: str) -> str:
@@ -1330,6 +1537,9 @@ class UnrealRuntimeSession(LoggerMixin):
         )
         result = self._parse_python_json(checked)
         if result.get("error") or result.get("verified") is not True:
+            refusal = _attachment_refusal(str(result.get("error", "")))
+            if refusal is not None:
+                raise UnrealAttachmentRefused(refusal)
             raise RuntimeError(
                 result.get("error", "Unreal attachment verification failed")
             )
@@ -1659,6 +1869,9 @@ class UnrealRuntimeSession(LoggerMixin):
             self.logger.info("Unreal refused the request (%s): %s", NOT_FOUND_ERROR, not_found)
             return {"success": False, "error_type": NOT_FOUND_ERROR, "error": not_found}
         if result.get("error"):
+            refusal = self._attached_refusal(result)
+            if refusal is not None:
+                return refusal
             error_type = result.get("error_type")
             if error_type == PIE_ACTIVE or error_type in expected_errors:
                 self.logger.info("Unreal refused the request (%s): %s", error_type, result["error"])
@@ -1666,6 +1879,19 @@ class UnrealRuntimeSession(LoggerMixin):
                 self.logger.log(failure_log_level, "Unreal tool script failed: %s", result["error"])
             return {"success": False, "error_type": "ScriptError", **result}
         return result
+
+    def _attached_refusal(self, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The InvalidState envelope when a failed script is the attachment guard's refusal.
+
+        Only in attached mode, where ``_guard_attachment`` runs the guard
+        ahead of every script; it is logged as a refusal.
+        """
+        if self.settings.unreal.mode != "attached" or result.get("error_type"):
+            return None
+        refusal = _attachment_refusal(str(result.get("error", "")))
+        if refusal is not None:
+            self.logger.info("Unreal refused the request (%s): %s", ATTACHMENT_REFUSED, refusal["error"])
+        return refusal
 
     async def _pie_active(self) -> bool:
         """Whether Play In Editor runs; False when the editor cannot say.
@@ -1711,9 +1937,13 @@ class UnrealRuntimeSession(LoggerMixin):
         tool's data, the shared mesh helpers and ``body``. It runs under an
         HTTP timeout of at least ``MESH_SCRIPT_TIMEOUT_S``, since a
         GeometryScript call blocks the editor until it returns and cannot be
-        cancelled. The script reports its own refusals with an ``error_type``;
-        the attachment guard's refusal, which is raised before the script
-        runs, comes back as ``InvalidState`` instead of a traceback.
+        cancelled, and commits its result only within that timeout less
+        ``MESH_COMMIT_MARGIN_S``: by the clock of this host for an editor on
+        it, by its own run time otherwise. So a timeout reported here leaves
+        the level as it was once the editor finishes. The script reports its
+        own refusals with an ``error_type``; the attachment guard's refusal,
+        which is raised before the script runs, comes back as
+        ``InvalidState`` instead of a traceback.
 
         Args:
             body: The tool body, from ``_unreal_mesh_scripts``.
@@ -1721,17 +1951,22 @@ class UnrealRuntimeSession(LoggerMixin):
 
         Returns:
             The payload, or an error envelope.
+
+        Raises:
+            UnrealTimeoutError: The editor did not answer within the timeout.
         """
-        previous = self.timeout
-        self.timeout = max(previous, MESH_SCRIPT_TIMEOUT_S)
+        timeout = max(self.timeout, MESH_SCRIPT_TIMEOUT_S)
+        budget = timeout - MESH_COMMIT_MARGIN_S
+        deadline = time.time() + budget if is_loopback(self.host) else None
+        script = mesh_script(body, args, budget_s=budget, deadline=deadline)
         try:
-            result = await self._execute_json_script(mesh_script(body, args), expected_errors=MESH_REFUSALS)
-        finally:
-            self.timeout = previous
-        refusal = attachment_refusal(result)
-        if refusal is not None:
-            self.logger.info("Unreal refused the request (%s): %s", refusal["error_type"], refusal["error"])
-            return refusal
+            result = await self._execute_json_script(script, expected_errors=MESH_REFUSALS, timeout=timeout)
+        except UnrealTimeoutError as exc:
+            raise mesh_timeout_error(exc, timeout, budget, same_clock=deadline is not None) from exc
+        stopped = attachment_refusal(result)
+        if stopped is not None:
+            self.logger.info("Unreal refused the request (%s): %s", stopped["error_type"], stopped["error"])
+            return stopped
         return result
 
     @staticmethod
@@ -1819,7 +2054,8 @@ class UnrealRuntimeSession(LoggerMixin):
         raw = await self._execute_python(code, mode=mode)
         failure = self._python_failure(raw)
         if failure is not None:
-            return self._script_error(failure)
+            refusal = self._attached_refusal({"error": failure})
+            return refusal if refusal is not None else self._script_error(failure)
         info = [
             str(entry.get("Output", ""))
             for entry in raw.get("LogOutput") or []
@@ -1974,55 +2210,156 @@ class UnrealRuntimeSession(LoggerMixin):
     # Phase 1 session methods — Scene Read Operations
     # ------------------------------------------------------------------
 
+    async def _paged_read(self, script: str, args: Dict[str, Any], noun: str, total_key: str) -> Dict[str, Any]:
+        """Run a paged scene read and say how to get the rest.
+
+        The editor script renders one page (``_unreal_scripts.page``) and
+        reports where it ended; this adds ``truncated`` and, when more is
+        left, a ``hint`` naming the offset of the next page.
+
+        Args:
+            script: The editor script, run after ``args``.
+            args: The script's arguments; ``budget`` is set here.
+            noun: What the page lists, plural, for the hint.
+            total_key: The result's key for every match.
+
+        Returns:
+            The script's result with ``truncated`` and ``hint``, or its error.
+        """
+        args = {**args, "budget": PAGE_BUDGET_BYTES}
+        result = await self._execute_json_script(f"args = {args!r}\n" + script)
+        if result.get("error"):
+            return result
+        ended = result.pop("page_ended_by", None)
+        next_offset = result.get("next_offset")
+        result["truncated"] = next_offset is not None
+        if next_offset is not None:
+            stop = (
+                f"the page reached the {PAGE_BUDGET_BYTES}-character response budget before max_results"
+                if ended == "response_budget"
+                else "the page reached max_results"
+            )
+            result["hint"] = (
+                f"Returned {result.get('count')} of {result.get(total_key)} {noun} from offset "
+                f"{result.get('offset')}; {stop}. Call again with offset={next_offset} for the next page."
+            )
+        return result
+
+    @staticmethod
+    def _check_page(offset: int, max_results: int) -> None:
+        """Refuse an offset or page size out of range before anything is sent."""
+        if not 1 <= max_results <= 5000:
+            raise ValueError("max_results must be between 1 and 5000")
+        if offset < 0:
+            raise ValueError("offset must be 0 or more")
+
     async def list_actors(
         self,
         class_filter: Optional[str] = None,
         tag_filter: Optional[str] = None,
         max_results: int = 200,
+        offset: int = 0,
+        label_filter: Optional[str] = None,
+        include_subclasses: bool = False,
     ) -> Dict[str, Any]:
-        """List actors with actual world transforms, class names and actor tags.
+        """List level actors, one page at a time, with world transforms, tags and attachment.
+
+        Every level actor that passes the filters is counted in ``total``; the
+        page holds those from ``offset`` on, up to ``max_results``, and stops
+        early rather than exceed the response budget, so ``count`` is what
+        came back and ``next_offset`` is where the next page starts. Each
+        entry has the actor's attachment parent and children (the first 20,
+        with ``child_count``).
 
         While Play In Editor runs, Unreal's editor lists no level actors, so
         the editor world is read directly (``_unreal_scripts.EDITOR_WORLD``'s
         ``level_actors``) and ``pie_active`` is True: the same actors, as
         they are in the editor rather than in the running game, and possibly
         the builder brush and helper actors the Outliner hides.
-        """
-        if not 1 <= max_results <= 5000:
-            raise ValueError("max_results must be between 1 and 5000")
-        code = ACTOR_HELPERS + EDITOR_WORLD + f"""
-class_filter = {class_filter!r}
-tag_filter = {tag_filter!r}
-actors = []
-truncated = False
-for actor in level_actors():
-    cls = actor.get_class()
-    if class_filter and class_filter not in (cls.get_name(), cls.get_path_name()):
-        continue
-    if tag_filter and not actor.actor_has_tag(tag_filter):
-        continue
-    if len(actors) == {max_results!r}:
-        truncated = True
-        break
-    actors.append(actor_info(actor))
-print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncated,
-                  "pie_active": pie_active()}}))
-"""
-        return await self._execute_json_script(code)
 
-    async def get_actor_info(self, actor_path: str) -> Dict[str, Any]:
-        """Read an actor's world transform, components, tags and visibility, and ``pie_active``.
+        Args:
+            class_filter: Keep actors whose class has this name
+                (StaticMeshActor, BP_Door_C) or path
+                (/Script/Engine.StaticMeshActor); None keeps every class.
+            tag_filter: Keep actors with this actor tag (case-insensitive, as
+                Unreal compares tags); None keeps every actor.
+            max_results: Most actors in the page, 1 to 5000.
+            offset: Matching actors to skip before the page starts.
+            label_filter: Keep actors whose label contains this text,
+                ignoring case; None keeps every actor.
+            include_subclasses: Also keep actors whose class derives from
+                class_filter's (class_filter Light keeps PointLight and a
+                Blueprint derived from it).
 
         Returns:
-            The actor's info. A not-found error naming the path when it names
-            no live actor of the level open in the editor: nothing there, an
-            actor already deleted, or one of a map that is not open, which
-            is never loaded (``_unreal_scripts.ACTOR_HELPERS``' ``actor_at``).
+            ``actors``, ``count``, ``total``, ``offset``, ``next_offset``,
+            ``truncated``, ``hint`` (when more are left), ``warnings`` and
+            ``pie_active``; or a ScriptError envelope.
         """
-        return await self._execute_json_script(
-            ACTOR_HELPERS
-            + f"\nprint(json.dumps(dict(actor_info(actor_at({actor_path!r})), pie_active=pie_active())))"
-        )
+        self._check_page(offset, max_results)
+        args = {
+            "class_filter": class_filter or None,
+            "include_subclasses": bool(include_subclasses),
+            "tag_filter": tag_filter or None,
+            "label_filter": label_filter or None,
+            "offset": offset,
+            "max_results": max_results,
+            "listed_children": LISTED_CHILDREN,
+        }
+        return await self._paged_read(LIST_ACTORS, args, "actors", "total")
+
+    async def get_actor_info(self, actor_path: str) -> Dict[str, Any]:
+        """Read an actor's world transform, components, tags, visibility and attachment.
+
+        Returns:
+            ``actor_info``'s fields, the attachment ``parent`` (the actor the
+            root component is attached to, or None), ``children`` (the first
+            200 actors attached to it) and ``child_count``, and ``pie_active``.
+            A not-found error naming the path when it names no live actor of
+            the level open in the editor: nothing there, an actor already
+            deleted, or one of a map that is not open, which is never loaded
+            (``_unreal_scripts.ACTOR_HELPERS``' ``actor_at``).
+        """
+        args = {"actor_path": actor_path, "listed_children": INFO_CHILDREN}
+        return await self._execute_json_script(f"args = {args!r}\n" + ACTOR_INFO)
+
+    async def list_actor_components(
+        self,
+        actor_path: str,
+        class_filter: Optional[str] = None,
+        offset: int = 0,
+        max_results: int = 200,
+    ) -> Dict[str, Any]:
+        """List an actor's components, one page at a time.
+
+        Every component is listed, editor-only ones (sprites, arrows)
+        included, with its class, whether it is the root and editor-only;
+        scene components add the component they are attached to (its name,
+        or its path when it belongs to another actor), world location,
+        mobility and visibility, and primitive components their world bounds
+        (box center and half-size, and bounding sphere radius, in cm).
+
+        Args:
+            actor_path: Full object path of the actor.
+            class_filter: Keep components whose class has this name or path or
+                derives from it (PrimitiveComponent keeps every mesh, shape
+                and sprite); None keeps every component.
+            offset: Components to skip before the page starts.
+            max_results: Most components in the page, 1 to 5000.
+
+        Returns:
+            ``actor_path``, ``components``, ``count``, ``total``, ``offset``,
+            ``next_offset``, ``truncated``, ``hint``, ``warnings`` and
+            ``pie_active``; or a ScriptError envelope (no such actor).
+        """
+        self._check_page(offset, max_results)
+        args = {
+            "actor_path": actor_path,
+            "class_filter": class_filter or None,
+            "offset": offset,
+            "max_results": max_results,
+        }
+        return await self._paged_read(ACTOR_COMPONENTS, args, "components", "total")
 
     async def search_assets(
         self,
@@ -2030,59 +2367,77 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
         class_names: Optional[List[str]] = None,
         package_paths: Optional[List[str]] = None,
         max_results: int = 100,
+        offset: int = 0,
+        recursive_paths: bool = True,
+        include_subclasses: bool = True,
     ) -> Dict[str, Any]:
         """
-        Search the Unreal Asset Registry.
+        Search the Unreal Asset Registry, without loading any asset.
+
+        Searches every mounted content root (/Game, /Engine and each plugin's)
+        unless ``package_paths`` narrows it. A class is given by its short
+        name (StaticMesh) or its path (/Script/Engine.StaticMesh). The query
+        matches part of the asset name, ignoring case; redirectors are left
+        out. Matches are sorted by object path, so ``offset`` pages through
+        them. Remote Control's asset search, used before, matched no short
+        class name (and fired an engine ensure), ignored subfolders, searched
+        only /Game without a filter, could not say whether more matched and
+        gave no package path (observed on UE 5.7.4).
 
         Args:
-            query: Search query string.
-            class_names: Filter by UClass names.
-            package_paths: Package path prefixes to search within.
+            query: Part of the asset name to match, ignoring case; empty
+                matches every asset.
+            class_names: Asset classes, by short name or class path.
+            package_paths: Content folders to search, such as /Game/Props;
+                empty searches every mounted content root.
             max_results: Maximum number of results, from 1 to
                 ``MAX_ASSET_SEARCH_RESULTS`` (1000).
+            offset: How many matches to skip, for the next page.
+            recursive_paths: Include the subfolders of package_paths.
+            include_subclasses: Include assets of the classes' subclasses.
 
         Returns:
-            Dictionary with ``assets`` list, ``count``, ``truncated``, or a
-            ``ValidationError`` envelope, sent to no editor, when
-            ``max_results`` is out of range: Remote Control sizes its result
+            Dictionary with ``assets`` (each with name, path, class_name,
+            class_path, package_name, package_path and metadata, the registry
+            tags Unreal records for that kind of asset, such as Triangles,
+            LODs, NaniteEnabled and CollisionPrims, as the strings Unreal
+            stores), ``count``, ``total`` (every match), ``offset``,
+            ``next_offset`` (None on the last page), ``truncated`` (more
+            matches follow) and ``class_paths`` (the classes searched), or a
+            ``ValidationError`` envelope for an unknown class, a malformed
+            package path or an out-of-range ``max_results`` or ``offset``,
+            the last two sent to no editor: Remote Control sized its result
             array to the limit, and -1 crashed the editor.
         """
-        if (
-            isinstance(max_results, bool)
-            or not isinstance(max_results, int)
-            or not 1 <= max_results <= MAX_ASSET_SEARCH_RESULTS
+        problem = None
+        if isinstance(max_results, bool) or not isinstance(max_results, int) or not (
+            1 <= max_results <= MAX_ASSET_SEARCH_RESULTS
         ):
-            return {
-                "success": False,
-                "error_type": "ValidationError",
-                "error": f"max_results must be an integer from 1 to {MAX_ASSET_SEARCH_RESULTS}, got {max_results!r}",
-            }
-        body: Dict[str, Any] = {
-            "Query": query,
-            "Limit": max_results,
+            problem = f"max_results must be an integer from 1 to {MAX_ASSET_SEARCH_RESULTS}, got {max_results!r}"
+        elif isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            problem = f"offset must be an integer of at least 0, got {offset!r}"
+        folders: List[str] = []
+        for path in package_paths or []:
+            folder = path.strip().rstrip("/")
+            if not folder:
+                continue  # "/" is every content root
+            problem = problem or _content_folder_problem(folder)
+            folders.append(folder)
+        classes = [name.strip() for name in class_names or [] if name.strip()]
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
+        args = {
+            "query": query or "",
+            "class_names": classes,
+            "package_paths": folders,
+            "recursive_paths": bool(recursive_paths),
+            "include_subclasses": bool(include_subclasses),
+            "offset": offset,
+            "limit": max_results,
         }
-        if class_names:
-            body["Filter"] = {"ClassNames": class_names}
-        if package_paths:
-            body.setdefault("Filter", {})["PackagePaths"] = package_paths
-
-        data = await self._http_put("/remote/search/assets", body)
-        raw_assets: list = data.get("Assets", [])
-
-        assets: list = []
-        for asset in raw_assets[:max_results]:
-            assets.append({
-                "name": asset.get("Name", ""),
-                "path": asset.get("Path", ""),
-                "class_name": asset.get("Class", ""),
-                "package_path": asset.get("PackagePath", ""),
-            })
-
-        return {
-            "assets": assets,
-            "count": len(assets),
-            "truncated": len(raw_assets) > max_results,
-        }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + ASSET_SEARCH, expected_errors=("ValidationError",)
+        )
 
     async def describe_object(self, object_path: str) -> Dict[str, Any]:
         """
@@ -3320,6 +3675,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_path: str,
         material_path: str,
         slot_index: int = 0,
+        slot_name: str = "",
+        component_name: str = "",
     ) -> Dict[str, Any]:
         """
         Assign a material to a mesh component's material slot.
@@ -3336,17 +3693,24 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Args:
             actor_path: Target actor path.
             material_path: Material asset path to assign.
-            slot_index: Material slot index (default 0).
+            slot_index: Material slot index (default 0); unused when
+                ``slot_name`` is given.
+            slot_name: Material slot name, as the Details panel shows it;
+                empty uses ``slot_index``.
+            component_name: Mesh component to assign to, by name (such as
+                StaticMeshComponent0) or path; empty picks the actor's mesh
+                root component, else its only mesh component.
 
         Returns:
-            Dictionary with actor_path, component_path, material_path (the
-            assigned material's object path), slot_index and
+            Dictionary with actor_path, component_path, component_name,
+            material_path (the assigned material's object path), slot_index,
+            slot_name (the slot's name; None when the mesh names none) and
             previous_material_path (what the slot rendered with before). An
             error envelope when the actor is not in the level being edited
             (``Actor not found``), the material path names no material
-            (``NotFoundError``), the slot is out of range
-            (``ValidationError``) or the slot reads back a different material
-            (``MaterialNotApplied``).
+            (``NotFoundError``), the component or slot is not found or is
+            ambiguous, naming the ones the actor has (``ValidationError``), or
+            the slot reads back a different material (``MaterialNotApplied``).
         """
         if isinstance(slot_index, bool) or not isinstance(slot_index, int):
             return {
@@ -3354,10 +3718,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "error_type": "ValidationError",
                 "error": f"slot_index must be an integer, got {slot_index!r}",
             }
-        args = {"actor_path": actor_path, "material_path": material_path, "slot_index": slot_index}
+        args = {
+            "actor_path": actor_path,
+            "material_path": material_path,
+            "slot_index": slot_index,
+            "slot_name": (slot_name or "").strip(),
+            "component_name": (component_name or "").strip(),
+        }
         return await self._execute_json_script(
             f"args = {args!r}\n" + ASSIGN_MATERIAL,
-            expected_errors=("NotFoundError", "ValidationError"),
+            expected_errors=("NotFoundError", "ValidationError", "InvalidAssetType"),
         )
 
     async def set_light_params(
@@ -3944,6 +4314,186 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 },
             }
 
+    @staticmethod
+    def _names_unreal_content(entry: Dict[str, Any]) -> bool:
+        """Whether a path the composition check refused is an Unreal object path, which reads no file.
+
+        Unreal's USD exporter writes the source material of each mesh as an
+        asset-valued attribute holding a content path,
+        ``info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@``,
+        and its importer loads that object from the editor's content; it opens
+        no file by the name. Only such a value passes: an asset-valued
+        attribute (not a sublayer, reference, payload or clip) holding
+        ``/Engine``, ``/Game`` or ``/Script``, folders and
+        ``<Name>.<Name>``, where the suffix is no file extension
+        (``/Engine/x.usda`` stays a file), naming no file on disk.
+        """
+        if entry.get("kind") != "asset":
+            return False
+        match = _UNREAL_OBJECT_PATH.match(str(entry.get("asset_path", "")))
+        if match is None or match.group(1).lower() in _FILE_SUFFIXES:
+            return False
+        return not os.path.lexists(str(entry.get("location", "")))
+
+    def _check_usd_composition(self, usd_path: str) -> None:
+        """Refuse a USD file whose composition draws on files outside the sandbox.
+
+        Unreal's USD importer composes the stage with its own copy of pxr and
+        the default asset resolver, so a layer inside the sandbox could
+        sublayer, reference or pay load ``../outside/ref.usda``, or name an
+        outside texture, and the editor read it. ``CompositionSandbox``
+        walks the layers from the root the way composition finds them (every
+        variant, value clips and asset-valued attributes too) before the file
+        reaches the editor; a refused file is never opened. A file pxr cannot
+        open here is refused too, since nothing then vouches for what it
+        names; a file the simul host does not have is left to the editor to
+        report.
+
+        Raises:
+            SandboxDenied: With ``details.outside_sandbox`` (each path, its
+                kind and the layer naming it), ``references_outside`` (the
+                locations) and ``referenced_by``.
+        """
+        if not self._path_policy.enabled or not Path(usd_path).exists():
+            return
+        from ..usd import sandbox as usd_sandbox
+
+        try:
+            layer = usd_sandbox.Sdf.Layer.FindOrOpen(usd_path)
+        except Exception as exc:  # pxr's parse error (Tf.ErrorException)
+            layer, reason = None, str(exc).strip().splitlines()[-1:] or [type(exc).__name__]
+        else:
+            reason = ["pxr opened no layer"]
+        if layer is None:
+            details = self._path_policy.denial_details(usd_path)
+            details.update(
+                referenced_by=usd_path,
+                hint=(
+                    f"Could not open {Path(usd_path).name} to check the files its composition draws on "
+                    f"against the sandbox ({reason[0]}), so it is not imported"
+                ),
+            )
+            raise SandboxDenied(
+                usd_path,
+                details,
+                error_message=f"USD file {usd_path} could not be checked against the sandbox: {reason[0]}",
+            )
+        try:
+            usd_sandbox.CompositionSandbox(self._path_policy).check_layers(layer)
+        except SandboxDenied as exc:
+            entries = list(exc.details.get("outside_sandbox", []))
+            files = [entry for entry in entries if not self._names_unreal_content(entry)]
+            listed_all = exc.details.get("outside_count", len(entries)) == len(entries)
+            if not files and listed_all:
+                return  # only Unreal content paths, as in Unreal's own USD exports
+            if listed_all and len(files) < len(entries):
+                exc.details["outside_sandbox"] = files
+                exc.details["outside_count"] = len(files)
+                shown = ", ".join(entry["location"] for entry in files[:3])
+                more = f" and {len(files) - 3} more" if len(files) > 3 else ""
+                exc.error_message = (
+                    f"USD file {usd_path} draws on {len(files)} file(s) outside the sandbox: {shown}{more}"
+                )
+                exc.args = (exc.error_message,)
+            exc.details["referenced_by"] = usd_path
+            exc.details["references_outside"] = list(
+                dict.fromkeys(entry["location"] for entry in exc.details.get("outside_sandbox", []))
+            )[:20]
+            raise
+
+    async def _interchange_sources(self, file_path: str) -> List[str]:
+        """The files an Interchange import of ``file_path`` reads, every one held to the sandbox.
+
+        Interchange reads what the model names besides itself: a glTF's
+        buffers and images, an OBJ's MTL libraries and their textures, an
+        FBX's textures, and the UDIM tiles beside a texture named like one.
+        Each is found where Unreal 5.7's translators look for it
+        (``simul.utils.asset_references``); an FBX's relative texture names
+        are resolved in the editor, where its FBX SDK opens them. A file
+        missing on the simul host is left to the editor to report.
+
+        Returns:
+            ``file_path`` and the files inside the sandbox it reads, resolved:
+            the asset import script tells an earlier import's assets apart by
+            them.
+
+        Raises:
+            SandboxDenied: A referenced file outside the sandbox exists, with
+                ``details.references_outside`` and ``referenced_by``; or the
+                references cannot be listed (a binary FBX this cannot parse).
+        """
+        path = Path(file_path)
+        policy = self._path_policy
+        if not path.is_file():
+            return [file_path]
+        try:
+            relative = fbx_relative_file_names(path) if path.suffix.lower() == ".fbx" else []
+            opened: Dict[str, List[str]] = {}
+            if relative:
+                answer = await self._execute_json_script(
+                    f"args = {{'names': {relative!r}}}\n" + EDITOR_RELATIVE_PATHS
+                )
+                answered = answer.get("paths") if answer.get("success", True) else None
+                # Only absolute paths say where the editor opens a name; without one it stays unchecked.
+                opened = {
+                    name: [found for found in paths if isinstance(found, str) and os.path.isabs(found)]
+                    for name, paths in (answered or {}).items()
+                    if isinstance(paths, list)
+                }
+            outside, inside = interchange_outside_references(path, policy, opened.get)
+        except UncheckableReferences as exc:
+            if not policy.enabled:
+                return [file_path]
+            details = policy.denial_details(file_path)
+            details.update(
+                referenced_by=file_path,
+                hint=(
+                    f"Could not check the files {path.name} refers to against the sandbox ({exc}), "
+                    "so it is not imported"
+                ),
+            )
+            raise SandboxDenied(
+                file_path,
+                details,
+                error_message=f"{path.name} could not be checked against the sandbox: {exc}",
+            ) from exc
+        if outside:
+            details = policy.denial_details(outside[0])
+            details.update(
+                referenced_by=file_path,
+                references_outside=outside[:20],
+                hint=(
+                    f"{path.name} refers to files outside the sandbox, which Unreal's importer would read: "
+                    f"{', '.join(outside[:5])}. Copy them under an allowed root and point {path.name} at "
+                    "the copies, or widen security.allowed_paths"
+                ),
+            )
+            raise SandboxDenied(
+                outside[0],
+                details,
+                error_message=(
+                    f"{path.name} refers to {len(outside)} file(s) outside the sandbox, so it was not "
+                    f"imported: {', '.join(outside[:3])}"
+                ),
+            )
+        return [file_path] + [found for found in inside if found != file_path]
+
+    def _import_destination(self, destination_path: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """The content folder an import writes to, or the envelope refusing it.
+
+        Imports write only under the project's /Game folder, /Game itself
+        included.
+        """
+        destination = (destination_path or "").strip().rstrip("/")
+        problem = _content_folder_problem(destination)
+        if problem is not None:
+            return destination, {"success": False, "error_type": "ValidationError", "error": problem}
+        if not _in_project_content(destination):
+            return destination, _outside_project_refusal(
+                destination, "import into", "Pass a destination_path under /Game, such as /Game/Imports"
+            )
+        return destination, None
+
     async def import_usd(
         self,
         usd_path: str,
@@ -3959,53 +4509,60 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         ``replace_existing`` the import is refused when that folder already
         holds assets, and existing actors are kept (new ones are added beside
         them): Unreal's USD importer otherwise replaces both, an earlier
-        import's actors and customized assets included. The options are set
-        without saving them to the project's config, where the editor's own
-        import dialog would read them. The call waits
+        import's actors and customized assets included. Every option is set
+        on every import (to Unreal's default unless given) without saving it
+        to the project's config, where the editor's own import dialog would
+        read it. Every layer and asset the stage draws on must be inside the
+        sandbox (``_check_usd_composition``). The call waits
         ``unreal.import_export_timeout``.
 
         Args:
             usd_path: Path to the USD file on disk.
-            destination_path: Content browser destination.
-            import_options: Interchange pipeline options.
+            destination_path: Content folder under /Game, /Game included.
+            import_options: USDImporter options (see ``USD_IMPORT_OPTIONS``):
+                the booleans in ``USD_IMPORT_BOOLEAN_OPTIONS``,
+                kinds_to_collapse (USD kinds: model, component, group,
+                assembly, subcomponent), fallback_collision_type (one of
+                ``USD_COLLISION_TYPES``), nanite_triangle_threshold,
+                prims_to_import (prim paths) and meters_per_unit with up_axis
+                (y or z), given together, to override the stage's own.
             replace_existing: Replace the assets in the destination folder and
                 the level's actors from an earlier import of this file.
 
         Returns:
             Dict with imported_assets, actor_paths (actors added to the level),
-            removed_actor_paths (actors the import replaced) and warnings, or
-            an error envelope: ``InvalidState`` when the folder already holds
+            removed_actor_paths (actors the import replaced), warnings (the
+            warnings and errors the editor logged during the import, and
+            saved import settings that differ from Unreal's defaults) and
+            dirty_engine_packages (engine or plugin packages the editor
+            holds modified when it finishes), or an error envelope:
+            ``ValidationError`` for an option, value or folder Unreal does
+            not take, ``SandboxError`` for a folder
+            outside /Game, ``InvalidState`` when the folder already holds
             assets and ``replace_existing`` is false (nothing is imported),
             ``NotFoundError`` for a file the editor host does not have,
-            ``EngineError`` when the importer produced nothing, ``PIEActive``,
-            ``PluginUnavailable`` and ``TimeoutError``.
+            ``EngineError`` when the importer produced nothing (with the
+            logged reasons), ``PIEActive``, ``PluginUnavailable`` and
+            ``TimeoutError``.
 
         Raises:
-            SandboxDenied: If ``usd_path`` is outside the sandbox.
+            SandboxDenied: If ``usd_path``, or a layer or asset its
+                composition draws on, is outside the sandbox.
         """
 
         usd_path = self._path_policy.authorize(usd_path)
-        if not destination_path.startswith("/Game/") or ".." in destination_path.split(
-            "/"
-        ):
-            raise ValueError("destination_path must be a /Game/ content directory")
+        destination, refusal = self._import_destination(destination_path)
+        if refusal is not None:
+            return refusal
         if type(replace_existing) is not bool:
             raise ValueError("replace_existing must be true or false")
-        options = import_options or {}
-        allowed = {
-            "import_actors",
-            "import_geometry",
-            "import_materials",
-            "import_lights",
-            "import_cameras",
-        }
-        if set(options) - allowed or any(type(v) is not bool for v in options.values()):
-            raise ValueError(
-                f"import_options accepts boolean values for: {sorted(allowed)}"
-            )
+        options, problems = _usd_import_options(import_options or {})
+        if problems:
+            return {"success": False, "error_type": "ValidationError", "error": "; ".join(problems)}
+        self._check_usd_composition(usd_path)
         args = {
             "path": usd_path,
-            "destination": destination_path.rstrip("/"),
+            "destination": destination,
             "name": _sanitized_object_name(Path(usd_path).stem),
             "options": options,
             "replace": replace_existing,
@@ -4021,6 +4578,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_paths: List[str],
         output_path: str,
         export_options: Optional[Dict[str, Any]] = None,
+        overwrite: bool = False,
     ) -> Dict[str, Any]:
         """
         Export selected actors with the optional USDImporter plugin.
@@ -4029,21 +4587,33 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         is refused without loading that map. The actors exported are read
         back from the written stage: Unreal's exporter leaves out what it does
         not export (editor helpers such as WorldSettings or PlayerStart)
-        without an error, and an export that wrote none of them fails. The
-        call waits ``unreal.import_export_timeout``, since the first USD
-        export of an editor session loads the USD Python modules (25-40 s).
+        without an error, and an export that wrote none of them fails. Unreal
+        also writes a file per mesh and material, into ``<output name>_assets``
+        beside the output, and with export_sublayers a layer per sublevel and
+        MaterialOverrides beside it; every file written is reported. The call
+        waits ``unreal.import_export_timeout``, since the first USD export of
+        an editor session loads the USD Python modules (25-40 s).
 
         Args:
             actor_paths: Actor paths to export.
             output_path: Output USD file path.
             export_options: Export pipeline options.
+            overwrite: Replace the files the export writes; otherwise the
+                export is refused when the output, a file in its asset
+                folder, or (with export_sublayers) a sublevel layer or
+                MaterialOverrides exists.
 
         Returns:
             Dict with output_path, actors_exported (the actors the stage has a
             prim for), exported_prims (each one's actor_path and prim_path),
-            skipped_actors (the actors it has none for) and file_size_bytes,
-            or an error envelope: ``EngineError`` when Unreal exported nothing
-            or failed, ``PIEActive``, ``PluginUnavailable`` and
+            skipped_actors (the actors it has none for), file_size_bytes,
+            written_files (every file the export created or changed under the
+            output's folder), overwritten_files (those that existed before)
+            and warnings (DynamicMeshActors, which Unreal writes as empty
+            Xforms), or an error envelope: ``InvalidState`` when a file it
+            would write exists and ``overwrite`` is false (with
+            ``details.existing_files``), ``EngineError`` when Unreal exported
+            nothing or failed, ``PIEActive``, ``PluginUnavailable`` and
             ``TimeoutError``.
 
         Raises:
@@ -4055,17 +4625,156 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             raise ValueError("At least one actor path is required")
         if Path(output_path).suffix.lower() not in {".usd", ".usda", ".usdc"}:
             raise ValueError("Output must have a .usd, .usda or .usdc extension")
+        if type(overwrite) is not bool:
+            raise ValueError("overwrite must be true or false")
         options = export_options or {}
         allowed = {"export_actor_folders", "export_sublayers"}
         if set(options) - allowed or any(type(v) is not bool for v in options.values()):
             raise ValueError(
                 f"export_options accepts boolean values for: {sorted(allowed)}"
             )
-        args = {"path": output_path, "actors": actor_paths, "options": options}
+        args = {"path": output_path, "actors": actor_paths, "options": options, "overwrite": overwrite}
         return await self._run_import_export(
             f"args = {args!r}\n" + USD_EXPORT,
             f"the export to {output_path}",
-            expected_errors=("PluginUnavailable",),
+            expected_errors=("PluginUnavailable", "InvalidState"),
+        )
+
+    async def import_asset(
+        self,
+        file_path: str,
+        destination_path: str = "/Game/Imports",
+        replace_existing: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Import an FBX, glTF, GLB or OBJ file as assets through Interchange.
+
+        Uses Unreal's Interchange importer with the project's default content
+        pipelines, as the Content Browser's Import does: meshes, materials
+        and textures are created and saved under ``destination_path``, and no
+        actor is placed. Every file the model names must be inside the
+        sandbox too (``_interchange_sources``). Without ``replace_existing``
+        an asset that already exists is kept (Interchange skips it), and a
+        file whose every asset exists imports nothing (``InvalidState``).
+        With it, Interchange reimports the asset named after the file and
+        keeps the other assets an earlier import of the file made, which are
+        reported. The call waits ``unreal.import_export_timeout``.
+
+        Args:
+            file_path: Path of the file on disk; must be inside the sandbox.
+            destination_path: Content folder under /Game, /Game included.
+            replace_existing: Reimport the asset named after the file.
+
+        Returns:
+            Dict with imported_assets, replaced_assets (those that existed
+            before), kept_assets (existing assets left as they were),
+            warnings (what the editor logged during the import, and the
+            assets a reimport kept) and dirty_engine_packages (engine or
+            plugin packages the editor holds modified when it finishes), or
+            an error envelope:
+            ``ValidationError`` for an unsupported file type or a
+            malformed folder, ``SandboxError`` for a folder outside /Game,
+            ``InvalidState`` when every asset exists and ``replace_existing``
+            is false, ``NotFoundError`` for a file the editor host does not
+            have, ``EngineError`` when Unreal imported nothing (with the
+            logged reasons), ``PIEActive`` and ``TimeoutError``.
+
+        Raises:
+            SandboxDenied: If ``file_path``, or a file it names that exists,
+                is outside the sandbox, or its references cannot be listed.
+        """
+        file_path = self._path_policy.authorize(file_path)
+        suffix = Path(file_path).suffix.lower()
+        if suffix not in ASSET_IMPORT_EXTENSIONS:
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": (
+                    f"{Path(file_path).name} is not a file this tool imports: pass one of "
+                    f"{', '.join(ASSET_IMPORT_EXTENSIONS)} (USD has import_unreal_usd)"
+                ),
+            }
+        destination, refusal = self._import_destination(destination_path)
+        if refusal is not None:
+            return refusal
+        if type(replace_existing) is not bool:
+            raise ValueError("replace_existing must be true or false")
+        sources = await self._interchange_sources(file_path)
+        args = {"path": file_path, "destination": destination, "replace": replace_existing, "sources": sources}
+        return await self._run_import_export(
+            f"args = {args!r}\n" + ASSET_IMPORT,
+            f"the import of {file_path}",
+            expected_errors=("NotFoundError", "InvalidState"),
+        )
+
+    async def save_assets(
+        self,
+        asset_paths: Optional[List[str]] = None,
+        save_level: bool = False,
+        all_dirty: bool = False,
+        allow_engine_content: bool = False,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Save modified assets and the level being edited.
+
+        Saves only packages that are modified: the named assets', the level's
+        (its map package and, in a World Partition level, its actors' and
+        objects' packages) with ``save_level``, or every modified package
+        with ``all_dirty``. Packages outside /Game (engine or plugin content,
+        shared by every project using it) are skipped unless
+        ``allow_engine_content``, and ones never saved (under /Temp) are
+        skipped. Refused while Play In Editor runs, when the editor saves
+        nothing. In attached mode it runs, like every tool, only while the
+        attached map is the one being edited. The call waits
+        ``unreal.import_export_timeout``.
+
+        Args:
+            asset_paths: Asset paths whose packages to save.
+            save_level: Save the level being edited.
+            all_dirty: Save every modified package.
+            allow_engine_content: Also save packages outside /Game.
+            dry_run: Report what would be saved and save nothing.
+
+        Returns:
+            Dict with saved, failed and would_save (package names), skipped
+            (each package left unsaved and why), level_package and dry_run,
+            or an error envelope: ``ValidationError`` when nothing is asked,
+            ``SandboxError`` for a named asset outside /Game without
+            ``allow_engine_content``, ``InvalidState`` for a level never
+            saved, ``EngineError`` when a package did not save (``failed``),
+            ``PIEActive`` and ``TimeoutError``.
+        """
+        flags = {
+            "save_level": save_level,
+            "all_dirty": all_dirty,
+            "allow_engine_content": allow_engine_content,
+            "dry_run": dry_run,
+        }
+        for name, value in flags.items():
+            if type(value) is not bool:
+                raise ValueError(f"{name} must be true or false")
+        paths = [path.strip() for path in asset_paths or [] if path.strip()]
+        if not paths and not save_level and not all_dirty:
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": "Nothing to save: pass asset_paths, save_level=true or all_dirty=true",
+            }
+        for path in paths:
+            package = path.split(".", 1)[0]
+            problem = _content_folder_problem(package)
+            if problem is not None:
+                return {"success": False, "error_type": "ValidationError", "error": problem}
+            if not allow_engine_content and not _in_project_content(package):
+                return _outside_project_refusal(
+                    package, "save", "Pass allow_engine_content=true to save the shared asset"
+                )
+        args = {"asset_paths": paths, **flags}
+        return await self._run_import_export(
+            f"args = {args!r}\n" + SAVE_ASSETS,
+            "the save",
+            expected_errors=("InvalidState",),
         )
 
     async def convert_to_simready(
@@ -4218,50 +4927,68 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         max_depth: int = 10,
         include_components: bool = False,
         class_filter: Optional[str] = None,
+        include_subclasses: bool = False,
+        offset: int = 0,
+        max_results: int = 100,
     ) -> Dict[str, Any]:
         """
-        Query the scene graph hierarchy starting from a root actor.
+        Read the level's attachment hierarchy as a tree, one page of the root's children at a time.
+
+        One editor script reads the editor world's level actors and who is
+        attached to whom (``_unreal_scripts.SCENE_GRAPH``): an actor attached
+        to nothing is a child of the level. The tree starts at the level, or
+        at the actor at ``root_path``, and goes ``max_depth`` levels down. The
+        page holds the root's children from ``offset`` on, each with its
+        descendants, up to ``max_results`` of them and within the response
+        budget; a subtree too large for a page on its own is cut shallower
+        (``depth_limited``). Query a subtree whole with its actor as
+        ``root_path``.
 
         Args:
-            root_path: Root actor path (None for level root).
-            max_depth: Maximum traversal depth.
-            include_components: Include component sub-trees.
-            class_filter: Filter actors by UClass name.
+            root_path: Actor whose attached actors form the tree; None or empty
+                starts at the level, whose children are the actors attached
+                to nothing.
+            max_depth: Levels below the root to include, 1 to 64 (the root's
+                children are level 1). A node whose children are deeper has
+                ``children_truncated``.
+            include_components: Give each actor its components (name, class,
+                whether it is the root, the component it is attached to).
+            class_filter: Keep actors whose class has this name or path, and
+                the actors above them, which get ``matches_filter`` false.
+            include_subclasses: Also keep actors whose class derives from
+                class_filter's.
+            offset: Root children to skip before the page starts.
+            max_results: Most root children in the page, 1 to 5000.
 
         Returns:
-            Dict with root tree, total_actors, total_depth.
+            ``root`` (name, path, class_name, child_count, children; actors
+            nest the same way), ``total_actors`` and ``total_depth`` (every
+            actor below the root and the deepest level, whatever the page and
+            max_depth), ``returned_actors``, ``count``, ``total`` (the root's
+            children), ``offset``, ``next_offset``, ``truncated``, ``hint``,
+            ``depth_limited``, ``warnings`` and ``pie_active``; or a
+            ScriptError envelope (no actor at root_path).
         """
-        # Fetch all actors first
-        search_body: Dict[str, Any] = {
-            "Query": "",
-            "Filter": "Actor",
+        self._check_page(offset, max_results)
+        if not 1 <= max_depth <= 64:
+            raise ValueError("max_depth must be between 1 and 64")
+        args = {
+            "root_path": root_path or None,
+            "max_depth": max_depth,
+            "include_components": bool(include_components),
+            "class_filter": class_filter or None,
+            "include_subclasses": bool(include_subclasses),
+            "offset": offset,
+            "max_results": max_results,
         }
-        if class_filter:
-            search_body["Filter"] = class_filter
-
-        response = await self._http_put("/remote/search/assets", search_body)
-        actors = response.get("Assets", [])
-
-        # Build tree
-        tree: Dict[str, Any] = {"name": "Root", "path": root_path or "/", "children": []}
-        depth = 0
-        for actor in actors[:max_depth * 50]:
-            path = actor.get("Path", "")
-            if root_path and not path.startswith(root_path):
-                continue
-            node = {
-                "name": actor.get("Name", ""),
-                "path": path,
-                "class": actor.get("Class", ""),
-                "children": [],
-            }
-            tree["children"].append(node)
-
-        return {
-            "root": tree,
-            "total_actors": len(tree["children"]),
-            "total_depth": min(depth + 1, max_depth),
-        }
+        result = await self._paged_read(SCENE_GRAPH, args, "children of the root", "total")
+        if result.get("depth_limited"):
+            cut = ", ".join(f"{item['path']} (to depth {item['depth']})" for item in result["depth_limited"])
+            result["truncated"] = True
+            result.setdefault("warnings", []).append(
+                f"Too large for one page, so drawn shallower: {cut}. Query each with root_path set to it."
+            )
+        return result
 
     async def analyze_scene_for_robotics(
         self,
@@ -4410,13 +5137,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         label: str,
         match_mode: str = "exact",
         max_results: int = 100,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
-        Find level actors whose actor tags match a semantic label.
+        Find level actors whose actor tags match a semantic label, one page at a time.
 
         Semantic labels are actor tags (Actor > Tags in the Details panel).
         Matching ignores case, as Unreal's own tag comparison does. One editor
-        script reads every actor's tags.
+        script reads every actor's tags and counts every match; the page holds
+        the matches from ``offset`` on, up to ``max_results``, and stops early
+        rather than exceed the response budget.
 
         Args:
             label: Semantic label (actor tag) to search for.
@@ -4425,29 +5155,31 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 for in each tag; a repeated group that holds a quantifier or
                 alternatives, as in (\\w+)+, is refused because it can run for
                 hours); every mode ignores case.
-            max_results: Maximum number of actors to return, 1 to 5000.
+            max_results: Most actors in the page, 1 to 5000.
+            offset: Matching actors to skip before the page starts.
 
         Returns:
             Dict with ``actors`` (each match as a ``list_unreal_actors``
-            entry, tags included), ``total_matches`` (every matching actor,
-            those past max_results too), ``truncated``, ``label_searched`` and
-            ``pie_active`` (while Play In Editor runs, the editor world is
-            searched, as in ``list_actors``), or a ``ScriptError`` envelope
-            when the editor script failed.
+            entry, tags and attachment included), ``count`` (in the page),
+            ``total_matches`` (every matching actor), ``offset``,
+            ``next_offset``, ``truncated``, ``hint`` (when more are left),
+            ``label_searched`` and ``pie_active`` (while Play In Editor runs,
+            the editor world is searched, as in ``list_actors``), or a
+            ``ScriptError`` envelope when the editor script failed.
 
         Raises:
             ValueError: match_mode is not exact, contains or regex; in regex
                 mode, label is not a valid regular expression or repeats a
                 group that holds a quantifier or alternatives (see
-                ``simul.utils.regex_guard``); or max_results is out of range.
+                ``simul.utils.regex_guard``); or max_results or offset is out
+                of range.
         """
         modes = ("exact", "contains", "regex")
         if match_mode not in modes:
             raise ValueError(
                 f"match_mode must be one of {', '.join(modes)}, got {match_mode!r}"
             )
-        if not 1 <= max_results <= 5000:
-            raise ValueError("max_results must be between 1 and 5000")
+        self._check_page(offset, max_results)
         if match_mode == "regex":
             try:
                 re.compile(label)
@@ -4463,10 +5195,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                     "between the repetitions is tried. Repeat a plain character "
                     "class instead (\\w+ rather than (\\w+)+), or use contains mode"
                 )
-        args = {"label": label, "match_mode": match_mode, "max_results": max_results}
-        return await self._execute_json_script(
-            f"args = {args!r}\n" + FIND_ACTORS_BY_TAG
-        )
+        args = {
+            "label": label,
+            "match_mode": match_mode,
+            "offset": offset,
+            "max_results": max_results,
+            "listed_children": LISTED_CHILDREN,
+        }
+        return await self._paged_read(FIND_ACTORS_BY_TAG, args, "matching actors", "total_matches")
 
     # ------------------------------------------------------------------
     # Phase 8: Geometry & Modeling (GeometryScript)
@@ -4507,7 +5243,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             segments: Steps around the shape (3 to 512): a sphere's
                 longitude and latitude steps, a cylinder's, cone's or
                 capsule's sides, a torus's steps around its axis (half as
-                many around the tube).
+                many around the tube). A 512-segment sphere has 522,240
+                triangles.
             location: Spawn location [x, y, z] in cm.
             actor_label: Optional label for the actor.
 
@@ -4518,8 +5255,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         kind = primitive_type.lower()
         problem = invalid_choice("primitive_type", kind, PRIMITIVE_TYPES, "UNKNOWN_PRIMITIVE")
-        if problem is None and not 3 <= int(segments) <= 512:
-            problem = refusal("INVALID_SEGMENTS", f"segments must be 3 to 512, not {segments}")
+        if problem is None and not MIN_SEGMENTS <= int(segments) <= MAX_SEGMENTS:
+            problem = refusal("INVALID_SEGMENTS", f"segments must be {MIN_SEGMENTS} to {MAX_SEGMENTS}, not {segments}")
         if problem is not None:
             return problem
         resolved, problem = primitive_dimensions(kind, dict(dimensions or {}))
@@ -4778,7 +5515,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Subdivide a DynamicMeshActor's mesh.
 
         A result over ``MAX_RESULT_TRIANGLES`` triangles is refused before
-        anything runs.
+        anything runs (``RESULT_TOO_LARGE``).
 
         Args:
             mesh_path: Mesh actor path.
@@ -4974,9 +5711,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         with its materials, for the other mesh tools to edit. ``static_mesh``
         writes a DynamicMeshActor's mesh into a StaticMesh asset under /Game,
         with the component's materials and simple collision, so the result can
-        be saved, placed and exported. Creating or overwriting an asset is not
-        undoable (Unreal does not transact asset creation); placing or
-        replacing actors is, in one transaction.
+        be saved, placed and exported. Creating or overwriting an asset, with
+        its materials and collision, is not undoable (Unreal does not transact
+        asset creation); placing or replacing actors is, in one transaction.
 
         Args:
             mesh_path: The source: a StaticMesh asset or StaticMeshActor for
@@ -5062,14 +5799,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Uniformly remesh a DynamicMeshActor's mesh for evenly sized triangles.
 
-        Give at most one target; with none, the triangle count is kept. A
-        result over ``MAX_RESULT_TRIANGLES`` triangles is refused.
+        Give at most one target; with none, the triangle count is kept. The
+        remesher makes up to ``REMESH_OVERSHOOT`` times the triangles a
+        target asks for, so a target predicted over ``MAX_RESULT_TRIANGLES``
+        is refused before anything runs (``RESULT_TOO_LARGE``), as is a
+        result over it.
 
         Args:
             mesh_path: Mesh actor path.
             mode: 'uniform', the only mode GeometryScript offers.
             target_edge_length: Target edge length in cm.
-            target_triangle_count: Target triangle count.
+            target_triangle_count: Target triangle count, 4 to
+                ``MAX_REMESH_TARGET_TRIANGLES``.
             smoothing_iterations: Remesh passes (1 to 50); more passes give
                 more even triangles and take longer.
 
@@ -5087,11 +5828,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         ):
             problem = refusal("INVALID_TARGET", f"target_edge_length must be above 0 cm, not {target_edge_length}")
         if problem is None and target_triangle_count is not None and not (
-            4 <= int(target_triangle_count) <= MAX_RESULT_TRIANGLES
+            4 <= int(target_triangle_count) <= MAX_REMESH_TARGET_TRIANGLES
         ):
             problem = refusal(
                 "INVALID_TARGET",
-                f"target_triangle_count must be 4 to {MAX_RESULT_TRIANGLES}, not {target_triangle_count}",
+                f"target_triangle_count must be 4 to {MAX_REMESH_TARGET_TRIANGLES}, not {target_triangle_count}: "
+                f"the remesher makes up to {REMESH_OVERSHOOT:g} times the target, and a result over "
+                f"{MAX_RESULT_TRIANGLES} triangles is refused",
             )
         if problem is None and not 1 <= int(smoothing_iterations) <= 50:
             problem = refusal("INVALID_PASSES", f"smoothing_iterations must be 1 to 50, not {smoothing_iterations}")
