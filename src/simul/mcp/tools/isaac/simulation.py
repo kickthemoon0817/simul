@@ -107,6 +107,8 @@ class SimulationMixin:
             "which also reverts edits made to them while the timeline was paused."
         ),
         read_only=False,
+        # Reverts edits made while paused.
+        destructive=True,
         idempotent=True,
     )
     async def stop_isaac_simulation(self) -> Dict[str, Any]:
@@ -330,6 +332,8 @@ class SimulationMixin:
             "edits made to them while paused."
         ),
         read_only=False,
+        # Reverts edits made while paused.
+        destructive=True,
         idempotent=True,
     )
     async def reset_isaac_simulation(self) -> Dict[str, Any]:

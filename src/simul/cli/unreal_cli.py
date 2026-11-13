@@ -746,6 +746,7 @@ def exec_script(
     ``"success": false``; any other key it prints, ``error`` included, is data.
     """
     from simul.adapters.unreal_runtime import UNREAL_EXEC_MODES, UnrealRuntimeSession
+    from simul.mcp.error_types import normalize_error_payload
     from simul.utils.script_result import (
         reported_error_type,
         reported_failure_message,
@@ -825,6 +826,10 @@ def exec_script(
         if not success:
             payload["error"] = error_text
             payload["error_type"] = error_type
+            # Named as execute_unreal_script and isaac exec name it: a printed
+            # type outside the vocabulary becomes its family, kept in
+            # details.exception_type.
+            normalize_error_payload(payload)
         print(json.dumps(payload, default=str))
         if not success:
             raise typer.Exit(1)

@@ -641,6 +641,27 @@ def test_exec_keeps_a_printed_error_type_and_lists_error_keys(monkeypatch) -> No
     assert (payload["error"], payload["error_type"]) == ("pose_error: 0.4", "InvalidState")
 
 
+def test_exec_maps_an_unknown_printed_error_type_to_its_family(monkeypatch) -> None:
+    """A type outside the vocabulary is EngineError, the name kept, as the MCP tool sends it."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [
+                {"Type": "Info", "Output": '{"success": false, "error": "no grip", "error_type": "GripFailure"}\n'},
+            ],
+            "CommandResult": "",
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('{...}')"])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert (payload["error"], payload["error_type"]) == ("no grip", "EngineError")
+    assert payload["details"] == {"exception_type": "GripFailure"}
+
+
 def test_exec_concatenates_multi_line_log_output(monkeypatch) -> None:
     """Multiple Info log lines join in order; Warning/Error entries route
     to their own streams instead of being silently dropped."""

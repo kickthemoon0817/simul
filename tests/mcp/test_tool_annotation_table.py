@@ -115,7 +115,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "read_isaac_aovs": (RW, False, True),  # creates render products
     "release_isaac_instance": (RW, True, False),
     "reparent_isaac_prim": (DESTRUCTIVE, True, True),
-    "reset_isaac_simulation": (RW, True, True),
+    "reset_isaac_simulation": (DESTRUCTIVE, True, True),  # reverts edits made while paused
     "save_isaac_stage": (DESTRUCTIVE, True, True),
     "search_isaac_prims": (RO, True, True),
     "set_active_isaac_instance": (RW, True, False),  # routes this session; the instance is untouched
@@ -133,7 +133,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "set_isaac_prim_visibility": (DESTRUCTIVE, True, True),
     "start_isaac_simulation": (RW, True, True),
     "step_isaac_simulation": (RW, False, True),
-    "stop_isaac_simulation": (RW, True, True),
+    "stop_isaac_simulation": (DESTRUCTIVE, True, True),  # reverts edits made while paused
     # Headless USD
     "create_prim": (DESTRUCTIVE, False, False),  # redefine_existing re-types a prim
     "delete_prim": (DESTRUCTIVE, True, False),
