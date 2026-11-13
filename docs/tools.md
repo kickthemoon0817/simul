@@ -8,9 +8,11 @@ selected (`--backends`), on `--unreal-tools` / `--blender-tools`, and on
 simul tools            # add --json for descriptions and input schemas
 ```
 
-Every tool returns a JSON object. Failures carry `success: false` and an
-error type such as `NotRunning`, `RefusedOperation` or
-`UnsupportedOperation`.
+Every tool returns a JSON object. A failure is sent with MCP `isError: true`
+and carries `success: false`, an `error_type` and an `error` message; see
+[Errors](#errors) for the types. Parameter bounds and choices are in each
+tool's input schema (`minimum`, `maximum`, `enum`), and a value outside them
+is refused with `ValidationError` before the tool runs.
 
 Results are strict JSON: a non-finite float is sent as the string
 `"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token. Each result
@@ -495,6 +497,10 @@ Notes:
   python_server, 5.x VS Code). It refuses `/persistent/` keys, which Kit saves
   for later sessions, unless `allow_persistent=true`. `get_isaac_carb_settings`
   reads `auth_token` values back as `***`.
+- `ping_isaac` does not wait for a call already running on the instance and
+  reports `busy` when one is. A call the client cancels keeps the instance
+  until Isaac Sim has finished it (the bridge is asked to interrupt it first);
+  see [isaac-sim.md](isaac-sim.md#transports).
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or
@@ -1112,12 +1118,10 @@ Behaviour worth knowing:
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:
   - `spawn_unreal_actor`, `delete_unreal_actor`,
-    `generate_unreal_procedural_scene`, the mesh tools that create an actor
-    (`generate_unreal_mesh_primitive`, `compute_unreal_convex_hull`,
-    `decompose_unreal_convex_hull`, `convert_unreal_mesh_format` to
-    `dynamic_mesh`), `import_unreal_usd`, `export_unreal_usd`,
-    `import_unreal_asset`, `save_unreal_assets` (the editor saves nothing
-    during PIE) and, in attached
+    `generate_unreal_procedural_scene`, every mesh tool except
+    `validate_unreal_mesh` (they create actors or replace meshes, see below),
+    `import_unreal_usd`, `export_unreal_usd`, `import_unreal_asset`,
+    `save_unreal_assets` (the editor saves nothing during PIE) and, in attached
     mode, every `control_unreal_ui` action except `inspect` and `clear_cursor`
     return `error_type: "PIEActive"`, with `details.hint` naming the way out:
     `control_unreal_simulation` with action `stop` (CLI: `simul unreal sim stop`).
@@ -1239,12 +1243,129 @@ Behaviour worth knowing:
   auto-exposure history, so its exposure can differ from the viewport's.
   RGB only: depth, segmentation and other render passes are not captured.
   CLI: `simul unreal capture-camera`.
+- The mesh tools (`generate_unreal_mesh_primitive`, `validate_unreal_mesh`
+  and the other `*_unreal_mesh*` and `*_unreal_convex_hull` tools) run
+  GeometryScript in the editor:
+  - They need the GeometryScripting plugin, which `simul unreal setup` enables
+    (restart an editor that was already running). Without it every mesh tool
+    returns `error_type: "UnsupportedOperation"` with `details.code:
+    "GEOMETRY_SCRIPTING_DISABLED"` and a hint naming setup.
+  - They take the path of a DynamicMeshActor in the level open in the editor,
+    found without loading a map. A path that names nothing is `NotFoundError`.
+    A StaticMeshActor (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh
+    asset path (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose
+    `details.hint` names `convert_unreal_mesh_format`, which places an
+    editable DynamicMeshActor copy of a StaticMesh asset in the level; any
+    other actor is `"NO_DYNAMIC_MESH"`.
+  - Every GeometryScript call is checked after it returns. GeometryScript
+    reports most failures that way and otherwise leaves the mesh as it was
+    (Catmull-Clark on a mesh without quad polygroups returned with the
+    triangle count unchanged). An error fails the tool with `EngineError`,
+    `details.code: "GEOMETRY_SCRIPT_FAILED"` and GeometryScript's messages in
+    `details.messages`, and nothing is changed; warnings come back in
+    `warnings`.
+  - An edit runs on a copy of the mesh, and the copy replaces the component's
+    mesh in one transaction, so a failed edit changes nothing, one Undo
+    reverts one edit and the level is marked dirty for Save. A tool that
+    creates an actor spawns it, with its mesh, in one transaction too.
+  - Undo and Redo of a mesh edit restore which mesh the DynamicMeshComponent
+    holds, not what Unreal does when a mesh is set (UE 5.7.4): the component
+    stops listening to the mesh it got back, so an in-place edit of that mesh
+    outside simul (a Blueprint, Python GeometryScript, Modeling Mode) no longer
+    updates its bounds or what it draws, and its physics keeps the simple
+    collision it had before the Undo or Redo (a trace against a hull that Redo
+    put back misses). Every mesh tool repairs both on each DynamicMeshActor it
+    touches, `validate_unreal_mesh` included: it rebuilds the collision, and
+    where an Undo or Redo left the actor's package dirty (or in a level never
+    saved) it sets the component's mesh again, which binds it (and renames the
+    mesh object). A clean level is left alone, so a level saved right after an
+    Undo keeps the stale binding until it is reloaded or edited.
+  - Each in-place edit keeps the mesh it replaced alive for Undo: a full copy
+    that the editor's undo buffer limit (256 MB by default) does not count, so
+    it is freed only when the edit leaves the undo history. A hundred edits of
+    a 32,256-triangle mesh added about 370 MB to the editor; one UV unwrap of a
+    1M-triangle mesh about 760 MB.
+  - A mesh tool leaves at most 2,000,000 triangles in a mesh it makes or
+    edits. A larger result is refused with `details.code: "RESULT_TOO_LARGE"`
+    (`details.predicted` says whether it was predicted or measured) and
+    nothing is changed: before anything runs when the size is known up front
+    (a subdivision, a remesh, which makes up to 1.6 times its target, a UV
+    unwrap or topology edit of a mesh already over the cap, a primitive with
+    more than 512 segments), otherwise when the operation has run and before
+    its result replaces anything.
+  - `compute_unreal_mesh_uv` unwraps with XAtlas only up to 20,000 triangles:
+    XAtlas crashed the editor on a 130,048- and a 318,400-triangle mesh, and
+    took 28.6 s for 32,256 (UE 5.7.4). Method `auto`, the default, uses
+    PatchBuilder above that size (29 s for 318,400 triangles) and the reply's
+    `method` names the one that ran; `xatlas` on a larger mesh is refused with
+    `details.code: "MESH_TOO_LARGE_FOR_XATLAS"`. A `uv_channel` the mesh does
+    not have is refused (`"UV_CHANNEL_MISSING"`).
+  - A mesh script runs under an HTTP timeout of at least 300 s, whatever
+    `UNREAL__TIMEOUT` says, since a GeometryScript call cannot be cancelled.
+    The slowest operations on a 2M-triangle mesh took 83 to 109 s (a
+    PatchBuilder unwrap, a convex hull, a simplification; UE 5.7.4, Apple
+    M-series). A script commits its result only within that timeout less 10
+    s: one that finishes later discards its result, so a `TimeoutError`
+    (`details.code: "MESH_TIME_BUDGET"`) leaves the level as it was once the
+    editor finishes, though the editor stays busy until then. For an editor on
+    this machine the limit runs on this machine's clock, so it holds however
+    long the call waited in the editor's queue; for a remote editor it is the
+    script's own run time, and a call that first waited behind another script
+    may still commit late.
+  - In attached mode, a call the attachment guard refuses (the editor shows
+    another map or instance) is `error_type: "InvalidState"`, `details.code:
+    "ATTACHMENT_CHANGED"`.
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.
-- `execute_unreal_script` runs the code you send in the editor's persistent
-  Python console namespace through `PythonScriptLibrary.ExecutePythonCommandEx`,
-  in or out of PIE. On UE 5.7 avoid one engine hazard in that code: Unreal wraps
+- Every Python call simul makes runs in a namespace of its own, and that
+  namespace is cleared when the call ends, whether it returns or raises. This
+  covers its own tools, `execute_unreal_script`, `simul unreal exec`, and
+  `batch_unreal_operations` calls to `ExecutePythonCommandEx` or
+  `ExecutePythonCommand`. (`call_unreal_actor_function` takes only actors of
+  the level open in the editor, so it never reaches the Python library.)
+  - **Why it matters.** UE 5.7 runs all literal Python in one dict that every
+    call and the editor's own Python console share, and `FileExecutionScope`
+    applies only to `.py` files. A name a script leaves there keeps its object
+    alive for Unreal's garbage collector.
+  - **The crash it prevents.** When the editor changes maps it releases
+    Python's hold on the old world and the objects inside it, but not on the
+    world's package or on objects outside it. A kept
+    `pkg = world.get_outermost()` therefore made the next `new_blank_map` or
+    map load abort the editor with "World Memory Leaks: Old Package ... not
+    cleaned up by GC", losing unsaved work.
+  - **`py` console commands are refused.** An `ExecuteConsoleCommand` whose
+    command is `py <code>`, or has a line or `|`-separated part that is one,
+    would run the code in that shared dict, past the per-call namespace. simul
+    refuses it with a `ValidationError` before anything is sent; run the code
+    with `execute_unreal_script` instead.
+  - **What remains.** Anything a script stores outside its namespace stays
+    alive for the editor's lifetime. A package or world kept that way, or an
+    object that refers to one, still aborts the editor at the next map change
+    as above. Places that keep things include a module attribute, an entry in
+    `sys.modules`, a registered callback or what its closure holds, and a
+    `unreal.uclass` type. An editor that ran an older simul keeps what those
+    calls bound until it restarts.
+- `execute_unreal_script` runs the code you send through
+  `PythonScriptLibrary.ExecutePythonCommandEx`, in or out of PIE.
+  - **A fresh namespace per call.** Each call starts with what a fresh
+    `__main__` holds (`__builtins__`, `__doc__`, `__spec__` and the rest) and
+    `unreal` imported. Nothing carries over between calls, so pass values back
+    in as code. A callback the script registers must import what it uses
+    inside itself, because the script's names are gone once it returns.
+  - **Mode behaviour is unchanged.** `ExecuteStatement` prints an expression's
+    value as the console does, but no longer keeps it in `builtins._`. A
+    `sys.displayhook` the script installs itself stays installed.
+  - **Code mentioning `.py` now runs.** Code that names a `.py` file followed
+    by a space (`print('see my.py first')`) runs as code; Unreal used to take
+    it for the path of a file to run.
+  - **A byte-order mark is skipped**, as Unreal skipped it, so a file saved as
+    "UTF-8 with BOM" runs.
+  - **A traceback starts with two frames of simul's.** The command's
+    (`File "<string>", line 1`) and the runner's (`File "<simul runner>"`)
+    come before the script's own frames, which keep the script's line numbers.
+
+  On UE 5.7 avoid one engine hazard in that code: Unreal wraps
   each static-library function
   (`unreal.MaterialEditingLibrary.get_scalar_parameter_names`,
   `unreal.EditorAssetLibrary.*`, `unreal.SystemLibrary.*`, every `*Library` /
@@ -1257,7 +1378,25 @@ Behaviour worth knowing:
   that built the cycle can return cleanly and the crash land minutes later. Call
   these functions inline (`unreal.MaterialEditingLibrary.get_scalar_parameter_names(mat)`)
   and don't stash them in a dict, list, closure or object that forms a cycle; a
-  reference that is dropped or stays reachable is safe. Module functions
+  reference that is dropped or stays reachable is safe.
+  - **Top-level aliases are safe.** An alias bound at the top level
+    (`names = unreal.MaterialEditingLibrary.get_scalar_parameter_names`) is
+    dropped when the call's namespace is cleared, even alongside functions
+    that use it.
+  - **Classes the call leaves are kept safe.** A class is always in a cycle,
+    so a class the script defines becomes garbage when the call ends. simul
+    keeps the library functions held by the classes the call's namespace
+    still reaches when it ends: bound to a name or not (appended to a list in
+    a loop, made with `type()`, the class of an object there). That covers
+    their attributes, the containers there, and their methods' default
+    arguments and closures. The class is collected without them, and the
+    next call lets go of each one nothing else holds any more.
+  - **Other cycles are not.** A cycle holding such a function that the
+    namespace no longer reaches when the call ends still crashes the editor's
+    next garbage collection: a class defined and dropped inside a function,
+    or one a loop rebinds the same name over without keeping it.
+
+  Module functions
   (`unreal.load_asset`) and the common `unreal.Object` accessors
   (`actor.get_name`, `actor.get_editor_property`) are a different, in-bounds
   wrapper and are safe, and simul's own tools call the library functions inline,
@@ -2144,7 +2283,151 @@ Behaviour worth knowing:
 
 | Tool | Purpose |
 |---|---|
-| `get_tool_usage_stats` | Per-tool call counts, success rates and durations from the persistent usage log. Clearing it is operator-only: `simul stats --reset` |
+| `get_tool_usage_stats` | Per-tool call counts, success rates and durations for the calling MCP session; `scope="server"` counts every session's calls. The recent call log (`include_recent`, `limit` 1 to 200) is always the caller's own, because records carry parameters, file paths and agent labels. Operators read every session with `simul stats`; clearing it is operator-only: `simul stats --reset` |
+
+## Errors
+
+Every failed call has the same shape, on every backend and whichever layer
+refused it (the MCP input schema, a request model, the tool, the engine):
+
+```json
+{"success": false, "error_type": "ValidationError", "error": "width: Input should be less than or equal to 3840",
+ "details": {"errors": [{"field": "width", "message": "...", "type": "less_than_equal"}], "input": {"width": 5000}}}
+```
+
+and it is sent with `isError: true`. `error_type` is always one of the names
+below (`simul.mcp.error_types`): seven classes that mean the same on every
+backend, and domain types where a backend says more than a class would.
+Nothing else reaches a client. A library's or Python's exception name
+(`ClientConnectorError`, `ConnectionResetError`, `KeyError`) is mapped onto
+its family and kept in `details.exception_type`: a name with `Timeout` in it
+is a `TimeoutError`; `Connection*` and `BrokenPipeError` a `ConnectionError`;
+`*NotFound*`, `FileNotFoundError`, `KeyError` and `LookupError` a
+`NotFoundError`; `ValueError`, `TypeError`, `JSONDecodeError`, `Invalid*` and
+`*ValidationError` a `ValidationError`; `PermissionError` a
+`PermissionDenied`; anything else (`OSError`, `RuntimeError`, `ImportError`,
+`ModuleNotFoundError`) an `EngineError`.
+
+An exception raised by code running inside Isaac Sim is the engine's,
+whatever its name: a tool's own script that raises (a `TypeError` from a
+changed Kit API, an `OSError` from a full disk, a `ModuleNotFoundError` for a
+removed `omni.isaac.*` module) is an `EngineError`, and an agent's
+`execute_isaac_script` that raises is a `ScriptError`, both naming it in
+`details.exception_type`. Only the transports' own failures keep a class of
+their own: the bridge's refusals (`StageUnavailable` is `InvalidState`,
+`UnsafeExecutionDisabled` is `ScriptExecutionDisabled`, `PrimNotFound` is
+`NotFoundError`, `RequestTimeout` is `TimeoutError`), an empty reply
+(`ConnectionError`), a reply that is not JSON (`BridgeProtocolError`) and a
+script the bridge stopped at its timeout (`TimeoutError`).
+
+| `error_type` | Meaning | What to do |
+|---|---|---|
+| `ValidationError` | The arguments do not fit the tool: wrong type, missing or unexpected argument, out of bounds, not among the choices. `details.errors` lists each field; `details.code` names the check when a tool has several (USD's `InvalidPrimPath`, `InvalidAttribute`) | Fix the call |
+| `NotFoundError` | What the call names (prim, actor, object, material, stage, instance, tool, file) does not exist | Check the name |
+| `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
+| `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
+| `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a non-domain exception, a reply that does not parse or does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
+| `InstanceBusy` | The Isaac instance is serving another call | Retry shortly |
+| `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
+
+Domain types of the server:
+
+| `error_type` | Meaning |
+|---|---|
+| `RateLimitError` | The agent spent its rate-limit budget; `retry_after_seconds` says when to retry. `release_isaac_instance` is never refused |
+| `InstanceClaimed` | Another agent holds a live claim on the Isaac instance (claims enforced) |
+| `ClaimStoreError` | The claim records could not be read or saved (check `$SIMUL_HOME/sessions`) |
+| `SessionRequired` | The tool keeps per-client state and the request has no client identity |
+| `PermissionDenied` | The caller may not act on what it named: another agent's claim, a file the process may not read or write |
+| `ScriptExecutionDisabled` | `security.allow_script_execution` is off; the arbitrary-code tools (`execute_isaac_script`, ...) answer this instead of an unknown-tool error |
+| `PayloadTooLarge` | A script, request or reply is larger than the transport accepts |
+
+Domain types of the engines:
+
+| `error_type` | Meaning |
+|---|---|
+| `RefusedOperation` | The tool refuses an operation that would damage the application or unsaved work without an override flag |
+| `AuthenticationError` | The engine refused the credentials (python_server token, Remote Control passphrase) |
+| `UnsupportedOperation` | The backend or its mode cannot do this (`attach_blender_window` outside attached mode) |
+| `InvalidState` | Not possible in the current state (nothing claimed to release, a folder that already holds the import) |
+| `ScriptError` | An agent's script raised inside the engine, whatever it raised (an `OSError` or a `ConnectionRefusedError` of its own included); `details.exception_type` names it, `details.traceback` says where |
+| `EmptyOutput` | The engine's script printed nothing where the tool expected its reply |
+| `InvalidAssetType` | The asset is not of the kind the tool needs |
+| `UnsupportedFormat` | The file format is not one the tool reads or writes |
+| `CaptureError` | A viewport capture failed |
+| `ViewportUnavailable` | There is no viewport to read or drive (a headless editor) |
+| `UiUnavailable` | The editor UI the tool drives is not available |
+| `SimulationNotRunning` | The answer needs a running simulation (play or step once) |
+| `ValidationFailed` | An asset check ran and found errors |
+| `SimReadyValidationFailed` | A SimReady export was stopped by the validation it runs first |
+| `PIEActive` | Unreal is in Play-In-Editor |
+| `SpawnError` | Unreal could not spawn the actor from the class or asset given |
+| `PluginUnavailable` | The optional Unreal plugin the tool needs is not enabled |
+| `IncompatibleBody` | The Unreal body cannot simulate as asked; `details.problems` says why |
+| `EditorExited` | The Unreal editor exited while `simul unreal setup` waited for it |
+| `BridgeUnavailable` | The Isaac Sim bridge extension the tool needs is not configured |
+| `BridgeProtocolError` | A transport (Isaac Sim's bridge or stock socket, Blender's bridge) answered outside its protocol: another version, a reply that is not JSON, malformed or unmatched; the request may have run |
+| `ResponseEncodingError` | Blender's bridge could not encode the result; the operation may have run |
+| `AttachmentError`, `AttachmentStale`, `AttachmentTargetChanged` | The attached Blender window could not be used, its process went away, or it loaded another file |
+| `UnsavedChangesError` | Blender refuses to replace a file with unsaved changes without the flag |
+| `KeyframesPartlyInserted` | Blender refused a key part way through a batch; the keys before it stay, and `details` gives how many went in and the one refused |
+| `LoadError` | A headless USD file could not be opened; `details.reason` says why |
+| `StageBusy` | A headless USD stage is serving a call that cannot run beside this one; retry shortly |
+| `ComputationError` | A headless USD computation failed |
+| `LogFileNotFound` | `simul logs` found no log file |
+| `*NotApplied` | The read-back family (`TransformNotApplied`, `MaterialNotApplied`, `RenderSettingNotApplied`, ...): the engine took the request, but what it reads back afterwards is not what was asked. The payload keeps the values read back, with `details.expected` and `details.actual` where the tool reports them. Match the family by the suffix |
+
+Each entry of a `ValidationError`'s `details.errors` has the `field` (a dotted
+path for a nested model's field, `metadata.physics.mass`), the `message` and
+pydantic's `type`, and when they apply the `constraint` that failed
+(`{"le": 3840}`, `{"min_length": 3}`, `{"expected": "'DomeLight', ... or
+'CylinderLight'"}`), the `input` given and a `suggestion`: the closest valid
+choice, or the closest argument name for an unexpected one. A bpy enum
+refusal (`enum "BOXX" not found in ('BOX', 'SPHERE')`) gets the same
+`constraint`, `input` and `suggestion`.
+
+`details.input` (and each error's `input`) echoes the arguments bounded: a
+string longer than 256 characters by its size, a list or mapping by its first
+16 entries and a count of the rest (`"<19984 more items, 20000 in all>"`), at
+most 64 values per argument. A value whose name has a word that names a
+secret is echoed as `***`: an argument, a mapping key or a settings path, at
+any depth (`token`, `password`, `passphrase`, `passwd`, `pwd`, `secret`, `key`,
+`api_key`, `auth`, `authorization`, `credential`, `cookie`, `bearer`, `jwt`,
+`pin`; `access_key`, `apiKey`, `/persistent/auth_token`, but not `author` or
+`keyframe`). `error` and each `details.errors` message are cut at 2 000
+characters (`"... <38042 more characters>"`), so a message that quotes a long
+argument stays small too.
+
+Arguments that do not fit the input schema are refused before the tool runs,
+but through the same envelope as every other failure: the call spends a
+rate-limit token and is recorded in the usage log and the audit log. A call to
+a tool that is not registered is a `NotFoundError`, recorded and rate limited
+under `<unknown tool>` with the name it gave in the record's parameters. The
+audit row of every call states the envelope's outcome, `error_type` included
+(see [Audit log](configuration.md#audit-log)).
+
+A call the client cancels may still have run: cancelling the request does not
+stop the engine. Its usage and audit rows say `cancelled` and `executed`:
+`false` (it never started), `true` (Isaac: the server waited for the engine,
+and the row keeps the engine's outcome) or `"unknown"` (Unreal, Blender: the
+request had been sent). Check the scene before repeating a cancelled call.
+
+## Annotations
+
+Every tool's `readOnlyHint`, `destructiveHint` and `idempotentHint` follow one
+rule on every backend, pinned for all tools by
+`tests/mcp/test_tool_annotation_table.py`:
+
+- **read-only**: changes nothing, a capture that only returns the image
+  included (`capture_blender_viewport`);
+- **destructive**: overwrites or deletes existing state or files, or runs
+  arbitrary code (`capture_isaac_viewport` deletes the oldest captures in its
+  directory, so it is destructive; `capture_unreal_viewport` writes a new
+  screenshot and is only additive);
+- **idempotent**: repeating the call with the same arguments changes nothing
+  more (a set, a delete, a save or export to the same path, a focus); a
+  create, a step, a capture that writes a new file or an edit that compounds
+  (simplify, subdivide) is not.
 
 ## MCP resources
 

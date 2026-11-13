@@ -11,6 +11,7 @@ import pytest
 
 from simul.adapters import unreal_setup
 from simul.adapters.unreal_setup import (
+    GEOMETRY_SCRIPTING_RESTART_WARNING,
     HEADLESS_FLAGS,
     HTTP_LISTENERS_SECTION,
     REMOTE_CONTROL_SECTION,
@@ -37,11 +38,18 @@ def test_patch_uproject_adds_missing_plugins(tmp_path: Path) -> None:
     result = patch_uproject(uproject)
 
     assert result.changed is True
-    assert set(result.added) == {"RemoteControl", "PythonScriptPlugin"}
+    assert set(result.added) == {"RemoteControl", "PythonScriptPlugin", "GeometryScripting"}
     data = json.loads(uproject.read_text())
     names = {p["Name"]: p for p in data["Plugins"]}
     assert names["RemoteControl"]["Enabled"] is True
     assert names["PythonScriptPlugin"]["Enabled"] is True
+    assert names["GeometryScripting"]["Enabled"] is True
+    # The mesh tools run in the editor; a packaged game gets no GeometryScripting.
+    assert names["GeometryScripting"]["TargetAllowList"] == ["Editor"]
+    assert "TargetAllowList" not in names["RemoteControl"]
+    # Setup says why it enabled GeometryScripting, and that a running editor needs a restart.
+    assert result.warnings == [GEOMETRY_SCRIPTING_RESTART_WARNING]
+    assert "mesh tools" in result.warnings[0] and "restart" in result.warnings[0]
 
 
 def test_patch_uproject_enables_present_but_disabled_plugins(tmp_path: Path) -> None:
@@ -60,10 +68,34 @@ def test_patch_uproject_enables_present_but_disabled_plugins(tmp_path: Path) -> 
 
     assert result.changed is True
     assert result.updated == ["RemoteControl"]
+    assert result.added == ["GeometryScripting"]
     assert result.already_ok == ["PythonScriptPlugin"]
     data = json.loads(uproject.read_text())
     # Unrelated plugin preserved.
     assert any(p["Name"] == "SomeOther" for p in data["Plugins"])
+
+
+def test_patch_uproject_enables_a_disabled_geometry_scripting(tmp_path: Path) -> None:
+    """The mesh tools need it; a project that turned it off gets it back, with the reason."""
+    uproject = _write_uproject(
+        tmp_path,
+        {
+            "Plugins": [
+                {"Name": "RemoteControl", "Enabled": True},
+                {"Name": "PythonScriptPlugin", "Enabled": True},
+                {"Name": "GeometryScripting", "Enabled": False},
+            ]
+        },
+    )
+
+    result = patch_uproject(uproject)
+
+    assert result.updated == ["GeometryScripting"]
+    assert "GeometryScripting" in result.warnings[0]
+    data = json.loads(uproject.read_text())
+    entry = {p["Name"]: p for p in data["Plugins"]}["GeometryScripting"]
+    # The project's own entry keeps its targets: setup only turns it on.
+    assert entry == {"Name": "GeometryScripting", "Enabled": True}
 
 
 def test_patch_uproject_noop_when_already_configured(tmp_path: Path) -> None:
@@ -73,6 +105,7 @@ def test_patch_uproject_noop_when_already_configured(tmp_path: Path) -> None:
             "Plugins": [
                 {"Name": "RemoteControl", "Enabled": True},
                 {"Name": "PythonScriptPlugin", "Enabled": True},
+                {"Name": "GeometryScripting", "Enabled": True},
             ]
         },
     )
@@ -81,7 +114,7 @@ def test_patch_uproject_noop_when_already_configured(tmp_path: Path) -> None:
     result = patch_uproject(uproject)
 
     assert result.changed is False
-    assert result.added == [] and result.updated == []
+    assert result.added == [] and result.updated == [] and result.warnings == []
     assert uproject.read_text() == before  # file untouched
 
 

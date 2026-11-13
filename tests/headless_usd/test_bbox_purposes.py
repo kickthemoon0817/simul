@@ -193,8 +193,11 @@ class TestLookupErrors:
         assert payload["success"] is False
         assert payload["error_type"] == error_type
         if error_type == "ValidationError":
-            # The code the edit tools report for the same check.
-            assert payload["details"] == {"code": "InvalidPrimPath", "prim_path": prim_path}
+            # The code the edit tools report for the same check, beside the
+            # errors list every ValidationError carries.
+            details = dict(payload["details"])
+            assert [error["message"] for error in details.pop("errors")] == [payload["error"]]
+            assert details == {"code": "InvalidPrimPath", "prim_path": prim_path}
         else:
             assert payload["details"] == {"prim_path": prim_path}
 

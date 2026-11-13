@@ -5,7 +5,7 @@ import json
 import os
 import sys
 from contextlib import redirect_stdout
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -35,11 +35,31 @@ def settings(tmp_path):
     )
 
 
+def same_callable(lhs, rhs):
+    """Unreal's test for two callables on a delegate (AreCallablesEqual, PyWrapperDelegate.cpp, UE 5.7).
+
+    The type, its tp_call, and self for a bound method: any two plain
+    functions are the same callable to Unreal.
+    """
+    if type(lhs) is not type(rhs):
+        return False
+    return not isinstance(lhs, MethodType) or lhs.__self__ is rhs.__self__
+
+
 @pytest.fixture
 def editor(monkeypatch):
     callbacks, events = [], []
+
+    def add_callable_unique(callback):
+        if not any(same_callable(bound, callback) for bound in callbacks):
+            callbacks.append(callback)
+
     level = SimpleNamespace(
-        on_map_changed=SimpleNamespace(add_callable=callbacks.append),
+        # As Unreal's: the module re-binds its listener on every call, and
+        # only one may stay bound.
+        on_map_changed=SimpleNamespace(
+            add_callable=callbacks.append, add_callable_unique=add_callable_unique
+        ),
         get_viewport_config_keys=lambda: ["viewport-a"],
         get_active_viewport_config_key=lambda: "viewport-a",
     )
@@ -147,6 +167,11 @@ async def test_guards_execute_on_editor_before_scripts_and_legacy_mutations(
             await session._call_function("/Editor", "SetLevelViewportCameraInfo")
         assert len(calls) == before + 1  # guard only; other viewport never moved
         level.get_active_viewport_config_key = lambda: "viewport-a"
+        # Every call re-binds the map listener; one stays bound. The module holds
+        # the subsystem, which keeps Unreal from collecting the listener's proxy
+        # now that no call leaves a `level` behind in the shared console dict.
+        assert len(callbacks) == 1
+        assert sys.modules["_simul_unreal_attachment_v1"].level_editor is level
         # Same map path, but a fresh load generation: old attachment must fail.
         for callback in callbacks:
             callback(1)
@@ -166,6 +191,64 @@ async def test_guards_execute_on_editor_before_scripts_and_legacy_mutations(
         fresh = UnrealRuntimeSession(settings)
         with pytest.raises(RuntimeError, match="No Unreal editor attached"):
             await fresh._call_function("/Actor", "Move")
+    finally:
+        await session.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_reload_of_the_same_map_fails_the_attachment_beside_another_python_handler(
+    settings, editor
+):
+    """Any plain function on on_map_changed is the same callable to Unreal.
+
+    A user's handler bound first used to make simul's add_callable_unique of
+    its own function a no-op: reloading the same map then kept document_id,
+    and an attached call ran on the reloaded map.
+    """
+    unreal, callbacks, events = editor
+    unreal.get_editor_subsystem("level").on_map_changed.add_callable(lambda flags: None)
+    runner, port, calls = await serve_editor()
+    session = UnrealRuntimeSession(settings)
+    try:
+        await UnrealAttachments(settings).attach(port=port)
+        for _ in range(3):
+            result = await session._execute_python("import unreal; unreal.events.append('ran')")
+            assert result["ReturnValue"] is True
+        assert len(callbacks) == 2  # the user's and simul's, once
+        for callback in list(callbacks):
+            callback(1)  # MapChangeEventFlags::NewMap, the same map path
+        result = await session._execute_python("import unreal; unreal.events.append('reloaded')")
+        assert result["ReturnValue"] is False and "attachment changed" in result["CommandResult"]
+        assert events == ["ran"] * 3
+    finally:
+        await session.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_module_subclass_in_place_of_the_attachment_module_fails_the_attachment(
+    settings, editor
+):
+    """A ModuleType subclass's verify property would survive the per-call refresh."""
+    unreal, callbacks, events = editor
+    runner, port, calls = await serve_editor()
+    session = UnrealRuntimeSession(settings)
+    try:
+        await UnrealAttachments(settings).attach(port=port)
+        attached = sys.modules["_simul_unreal_attachment_v1"]
+
+        class Passing(type(attached)):
+            verify = property(lambda self: lambda expected: None)
+
+        impostor = Passing("_simul_unreal_attachment_v1")
+        impostor.__dict__.update(vars(attached))
+        sys.modules["_simul_unreal_attachment_v1"] = impostor
+
+        result = await session._execute_python("import unreal; unreal.events.append('skipped the check')")
+
+        assert result["ReturnValue"] is False and "attachment changed" in result["CommandResult"]
+        assert events == []
     finally:
         await session.close()
         await runner.cleanup()

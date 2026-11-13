@@ -16,9 +16,6 @@ import json
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
-
 from simul.adapters.isaac_socket_client import ScriptResult
 from simul.config import Settings
 from simul.mcp.tools.isaac_tools import PRIM_DETAIL_ASPECTS, IsaacTools
@@ -77,7 +74,7 @@ def test_unknown_aspect_names_the_valid_ones() -> None:
         tools.get_isaac_prim_detail(prim_path="/World/Mesh", aspects=["nonsense"])
     )
 
-    assert result["error_type"] == "ValueError"
+    assert result["error_type"] == "ValidationError"
     assert "nonsense" in result["error"]
     assert "transform" in result["error"]
 

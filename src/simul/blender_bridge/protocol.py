@@ -54,6 +54,17 @@ def protocol_mismatch_message(addon: Any, server: Any) -> str:
     )
 
 
+class BridgeProtocolError(ValueError):
+    """The bridge endpoint or its reply does not follow this protocol.
+
+    Another protocol version, an endpoint file that is not this machine's
+    bridge, a reply that is malformed or answers another request. Not the
+    caller's input, though a ValueError as before: ``error_type`` names it.
+    """
+
+    error_type = "BridgeProtocolError"
+
+
 class BridgeRemoteError(RuntimeError):
     """A rejected operation, with the remote policy diagnostic preserved."""
 
@@ -85,16 +96,16 @@ class BridgeWire:
     ) -> dict[str, Any]:
         """Send exactly once; never retry an operation whose outcome is unknown."""
         if endpoint.get("protocol") != PROTOCOL_VERSION:
-            raise ValueError(
+            raise BridgeProtocolError(
                 protocol_mismatch_message(endpoint.get("protocol"), PROTOCOL_VERSION)
             )
         if endpoint.get("host") != "127.0.0.1":
-            raise ValueError("Unsupported Blender bridge endpoint")
+            raise BridgeProtocolError("Unsupported Blender bridge endpoint")
         if not isinstance(endpoint.get("token"), str) or not endpoint["token"]:
-            raise ValueError("Missing Blender bridge authentication token")
+            raise BridgeProtocolError("Missing Blender bridge authentication token")
         port = endpoint.get("port")
         if type(port) is not int or not 1 <= port <= 65535:
-            raise ValueError("Invalid Blender bridge port")
+            raise BridgeProtocolError("Invalid Blender bridge port")
         request = {**payload, "token": endpoint["token"], "protocol": PROTOCOL_VERSION}
         deadline = time.monotonic() + timeout
         with socket.create_connection(
@@ -113,12 +124,15 @@ class BridgeWire:
                     raise ConnectionError("Blender bridge closed without a response")
                 buffer.extend(chunk)
                 if len(buffer) > MAX_MESSAGE_BYTES:
-                    raise ValueError("Blender bridge response exceeds 32 MiB")
-        response = json.loads(buffer.split(b"\n", 1)[0])
+                    raise BridgeProtocolError("Blender bridge response exceeds 32 MiB")
+        try:
+            response = json.loads(buffer.split(b"\n", 1)[0])
+        except ValueError as exc:
+            raise BridgeProtocolError(f"Undecodable Blender bridge response: {exc}") from exc
         if not isinstance(response, dict):
-            raise ValueError("Invalid Blender bridge response")
+            raise BridgeProtocolError("Invalid Blender bridge response")
         if response.get("request_id") != payload.get("request_id"):
-            raise ValueError("Blender bridge response identity mismatch")
+            raise BridgeProtocolError("Blender bridge response identity mismatch")
         if response.get("success") is not True:
             raise BridgeRemoteError(
                 response.get("error", "Blender bridge request failed"),
@@ -127,5 +141,5 @@ class BridgeWire:
             )
         result = response["result"]
         if not isinstance(result, dict):
-            raise ValueError("Invalid Blender bridge result")
+            raise BridgeProtocolError("Invalid Blender bridge result")
         return result

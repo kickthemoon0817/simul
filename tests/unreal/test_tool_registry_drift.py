@@ -254,27 +254,31 @@ def _records(instance: server_module.SimulMCPServer, tool: str) -> List[Dict[str
 def test_invalid_input_reports_the_check_and_the_input(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     instance, session = _capture_server(monkeypatch, tmp_path)
 
-    payload = _call(instance, "capture_unreal_viewport", format="gif")
+    # The schema takes 0 to 16384 (format and view are refused there); 1 to 15 only the check refuses.
+    payload = _call(instance, "capture_unreal_viewport", inline_max_size=5)
 
     assert payload == {
         "success": False,
-        "error": "Invalid format 'gif'. Must be one of ['jpeg', 'png']",
+        "error": "inline_max_size must be 0 or between 16 and 16384",
         "error_type": "ValidationError",
         "details": {
+            "errors": [
+                {"field": None, "message": "inline_max_size must be 0 or between 16 and 16384", "type": "value_error"}
+            ],
             "input": {
                 "resolution_x": 1920,
                 "resolution_y": 1080,
-                "format": "gif",
+                "format": "png",
                 "inline": False,
                 "view": "auto",
                 "jpeg_quality": 85,
-                "inline_max_size": 0,
-            }
+                "inline_max_size": 5,
+            },
         },
     }
     assert session.calls == []
     assert _records(instance, "capture_unreal_viewport") == [
-        {"success": False, "error": "Invalid format 'gif'. Must be one of ['jpeg', 'png']"}
+        {"success": False, "error": "inline_max_size must be 0 or between 16 and 16384"}
     ]
 
 

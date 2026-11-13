@@ -40,6 +40,7 @@ from fastmcp import Client
 from PIL import Image
 
 from simul.adapters import unreal_runtime
+from simul.adapters._unreal_python import unwrap_command
 from simul.adapters.unreal_runtime import (
     EDITOR_VIEW_DURING_PLAY_WARNING,
     GAME_VIEW_DID_NOT_DRAW,
@@ -67,6 +68,12 @@ PIE_WORLD = "/Game/Maps/UEDPIE_0_Lab.Lab"
 EDITOR_BLUE, GAME_RED, CAPTURE_GREEN = (0, 0, 255), (255, 0, 0), (0, 255, 0)
 VIEWPORT_SIZE = (1305, 1265)
 GAME_VIEWPORT_SIZE = (1280, 720)
+
+
+def script_source(command: str) -> str:
+    """The source a Python command runs: simul sends each one through its namespace runner, encoded."""
+    wrapped = unwrap_command(command)
+    return wrapped[1] if wrapped else command
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +532,7 @@ class Editor:
 
     def run_python(self, code: str) -> Dict[str, Any]:
         """``ExecutePythonCommandEx`` in ExecuteFile mode; a capture's poll comes a frame later."""
-        if "size_wanted" in code:
+        if "size_wanted" in script_source(code):
             self.draw_game_shot()
         output = io.StringIO()
         try:
@@ -568,7 +575,8 @@ async def remote_control(editor: Editor) -> AsyncIterator[Settings]:
             if editor.listing_held:
                 editor.other_request.set()
             reply = editor.run_python(code)
-            if editor.overlap_captures and "'existing': numbered_shots()" in code and not editor.listing_held:
+            listing = "'existing': numbered_shots()" in script_source(code)
+            if editor.overlap_captures and listing and not editor.listing_held:
                 editor.listing_held = True
                 try:
                     await asyncio.wait_for(editor.other_request.wait(), 1.0)

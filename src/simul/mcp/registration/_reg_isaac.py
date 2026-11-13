@@ -66,8 +66,9 @@ def _register_ping(server: "SimulMCPServer") -> None:
         name="ping_isaac",
         description=(
             "Pre-flight check: verify that a running Isaac Sim instance is "
-            "reachable on the configured TCP socket. Call this before "
-            "execute_isaac_script to confirm connectivity and get the target address."
+            "reachable on the configured TCP socket. Call this before other Isaac "
+            "tools to confirm connectivity and get the target address. It does not "
+            "wait for a call already running on the instance; busy says one is."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -86,12 +87,18 @@ def _register_ping(server: "SimulMCPServer") -> None:
 
 
 async def _ping(server: "SimulMCPServer") -> Dict[str, Any]:
-    """Probe the instance the request targets and describe its transports."""
+    """Probe the instance the request targets and describe its transports.
+
+    ``busy`` says another call holds the instance: a probe that then fails may
+    only mean the engine is inside a synchronous script.
+    """
     client = server._get_request_isaac_client()
+    busy = server._get_instance_lock(server._get_effective_instance_name()).locked()
     reachable = await client.ping()
     payload: Dict[str, Any] = {
         "success": reachable,
         "reachable": reachable,
+        "busy": busy,
         "address": client.address,
         "bridge_address": client.bridge_address,
         "bridge_circuit_open": client.bridge_circuit_open,
@@ -99,7 +106,10 @@ async def _ping(server: "SimulMCPServer") -> Dict[str, Any]:
         "timeout_seconds": client.timeout_seconds,
     }
     if not reachable:
-        payload["error"] = f"Isaac Sim is not reachable at {client.address}"
+        payload["error"] = f"Isaac Sim is not reachable at {client.address}" + (
+            "; another call holds the instance, and a synchronous script blocks the "
+            "socket until it returns" if busy else ""
+        )
     return payload
 
 
@@ -157,7 +167,9 @@ def _build_tool_wrapper(
         for guard in meta.sandboxed_paths:
             denial = server._sandbox_denial(arguments.get(guard.parameter), write=guard.write)
             if denial is not None:
-                return server._as_text_result(denial)
+                # Refused before Isaac is reached, but still rate limited and
+                # recorded like every other call.
+                return await server._exec_payload(meta.name, denial)
         call = getattr(server._isaac_tools, method_name)(**arguments)
         if meta.bypasses_instance_lock:
             return await server._exec_isaac(meta.name, call, bypass_instance_lock=True)

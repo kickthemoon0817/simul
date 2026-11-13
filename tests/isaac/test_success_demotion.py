@@ -175,8 +175,8 @@ def test_interrupt_error_frame_keeps_the_remote_traceback() -> None:
     )
     result = asyncio.run(IsaacTools(client, settings=Settings()).interrupt_script())
     assert result["success"] is False
-    assert result["error_type"] == "RuntimeError"
-    assert result["details"] == {"traceback": "tb"}
+    assert result["error_type"] == "EngineError"
+    assert result["details"] == {"traceback": "tb", "exception_type": "RuntimeError"}
 
 
 def test_bridge_unknown_action_still_defers_to_the_script_path() -> None:
