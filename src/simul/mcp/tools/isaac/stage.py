@@ -9,6 +9,7 @@ from ._shared import (
     _compose_script,
     _pyval,
 )
+from ._physics_units import physics_units_source
 from .graph import script_guard_source
 from .._meta import SandboxedPath, tool_meta
 
@@ -136,6 +137,10 @@ REFERENCE_ASSET_CORE = """\
         rotate_x = None
         if asset_up is not None and asset_up != stage_up:
             rotate_x = 90.0 if (asset_up, stage_up) == ("Y", "Z") else -90.0
+        # kilogramsPerUnit has a defined fallback (1.0, kilograms), unlike
+        # metersPerUnit, so an asset that does not author it is in kilograms.
+        asset_kilograms = float(root.GetInfo("kilogramsPerUnit")) if root.HasInfo("kilogramsPerUnit") else 1.0
+        stage_kilograms = float(UsdPhysics.GetStageKilogramsPerUnit(stage)) or 1.0
         notes = []
         if asset_meters is None:
             notes.append("the asset does not author metersPerUnit (USD's fallback is centimetres); no scale applied")
@@ -144,13 +149,37 @@ REFERENCE_ASSET_CORE = """\
         return {
             "asset_meters_per_unit": asset_meters,
             "asset_up_axis": asset_up,
+            "asset_kilograms_per_unit": asset_kilograms,
             "stage_meters_per_unit": stage_meters,
             "stage_up_axis": stage_up,
+            "stage_kilograms_per_unit": stage_kilograms,
             "scale_needed": scale,
             "rotate_x_needed": rotate_x,
+            "mass_ratio": asset_kilograms / stage_kilograms,
             "applied": False,
             "notes": notes,
         }
+
+    def _physics_units(stage, root, units, apply):
+        # PhysX reads physics values in stage units whatever the transform
+        # does, so values authored in the asset's units are rescaled (or, when
+        # not applying, only counted) the way Kit's metrics assembler does.
+        length_ratio = units["scale_needed"] if units["scale_needed"] is not None else 1.0
+        mass_ratio = units["mass_ratio"]
+        if math.isclose(length_ratio, 1.0, rel_tol=1e-12) and math.isclose(mass_ratio, 1.0, rel_tol=1e-12):
+            return None
+        report = _physics_unit_correction(stage, root, length_ratio, mass_ratio, apply)
+        units["physics"] = report
+        if not apply and report["attribute_count"]:
+            units["notes"].append(
+                str(report["attribute_count"]) + " physics value(s) in asset units were not rescaled"
+            )
+        if report["uncorrected_count"]:
+            return (
+                str(report["uncorrected_count"]) + " physics value(s) in asset units could not be rescaled "
+                "(see units.physics.uncorrected); PhysX will read them in stage units."
+            )
+        return None
 
     def _needs_correction(units):
         return units["scale_needed"] is not None or units["rotate_x_needed"] is not None
@@ -252,6 +281,7 @@ REFERENCE_ASSET_CORE = """\
         if found:
             stage.RemovePrim(created)
             return _code_nodes_refusal(found)
+        physics_warning = _physics_units(stage, holder, units, correct_units)
         result = {
             "referenced_prim": root_path or "/" + root_name,
             "used_default_prim": root_path is None,
@@ -260,8 +290,9 @@ REFERENCE_ASSET_CORE = """\
             "child_count": len(holder.GetChildren()),
             "units": units,
         }
-        if warning is not None:
-            result["warning"] = warning
+        warnings = [text for text in (warning, physics_warning) if text is not None]
+        if warnings:
+            result["warning"] = " ".join(warnings)
         return result
 
     def _reference_on_prim(stage, prim_path, asset_path, asset_prim_path, correct_units, guard):
@@ -278,6 +309,8 @@ REFERENCE_ASSET_CORE = """\
             return _failure("Prim is inside an instance and cannot be edited here: " + prim_path, "ValidationError",
                             "INSTANCE_PROXY")
         undo = _references_undo(stage, prim)
+        prior = prim.GetMetadata("references")
+        had_references = bool(prior and list(prior.GetAppliedItems()))
 
         def _roll_back():
             if created is not None:
@@ -297,7 +330,15 @@ REFERENCE_ASSET_CORE = """\
             return _code_nodes_refusal(found)
         units = _metrics(stage, layer)
         declined = None
-        if _needs_correction(units) and correct_units:
+        if correct_units and had_references and (_needs_correction(units) or units["mass_ratio"] != 1.0):
+            # Values from the prim's other references are in their own units;
+            # rescaling the subtree here would convert them too.
+            declined = (
+                "correct_units was not applied: the prim also references other assets, whose "
+                "values a correction here would convert too. import_isaac_asset wraps the "
+                "reference in a corrected Xform instead."
+            )
+        elif _needs_correction(units) and correct_units:
             own_ops = [
                 op.GetOpName() for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
                 if not op.GetOpName().endswith(":unitsResolve")
@@ -317,10 +358,11 @@ REFERENCE_ASSET_CORE = """\
                 )
             else:
                 _add_correction_ops(prim, units)
-            if declined is not None:
-                units["notes"].append(declined)
         elif _needs_correction(units):
             units["notes"].append("mismatch reported, not corrected (correct_units=false)")
+        if declined is not None:
+            units["notes"].append(declined)
+        physics_warning = _physics_units(stage, prim, units, correct_units and declined is None)
         result = {
             "already_referenced": False,
             "referenced_prim": root_path or "/" + root_name,
@@ -331,7 +373,7 @@ REFERENCE_ASSET_CORE = """\
         }
         # The caller asked for the correction, so a refusal to apply it is
         # surfaced at the top level, not only inside units.notes.
-        warnings = [text for text in (warning, declined) if text is not None]
+        warnings = [text for text in (warning, declined, physics_warning) if text is not None]
         if warnings:
             result["warning"] = " ".join(warnings)
         return result
@@ -517,7 +559,9 @@ class StageAssetMixin:
                         print(json.dumps({{"error": f"Failed to save stage: {{error}}"}}))
                 """,
             )
-            return await self._execute_json_script(script)
+            # Writing a large stage outlasts the default budget; a timeout
+            # would report failure for a save Kit then finishes.
+            return await self._execute_json_script(script, timeout_seconds=self._heavy_script_timeout())
 
         probe = await self._execute_json_script(SAVE_PROBE_SCRIPT)
         if not probe.get("success"):
@@ -575,7 +619,9 @@ class StageAssetMixin:
                     print(json.dumps({{"error": f"Failed to save stage: {{error}}"}}))
             """,
         )
-        return await self._execute_json_script(script)
+        # Writing a large stage outlasts the default budget; a timeout
+        # would report failure for a save Kit then finishes.
+        return await self._execute_json_script(script, timeout_seconds=self._heavy_script_timeout())
 
     @tool_meta(
         name="new_isaac_stage",
@@ -691,10 +737,11 @@ class StageAssetMixin:
             """\
             import json
             import omni.usd
-            from pxr import Gf, Sdf, UsdGeom
+            from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
             """,
             OPEN_ASSET_CORE,
             script_guard_source(),
+            physics_units_source(),
             REFERENCE_ASSET_CORE,
             f"""\
             asset_path = {_asset_path}
@@ -789,10 +836,11 @@ class StageAssetMixin:
             """\
             import json
             import omni.usd
-            from pxr import Gf, Sdf, UsdGeom
+            from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
             """,
             OPEN_ASSET_CORE,
             script_guard_source(),
+            physics_units_source(),
             REFERENCE_ASSET_CORE,
             f"""\
             prim_path = {_pyval(prim_path)}

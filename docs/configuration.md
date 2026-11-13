@@ -185,13 +185,17 @@ attributes while `inputs:usdTimecode` does not, and
 `omni.isaac.robot_description_editor` is not a script extension. The other
 `omni.warp` nodes, which run fixed kernels, stay usable.
 
-Routes this does not close: the prim-editing tools (`set_isaac_prim_attribute`
-on a node's code attribute or `node:type`, `create_isaac_prim` and
-`duplicate_isaac_prim` of a code node) until they adopt the same check; a
-stage opened with `open_isaac_stage` that already contains such a node; and
-nodes already on the stage, which run when the graph evaluates. Treat the
-switch as removing the agent's direct code tools, not as a sandbox for an
-untrusted stage.
+The prim-editing tools apply the same check, since OmniGraph nodes are prims:
+`create_isaac_prim` refuses a code-running type and a code attribute or
+code-running `node:type` among its attributes, `set_isaac_prim_attribute`
+refuses a code attribute, a code-running `node:type` value and any write to
+a code-running node, and `duplicate_isaac_prim` refuses a subtree that holds
+one.
+
+Routes this does not close: a stage opened with `open_isaac_stage` that
+already contains such a node, and nodes already on the stage, which run when
+the graph evaluates. Treat the switch as removing the agent's direct code
+tools, not as a sandbox for an untrusted stage.
 
 The switch is the one that removes the agent-authored code tools. The
 Isaac bridge extension's `allow_unsafe_execution` setting (and

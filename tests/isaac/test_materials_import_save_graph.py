@@ -145,11 +145,11 @@ def _shader(stage: Usd.Stage) -> UsdShade.Shader:
     ("name", "value", "type_name", "read_back"),
     [
         ("project_uvw", True, "bool", True),
-        ("diffuse_texture", "/textures/wood.png", "asset", "/textures/wood.png"),
+        ("diffuse_texture", "/tmp/simul-work/textures/wood.png", "asset", "/tmp/simul-work/textures/wood.png"),
         ("uv_space_index", 1, "int", 1),
         ("texture_scale", [2, 2], "float2", [2.0, 2.0]),
         ("emissive_color", [1, 0.5, 0], "color3f", [1.0, 0.5, 0.0]),
-        ("inputs:metallic_texture", "metal.png", "asset", "metal.png"),
+        ("inputs:metallic_texture", "/tmp/simul-work/metal.png", "asset", "/tmp/simul-work/metal.png"),
     ],
 )
 def test_new_omnipbr_inputs_take_the_shader_type(
@@ -165,6 +165,9 @@ def test_new_omnipbr_inputs_take_the_shader_type(
     assert result["success"] is True, result
     assert result["created"] is True
     assert result["input_type"] == type_name
+    if type_name == "asset":
+        # A path is written as the sandbox resolved it (/tmp is /private/tmp on macOS).
+        read_back = capturing_tools[0]._path_policy.authorize(read_back)
     assert result["value_set"] == read_back
     shader_input = _shader(omnipbr_stage).GetInput(bare)
     assert str(shader_input.GetTypeName()) == type_name

@@ -102,7 +102,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     "get_isaac_texture_dependencies": {"max_results": _PAGE},
     "get_isaac_selection": {"max_results": _PAGE},
     "find_isaac_prims_in_area": {"max_results": _PAGE},
-    "list_isaac_articulations": {"max_results": Bounds(ge=1, le=200)},
+    "list_isaac_articulations": {"max_results": Bounds(ge=1, le=200), "offset": _OFFSET},
     "get_isaac_graph_nodes": {"max_results": _PAGE},
     "list_isaac_graph_node_types": {"max_results": Bounds(ge=1, le=2000)},
     "list_isaac_materials": {"max_results": _PAGE, "offset": _OFFSET},

@@ -365,8 +365,8 @@ class OmniGraphMixin:
         description=(
             "Create a node in an OmniGraph graph. Specify the graph path, desired node "
             "path, and node type ID. Use list_isaac_graph_node_types to discover available "
-            "node types. Common types include omni.graph.nodes.OnPlaybackTick, "
-            "omni.graph.nodes.ReadVariable, "
+            "node types. Common types include omni.graph.action.OnPlaybackTick, "
+            "omni.graph.core.ReadVariable, "
             "isaacsim.core.nodes.IsaacArticulationController. With "
             "security.allow_script_execution off, node types that run Python given as data "
             "(ScriptNode, omni.warp.WarpKernel, Replicator's augmentation and condition nodes, "
@@ -387,7 +387,7 @@ class OmniGraphMixin:
             graph_path: USD path to the target graph.
             node_path: Path for the new node within the graph.
             node_type: OmniGraph node type ID
-                       (e.g. "omni.graph.nodes.OnPlaybackTick").
+                       (e.g. "omni.graph.action.OnPlaybackTick").
 
         Returns:
             Dict with created node path and type, or a
