@@ -214,7 +214,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         "scene_type": Choices(("room", "corridor", "warehouse", "outdoor"), enforced=False),
     },
     "apply_unreal_mesh_boolean": {
-        "operation": Choices(("union", "subtract", "intersect"), enforced=False),
+        "operation": Choices(("union", "subtract", "intersect", "difference", "intersection"), enforced=False),
     },
     "subdivide_unreal_mesh": {
         "level": Bounds(ge=1, le=4),
@@ -227,7 +227,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     },
     # The editor also takes aliases (patchbuilder, auto_uv; any case), so the
     # canonical names are advertised without refusing the rest.
-    "compute_unreal_mesh_uv": {"method": Choices(("xatlas", "patch_builder"), enforced=False)},
+    "compute_unreal_mesh_uv": {"method": Choices(("auto", "auto_uv", "xatlas", "patch_builder"), enforced=False)},
     "convert_unreal_mesh_format": {
         "target_format": Choices(("static_mesh", "dynamic_mesh"), enforced=False),
     },

@@ -8,7 +8,14 @@ so the CLI ``simul stats`` command can read historical data.
 The in-memory view is kept per MCP session too, because the agent-facing
 ``get_tool_usage_stats`` shows a caller its own session's calls: the records
 carry parameters, file paths and agent labels of whoever made them. The JSONL
-log, which only the operator reads, keeps every record with its session.
+log, which only the operator reads, keeps every record with its session
+and the request id its audit row carries.
+
+The log is rotated by size (``tool_usage.jsonl.1`` ... ``.N``, oldest
+dropped), so it no longer grows without bound, and reads stream it: the CLI
+keeps only the records it will show. Every field of a row is bounded
+(``_bounded_text``, ``_bounded_params``), so one call with a huge argument
+cannot write a huge row and rotate the history away.
 """
 
 from __future__ import annotations
@@ -20,8 +27,9 @@ import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, Iterator, List, Optional, Union
 
+from ..utils.filelock import exclusive_file_lock
 from ..utils.paths import state_dir
 
 logger = logging.getLogger(__name__)
@@ -33,6 +41,58 @@ MAX_RECENT = 200
 #: Sessions whose per-session stats are kept; the least recently active is
 #: dropped first. The server also drops a session's stats when it ends.
 MAX_SESSIONS = 1024
+#: Size at which ``tool_usage.jsonl`` is rotated, and the rotated copies kept
+#: (about 50 000 records each, so ``simul stats`` reads at most ~300 000).
+MAX_LOG_BYTES = 10 * 1024 * 1024
+LOG_BACKUPS = 5
+_LOG_NAME = "tool_usage.jsonl"
+#: Longest tool name, agent id or session label a row keeps, the longest
+#: error message, and the longest string parameter; longer ones are cut or
+#: shown by their size.
+MAX_NAME_CHARS = 128
+MAX_ERROR_CHARS = 2000
+MAX_PARAM_CHARS = 256
+# Most parameters a row keeps, and the JSON size a list or mapping may take.
+_MAX_PARAMS = 32
+_MAX_PARAM_JSON = 1024
+
+
+def _bounded_text(value: Optional[str], limit: int) -> Optional[str]:
+    """``value`` cut to ``limit`` characters, saying how much was left out."""
+    if value is None or len(value) <= limit:
+        return value
+    return f"{value[:limit]}... <{len(value) - limit} more characters>"
+
+
+def _bounded_param(value: Any) -> Any:
+    """A parameter as a row keeps it: a long string by its size, a large list or mapping by its length."""
+    if isinstance(value, str):
+        return value if len(value) <= MAX_PARAM_CHARS else f"<{len(value)} characters>"
+    if isinstance(value, (list, tuple, dict)):
+        try:
+            size = len(json.dumps(value, default=str))
+        except (TypeError, ValueError):
+            size = _MAX_PARAM_JSON + 1
+        if size > _MAX_PARAM_JSON:
+            return f"<{type(value).__name__} of {len(value)}, {size} bytes>"
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _bounded_text(str(value), MAX_PARAM_CHARS)
+
+
+def _bounded_params(params: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The parameters a row keeps: each bounded, at most ``_MAX_PARAMS`` of them."""
+    if not params:
+        return params
+    items = list(params.items())
+    kept = {
+        str(_bounded_text(str(key), MAX_NAME_CHARS)): _bounded_param(value)
+        for key, value in items[:_MAX_PARAMS]
+    }
+    if len(items) > _MAX_PARAMS:
+        kept["..."] = f"<{len(items) - _MAX_PARAMS} more parameters>"
+    return kept
 
 
 @dataclass
@@ -89,6 +149,9 @@ class CallRecord:
     agent_id: Optional[str] = None
     script_sha256: Optional[str] = None
     session: Optional[str] = None
+    request_id: Optional[str] = None
+    cancelled: bool = False
+    executed: Optional[Union[bool, str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -105,13 +168,19 @@ class CallRecord:
             out["agent_id"] = self.agent_id
         if self.script_sha256:
             out["script_sha256"] = self.script_sha256
+        if self.cancelled:
+            # The client gave up on it; whether the engine ran it anyway.
+            out["cancelled"] = True
+            out["executed"] = "unknown" if self.executed is None else self.executed
         return out
 
     def to_log_dict(self) -> Dict[str, Any]:
-        """The JSONL row: ``to_dict`` plus the session."""
+        """The JSONL row: ``to_dict`` plus the session and the request id."""
         out = self.to_dict()
         if self.session:
             out["session"] = self.session
+        if self.request_id:
+            out["request_id"] = self.request_id
         return out
 
 
@@ -127,13 +196,18 @@ class ToolUsageTracker:
         self,
         max_recent: int = MAX_RECENT,
         log_dir: Optional[Path] = None,
+        max_bytes: int = MAX_LOG_BYTES,
+        backups: int = LOG_BACKUPS,
     ) -> None:
+        self._max_bytes = max_bytes
+        self._backups = max(1, backups)
         self._stats: Dict[str, ToolStats] = {}
         self._session_stats: "OrderedDict[str, Dict[str, ToolStats]]" = OrderedDict()
         self._recent: Deque[CallRecord] = deque(maxlen=max_recent)
 
         self._log_dir = log_dir or _DEFAULT_LOG_DIR
-        self._log_file = self._log_dir / "tool_usage.jsonl"
+        self._log_file = self._log_dir / _LOG_NAME
+        self._tightened = False
 
     def record(
         self,
@@ -145,8 +219,11 @@ class ToolUsageTracker:
         agent_id: Optional[str] = None,
         script_sha256: Optional[str] = None,
         session: Optional[str] = None,
+        request_id: Optional[str] = None,
+        cancelled: bool = False,
+        executed: Optional[Union[bool, str]] = None,
     ) -> None:
-        """Record a tool call (in-memory + JSONL).
+        """Record a tool call (in-memory + JSONL); never raises.
 
         Args:
             tool_name: Registered tool name.
@@ -161,8 +238,53 @@ class ToolUsageTracker:
                 without storing the code itself.
             session: Published label of the MCP session the call came in on,
                 which scopes the agent-facing stats.
+            request_id: The call's correlation id, which its audit row and
+                log lines carry too.
+            cancelled: The client cancelled the call.
+            executed: For a cancelled call, whether the engine ran the
+                operation anyway: True, False, or ``"unknown"``. A cancelled
+                call that ran keeps the engine's ``success`` and ``error``.
         """
+        try:
+            self._record(
+                tool_name,
+                duration_ms,
+                success,
+                params=params,
+                error=error,
+                agent_id=agent_id,
+                script_sha256=script_sha256,
+                session=session,
+                request_id=request_id,
+                cancelled=cancelled,
+                executed=executed,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            # Bookkeeping never fails the call it describes.
+            logger.warning("Could not record the %s call: %s", tool_name, exc)
+
+    def _record(
+        self,
+        tool_name: str,
+        duration_ms: float,
+        success: bool,
+        *,
+        params: Optional[Dict[str, Any]],
+        error: Optional[str],
+        agent_id: Optional[str],
+        script_sha256: Optional[str],
+        session: Optional[str],
+        request_id: Optional[str],
+        cancelled: bool,
+        executed: Optional[Union[bool, str]],
+    ) -> None:
+        """``record``, which may raise."""
         now = time.time()
+        tool_name = _bounded_text(tool_name, MAX_NAME_CHARS) or tool_name
+        agent_id = _bounded_text(agent_id, MAX_NAME_CHARS)
+        session = _bounded_text(session, MAX_NAME_CHARS)
+        error = _bounded_text(error, MAX_ERROR_CHARS)
+        params = _bounded_params(params)
 
         self._stats.setdefault(tool_name, ToolStats()).add(duration_ms, success, now)
         if session:
@@ -185,22 +307,66 @@ class ToolUsageTracker:
             agent_id=agent_id,
             script_sha256=script_sha256,
             session=session,
+            request_id=request_id,
+            cancelled=cancelled,
+            executed=executed,
         )
         self._recent.append(rec)
         self._append_log(rec)
 
     def _append_log(self, rec: CallRecord) -> None:
-        """Append a single record to the JSONL log file, creating its directory on first use."""
+        """Append a single record to the JSONL log file, rotating it when it is full.
+
+        The directory is created (0700) on the first write, and the file 0600.
+        """
         try:
-            self._log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            from ..logging import make_private_dir, tighten_log_files
+
+            make_private_dir(self._log_dir)
+            if not self._tightened:
+                # A log an earlier version wrote world-readable, and its
+                # rotated copies, are simul's own: make them 0600 once.
+                tighten_log_files(self._log_file)
+                self._tightened = True
+            self._rotate_if_full()
+            line = json.dumps(rec.to_log_dict(), default=str) + "\n"
             with open(
                 os.open(self._log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
                 "w",
                 encoding="utf-8",
             ) as f:
-                f.write(json.dumps(rec.to_log_dict()) + "\n")
-        except OSError as exc:
+                f.write(line)
+        except Exception as exc:
+            # A full disk, an unwritable directory or an unencodable value:
+            # the call it describes still stands.
             logger.debug("Failed to write usage log: %s", exc)
+
+    def _rotate_if_full(self) -> None:
+        """Shift ``tool_usage.jsonl`` to ``.1`` (``.1`` to ``.2`` ...) once it reaches ``max_bytes``.
+
+        Every server on the machine appends to the same file, so the shift
+        holds a lock and re-checks the size under it: two servers that both
+        see a full file rotate it once.
+        """
+        try:
+            if self._log_file.stat().st_size < self._max_bytes:
+                return
+        except OSError:
+            return
+        try:
+            with exclusive_file_lock(self._log_dir / "tool_usage.lock", timeout=2.0):
+                try:
+                    if self._log_file.stat().st_size < self._max_bytes:
+                        return
+                except FileNotFoundError:
+                    return
+                for index in range(self._backups - 1, 0, -1):
+                    older = _rotated(self._log_file, index)
+                    if older.exists():
+                        os.replace(older, _rotated(self._log_file, index + 1))
+                os.replace(self._log_file, _rotated(self._log_file, 1))
+        except (OSError, TimeoutError) as exc:
+            logger.debug("Could not rotate the usage log: %s", exc)
 
     def forget_session(self, session: str) -> None:
         """Drop the per-session stats of an MCP session that has ended."""
@@ -269,10 +435,17 @@ class ToolUsageTracker:
         return [r.to_dict() for r in records[:limit]]
 
     def reset(self) -> None:
-        """Clear in-memory data and truncate the JSONL log."""
+        """Clear in-memory data and empty the JSONL log, rotated copies included."""
         self._stats.clear()
         self._session_stats.clear()
         self._recent.clear()
+        for rotated in _log_files(self._log_file):
+            if rotated == self._log_file:
+                continue
+            try:
+                rotated.unlink()
+            except OSError as exc:
+                logger.debug("Failed to remove %s: %s", rotated, exc)
         if not self._log_file.exists():
             return
         try:
@@ -304,41 +477,34 @@ class ToolUsageTracker:
         Returns:
             Dict with per-tool stats and optional recent records.
         """
-        log_file = (log_dir or _DEFAULT_LOG_DIR) / "tool_usage.jsonl"
-        if not log_file.exists():
+        log_file = (log_dir or _DEFAULT_LOG_DIR) / _LOG_NAME
+        files = _log_files(log_file)
+        if not files:
             return {"total_tools_used": 0, "total_calls": 0, "tools": {}}
 
         stats: Dict[str, ToolStats] = {}
-        recent: List[Dict[str, Any]] = []
+        # Only the newest `limit` records are kept while the files stream past.
+        recent: Deque[Dict[str, Any]] = deque(maxlen=max(limit, 0) or None)
 
-        with open(log_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+        for rec in _read_records(files):
+            name = rec.get("tool", "")
+            if tool_name and name != tool_name:
+                continue
 
-                name = rec.get("tool", "")
-                if tool_name and name != tool_name:
-                    continue
+            if name not in stats:
+                stats[name] = ToolStats()
 
-                if name not in stats:
-                    stats[name] = ToolStats()
+            s = stats[name]
+            s.total_calls += 1
+            s.total_duration_ms += rec.get("duration_ms", 0.0)
+            s.last_called = max(s.last_called, rec.get("timestamp", 0.0))
+            if rec.get("success"):
+                s.successes += 1
+            else:
+                s.failures += 1
 
-                s = stats[name]
-                s.total_calls += 1
-                s.total_duration_ms += rec.get("duration_ms", 0.0)
-                s.last_called = max(s.last_called, rec.get("timestamp", 0.0))
-                if rec.get("success"):
-                    s.successes += 1
-                else:
-                    s.failures += 1
-
-                if limit > 0:
-                    recent.append(rec)
+            if limit > 0:
+                recent.append(rec)
 
         ranked = sorted(stats.items(), key=lambda kv: kv[1].total_calls, reverse=True)
         result: Dict[str, Any] = {
@@ -347,6 +513,45 @@ class ToolUsageTracker:
             "tools": {name: s.to_dict() for name, s in ranked},
         }
         if limit > 0:
-            recent.reverse()
-            result["recent"] = recent[:limit]
+            result["recent"] = list(reversed(recent))
         return result
+
+
+def _rotated(log_file: Path, index: int) -> Path:
+    """The ``index``-th rotated copy of ``log_file`` (``tool_usage.jsonl.1`` is the newest)."""
+    return log_file.with_name(f"{log_file.name}.{index}")
+
+
+def _log_files(log_file: Path) -> List[Path]:
+    """The rotated copies, oldest first, then the current file; only those that exist."""
+    rotated = []
+    try:
+        for candidate in log_file.parent.glob(f"{log_file.name}.*"):
+            suffix = candidate.name[len(log_file.name) + 1:]
+            if suffix.isdigit():
+                rotated.append((int(suffix), candidate))
+    except OSError:
+        pass
+    files = [candidate for _, candidate in sorted(rotated, reverse=True)]
+    if log_file.exists():
+        files.append(log_file)
+    return files
+
+
+def _read_records(files: List[Path]) -> Iterator[Dict[str, Any]]:
+    """Yield each JSON record of ``files`` in order, skipping blank and damaged lines."""
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(record, dict):
+                        yield record
+        except OSError as exc:
+            logger.debug("Could not read %s: %s", path, exc)

@@ -497,6 +497,10 @@ Notes:
   python_server, 5.x VS Code). It refuses `/persistent/` keys, which Kit saves
   for later sessions, unless `allow_persistent=true`. `get_isaac_carb_settings`
   reads `auth_token` values back as `***`.
+- `ping_isaac` does not wait for a call already running on the instance and
+  reports `busy` when one is. A call the client cancels keeps the instance
+  until Isaac Sim has finished it (the bridge is asked to interrupt it first);
+  see [isaac-sim.md](isaac-sim.md#transports).
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or
@@ -1095,12 +1099,10 @@ Behaviour worth knowing:
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:
   - `spawn_unreal_actor`, `delete_unreal_actor`,
-    `generate_unreal_procedural_scene`, the mesh tools that create an actor
-    (`generate_unreal_mesh_primitive`, `compute_unreal_convex_hull`,
-    `decompose_unreal_convex_hull`, `convert_unreal_mesh_format` to
-    `dynamic_mesh`), `import_unreal_usd`, `export_unreal_usd`,
-    `import_unreal_asset`, `save_unreal_assets` (the editor saves nothing
-    during PIE) and, in attached
+    `generate_unreal_procedural_scene`, every mesh tool except
+    `validate_unreal_mesh` (they create actors or replace meshes, see below),
+    `import_unreal_usd`, `export_unreal_usd`, `import_unreal_asset`,
+    `save_unreal_assets` (the editor saves nothing during PIE) and, in attached
     mode, every `control_unreal_ui` action except `inspect` and `clear_cursor`
     return `error_type: "PIEActive"`, with `details.hint` naming the way out:
     `control_unreal_simulation` with action `stop` (CLI: `simul unreal sim stop`).
@@ -1138,6 +1140,159 @@ Behaviour worth knowing:
     starts) the camera stays where it was put; when a Play session in the
     level viewport stops, Unreal replaces the editor camera, by default with
     the game camera's last view.
+- The mesh tools (`generate_unreal_mesh_primitive`, `validate_unreal_mesh`
+  and the other `*_unreal_mesh*` and `*_unreal_convex_hull` tools) run
+  GeometryScript in the editor:
+  - They need the GeometryScripting plugin, which `simul unreal setup` enables
+    (restart an editor that was already running). Without it every mesh tool
+    returns `error_type: "UnsupportedOperation"` with `details.code:
+    "GEOMETRY_SCRIPTING_DISABLED"` and a hint naming setup.
+  - They take the path of an actor in the level open in the editor, found
+    without loading a map, or of an asset. A path that names nothing is
+    `NotFoundError`. `validate_unreal_mesh`, `compute_unreal_convex_hull` and
+    `decompose_unreal_convex_hull` read a DynamicMeshActor, a StaticMeshActor
+    or a StaticMesh asset (its first LOD, copied into a transient
+    DynamicMesh; the reply's `source_kind` says which). The tools that edit a
+    mesh in place take a DynamicMeshActor only: a StaticMeshActor
+    (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh asset path
+    (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose `details.hint` names
+    `convert_unreal_mesh_format`; any other actor is `"NO_DYNAMIC_MESH"`.
+  - `convert_unreal_mesh_format` moves meshes between the two kinds.
+    `dynamic_mesh` places a DynamicMeshActor copy of a StaticMesh asset (at
+    `location`) or of a StaticMeshActor (at its transform), with its
+    materials; `replace_actor` removes the StaticMeshActor in the same
+    transaction. `static_mesh` writes a DynamicMeshActor's mesh into a
+    StaticMesh asset: `asset_path` (default `/Game/Generated/SM_<label>`, the
+    label's ASCII letters and digits joined by underscores) must
+    be under `/Game` (anything else, `/Engine` or a plugin's content, is
+    `SandboxError` `"OUTSIDE_GAME_CONTENT"`); an existing StaticMesh is
+    refused (`"ASSET_EXISTS"`) unless `overwrite`, which replaces its mesh and
+    keeps its references; the component's materials go to its slots; its
+    simple collision is the component's, a convex hull or none (`collision`,
+    `auto` by default); `nanite` enables Nanite; `save` (default true) saves
+    that asset's package and nothing else, and the reply names the `.uasset`
+    written. With Nanite the asset's `triangle_count` and `vertex_count` are the
+    mesh written, which Nanite renders, and `fallback_triangle_count` and
+    `fallback_vertex_count` its fallback mesh (LOD 0: 316 triangles for a
+    1,920-triangle sphere). `replace_actor` swaps the DynamicMeshActor for a
+    StaticMeshActor at its transform, in one undoable transaction. Writing the
+    asset, new or overwritten, with its materials and collision, is not
+    undoable: Unreal records no undo step for a new asset, so simul records
+    none for the rest of the write either (its collision used to be an Undo
+    step of its own, and one Undo dropped it from the asset). Unreal's USD exporter
+    writes a DynamicMeshActor as an empty Xform, without its mesh, so convert
+    with `replace_actor` before exporting a mesh made with these tools; the
+    reply's `hint` says so when the DynamicMeshActor was left in place.
+  - A hull or decomposition with `output` `collision` or `both` on a
+    StaticMesh source sets the StaticMesh asset's simple collision (every
+    actor using it shares it), only for an asset under `/Game`, in one
+    undoable transaction; `save` saves that asset. Undo restores the asset's
+    collision, but Unreal does not rebuild the physics of the actors already
+    placed with it: until the level is reloaded they keep colliding with the
+    hull (a line trace still hits it). Save before such an edit, or set the
+    collision again rather than undo it.
+  - Every GeometryScript call is checked after it returns. GeometryScript
+    reports most failures that way and otherwise leaves the mesh as it was
+    (Catmull-Clark on a mesh without quad polygroups returned with the
+    triangle count unchanged). An error fails the tool with `EngineError`,
+    `details.code: "GEOMETRY_SCRIPT_FAILED"` and GeometryScript's messages in
+    `details.messages`, and nothing is changed; warnings come back in
+    `warnings`.
+  - An edit runs on a copy of the mesh, and the copy replaces the component's
+    mesh in one transaction, so a failed edit changes nothing, one Undo
+    reverts one edit and the level is marked dirty for Save. A tool that
+    creates an actor spawns it, with its mesh, in one transaction too.
+  - Undo and Redo of a mesh edit restore which mesh the DynamicMeshComponent
+    holds, not what Unreal does when a mesh is set (UE 5.7.4): the component
+    stops listening to the mesh it got back, so an in-place edit of that mesh
+    outside simul (a Blueprint, Python GeometryScript, Modeling Mode) no longer
+    updates its bounds or what it draws, and its physics keeps the simple
+    collision it had before the Undo or Redo (a trace against a hull that Redo
+    put back misses). Every mesh tool repairs both on each DynamicMeshActor it
+    touches, `validate_unreal_mesh` included: it rebuilds the collision, and
+    where an Undo or Redo left the actor's package dirty (or in a level never
+    saved) it sets the component's mesh again, which binds it (and renames the
+    mesh object). A clean level is left alone, so a level saved right after an
+    Undo keeps the stale binding until it is reloaded or edited.
+  - Each in-place edit keeps the mesh it replaced alive for Undo: a full copy
+    that the editor's undo buffer limit (256 MB by default) does not count, so
+    it is freed only when the edit leaves the undo history. A hundred edits of
+    a 32,256-triangle mesh added about 370 MB to the editor; one UV unwrap of a
+    1M-triangle mesh about 760 MB.
+  - A mesh tool leaves at most 2,000,000 triangles in a mesh it makes or
+    edits. A larger result is refused with `details.code: "RESULT_TOO_LARGE"`
+    (`details.predicted` says whether it was predicted or measured) and
+    nothing is changed: before anything runs when the size is known up front
+    (a subdivision, a remesh, which makes up to 1.6 times its target, a UV
+    unwrap or topology edit of a mesh already over the cap, a primitive with
+    more than 512 segments), otherwise when the operation has run and before
+    its result replaces anything.
+  - `compute_unreal_mesh_uv` unwraps with XAtlas only up to 20,000 triangles:
+    XAtlas crashed the editor on a 130,048- and a 318,400-triangle mesh, and
+    took 28.6 s for 32,256 (UE 5.7.4). Method `auto`, the default, uses
+    PatchBuilder above that size (29 s for 318,400 triangles) and the reply's
+    `method` names the one that ran; `xatlas` on a larger mesh is refused with
+    `details.code: "MESH_TOO_LARGE_FOR_XATLAS"`. A `uv_channel` the mesh does
+    not have is refused (`"UV_CHANNEL_MISSING"`).
+  - Positions are where the actors are in the level. `apply_unreal_mesh_boolean`
+    combines both meshes at their actors' world transforms (location,
+    rotation, scale) and writes the result in the target's local space.
+    `cut_unreal_mesh_plane` takes its plane in world space unless `space` is
+    `local`, removes the half the normal points into (or keeps it as a second
+    actor with `keep_both_sides`), reports the plane in the mesh's space, and
+    refuses a plane that misses the mesh (`"PLANE_MISSES_MESH"`). The hull,
+    decomposition and cut actors take the source's whole transform. Face
+    selections of `edit_unreal_mesh_topology` (`normal:x,y,z[,angle]`,
+    `box:...`, `all`) are in the mesh's local space.
+  - `compute_unreal_convex_hull` and `decompose_unreal_convex_hull` produce
+    simple collision: `output` `actor` (default) spawns a DynamicMeshActor
+    whose mesh and simple collision are the hull or pieces, `collision`
+    replaces the source's simple collision, `both` does both, in one
+    transaction (Undo restores the collision Unreal uses, the component's
+    BodySetup included). Unreal rebuilds the physics of neither: after an Undo
+    or Redo a line trace still meets the shapes from before it (Redo of a hull
+    put the shape back, and traces missed it) until a mesh tool next touches
+    the actor, which rebuilds its collision. The hull is simplified to `max_faces` triangles
+    (250; 0 keeps the exact hull, 84,064 triangles for a 130,048-triangle
+    sphere). The decomposition is Unreal's own (GeometryScript's collision
+    generation, not V-HACD), with its sphere, box and capsule detection off:
+    left on, a sphere or capsule source came back as "Hull Computation Failed"
+    and a 100 cm cube. `max_vertices_per_hull` limits each piece (as 2V - 4
+    triangles); `error_tolerance` and `min_part_thickness` are passed on;
+    `volume_ratio` says how much of a closed source the pieces cover.
+  - `generate_unreal_mesh_primitive` takes each type's dimensions by name in
+    Unreal's axes (box `width` X, `depth` Y, `height` Z; capsule `radius` and
+    `length`, its straight part; torus `major_radius`, `minor_radius`), refuses
+    unknown names and sizes that are not above 0, and gives primitives quad
+    polygroups, so Catmull-Clark subdivides them. `segments` is 3 to 512.
+  - Options are implemented or refused, never ignored: `subdivide_unreal_mesh`
+    runs Catmull-Clark, Loop or uniform tessellation (levels 1 to 4; a result
+    over 2,000,000 triangles is refused); `simplify_unreal_mesh` takes one of a
+    triangle count, a fraction below 1 or `max_error` (a tolerance in cm);
+    `remesh_unreal_mesh` is uniform only and keeps the triangle count by
+    default; `compute_unreal_mesh_uv` packs islands `island_padding` texels
+    apart at `texture_resolution`; `edit_unreal_mesh_topology` needs a
+    selection and reports `faces_affected` and `edges_affected`.
+  - `validate_unreal_mesh` runs the checks named in `checks` (all by
+    default): `closed`, `manifold` (bowtie vertices), `degenerate_triangles`,
+    `orientation` (a closed mesh encloses a positive volume), `compact`,
+    `normals` and `uvs`, each with `passed`, `count` and `detail`. It does not
+    look for self-intersections.
+  - A mesh script runs under an HTTP timeout of at least 300 s, whatever
+    `UNREAL__TIMEOUT` says, since a GeometryScript call cannot be cancelled.
+    The slowest operations on a 2M-triangle mesh took 83 to 109 s (a
+    PatchBuilder unwrap, a convex hull, a simplification; UE 5.7.4, Apple
+    M-series). A script commits its result only within that timeout less 10
+    s: one that finishes later discards its result, so a `TimeoutError`
+    (`details.code: "MESH_TIME_BUDGET"`) leaves the level as it was once the
+    editor finishes, though the editor stays busy until then. For an editor on
+    this machine the limit runs on this machine's clock, so it holds however
+    long the call waited in the editor's queue; for a remote editor it is the
+    script's own run time, and a call that first waited behind another script
+    may still commit late.
+  - In attached mode, a call the attachment guard refuses (the editor shows
+    another map or instance) is `error_type: "InvalidState"`, `details.code:
+    "ATTACHMENT_CHANGED"`.
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.
@@ -2252,10 +2407,15 @@ Arguments that do not fit the input schema are refused before the tool runs,
 but through the same envelope as every other failure: the call spends a
 rate-limit token and is recorded in the usage log and the audit log. A call to
 a tool that is not registered is a `NotFoundError`, recorded and rate limited
-under `<unknown tool>` with the name it gave in the record's parameters. On
-this version the audit row of a call that failed inside the envelope says
-`status: ok`, since it records only whether the MCP call raised; the usage log
-has the outcome.
+under `<unknown tool>` with the name it gave in the record's parameters. The
+audit row of every call states the envelope's outcome, `error_type` included
+(see [Audit log](configuration.md#audit-log)).
+
+A call the client cancels may still have run: cancelling the request does not
+stop the engine. Its usage and audit rows say `cancelled` and `executed`:
+`false` (it never started), `true` (Isaac: the server waited for the engine,
+and the row keeps the engine's outcome) or `"unknown"` (Unreal, Blender: the
+request had been sent). Check the scene before repeating a cancelled call.
 
 ## Annotations
 

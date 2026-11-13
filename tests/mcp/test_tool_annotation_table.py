@@ -151,7 +151,8 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "batch_unreal_operations": (DESTRUCTIVE, False, True),
     "call_unreal_actor_function": (DESTRUCTIVE, False, True),
     "capture_unreal_viewport": (RW, False, True),  # writes a new screenshot file
-    "compute_unreal_convex_hull": (RW, False, True),
+    # output collision replaces the source's simple collision.
+    "compute_unreal_convex_hull": (DESTRUCTIVE, False, True),
     "compute_unreal_mesh_uv": (DESTRUCTIVE, False, True),
     "control_unreal_simulation": (RW, False, True),
     "control_unreal_ui": (RW, False, True),

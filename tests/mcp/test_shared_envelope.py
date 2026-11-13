@@ -479,34 +479,59 @@ def test_admitted_isaac_calls_hold_the_instance_lock_and_heartbeat(
     assert beats == ["isaac_ok", "isaac_broken"]
 
 
-def test_a_cancelled_isaac_call_releases_the_instance_lock(
+def test_a_cancelled_isaac_call_holds_the_instance_until_the_engine_is_done(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Cancellation unwinds through the admission hook: the lock is freed, no heartbeat."""
+    """Cancelling the request does not stop Isaac Sim running the script.
+
+    The lock used to be released at once, so the next call was let in while
+    the engine was still serving the first. Now the cancelled call keeps the
+    instance until the engine call ends, is recorded as cancelled, and only
+    then passes the cancellation on.
+    """
     instance = _server(monkeypatch, tmp_path)
     lock = instance._get_instance_lock(instance._get_effective_instance_name())
     beats: List[str] = []
     monkeypatch.setattr(instance, "_heartbeat_active_binding", beats.append)
+    events: List[str] = []
 
-    async def scenario() -> bool:
+    async def scenario() -> None:
         started = asyncio.Event()
 
         async def long_step() -> Dict[str, Any]:
             started.set()
-            await asyncio.sleep(60)
+            await asyncio.sleep(0.3)
+            events.append("engine done")
+            return {"success": True}
+
+        async def next_call() -> Dict[str, Any]:
+            events.append("next call ran")
             return {"success": True}
 
         task = asyncio.ensure_future(instance._exec_isaac("isaac_step", long_step()))
         await started.wait()
-        held = lock.locked()
         task.cancel()
+        follower = asyncio.ensure_future(instance._exec_isaac("isaac_next", next_call()))
+        await asyncio.sleep(0.05)
+        assert lock.locked(), "the instance stays held while the engine runs"
         with pytest.raises(asyncio.CancelledError):
             await task
-        return held
+        await follower
 
-    assert asyncio.run(scenario()) is True, "the call ran under the lock"
+    asyncio.run(scenario())
+
+    assert events == ["engine done", "next call ran"]
     assert not lock.locked()
-    assert beats == []
+    assert beats == ["isaac_next"]
+    # The engine finished the step: the record keeps its outcome, and says the
+    # client cancelled a call that ran (it used to read as a failure).
+    (row,) = instance.usage_tracker.get_recent(tool_name="isaac_step")
+    assert (row["success"], row.get("error"), row["cancelled"], row["executed"]) == (
+        True,
+        None,
+        True,
+        True,
+    )
 
 
 def test_a_call_cancelled_while_queued_for_the_lock_closes_its_coroutine(
@@ -548,7 +573,10 @@ def test_a_call_cancelled_while_queued_for_the_lock_closes_its_coroutine(
     assert ran == []
     assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
     assert not lock.locked()
-    assert _records(instance, "isaac_tool") == []
+    # It never ran, but the cancellation is on record (it used to leave none).
+    assert _records(instance, "isaac_tool") == [
+        {"success": False, "error": "cancelled_before_start"}
+    ]
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         del coro
