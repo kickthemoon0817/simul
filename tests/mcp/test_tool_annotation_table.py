@@ -201,6 +201,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "set_unreal_material_params": (DESTRUCTIVE, True, True),
     "set_unreal_physics_params": (DESTRUCTIVE, True, True),
     "set_unreal_render_settings": (DESTRUCTIVE, True, True),
+    "setup_unreal_physics_bulk": (DESTRUCTIVE, True, True),
     "simplify_unreal_mesh": (DESTRUCTIVE, False, True),
     "spawn_unreal_actor": (RW, False, True),
     "subdivide_unreal_mesh": (DESTRUCTIVE, False, True),

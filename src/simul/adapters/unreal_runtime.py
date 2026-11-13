@@ -101,6 +101,7 @@ from ._unreal_scripts import (
     ASSET_IMPORT,
     ASSET_SEARCH,
     ASSIGN_MATERIAL,
+    BULK_PHYSICS,
     CREATE_MATERIAL_INSTANCE,
     DELETE_ACTOR,
     EDITOR_RELATIVE_PATHS,
@@ -163,6 +164,24 @@ ROBOTICS_CRITERIA: Dict[str, float] = {
 
 #: Most actor paths the collision summary lists; its counts cover every actor.
 ROBOTICS_LISTED_LIMIT = 50
+
+#: ``analyze_scene_for_robotics`` entries per category: the default and most per page.
+ROBOTICS_DEFAULT_RESULTS = 50
+ROBOTICS_MAX_RESULTS = 500
+
+#: Most bytes of JSON an analysis page holds. Under the server's 40 KB result
+#: budget, which would otherwise cut the largest list alone (a 5,000-actor level
+#: gave 494,853 bytes and lost every surface), with room for the envelope.
+ROBOTICS_PAGE_BYTES = 32_000
+
+#: Most instances of one instanced static mesh component the robotics analysis
+#: measures one by one; a component with more counts whole, by its world bounds.
+ROBOTICS_MAX_INSTANCES = 1000
+
+#: Seconds the robotics analysis keeps a scan for the pages after the first;
+#: offset 0 always scans. A 5,011-actor level took 13 to 99 s a page on a loaded
+#: machine when every page scanned the level again.
+ROBOTICS_SNAPSHOT_SECONDS = 600.0
 
 #: ``set_physics_params`` mass range, in kg. Unreal clamps a lighter override
 #: to 0.001 kg (FBodyInstance::MassInKgOverride's ClampMin); a body heavier than
@@ -247,6 +266,22 @@ USD_IMPORT_OPTIONS: Tuple[str, ...] = USD_IMPORT_BOOLEAN_OPTIONS + (
 # UE 5.7); an object name's are _INVALID_OBJECT_NAME_CHARACTERS, below.
 _INVALID_FOLDER_CHARACTERS = frozenset("\\:*?\"<>|' ,.&!~\n\r\t@#")
 
+#: Most actors ``setup_physics_bulk`` sets up in one call, and how many of the
+#: configured and failed actors its reply lists (it counts them all).
+PHYSICS_BULK_MAX_ACTORS = 1000
+PHYSICS_BULK_LISTED = 50
+
+#: ``set_light_params`` color temperature range, in Kelvin: what Unreal's
+#: blackbody color covers (FLinearColor::MakeFromColorTemperature clamps to it),
+#: so 100 K and 1e9 K, which it stored, rendered as these ends.
+LIGHT_MIN_TEMPERATURE_K = 1000.0
+LIGHT_MAX_TEMPERATURE_K = 15000.0
+
+#: Most light intensity ``set_light_params`` takes, in the light's unit. The
+#: sun is about 120,000 lux and a stadium floodlight about 1e6 lumens; 1e30 lux
+#: was stored, and 1e39 overflowed Unreal's 32-bit float.
+LIGHT_MAX_INTENSITY = 1e9
+
 #: ``control_simulation`` actions and start modes, as the tool's enums list them.
 SIMULATION_ACTIONS: Tuple[str, ...] = ("start", "stop", "pause", "resume", "step")
 SIMULATION_MODES: Tuple[str, ...] = ("simulate", "play")
@@ -314,6 +349,83 @@ def _check_range(name: str, value: float, low: float, high: float, unit: str = "
 # input and normalize. Anything that isn't a clean 32-char hex digest is
 # treated as plaintext and MD5-hashed (UE's FMD5::HashAnsiString).
 _HEX32_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+#: The categories ``analyze_scene_for_robotics`` lists, paged together.
+ROBOTICS_LISTS: Tuple[str, ...] = ("traversable_surfaces", "graspable_objects")
+
+
+def _robotics_page(result: Dict[str, Any], offset: int, max_results: int) -> Dict[str, Any]:
+    """Fit an analysis page within ROBOTICS_PAGE_BYTES and say where the next starts.
+
+    Both lists keep the same number of entries, the most that fits (at least
+    one, so paging always moves on), so the next page at ``offset`` plus that
+    number continues both. A page over the budget used to be cut by the server
+    at its largest list alone, with a hint naming parameters this tool lacks.
+
+    Args:
+        result: The editor script's payload: each list cut to ``max_results``
+            from ``offset``, and ``totals``.
+        offset: The page's offset.
+        max_results: The most entries per category asked for.
+
+    Returns:
+        The payload with the lists cut to fit, ``returned``, ``offset``,
+        ``max_results``, ``next_offset`` and ``hint``.
+    """
+    counted = result.get("totals") or {}
+    totals = {name: int(counted.get(name, len(result.get(name) or []))) for name in ROBOTICS_LISTS}
+    lists = {name: list(result.get(name) or []) for name in ROBOTICS_LISTS}
+
+    def page(keep: int) -> Dict[str, Any]:
+        return {**result, **{name: items[:keep] for name, items in lists.items()}, "totals": totals}
+
+    keep = max(len(items) for items in lists.values())
+    while keep > 1 and len(json.dumps(page(keep))) > ROBOTICS_PAGE_BYTES:
+        keep = keep * 3 // 4 if keep > 4 else keep - 1
+    payload = page(keep)
+    end = offset + keep
+    more = any(totals[name] > end for name in ROBOTICS_LISTS)
+    hint = None
+    if more:
+        hint = (
+            f"Both lists are paged together, {keep} per category from offset {offset}; totals counts "
+            f"every match. Pass offset {end} for the next page, or narrow the query with actor_filter "
+            "or analysis_types."
+        )
+        if keep < max_results:
+            hint += f" This page holds {keep} rather than max_results {max_results} to fit the response budget."
+    payload.update(
+        returned={name: len(payload[name]) for name in ROBOTICS_LISTS},
+        offset=offset,
+        max_results=max_results,
+        next_offset=end if more else None,
+        hint=hint,
+    )
+    return payload
+
+
+def _physics_values(
+    mass: Optional[float],
+    linear_damping: Optional[float],
+    angular_damping: Optional[float],
+    enable_gravity: Optional[bool],
+) -> Dict[str, Any]:
+    """The body parameters given, checked against Unreal's ranges.
+
+    Raises:
+        ArgumentError: A value is not finite or out of its range (a
+            ValidationError with ``details.code`` OUT_OF_RANGE).
+    """
+    values: Dict[str, Any] = {}
+    if mass is not None:
+        values["mass"] = _check_range("mass", mass, PHYSICS_MIN_MASS_KG, PHYSICS_MAX_MASS_KG, " kg")
+    for name, value in (("linear_damping", linear_damping), ("angular_damping", angular_damping)):
+        if value is not None:
+            values[name] = _check_range(name, value, 0.0, PHYSICS_MAX_DAMPING)
+    if enable_gravity is not None:
+        values["enable_gravity"] = bool(enable_gravity)
+    return values
 
 
 def _passphrase_to_md5(value: Optional[str]) -> Optional[str]:
@@ -3833,56 +3945,98 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         cast_shadows: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Set light component parameters on a light actor.
+        Set a light's parameters and read them back.
 
-        Writes the actor's light component in one editor transaction and
-        reads every value back. A parameter left as None keeps its current
-        value.
+        Writes the actor's light component (a point, spot, rect or
+        directional light, or a SkyLight's intensity, color and shadows) in
+        one undoable editor transaction and reads every value back. Values are
+        checked before anything is written; a value Unreal still stores
+        differently is put back and reported. A parameter left as None keeps
+        its current value; with none given the light is only read.
+
+        Intensity is in the light's own unit, returned as ``intensity_unit``:
+        lux for a directional light, the light's Intensity Units for a point,
+        spot or rect light (candelas by default, or lumens, EV, nits or
+        unitless), and a plain multiplier for a SkyLight. When Unreal stores a
+        value differently, every value is put back, so a failed call changes
+        nothing. The color is sRGB: each channel
+        0-1, gamma-encoded as the color picker shows it, stored as the 8-bit
+        FColor Unreal keeps (channel x 255, rounded).
 
         Args:
             actor_path: Light actor path.
-            intensity: Light intensity.
-            color: Light color as [r, g, b], each channel 0-1; None keeps the
-                current color.
-            temperature: Color temperature in Kelvin.
+            intensity: Light intensity, 0 to 1e9, in the light's unit.
+            color: Light color as sRGB [r, g, b], each channel 0-1; None keeps
+                the current color.
+            temperature: Color temperature in Kelvin, 1000 to 15000, the
+                range Unreal's blackbody color covers (it clamps others);
+                applies with use_temperature.
             use_temperature: Use color temperature instead of direct color.
-            attenuation_radius: Light attenuation radius in cm (point and
-                spot lights only).
+            attenuation_radius: Light attenuation radius in cm, more than 0
+                (point, spot and rect lights only).
             cast_shadows: Enable shadow casting.
 
         Returns:
-            Dictionary with actor_path, component_path, params_set and the
-            read-back ``applied`` values, or a ``ScriptError`` envelope when
-            the actor has no light component, a property does not exist on
-            it, or Unreal did not apply a value.
+            Dictionary with actor_path, component_path, light_class,
+            intensity_unit, params_set, ``applied`` (the values given, read
+            back), ``current`` (every light value read back) and warning; or
+            a ValidationError envelope for an actor without a light
+            (details.code NOT_A_LIGHT) or a value the light class lacks
+            (PROPERTY_NOT_ON_LIGHT: a directional light's attenuation radius,
+            a SkyLight's temperature; nothing written), a
+            LightParamsNotApplied envelope for a value Unreal stored
+            differently (details.expected and details.actual; every value put
+            back), or a NotFoundError envelope when no actor is at the path.
 
         Raises:
-            ValueError: ``color`` is not three numbers between 0 and 1.
+            ArgumentError: ``color`` is not three numbers between 0 and 1, or
+                another value is not finite or out of its range (a
+                ValidationError with ``details.code``).
         """
-        # Python editor-property names on ULightComponent and subclasses.
+        # Python editor-property names on ULightComponentBase and subclasses.
         values: Dict[str, Any] = {}
         if intensity is not None:
-            values["intensity"] = intensity
+            values["intensity"] = _check_range("intensity", intensity, 0.0, LIGHT_MAX_INTENSITY)
         if color is not None:
-            rgb = _vector3("color", color, "r, g, b")
+            try:
+                rgb = _vector3("color", color, "r, g, b")
+            except ValueError as exc:
+                raise ArgumentError(str(exc), "NOT_A_COLOR", parameter="color", value=str(list(color))) from None
             if not all(0.0 <= channel <= 1.0 for channel in rgb):
-                raise ValueError(f"color channels must be between 0 and 1, got {list(color)!r}")
+                raise ArgumentError(
+                    f"color channels must be between 0 and 1, got {list(color)!r}",
+                    "OUT_OF_RANGE",
+                    parameter="color",
+                    value=list(rgb),
+                    minimum=0.0,
+                    maximum=1.0,
+                )
             # LightColor is an FColor: 0-255 channels.
             values["light_color"] = [round(channel * 255) for channel in rgb] + [255]
         if temperature is not None:
-            values["temperature"] = temperature
+            values["temperature"] = _check_range(
+                "temperature", temperature, LIGHT_MIN_TEMPERATURE_K, LIGHT_MAX_TEMPERATURE_K, " K"
+            )
         if use_temperature is not None:
             values["use_temperature"] = use_temperature
         if attenuation_radius is not None:
-            values["attenuation_radius"] = attenuation_radius
+            if not (math.isfinite(attenuation_radius) and attenuation_radius > 0):
+                raise ArgumentError(
+                    f"attenuation_radius must be a finite number above 0, got {attenuation_radius!r}",
+                    "OUT_OF_RANGE",
+                    parameter="attenuation_radius",
+                    value=attenuation_radius if math.isfinite(attenuation_radius) else str(attenuation_radius),
+                    minimum=0.0,
+                )
+            values["attenuation_radius"] = float(attenuation_radius)
         if cast_shadows is not None:
             values["cast_shadows"] = cast_shadows
 
-        if not values:
-            return {"actor_path": actor_path, "params_set": 0}
-
         args = {"actor_path": actor_path, "values": values}
-        result = await self._execute_json_script(f"args = {args!r}\n" + SET_LIGHT_PARAMS)
+        result = await self._execute_json_script(
+            f"args = {args!r}\n" + SET_LIGHT_PARAMS,
+            expected_errors=("ValidationError", "LightParamsNotApplied", "NotFoundError"),
+        )
         return {"actor_path": actor_path, **result}
 
     async def set_render_settings(
@@ -4379,17 +4533,101 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             ArgumentError: A value is not finite or out of its range (a
                 ValidationError with ``details.code`` OUT_OF_RANGE).
         """
-        values: Dict[str, Any] = {}
-        if mass is not None:
-            values["mass"] = _check_range("mass", mass, PHYSICS_MIN_MASS_KG, PHYSICS_MAX_MASS_KG, " kg")
-        for name, value in (("linear_damping", linear_damping), ("angular_damping", angular_damping)):
-            if value is not None:
-                values[name] = _check_range(name, value, 0.0, PHYSICS_MAX_DAMPING)
-        if enable_gravity is not None:
-            values["enable_gravity"] = bool(enable_gravity)
+        values = _physics_values(mass, linear_damping, angular_damping, enable_gravity)
         args = {"actor_path": actor_path, "values": values, "transaction": "simul: set physics params"}
         return await self._execute_json_script(
             f"args = {args!r}\n" + SET_PHYSICS_PARAMS, expected_errors=("PhysicsParamsNotApplied",)
+        )
+
+    async def setup_physics_bulk(
+        self,
+        actor_paths: Optional[List[str]] = None,
+        tag: Optional[str] = None,
+        folder: Optional[str] = None,
+        actor_filter: Optional[str] = None,
+        enable: bool = True,
+        kinematic: bool = False,
+        make_movable: bool = True,
+        allow_detach: bool = False,
+        collision_preset: Optional[str] = None,
+        mass: Optional[float] = None,
+        linear_damping: Optional[float] = None,
+        angular_damping: Optional[float] = None,
+        enable_gravity: Optional[bool] = None,
+        skip_failures: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Set up physics on many editor actors in one call and one undoable transaction.
+
+        The actors are those at ``actor_paths`` plus every editor actor with
+        ``tag``, in the outliner ``folder`` (or a folder under it) and whose
+        label or path contains ``actor_filter``, each that is given (a
+        procedural scene's tag with actor_filter "_Box_" picks its props and
+        leaves its floor and walls), at most PHYSICS_BULK_MAX_ACTORS. Each
+        is set up as ``enable_physics``, ``set_collision`` (a preset only) and
+        ``set_physics_params`` would set it, checked first in the same way
+        with the preset's collision standing in for its own; unless
+        ``skip_failures``, one actor that cannot be set up refuses the whole
+        call with nothing changed. One Undo reverts the call. Setting up
+        props one call at a time ran into the rate limit (126 bodies took
+        116 s).
+
+        Args:
+            actor_paths: Editor actor paths.
+            tag: Also every editor actor with this actor tag.
+            folder: Also every editor actor in this outliner folder or one
+                under it (with ``tag``, only actors that have both).
+            actor_filter: Also every editor actor whose label or object path
+                contains this text, ignoring case (with ``tag`` or ``folder``,
+                only actors that match those too).
+            enable: As ``enable_physics``: False stops the bodies simulating.
+            kinematic: As ``enable_physics``: kinematic instead of simulated.
+            make_movable: As ``enable_physics``.
+            allow_detach: As ``enable_physics``.
+            collision_preset: A collision preset to set first, such as
+                PhysicsActor; empty keeps each actor's collision.
+            mass: Mass override in kg, as ``set_physics_params``.
+            linear_damping: As ``set_physics_params``.
+            angular_damping: As ``set_physics_params``.
+            enable_gravity: As ``set_physics_params``.
+            skip_failures: Set up the actors that can be and report the rest,
+                instead of refusing the call.
+
+        Returns:
+            Dict with world ("editor"), mode, matched, configured_count,
+            failed_count, configured (the first PHYSICS_BULK_LISTED: actor_path,
+            physics_mode, mobility_changed_from, detached_from, mass_kg),
+            failed (the first PHYSICS_BULK_LISTED: actor_path, error and, for a
+            body that cannot take the mode, its problem codes) and warning; or
+            an IncompatibleBody envelope listing the actors that cannot be set
+            up (nothing changed), or a ValidationError envelope for an unknown
+            preset, no match or too many.
+
+        Raises:
+            ValueError: No selection, or a parameter out of range.
+        """
+        paths = [path for path in (actor_paths or []) if path]
+        if not paths and not tag and not folder and not actor_filter:
+            raise ValueError("Give actor_paths, tag, folder or actor_filter to select the actors")
+        mode = "off" if not enable else ("kinematic" if kinematic else "simulate")
+        args = {
+            "paths": paths,
+            "tag": tag or None,
+            "folder": (folder or "").strip("/") or None,
+            "actor_filter": actor_filter or None,
+            "mode": mode,
+            "make_movable": bool(make_movable),
+            "allow_detach": bool(allow_detach),
+            "preset": collision_preset or None,
+            "values": _physics_values(mass, linear_damping, angular_damping, enable_gravity),
+            "skip_failures": bool(skip_failures),
+            "limit": PHYSICS_BULK_MAX_ACTORS,
+            "listed": PHYSICS_BULK_LISTED,
+            "transaction": "simul: set up physics",
+        }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + BULK_PHYSICS,
+            expected_errors=(INCOMPATIBLE_BODY, "ValidationError", "PhysicsNotApplied"),
         )
 
     async def get_physics_state(
@@ -5307,22 +5545,33 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         self,
         analysis_types: Optional[List[str]] = None,
         actor_filter: Optional[str] = None,
+        max_results: int = ROBOTICS_DEFAULT_RESULTS,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
         Classify level actors for robotics from their collision setup.
 
         One editor script reads every actor loaded in the editor world. Only
-        primitive components with collision enabled count, an actor's size is
-        the bounding box of those components, and the thresholds are
+        primitive components with collision enabled count, and an actor is
+        measured by the oriented box of its physics-collision components (a
+        single component's box rotated and scaled with it; several components'
+        boxes in the actor's frame), so a rotated plank or slab keeps its real
+        size. An instanced static mesh component (ISM, HISM, foliage) draws its
+        mesh once per instance, so each instance is measured and classified by
+        itself, with its ``instance_index`` and ``component_path``, up to 1000
+        instances per component; a component with more counts whole by its
+        world bounds (``instances``). The thresholds are
         ``ROBOTICS_CRITERIA``, returned as ``criteria``:
 
         * traversability: floor-like surfaces a robot can stand on. Physics
-          collision, at least 1 m^2 in plan, no thicker than a quarter of the
-          shorter side and tilted at most 15 degrees. The bounding box decides,
-          so a landscape section counts whole, hills included.
-        * graspability: Movable actors with physics collision that fit in a
-          60 cm cube, with whether they simulate physics and their mass (null
-          while Unreal reports none).
+          collision, at least 1 m^2 of top face, no thicker than a quarter of
+          its shorter side and tilted at most 15 degrees; the top face is the
+          box face across its thinnest side, facing up, so a slab turned upside
+          down is still a floor. A landscape section counts whole, hills
+          included.
+        * graspability: Movable actors with physics collision whose box fits
+          in a 60 cm cube, with whether they simulate physics and their mass
+          (null while Unreal reports none).
         * collision_complexity: actors with collision and with physics
           collision, collision-enabled components by profile, landscape
           heightfields, and for static meshes the simple shapes and convex
@@ -5332,47 +5581,84 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
           bodies pass through them). The first 50 actors with that last
           problem are listed.
 
+        The two lists are paged together: surfaces largest first, graspable
+        objects by path, each cut to ``max_results`` from ``offset``, and
+        ``totals`` counts every match. A page whose JSON would exceed 32,000
+        characters holds fewer per category, the same number for both, so it
+        fits the response budget; ``next_offset`` is where the next page
+        starts, and ``hint`` says how to get it. Offset 0 scans the level and
+        keeps the scan in the editor for ten minutes: a later offset with the
+        same filter and analyses reads it instead of scanning again
+        (``snapshot_age_s``), so every page of a large level comes from one
+        snapshot and costs no scan.
+
         Args:
             analysis_types: Any of traversability, graspability and
                 collision_complexity; None or empty runs all three.
             actor_filter: Only analyze actors whose label or object path
                 contains this text, ignoring case; None or empty analyzes
                 every actor.
+            max_results: Most entries per category on this page, 1 to 500.
+            offset: Entries of each category to skip (the previous page's
+                next_offset).
 
         Returns:
             Dict with traversable_surfaces and graspable_objects (each entry
-            name, path, class_name and size [x, y, z] in cm; surfaces add
-            top_z, area_m2 and tilt_degrees), collision_summary (empty unless
-            collision_complexity ran), total_actors_analyzed, analysis_types
-            (those that ran), criteria and pie_active (while Play In Editor
-            runs, the editor world is read, as in ``list_actors``, and the
-            static mesh collision counts simple_shapes, convex_hulls,
-            complex_collision and missing_simple_collision are null, as is
+            name, path, class_name and size [x, y, z] in cm along its box's
+            own axes, plus component_path and instance_index for an instance
+            of an instanced mesh, or component_path and instances for one
+            counted whole; surfaces add top_z, area_m2, tilt_degrees and
+            normal, the top face's upward unit normal), totals (matches per
+            category), returned (entries per category on this page), offset,
+            max_results, next_offset (null on the last page), hint,
+            scanned_at and snapshot_age_s (the scan this page was cut from),
+            collision_summary
+            (empty unless collision_complexity ran), total_actors_analyzed,
+            analysis_types (those that ran), criteria and pie_active (while
+            Play In Editor runs, the editor world is read, as in
+            ``list_actors``, and the static mesh collision counts
+            simple_shapes, convex_hulls, complex_collision and
+            missing_simple_collision are null, as is
             missing_simple_collision_actors: Unreal's StaticMeshEditorSubsystem
             reports none then); or a ScriptError envelope when the editor
             script failed.
 
         Raises:
-            ValueError: An analysis type is not one of the three.
+            ArgumentError: An analysis type is not one of the three, or
+                max_results or offset is out of range (a ValidationError with
+                ``details.code``).
         """
         requested = [name.strip().lower() for name in analysis_types or [] if name.strip()]
         unknown = [name for name in requested if name not in ROBOTICS_ANALYSES]
         if unknown:
-            raise ValueError(
+            raise ArgumentError(
                 f"analysis_types: unknown {', '.join(map(repr, unknown))}; use "
-                f"{', '.join(ROBOTICS_ANALYSES)}"
+                f"{', '.join(ROBOTICS_ANALYSES)}",
+                "UNKNOWN_ANALYSIS",
+                parameter="analysis_types",
+                value=unknown,
+                allowed=list(ROBOTICS_ANALYSES),
             )
+        _check_page_args(offset, max_results, ROBOTICS_MAX_RESULTS)
         analyses = [name for name in ROBOTICS_ANALYSES if name in requested or not requested]
         args = {
             "analyses": analyses,
             "actor_filter": actor_filter or None,
             "criteria": ROBOTICS_CRITERIA,
             "listed_limit": ROBOTICS_LISTED_LIMIT,
+            "offset": offset,
+            "max_results": max_results,
+            "max_instances": ROBOTICS_MAX_INSTANCES,
+            "snapshot_seconds": ROBOTICS_SNAPSHOT_SECONDS,
         }
         result = await self._execute_json_script(f"args = {args!r}\n" + ROBOTICS_SCENE_ANALYSIS)
         if result.get("error"):
             return result
-        return {**result, "analysis_types": analyses, "criteria": dict(ROBOTICS_CRITERIA)}
+        return _robotics_page(
+            {**result, "analysis_types": analyses, "criteria": dict(ROBOTICS_CRITERIA)},
+            offset,
+            max_results,
+        )
 
     async def generate_procedural_scene(
         self,
@@ -5380,6 +5666,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         parameters: Optional[Dict[str, Any]] = None,
         bounds_min: Optional[List[float]] = None,
         bounds_max: Optional[List[float]] = None,
+        physics_props: bool = False,
     ) -> Dict[str, Any]:
         """
         Build a test scene from Engine basic shapes inside an axis-aligned box.
@@ -5406,11 +5693,17 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             bounds_min: Minimum corner [x, y, z] in cm; default [0, 0, 0].
             bounds_max: Maximum corner [x, y, z] in cm; default
                 [1000, 1000, 500].
+            physics_props: Make the props physics-ready: Movable,
+                PhysicsActor collision and simulating physics, so they fall
+                and take forces once the simulation starts. False leaves
+                them Movable with the mesh's BlockAll collision, not
+                simulating.
 
         Returns:
             Dict with actors_spawned (actor paths in spawn order),
-            total_spawned, scene_type, seed, tag (this call's own tag) and
-            folder; a SpawnError envelope, with nothing left in the level, when
+            total_spawned, scene_type, seed, tag (this call's own tag),
+            folder and physics_props (how many props were made
+            physics-ready); a SpawnError envelope, with nothing left in the level, when
             a spawn failed (``details.actors_left`` lists any actor rollback
             could not remove); or a PIEActive envelope while Play In Editor
             runs, when Unreal's editor spawns nothing.
@@ -5422,8 +5715,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         plan = plan_scene(scene_type, parameters, bounds_min, bounds_max)
         generation = new_generation()
         tag, folder = plan.tag(generation), plan.folder(generation)
+        pieces = [dict(piece.spawn_args(), physics=bool(physics_props and piece.movable)) for piece in plan.pieces]
         args = {
-            "pieces": [piece.spawn_args() for piece in plan.pieces],
+            "pieces": pieces,
             "folder": folder,
             "tags": ["simul_procedural", tag],
             "transaction": f"simul: generate {plan.scene_type} scene",
@@ -5443,6 +5737,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "seed": plan.seed,
             "tag": tag,
             "folder": folder,
+            "physics_props": sum(1 for piece in pieces if piece["physics"]),
         }
 
     async def get_actor_by_semantic_label(
