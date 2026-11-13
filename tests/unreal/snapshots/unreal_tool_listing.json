@@ -134,7 +134,7 @@
   {
    "name": "execute_unreal_script",
    "title": "Execute Unreal Script",
-   "description": "Execute arbitrary Python code inside the Unreal Engine editor. Use for operations not covered by other tools. The code runs via PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return structured data. UE 5.7 hazard: do not leave a reference to an unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) in a reference cycle; a later garbage collection, including the editor's own on autosave, crashes the editor. Call them inline. For granular CLI operations see: simul unreal --help",
+   "description": "Execute arbitrary Python code inside the Unreal Engine editor. Use for operations not covered by other tools. The code runs via PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return structured data. Each call starts in a fresh namespace with unreal imported, and every name it binds is discarded when it ends, returned or raised: nothing carries over to the next call (pass values back in as code), and a callback it registers must import what it uses inside itself. Never keep an unreal package or world, or an object that refers to one, in sys.modules, a module attribute or a registered callback: the next map change aborts the editor. UE 5.7 hazard: do not leave a reference to an unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) in a reference cycle (a class attribute or a method's default argument puts it in one); a later garbage collection, including the editor's own on autosave, crashes the editor. Call them inline. For granular CLI operations see: simul unreal --help",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2274,7 +2274,7 @@
   {
    "name": "batch_unreal_operations",
    "title": "Batch Unreal Operations",
-   "description": "Execute several Remote Control requests in one HTTP call, in order. Each result is Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has error and error_type. Operations without a RequestId are numbered for you.",
+   "description": "Execute several Remote Control requests in one HTTP call, in order. Each result is Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has error and error_type. Operations without a RequestId are numbered for you. Python run through PythonScriptLibrary gets a fresh namespace per call, as in execute_unreal_script; an ExecuteConsoleCommand of a py command is refused (ValidationError).",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
