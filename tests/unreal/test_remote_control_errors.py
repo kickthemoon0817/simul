@@ -38,6 +38,10 @@ from simul.config import Settings
 
 CUBE = "/Game/Maps/Main.Main:PersistentLevel.StaticMeshActor_1"
 
+#: A Remote Control property write: a mutation, so it is sent once.
+WRITE_TAGS = {"objectPath": CUBE, "propertyName": "Tags", "propertyValue": {"Tags": ["a"]},
+              "access": "WRITE_TRANSACTION_ACCESS"}
+
 
 def _settings(port: int, **unreal: Any) -> Settings:
     base = Settings()
@@ -266,7 +270,7 @@ async def test_remote_control_refusals_keep_their_message(status: int, message: 
 
     async with editor(handler, max_retries=0) as session:
         with pytest.raises(UnrealError) as raised:
-            await session.set_actor_property(CUBE, "Tags", '["a"]')
+            await session._http_put("/remote/object/property", WRITE_TAGS)
 
     error = raised.value
     assert error.error_type == error_type
@@ -300,7 +304,7 @@ async def test_a_mutation_answered_with_5xx_is_not_retried_and_says_so() -> None
 
     async with editor(handler, max_retries=3) as session:
         with pytest.raises(UnrealError) as raised:
-            await session.set_actor_property(CUBE, "Tags", '["a"]')
+            await session._http_put("/remote/object/property", WRITE_TAGS)
 
     assert raised.value.error_type == "EngineError"
     assert calls == ["/remote/object/property"]
@@ -333,7 +337,7 @@ async def test_a_read_timeout_and_a_mutation_timeout_are_told_apart() -> None:
         with pytest.raises(UnrealTimeoutError) as read:
             await session.describe_object(CUBE)
         with pytest.raises(UnrealTimeoutError) as write:
-            await session.set_actor_property(CUBE, "Tags", '["a"]')
+            await session._http_put("/remote/object/property", WRITE_TAGS)
 
     assert str(read.value) == "Remote Control did not answer PUT /remote/object/describe within 0.2s"
     assert "may still apply the request" in str(write.value)
@@ -366,10 +370,39 @@ async def test_an_editor_that_drops_the_connection_may_have_crashed() -> None:
         raise ConnectionResetError
 
     async with editor(handler, max_retries=0) as session:
-        with pytest.raises(UnrealConnectionError) as raised:
-            await session.set_actor_property(CUBE, "Tags", '["a"]')
+        with pytest.raises(UnrealConnectionError) as read:
+            await session._http_get("/remote/info")
+        with pytest.raises(UnrealConnectionError) as write:
+            await session._http_put("/remote/object/property", WRITE_TAGS)
 
-    assert "may have crashed" in str(raised.value)
+    assert str(read.value).endswith("it may have crashed or be shutting down")
+    # A change may have run before the connection dropped: the editor did
+    # not necessarily crash, and the change is not necessarily lost.
+    assert "whether the request ran is unknown: check the editor's state before retrying" in str(write.value)
+    assert "may also have crashed" in str(write.value)
+
+
+@pytest.mark.asyncio
+async def test_a_mutation_whose_answer_is_lost_is_sent_once() -> None:
+    """aiohttp re-sent a PUT when the connection dropped, running the mutation twice."""
+    received: List[str] = []
+
+    async def handler(request: web.Request) -> web.Response:
+        received.append(request.path)
+        request.transport.close()
+        raise ConnectionResetError
+
+    async with editor(handler, max_retries=3) as session:
+        with pytest.raises(UnrealConnectionError):
+            await session._http_put("/remote/object/property", WRITE_TAGS)
+        writes = list(received)
+        received.clear()
+        with pytest.raises(UnrealConnectionError):
+            await session._http_get("/remote/info")
+
+    assert writes == ["/remote/object/property"]
+    # A read is retried, by the session's own policy: once plus max_retries.
+    assert received == ["/remote/info"] * 4
 
 
 # -- U1-07: a tool script's SimulNotFound is NotFoundError ---------------------

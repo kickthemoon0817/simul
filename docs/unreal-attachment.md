@@ -56,7 +56,12 @@ way, with `error` saying to set `UNREAL__PASSPHRASE`. `ping_unreal` and
 `unreal_health_check` apply the same rule: Remote Control answered, so
 `reachable` is true, and the call fails with `error_type: AuthenticationError`
 and that `error` (`unreal_health_check`'s deprecated `connected` stays false).
-A scan leaves out ports where nothing answered, except the active endpoint. A
+A scan leaves out ports where nothing answered, except the active endpoint and
+an editor too busy to answer. An editor that accepts the connection but does
+not answer within the timeout is busy: it is running a script, loading or
+compiling. It is listed with `reachable` false and `error` saying so, and
+`ping_unreal` and `unreal_health_check` report it with `busy: true` and
+`error_type: InstanceBusy`. A
 port whose probe never left this machine (out of file descriptors or local
 ports, or a host name that does not resolve) is not dropped silently:
 `warnings` names it, since an editor there would be missing.
