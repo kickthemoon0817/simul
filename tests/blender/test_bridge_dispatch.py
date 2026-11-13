@@ -6,6 +6,7 @@ import importlib.util
 import json
 import socket
 import sys
+import threading
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -46,8 +47,12 @@ def bridge_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     bpy.ops = SimpleNamespace(ed=SimpleNamespace(undo_push=undo_push))  # type: ignore[attr-defined]
     handlers = ModuleType("bpy.app.handlers")
     handlers.persistent = lambda fn: fn  # type: ignore[attr-defined]
+    handlers.load_post = []  # type: ignore[attr-defined]
     app = ModuleType("bpy.app")
     app.handlers = handlers  # type: ignore[attr-defined]
+    app.timers = SimpleNamespace(  # type: ignore[attr-defined]
+        register=Mock(), unregister=Mock(), is_registered=Mock(return_value=False)
+    )
     bpy.app = app  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "bpy", bpy)
     monkeypatch.setitem(sys.modules, "bpy.app", app)
@@ -96,6 +101,12 @@ def _request(bridge: Any, **extra: Any) -> Dict[str, Any]:
     }
 
 
+def _framed(bridge: Any, request: Dict[str, Any]) -> bytes:
+    """``request`` as the client sends it: protocol and token first, then the rest."""
+    first = {"protocol": request.get("protocol", PROTOCOL_VERSION), "token": request.get("token", bridge.token)}
+    return BridgeWire.encode({**first, **request})
+
+
 def test_stale_client_protocol_is_named_with_the_fix(
     bridge_module: Any, tmp_path: Path
 ) -> None:
@@ -137,7 +148,7 @@ def test_unencodable_result_still_gets_a_reply(
     monkeypatch.setattr(
         bridge,
         "dispatch",
-        lambda request: {"request_id": "r1", "success": True, "result": {"x": float("nan")}},
+        lambda request, on_start=None: {"request_id": "r1", "success": True, "result": {"x": float("nan")}},
     )
     server, client = socket.socketpair()
     try:
@@ -145,7 +156,7 @@ def test_unencodable_result_still_gets_a_reply(
         bridge.listener = Mock(accept=Mock(side_effect=BlockingIOError))
         pending = bridge_module.PendingConnection(server, time.monotonic() + 5)
         bridge.connections.append(pending)
-        client.sendall(json.dumps({"request_id": "r1"}).encode() + b"\n")
+        client.sendall(_framed(bridge, {"request_id": "r1"}))
         for _ in range(5):
             bridge.poll()
             if not bridge.connections:
@@ -625,6 +636,544 @@ def test_an_unclassified_operation_is_recorded_rather_than_lost(bridge_module: A
     assert bridge_module.undo_step_name("new_operation", {}) == "simul: new_operation"
 
 
+# ---------------------------------------------------------------------------
+# Requests wait their turn instead of being dropped (B1-09, M16)
+# ---------------------------------------------------------------------------
+
+
+class _QueueSession:
+    """Records the operations it runs, in order; ``during`` runs inside ``slow``."""
+
+    calls: list = []
+    during: Any = None
+
+    def __init__(self, **kwargs: Any) -> None:
+        pass
+
+    def get_frame(self) -> Dict[str, Any]:
+        self.calls.append("get_frame")
+        return {"frame": len(self.calls)}
+
+    def get_file_info(self) -> Dict[str, Any]:
+        self.calls.append("get_file_info")
+        return {"file_path": ""}
+
+    def get_viewport_info(self) -> Dict[str, Any]:
+        """The slow one: whatever ``during`` does happens while it runs."""
+        self.calls.append("slow")
+        hook = _QueueSession.during
+        if hook is not None:
+            hook()
+        return {"done": True}
+
+
+class _Wire:
+    """A bridge on a real loopback listener, and the clients that talk to it."""
+
+    def __init__(self, module: Any, bridge: Any, tmp_path: Path) -> None:
+        self.module = module
+        self.bridge = bridge
+        self.tmp_path = tmp_path
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(socket.SOMAXCONN)
+        self.listener.setblocking(False)
+        bridge.listener = self.listener
+        self.clients: list = []
+
+    def request(self, method: str, request_id: str, **extra: Any) -> bytes:
+        """One whole request, framed as the client frames it."""
+        return _framed(
+            self.bridge,
+            _operation_request(self.bridge, self.tmp_path, method, request_id=request_id, **extra),
+        )
+
+    def send(self, method: str, request_id: str, **extra: Any) -> socket.socket:
+        """Connect and send one whole request; the bridge reads it when polled."""
+        client = self.connect()
+        client.sendall(self.request(method, request_id, **extra))
+        # Loopback delivery can trail send() a little (seen on macOS).
+        time.sleep(0.05)
+        return client
+
+    def connect(self) -> socket.socket:
+        client = socket.create_connection(self.listener.getsockname(), timeout=5)
+        self.clients.append(client)
+        return client
+
+    def poll(self, times: int = 1) -> None:
+        for _ in range(times):
+            assert self.bridge.poll() in (0.01, 0.05)
+
+    def poll_until(self, condition: Any, attempts: int = 200) -> bool:
+        """Poll until ``condition()``; loopback delivery is not instantaneous."""
+        for _ in range(attempts):
+            self.poll()
+            if condition():
+                return True
+            time.sleep(0.005)
+        return False
+
+    @staticmethod
+    def lines(client: socket.socket, count: int = 1) -> list:
+        """Read ``count`` newline-terminated messages from a client."""
+        buffer = b""
+        while buffer.count(b"\n") < count:
+            chunk = client.recv(65536)
+            assert chunk, f"connection closed after {buffer!r}"
+            buffer += chunk
+        return [json.loads(line) for line in buffer.split(b"\n")[:count]]
+
+    def close(self) -> None:
+        for client in self.clients:
+            client.close()
+        self.bridge.connections.clear()
+        self.listener.close()
+
+
+@pytest.fixture
+def wire(bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setattr(bridge_module, "BlenderRuntimeSession", _QueueSession)
+    monkeypatch.setattr(_QueueSession, "calls", [])
+    monkeypatch.setattr(_QueueSession, "during", None)
+    connected = _Wire(bridge_module, _bridge(bridge_module, tmp_path), tmp_path)
+    yield connected
+    connected.close()
+
+
+class _Clock:
+    """Stands in for the bridge's ``time`` module, with a monotonic clock tests move."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    @staticmethod
+    def time() -> float:
+        return time.time()
+
+
+def test_requests_that_arrive_together_all_get_answers_in_order(wire: Any) -> None:
+    """B1-09: of six calls sent beside a slow script, five failed with Errno 54.
+
+    The bridge held 8 connections and dropped the rest unread; now it holds
+    them all, and runs one operation per poll, oldest first.
+    """
+    clients = [wire.send("get_frame", f"r{index}") for index in range(12)]
+    assert wire.poll_until(lambda: not wire.bridge.connections and len(_QueueSession.calls) == 12)
+
+    for index, client in enumerate(clients):
+        [reply] = wire.lines(client)
+        assert reply["request_id"] == f"r{index}"
+        assert reply["success"] is True, reply
+    assert _QueueSession.calls == ["get_frame"] * 12
+
+
+def test_one_operation_runs_per_poll_so_blender_handles_events_between(
+    wire: Any,
+) -> None:
+    first, second = wire.send("get_frame", "a"), wire.send("get_frame", "b")
+    wire.poll()
+    assert _QueueSession.calls == ["get_frame"]
+    wire.poll()
+    assert _QueueSession.calls == ["get_frame", "get_frame"]
+    assert wire.lines(first)[0]["result"] == {"frame": 1}
+    assert wire.lines(second)[0]["result"] == {"frame": 2}
+
+
+def test_a_refused_request_does_not_hold_up_the_next(wire: Any) -> None:
+    refused = wire.send("get_frame", "bad", token="wrong")
+    accepted = wire.send("get_frame", "good")
+    wire.poll()
+    assert wire.lines(refused)[0]["error_type"] == "AuthenticationError"
+    assert wire.lines(accepted)[0]["success"] is True
+
+
+def test_a_request_behind_a_long_operation_is_still_read(
+    wire: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1-09: each connection had 5 s from accept, then was closed unread.
+
+    Calls sent beside a 7 s script were accepted with it and dropped once it
+    finished. A minute spent in another operation does not count against a
+    waiting request, or against one still arriving: the bridge could not read
+    then.
+    """
+    clock = _Clock()
+    monkeypatch.setattr(wire.module, "time", clock)
+    _QueueSession.during = lambda: setattr(clock, "now", clock.now + 60)
+    slow = wire.send("get_viewport_info", "slow")
+    waiting = wire.send("get_file_info", "waiting")
+    arriving = wire.connect()
+    request = wire.request("get_frame", "late")
+    arriving.sendall(request[:120])
+    time.sleep(0.05)
+    wire.poll()
+    assert wire.lines(slow)[0]["result"] == {"done": True}
+    arriving.sendall(request[120:])
+    assert wire.poll_until(lambda: len(_QueueSession.calls) == 3)
+
+    assert wire.lines(waiting)[0]["result"] == {"file_path": ""}
+    assert wire.lines(arriving)[0]["result"] == {"frame": 3}
+    assert _QueueSession.calls == ["slow", "get_file_info", "get_frame"]
+
+
+def test_a_large_request_is_read_while_its_bytes_keep_coming(
+    wire: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M16: a 26.9 MB mesh got Broken pipe; reading had 5 s and 64 KiB per poll.
+
+    A request is dropped only after IDLE_SECONDS without a byte, however long
+    the whole takes to arrive (up to REQUEST_SECONDS).
+    """
+    clock = _Clock()
+    monkeypatch.setattr(wire.module, "time", clock)
+    client = wire.connect()
+    request = wire.request("get_frame", "big")
+    # Polled every 0.2 s, too often to count as Blender being busy, for longer
+    # in all than IDLE_SECONDS.
+    pieces = [request[i : i + 7] for i in range(0, len(request), 7)]
+    assert wire.module.IDLE_SECONDS < len(pieces) * 0.2 < wire.module.REQUEST_SECONDS
+    for piece in pieces:
+        client.sendall(piece)
+        time.sleep(0.002)
+        wire.poll()
+        clock.now += 0.2
+    assert wire.poll_until(lambda: _QueueSession.calls == ["get_frame"])
+
+    assert wire.lines(client)[0]["result"] == {"frame": 1}
+
+
+def _trickle(wire: Any, clock: Any, client: socket.socket, data: bytes, every: float) -> None:
+    """Send ``data`` a byte every ``every`` seconds, polling every 0.2 s in between.
+
+    The bridge polls all along, so the waits count against the client, not
+    as Blender being busy.
+    """
+    for byte in data:
+        client.sendall(bytes([byte]))
+        time.sleep(0.002)
+        for _ in range(max(1, round(every / 0.2))):
+            wire.poll()
+            clock.now += 0.2
+        if not wire.bridge.connections or wire.bridge.connections[0].discarding:
+            return
+
+
+def test_an_authenticated_request_that_never_ends_is_refused_at_its_deadline(
+    wire: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review: one byte every few seconds renewed the idle timer for ever."""
+    clock = _Clock()
+    monkeypatch.setattr(wire.module, "time", clock)
+    client = wire.connect()
+    request = wire.request("get_frame", "slowloris")
+    client.sendall(request[: len(wire.bridge._prefix) + 5])
+    time.sleep(0.05)
+    wire.poll()
+    _trickle(wire, clock, client, request[len(wire.bridge._prefix) + 5 : -1], 3.0)
+    [reply] = wire.lines(client)
+
+    assert reply["error_type"] == "TimeoutError"
+    assert reply["details"] == {"code": "request_timeout", "executed": False}
+    assert _QueueSession.calls == []
+
+
+def test_a_connection_that_does_not_authenticate_in_time_is_closed(
+    wire: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(wire.module, "time", clock)
+    client = wire.connect()
+    _trickle(wire, clock, client, wire.bridge._prefix[:-1], 0.2)
+
+    assert wire.bridge.connections == []
+    assert client.recv(10) == b""
+
+
+def test_an_idle_connection_is_dropped(wire: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(wire.module, "time", clock)
+    client = wire.connect()
+    client.sendall(wire.bridge._prefix)
+    time.sleep(0.05)
+    wire.poll()
+    assert wire.bridge.connections and wire.bridge.connections[0].authenticated
+    # Polled all along: the client, not Blender, is idle.
+    for _ in range(int(wire.module.IDLE_SECONDS / 0.2) + 2):
+        clock.now += 0.2
+        wire.poll()
+
+    assert wire.bridge.connections == []
+    assert client.recv(10) == b""
+
+
+@pytest.mark.parametrize(
+    ("data", "error_type", "code"),
+    [
+        (b'{"request_id": "r1", "token": "', "BridgeProtocolError", "protocol_mismatch"),
+        (b'{"protocol": 3, "token": "', "BridgeProtocolError", "protocol_mismatch"),
+        (None, "AuthenticationError", "unauthenticated"),
+    ],
+    ids=["older-client", "other-protocol", "wrong-token"],
+)
+def test_an_unauthenticated_request_is_refused_from_its_first_bytes(
+    wire: Any, data: Optional[bytes], error_type: str, code: str
+) -> None:
+    """Review: tokenless 31 MiB lines were read, decoded and held, 21 times their size.
+
+    The protocol and token come first, so the bridge refuses after a few
+    dozen bytes and reads the rest only to drop it.
+    """
+    if data is None:
+        data = wire.bridge._prefix[:-10] + b'xxxxxxxxx"'
+    client = wire.connect()
+    # More than the socket buffers hold, so it is sent while the bridge reads.
+    sender = threading.Thread(target=client.sendall, args=(data + b"[]," * 300_000,))
+    sender.start()
+    try:
+        assert wire.poll_until(lambda: bool(wire.bridge.connections) and wire.bridge.connections[0].discarding)
+        assert wire.poll_until(lambda: not sender.is_alive())
+    finally:
+        sender.join(timeout=5)
+    [reply] = wire.lines(client)
+
+    assert reply["request_id"] is None
+    assert reply["error_type"] == error_type
+    assert reply["details"] == {"code": code, "executed": False}
+    assert wire.bridge._buffered() == 0
+    assert _QueueSession.calls == []
+
+
+def test_waiting_requests_are_held_undecoded(wire: Any) -> None:
+    """Only the request being answered is decoded; the others wait as their bytes."""
+    first = wire.send("get_frame", "first")
+    second = wire.send("get_frame", "second")
+    wire.poll()
+    waiting = [p for p in wire.bridge.connections if p.ready]
+    assert len(waiting) == 1 and waiting[0].request is None
+    assert waiting[0].line.startswith(wire.bridge._prefix)
+    wire.poll()
+    assert wire.lines(first)[0]["success"] and wire.lines(second)[0]["success"]
+
+
+def test_request_data_past_the_budget_is_refused_as_busy(
+    wire: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review: 64 connections could each hold 32 MiB, decoded, until their turn."""
+    monkeypatch.setattr(wire.module, "BUFFER_BUDGET", 4000)
+    first = wire.connect()
+    first.sendall(wire.request("get_frame", "first")[:-1] + b" " * 3000)
+    time.sleep(0.05)
+    wire.poll()
+    second = wire.connect()
+    second.sendall(wire.request("get_frame", "second")[:-1] + b" " * 3000)
+    assert wire.poll_until(lambda: any(p.discarding for p in wire.bridge.connections))
+    [busy] = wire.lines(second)
+
+    assert busy["request_id"] is None
+    assert busy["error_type"] == "InstanceBusy"
+    assert busy["details"] == {"code": "bridge_busy", "executed": False}
+    # Alone, a request may use the whole budget: the first one completes.
+    first.sendall(b"\n")
+    assert wire.poll_until(lambda: _QueueSession.calls == ["get_frame"])
+    assert wire.lines(first)[0]["success"] is True
+
+
+def test_a_full_bridge_gives_an_unauthenticated_connection_up_for_a_new_one(
+    wire: Any,
+) -> None:
+    """Review: 64 tokenless connections trickling bytes made a real get_frame fail."""
+    idle = [wire.connect() for _ in range(wire.module.MAX_CONNECTIONS)]
+    for client in idle:
+        client.sendall(b'{"protocol": ')
+    time.sleep(0.05)
+    wire.poll()
+    assert len(wire.bridge.connections) == wire.module.MAX_CONNECTIONS
+    client = wire.send("get_frame", "real")
+    assert wire.poll_until(lambda: _QueueSession.calls == ["get_frame"])
+
+    assert wire.lines(client)[0]["success"] is True
+    assert len(wire.bridge.connections) <= wire.module.MAX_CONNECTIONS
+    assert idle[0].recv(10) == b""
+
+
+def test_a_request_over_the_cap_gets_a_refusal_it_can_read(
+    wire: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing it unread reset the connection under a client still sending."""
+    monkeypatch.setattr(wire.module, "MAX_MESSAGE_BYTES", 1000)
+    client = wire.connect()
+    client.sendall(wire.bridge._prefix)
+    for _ in range(2):
+        client.sendall(b"x" * 3000)
+        time.sleep(0.05)
+        wire.poll(3)
+    [reply] = wire.lines(client)
+
+    assert reply["request_id"] is None
+    assert reply["success"] is False
+    assert reply["error_type"] == "PayloadTooLarge"
+    assert "not executed" in reply["error"]
+    assert reply["details"] == {"code": "request_too_large", "limit_bytes": 1000, "executed": False}
+    assert _QueueSession.calls == []
+    client.close()
+    assert wire.poll_until(lambda: not wire.bridge.connections)
+
+
+@pytest.mark.parametrize(
+    "rest", [b", not json\n", b', "x": ' + b"[" * 100_000 + b"\n"], ids=["garbage", "deeply-nested"]
+)
+def test_an_unparsable_request_gets_a_refusal_and_the_bridge_keeps_polling(
+    wire: Any, rest: bytes
+) -> None:
+    """A RecursionError from json.loads escaped poll, which in Blender stops its timer."""
+    client = wire.connect()
+    client.sendall(wire.bridge._prefix + rest)
+    time.sleep(0.05)
+    wire.poll(2)
+    [reply] = wire.lines(client)
+
+    assert reply["error_type"] == "BridgeProtocolError"
+    assert reply["details"] == {"code": "invalid_request", "executed": False}
+    assert _QueueSession.calls == []
+
+
+def test_a_failing_annotation_prune_does_not_stop_serving(
+    wire: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blender unregisters a timer that raises; a cosmetic step must not cost requests."""
+    monkeypatch.setattr(
+        wire.module.cursors, "prune", Mock(side_effect=RuntimeError("overlay broke"))
+    )
+    client = wire.send("get_frame", "served")
+    wire.poll(2)
+
+    assert wire.lines(client)[0]["success"] is True
+
+
+def test_the_start_is_acknowledged_before_the_operation_runs(wire: Any) -> None:
+    """With the start acknowledgement, a client knows whether a request it gave up on ran."""
+    seen: list = []
+    client = wire.send("get_viewport_info", "acked", ack=True)
+    # Waits for the acknowledgement while the operation runs; without one it times out.
+
+    def peek() -> None:
+        client.settimeout(2)
+        seen.append(client.recv(65536, socket.MSG_PEEK))
+
+    _QueueSession.during = peek
+    wire.poll()
+    client.settimeout(5)
+    ack, reply = wire.lines(client, 2)
+
+    assert ack == {"request_id": "acked", "started": True}
+    assert seen == [BridgeWire.encode(ack)]
+    assert reply["request_id"] == "acked" and reply["success"] is True
+
+
+class _PartialSocket:
+    """A socket whose send takes only a few bytes; ``sendall`` raises ``failure``."""
+
+    def __init__(self, failure: Optional[BaseException] = None) -> None:
+        self.failure = failure
+        self.sent = b""
+        self.blocking = False
+
+    def recv(self, size: int, flags: int = 0) -> bytes:
+        raise BlockingIOError
+
+    def send(self, data: bytes) -> int:
+        self.sent += data[:5]
+        return 5
+
+    def sendall(self, data: bytes) -> None:
+        if self.failure is not None:
+            raise self.failure
+        self.sent += data
+
+    def settimeout(self, value: float) -> None:
+        self.blocking = True
+
+    def setblocking(self, flag: bool) -> None:
+        self.blocking = flag
+
+
+@pytest.mark.parametrize("failure", [None, BrokenPipeError(32, "Broken pipe")])
+def test_a_partly_sent_acknowledgement_is_finished_or_the_operation_not_run(
+    bridge_module: Any, tmp_path: Path, failure: Optional[BaseException]
+) -> None:
+    """Review: a partial send of the acknowledgement still ran the operation."""
+    bridge = _bridge(bridge_module, tmp_path)
+    connection = _PartialSocket(failure)
+    pending = bridge_module.PendingConnection(connection, time.monotonic() + 5)
+    pending.request = {"request_id": "r", "ack": True}
+    ack = BridgeWire.encode({"request_id": "r", "started": True})
+    if failure is None:
+        bridge._acknowledge_start(pending)
+        assert connection.sent == ack
+        assert pending.outgoing == b""
+    else:
+        with pytest.raises(bridge_module.RequestAbandoned):
+            bridge._acknowledge_start(pending)
+    assert connection.blocking is False
+
+
+def test_the_discovery_record_advertises_the_start_acknowledgement(
+    bridge_module: Any, tmp_path: Path
+) -> None:
+    """Clients ask for acknowledgements only from an add-on that sends them."""
+    from simul.blender_bridge.protocol import START_ACK, BridgeFiles
+
+    bridge = _bridge(bridge_module, tmp_path)
+    bridge.start()
+    try:
+        record = BridgeFiles.read(bridge.discovery_path)
+    finally:
+        bridge.stop()
+    assert record["capabilities"] == [START_ACK]
+
+
+def test_a_refused_request_is_never_acknowledged(wire: Any) -> None:
+    client = wire.send("get_frame", "refused", ack=True, instance_id="other")
+    wire.poll()
+    [reply] = wire.lines(client)
+    assert reply["error_type"] == "ValueError"
+    assert reply["request_id"] == "refused"
+
+
+def test_a_request_whose_client_left_while_it_waited_never_runs(wire: Any) -> None:
+    """The client gave up (timed out and closed) while an earlier operation ran."""
+    slow = wire.send("get_viewport_info", "slow")
+    waiting = wire.send("get_frame", "gone")
+    # Closed while the slow one runs; the pause lets the close reach the bridge.
+    _QueueSession.during = lambda: (waiting.close(), time.sleep(0.05))
+    wire.poll(3)
+
+    assert wire.lines(slow)[0]["success"] is True
+    assert _QueueSession.calls == ["slow"]
+    assert wire.bridge.connections == []
+
+
+def test_a_request_whose_deadline_passed_while_it_waited_never_runs(
+    wire: Any,
+) -> None:
+    """Review: the refusal carried no details.executed, so the client could not tell."""
+    slow = wire.send("get_viewport_info", "slow")
+    late = wire.send("get_frame", "late", deadline=time.time() + 0.05)
+    _QueueSession.during = lambda: time.sleep(0.1)
+    wire.poll(3)
+
+    assert wire.lines(slow)[0]["success"] is True
+    [refused] = wire.lines(late)
+    assert refused["error_type"] == "TimeoutError"
+    assert "no operation was performed" in refused["error"]
+    assert refused["details"] == {"executed": False}
+    assert _QueueSession.calls == ["slow"]
+
+
 def test_stopping_the_bridge_removes_the_playback_handlers(
     bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -691,3 +1240,24 @@ def test_a_disabled_script_is_script_execution_disabled_over_the_bridge(
 
     assert reply["success"] is False
     assert reply["error_type"] == "ScriptExecutionDisabled"
+
+
+def test_a_declared_error_type_reaches_the_reply(
+    bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused pattern is a ValidationError in either mode, not its Python class."""
+    from simul.utils.regex_guard import RegexRefused
+
+    class Session:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def get_frame(self) -> Dict[str, Any]:
+            raise RegexRefused("name_pattern has trouble", "trouble")
+
+    monkeypatch.setattr(bridge_module, "BlenderRuntimeSession", Session)
+    bridge = _bridge(bridge_module, tmp_path)
+    reply = bridge.dispatch(_operation_request(bridge, tmp_path, "get_frame"))
+
+    assert reply["error_type"] == "ValidationError"
+    assert reply["details"] == {"code": "regex_backtracking", "construct": "trouble"}

@@ -39,6 +39,7 @@ from simul.adapters.unreal_runtime import (
 )
 from simul.config import Settings
 from simul.mcp.server import SimulMCPServer
+from simul.utils.regex_guard import RegexRefused
 
 PYTHON_LIBRARY = "/Script/PythonScriptPlugin.Default__PythonScriptLibrary"
 ACTOR_SUBSYSTEM = "/Script/UnrealEd.Default__EditorActorSubsystem"
@@ -881,6 +882,44 @@ def test_regex_mode_refuses_only_repeated_groups_that_can_split_a_tag(
     several ways tries every split of the tag: ^(\\w+)+_light$ takes over a
     second on a 26-character tag and doubles with each further character."""
     assert (_exponential_regex_construct(pattern) is not None) is refused
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "label",
+    [
+        # Review: the guard analysed these case-sensitively for 255 characters,
+        # while the editor compiles with IGNORECASE and tags reach 1023: A*a*A*x
+        # took 191 s on one tag, [A-Z]*[a-z]*[A-Z]*[a-z]*x 82 s.
+        "A*a*A*x",
+        "[A-Z]*[a-z]*[A-Z]*[a-z]*x",
+        ".*.*x",
+        ".*a.*a.*x",
+        r".*(.*)?(.*)?.*x",
+        r"[a-z]*[0-9]*[a-z]*[0-9]*[a-z]*x",
+    ],
+)
+async def test_semantic_label_regex_is_guarded_as_the_editor_searches_it(label: str) -> None:
+    session = UnrealRuntimeSession(Settings())
+    session._execute_python = AsyncMock()
+
+    with pytest.raises(RegexRefused) as refused:
+        await session.get_actor_by_semantic_label(label=label, match_mode="regex")
+    session._execute_python.assert_not_called()
+    assert refused.value.error_type == "ValidationError"
+    assert refused.value.details["code"] == "regex_backtracking"
+    assert "1023-character" in str(refused.value)
+    assert "contains mode" in str(refused.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", [r"^chair_\d+$", r".*leg.*", r"left.*front", r"^(?:left|right)_arm$"])
+async def test_semantic_label_regex_that_is_bounded_reaches_the_editor(label: str) -> None:
+    session = UnrealRuntimeSession(Settings())
+    session._execute_json_script = AsyncMock(return_value={"actors": []})
+
+    await session.get_actor_by_semantic_label(label=label, match_mode="regex")
+    session._execute_json_script.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
