@@ -39,6 +39,7 @@ from ._unreal_errors import (
     CONNECTION_ERROR,
     NOT_FOUND_ERROR,
     TIMEOUT_ERROR,
+    VALIDATION_ERROR,
     UnrealConnectionError,
     UnrealError,
     UnrealTimeoutError,
@@ -48,6 +49,7 @@ from ._unreal_errors import (
     script_not_found,
 )
 from ._unreal_procedural import new_generation, plan_scene
+from ._unreal_python import isolate, python_command
 from ._unreal_scripts import (
     ACTOR_COMPONENTS,
     ACTOR_EXISTS,
@@ -685,6 +687,13 @@ def _batch_requests(operations: Any) -> Tuple[List[Dict[str, Any]], Optional[str
         fields["Verb"] = verb.upper()
         if "Body" in fields and not isinstance(fields["Body"], dict):
             return [], f"operation {index}'s Body must be a JSON object"
+        try:
+            runs_python = python_command(url.split("?", 1)[0], fields.get("Body")) is not None
+        except ValueError as exc:
+            return [], f"operation {index}: {exc}"
+        if runs_python:
+            # In a namespace of its own, as every other Python call.
+            fields["Body"] = isolate(fields["Body"])
         shaped.append(fields)
     given = [fields["RequestId"] for fields in shaped if fields.get("RequestId") is not None]
     if len(set(given)) != len(given):
@@ -704,12 +713,11 @@ def _batch_requests(operations: Any) -> Tuple[List[Dict[str, Any]], Optional[str
 
 
 def _is_python_call(path: str, body: Optional[Dict[str, Any]]) -> bool:
-    """Whether a request runs Python in the editor (``ExecutePythonCommandEx``)."""
-    return (
-        path == "/remote/object/call"
-        and body is not None
-        and body.get("functionName") == "ExecutePythonCommandEx"
-    )
+    """Whether a request runs Python source in the editor (``_unreal_python.python_command``)."""
+    try:
+        return python_command(path, body) is not None
+    except ValueError:
+        return False
 
 
 def _not_sent(exc: BaseException) -> Optional[str]:
@@ -1207,7 +1215,17 @@ class UnrealRuntimeSession(LoggerMixin):
         Returns:
             Parsed JSON response as a dictionary.
         """
-        if self.settings.unreal.mode == "attached" and not _skip_attachment:
+        attached = self.settings.unreal.mode == "attached" and not _skip_attachment
+        try:
+            runs_python = python_command(path, body) is not None
+        except ValueError as exc:
+            raise UnrealError(str(exc), VALIDATION_ERROR) from exc
+        if runs_python:
+            # Every Python call, simul's and the caller's, runs in a namespace
+            # of its own that is dropped when it ends (_unreal_python), with
+            # the attachment check first in attached mode.
+            body = isolate(body or {}, self._attachment_guard() if attached else "")
+        elif attached:
             body = await self._guard_attachment(method, path, body)
         # Remote Control uses PUT even for arbitrary Python and actor mutations.
         # Once sent, a timeout cannot establish that the operation did not run.
@@ -1436,35 +1454,29 @@ class UnrealRuntimeSession(LoggerMixin):
             self._base_url = f"http://{self.host}:{self.port}"
         return self._attachment["target"]
 
+    def _attachment_guard(self) -> str:
+        """Source that raises unless the editor is still the attached one.
+
+        A Python call runs it first, in the same namespace and the same
+        execution as its code (``_unreal_python.isolate``).
+        """
+        from ._unreal_attach_scripts import EDITOR_STATE
+
+        target = self._load_attachment()
+        return EDITOR_STATE + f"_simul_editor.verify({target!r})\n"
+
     async def _guard_attachment(
         self,
         method: str,
         path: str,
         body: Optional[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        """Guard scripts in their execution call; preflight legacy HTTP operations."""
-        from ._unreal_attach_scripts import EDITOR_STATE
+        """Preflight a request that runs no Python against the saved attachment.
 
+        Python calls carry their check in the call itself (``_http_request``).
+        """
         target = self._load_attachment()
-        guard = EDITOR_STATE + f"_simul_editor.verify({target!r})\n"
-        is_python = (
-            path == "/remote/object/call"
-            and body is not None
-            and body.get("objectPath")
-            == "/Script/PythonScriptPlugin.Default__PythonScriptLibrary"
-            and body.get("functionName") == "ExecutePythonCommandEx"
-        )
-        if is_python:
-            parameters = dict(body.get("parameters", {}))
-            code = parameters.get("PythonCommand", "")
-            mode = parameters.get("ExecutionMode", "ExecuteFile")
-            if mode == "EvaluateStatement":
-                parameters["PythonCommand"] = f"(exec({guard!r}), eval({code!r}))[1]"
-            elif mode in {"ExecuteFile", "ExecuteStatement"}:
-                parameters["PythonCommand"] = f"exec({(guard + code)!r})"
-            else:
-                raise ValueError("Unsupported Unreal Python execution mode")
-            return {**body, "parameters": parameters}
+        guard = self._attachment_guard()
         if body and (
             body.get("functionName")
             in {"GetLevelViewportCameraInfo", "SetLevelViewportCameraInfo"}
