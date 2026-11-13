@@ -179,6 +179,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "get_unreal_simulation_status": (RO, True, True),
     "get_unreal_viewport_info": (RO, True, True),
     "import_unreal_usd": (DESTRUCTIVE, False, True),  # replace_existing replaces assets and actors
+    "import_unreal_asset": (DESTRUCTIVE, False, True),
     "list_unreal_actor_components": (RO, True, True),
     "list_unreal_actors": (RO, True, True),
     "list_unreal_instances": (RO, True, True),
@@ -187,6 +188,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "remesh_unreal_mesh": (DESTRUCTIVE, False, True),
     "search_unreal_assets": (RO, True, True),
     "set_unreal_actor_parent": (DESTRUCTIVE, True, True),
+    "save_unreal_assets": (DESTRUCTIVE, True, True),
     "set_unreal_actor_property": (DESTRUCTIVE, True, True),
     "set_unreal_actor_transform": (DESTRUCTIVE, True, True),
     "set_unreal_actor_visibility": (DESTRUCTIVE, True, True),

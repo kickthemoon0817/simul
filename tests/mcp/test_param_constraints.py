@@ -245,6 +245,7 @@ _PROSE_ONLY = {
     ("set_isaac_material_property", "property_name"),
     ("set_blender_object_mode", "mode"),
     ("assign_blender_material", "object_name"),
+    ("import_unreal_asset", "file_path"),
 }
 
 
