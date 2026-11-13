@@ -29,11 +29,17 @@ plus a notice).
   every entry once and always moves forward.
 - **Oversized entries.** An entry too large on its own is sent compacted to its
   identifying and small fields (`truncated_item`, `dropped_keys`), so the next
-  page starts after it.
+  page starts after it. A page that keeps all its entries, some compacted,
+  keeps the tool's `next_offset`, which is `null` on the last page.
+- **Bulk mappings.** A tool whose bulk is one mapping declares it
+  (`get_prim_info`'s `attributes`). That mapping is cut first, to its leading
+  entries, and named in `truncated_fields` with `returned`, `total`,
+  `first_omitted` and how to ask for the rest. The small fields and lists
+  beside it, such as the prim's `api_schemas`, arrive whole.
 - **Other lists.** Any other list cut to fit is listed in `truncated_fields` (or
   in `truncation` when the tool does not page), with `next_offset: "unchanged"`
   whenever the result is paged: its dropped entries will not come back on a
-  later page. The paged lists of each tool are declared in
+  later page. The paged lists and bulk mappings of each tool are declared in
   `simul.mcp.paged_results`.
 - **Hard limit.** Above 400 KB, the field carrying the excess is cut at any
   depth. A string becomes a `truncated_field` marker, and a list or mapping
@@ -69,6 +75,10 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   relationship as `{targets, authored}`, applied API schemas, and metadata:
   specifier, instanceable, composition arcs with `resolved`, variant sets
   and selections, the layers holding opinions, and other authored metadata.
+  Layers are named by their file path. When a prim's attributes exceed the
+  result budget, the leading ones that fit are sent and `truncated_fields`
+  says how many there are and where the cut fell. Narrow with
+  `attribute_filter` to read the rest.
   An array attribute carries its `length` and first `array_preview`
   elements (default 16, up to 10000), so a million-point mesh costs a few
   KB; `attribute_filter` takes glob patterns, `time_code` reads animated
@@ -91,6 +101,9 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   depth-first (path, type, depth, child count, API schemas), paged with
   `max_results`/`offset`. `include_properties` adds each prim's authored
   attributes and relationship targets, so a whole robot reads in one call.
+  The first page spends the tool's own rate-limit bucket. Each later page
+  (a nonzero `offset`) counts only against the per-agent ceiling, so walking
+  a large stage is not throttled page by page.
 - **Meshes.** `get_mesh_info` is computed with numpy over whole arrays (a
   million-vertex mesh in about 0.3 s). It reports normals from
   `primvars:normals` or `normals` (`normals_source`), `uv_sets`, and the
@@ -98,8 +111,12 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   `materialBind` subset's (also on the subset entry), plus a
   `physics_material` that carries `PhysicsMaterialAPI`. `surface_area`, `volume` and
   `bbox` are in the mesh's own space; `volume` is null unless the mesh is
-  closed, `surface_area` null for invalid topology, and `bbox` null without
-  points. Face areas use Newell's method, exact for planar faces, concave
+  closed and consistently oriented, `surface_area` null for invalid
+  topology, and `bbox` null without points. `consistently_oriented` says
+  whether the two faces sharing each edge run it in opposite directions. A
+  closed mesh with a flipped face reports `false`, with no volume, because
+  the divergence theorem over that winding gives a wrong number, and a
+  `note` says so. A prim that is not a Mesh is an `InvalidAssetType` error. Face areas use Newell's method, exact for planar faces, concave
   ones included. Faces listed in `holeIndices` add no area and leave their
   edges open. `time_code` reads a deforming mesh, and `points_time_samples`
   says whether it deforms. A mesh whose points or topology exist only as
@@ -111,11 +128,19 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   - `scene_size_meters` next to `scene_size`;
   - `has_animation` from an authored time range or time samples spanning
     more than one time (`time_sample_range`), with `duration_seconds` (time
-    codes divided by `timeCodesPerSecond`);
+    codes divided by `timeCodesPerSecond`). The sample range is in stage time
+    codes, as pxr composes them: each layer's samples are mapped through its
+    sublayer offset and the offset and scale of every reference or payload
+    that brings it in, and value clips through their `times` and `active`
+    (with or without a manifest). Mapping offsets costs the stage's arcs, not
+    its prims; finding clip sets reads each layer's prim specs once (about
+    0.25 s per 200,000 prims);
   - `warnings` for layers whose authored `upAxis` or `metersPerUnit` differs
     from the stage's (USD rescales and reorients nothing), one entry per
     mismatch and value with `layer_count` and up to 5 example `layers`;
     at most 10 groups, then a `MoreUnitMismatches` count;
+  - `inconsistently_wound_meshes` among the mesh totals: closed meshes
+    with a flipped face, whose volume is left out of `total_volume`;
   - `materials`, `root_prims` and their counts;
   - `(typeless)` as the type key of untyped prims.
 
@@ -150,7 +175,11 @@ parse error). The checks, in order:
   the bytes do not match the extension (text in a `.usdc`).
 - Composition: `MissingSublayer`, `MissingReference`, `MissingPayload`,
   `UnresolvedPrimPath`, and pxr's `UnresolvableDependency` for other asset
-  paths such as textures.
+  paths such as textures. For an Unreal content path in an asset value
+  (`/Engine/.../Name.Name`, as Unreal's USD exporter writes
+  `info:unreal:sourceAsset`), `UnresolvableDependency` and
+  `MissingSourceTypeInRegistry` are warnings, not errors: the path names an
+  object in Unreal's content, not a file.
 - Stage metadata: a dangling defaultPrim is an error; an unset defaultPrim,
   upAxis or metersPerUnit is a warning, since consumers fall back to Y up and
   centimeters.
@@ -163,7 +192,8 @@ parse error). The checks, in order:
 `load_usd_file` fails with `error_type: LoadError` and `details.reason` set
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
-them in `warnings`. `simul usd validate` runs the same checks and exits 1
+them in `warnings`, along with an `UnrealContentPath` entry for each Unreal
+content path the sandbox let through (none with the sandbox off). `simul usd validate` runs the same checks and exits 1
 when the file is invalid. A relative `file_path` resolves against
 `security.relative_path_base` (default: the server's working directory), and
 the result's `file_path` is the resolved path. A URL needs an asset resolver
@@ -198,7 +228,9 @@ changed nothing.
 Edit errors use the same types as the lookups above. Invalid input is a
 `ValidationError` whose `details.code` says which check failed
 (`InvalidPrimPath`, `UnknownPrimType`, `InvalidAttribute`,
-`InvalidTimeCode`). A missing stage or prim is a `NotFoundError`. A write
+`InvalidTimeCode`; `search_prims` reports a bad regular expression as
+`InvalidRegex`). A missing stage or prim is a `NotFoundError`, in
+`summarize_scene` too. A write
 that fails after the checks passed is an
 `EngineError` with `details.rolled_back: true`. A refusal that an explicit flag
 overrides is a `RefusedOperation` naming the flag in `details.override`, and
@@ -330,8 +362,10 @@ and unsaved edits are lost when the server exits.
 - **`reload_usd_stage`** rereads the root file and any changed sublayer or
   referenced file, each held to the sandbox first as above. Every file is
   read and checked before anything is reread, so a refusal leaves the stage
-  as it was, unsaved edits included. A changed sublayer or referenced file
-  that pxr cannot parse now is listed in `failed_files` with pxr's reason;
+  as it was, unsaved edits included. A root file that cannot be reread is
+  an `EngineError` with `details.code: ReloadFailed` (a failed save or
+  export says `SaveFailed`). A changed sublayer or referenced file that pxr
+  cannot parse now is listed in `failed_files` with pxr's reason instead;
   it keeps its previous content and stays in `changed_on_disk`. A load of a
   file that composes it lists a `FileNotReread` warning, and while the file
   stays the same a repeated load returns the same stage.
@@ -1152,7 +1186,10 @@ Behaviour worth knowing:
     reference, payload or clip) whose value is under `/Engine`, `/Game` or
     `/Script` and ends in `<Name>.<Name>` with no file extension, naming no
     file on disk. `@/Engine/x.usda@`, a relative path and another content
-    root (a plugin's) are refused like any path outside the sandbox.
+    root (a plugin's) are refused like any path outside the sandbox. The
+    rule lives in `CompositionSandbox`, so `load_usd_file` and
+    `validate_usd_file` accept the same exports (see
+    [configuration.md](configuration.md#file-sandbox)).
   - An import can leave engine or plugin packages modified in memory: on UE
     5.7.4 Interchange set `bUsedWithNanite` on its shared parent material
     `/InterchangeAssets/Materials/PBRSurfaceMaterial_MR`. Unreal does that on

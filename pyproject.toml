@@ -29,7 +29,11 @@ dependencies = [
     "fastmcp>=4,<5",
     "pydantic>=2.10",
     "pydantic-settings>=2.10",
-    "typer>=0.15",
+    # typer 0.26 swapped click for a vendored copy and 0.29 removed
+    # Option(click_type=); the CLI subclasses click's ParamTypes, so it
+    # stays on the click-based typer and declares click itself.
+    "typer>=0.15,<0.26",
+    "click>=8.1,<9",
     "rich>=14.0",
     "pyyaml>=6.0.2",
     "numpy>=2.0",

@@ -156,8 +156,11 @@ class TestMeshInfo:
     def test_non_mesh_is_named(self, usd_tools, mesh_stage: str) -> None:
         payload = usd_tools.call("get_mesh_info", stage_id=mesh_stage, prim_path="/World/NotAMesh")
 
-        assert payload["error_type"] == "NotFoundError"
+        # The prim exists; it is the wrong kind for the tool (m7).
+        assert payload["error_type"] == "InvalidAssetType"
         assert "Cube" in payload["error"]
+        assert payload["details"]["prim_type"] == "Cube"
+        assert payload["details"]["expected_type"] == "Mesh"
 
     def test_million_vertex_mesh_is_fast(self, usd_tools, tmp_path: Path) -> None:
         side = 1000

@@ -26,7 +26,7 @@ from ..usd import editing, stage_files
 from ..usd.editing import USDEditError
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
-from ..usd.sandbox import CompositionSandbox
+from ..usd.sandbox import CompositionSandbox, OutsidePath
 from ..usd.validation import (
     USDLoadError,
     check_usd_file,
@@ -62,6 +62,7 @@ MAX_STAGES_PER_OWNER = 32
 # Locks a save or export picks from by the path it writes.
 FILE_LOCK_STRIPES = 64
 SAVE_FAILED = editing.SAVE_FAILED
+RELOAD_FAILED = editing.RELOAD_FAILED
 INVALID_FILE_PATH = editing.INVALID_FILE_PATH
 
 
@@ -78,11 +79,15 @@ class _StageRecord:
             read: at the load or the last reload, and for the root file at
             the last save. A file that could not be reread keeps the stamp
             of the content still in use, so it stays changed on disk.
+        unreal_content: The Unreal content paths the composition sandbox
+            let through as editor objects rather than files, as of the load
+            or the last reload.
     """
 
     file_path: str
     owner: Optional[str]
     stamps: Dict[str, stage_files.Stamp] = field(default_factory=dict)
+    unreal_content: List[OutsidePath] = field(default_factory=list)
 
 
 class HeadlessUSDSession(LoggerMixin):
@@ -460,7 +465,10 @@ class HeadlessUSDSession(LoggerMixin):
             self._active_stages[stage_id] = stage
             self._bbox_caches[stage_id] = BBoxCache(stage)
             self._stage_records[stage_id] = _StageRecord(
-                file_path=file_path, owner=owner, stamps=self._stamps_in_use(stage, unread)
+                file_path=file_path,
+                owner=owner,
+                stamps=self._stamps_in_use(stage, unread),
+                unreal_content=sandbox.content_paths if sandbox is not None else [],
             )
         self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
         return stage_id
@@ -577,6 +585,25 @@ class HeadlessUSDSession(LoggerMixin):
         if reloaded and factory is not None:
             self._recheck_stages_using(reloaded, factory, skip=stage)
         return reloaded, unread
+
+    def unreal_content_paths(self, stage_id: str) -> List[OutsidePath]:
+        """
+        The Unreal content paths the sandbox let through for a loaded stage.
+
+        Each is an asset value shaped like ``/Engine/.../Name.Name`` that
+        names an editor object, not a file (see
+        ``simul.usd.sandbox.is_unreal_content_path``), as Unreal's USD
+        exporter writes one. Empty when the load ran without a sandbox.
+
+        Args:
+            stage_id: Stage identifier
+
+        Returns:
+            The paths, with the layer authoring each; empty for an unknown stage.
+        """
+        with self._registry:
+            record = self._stage_records.get(stage_id)
+            return list(record.unreal_content) if record is not None else []
 
     def _refresh_shared(
         self, stage: Usd.Stage, skip: Optional[Set[str]] = None
@@ -980,7 +1007,7 @@ class HeadlessUSDSession(LoggerMixin):
                 candidate = stage_files.open_candidate(root)
             except Exception as exc:
                 raise USDEditError(
-                    SAVE_FAILED,
+                    RELOAD_FAILED,
                     f"Reloading {record.file_path} failed: {editing.tf_error_reason(exc)}",
                     file_path=record.file_path,
                 ) from exc
@@ -1003,14 +1030,15 @@ class HeadlessUSDSession(LoggerMixin):
             raise
         except Exception as exc:
             raise USDEditError(
-                SAVE_FAILED,
+                RELOAD_FAILED,
                 f"Reloading {record.file_path} failed: {editing.tf_error_reason(exc)}",
                 file_path=record.file_path,
             ) from exc
         self._invalidate_bbox_cache(stage_id)
         if factory is not None:
+            checker = factory()
             try:
-                _checked(lambda: factory().check_stage(stage))
+                _checked(lambda: checker.check_stage(stage))
             except SandboxDenied:
                 self._drop(stage_id)
                 self.logger.warning(
@@ -1020,6 +1048,8 @@ class HeadlessUSDSession(LoggerMixin):
         stamps = self._stamps_in_use(stage, unread)
         with self._registry:
             record.stamps = stamps
+            if factory is not None:
+                record.unreal_content = checker.content_paths
         reloaded_files = sorted((set(changed) | set(reloaded) | {record.file_path}) - set(unread))
         self.logger.info(f"Reloaded USD stage {stage_id} (discarded unsaved edits: {dirty})")
         return {
@@ -1245,11 +1275,13 @@ class HeadlessUSDSession(LoggerMixin):
         """
         stage = self.get_stage(stage_id)
         if stage:
-            # Get the original file path if available
-            file_path = ""
-            if stage_id in self._active_stages:
-                root_layer = stage.GetRootLayer()
-                file_path = root_layer.identifier
+            # The file the stage was loaded from, not its private root layer's
+            # identifier (which carries the session's simul_stage argument).
+            with self._registry:
+                record = self._stage_records.get(stage_id)
+            file_path = record.file_path if record is not None else stage_files.public_identifier(
+                stage.GetRootLayer().identifier
+            )
 
             return self.summarizer.summarize_stage(
                 stage,
@@ -1375,10 +1407,12 @@ class HeadlessUSDSession(LoggerMixin):
                         "volume": mesh_info.volume,
                         "materials": mesh_info.materials,
                         "subsets": mesh_info.subsets,
-                        "bbox": {
+                        # None for a mesh without points, which has no bounds.
+                        "bbox": None if mesh_info.bbox is None else {
                             "min": list(mesh_info.bbox[0]),
                             "max": list(mesh_info.bbox[1]),
                         },
+                        "consistently_oriented": mesh_info.consistently_oriented,
                     }
                 except Exception as e:
                     self.logger.error(f"Error getting mesh info for {prim_path}: {e}")
