@@ -103,7 +103,8 @@ unless you configure that path yourself:
 | FastMCP's data directory | `fastmcp/` | `FASTMCP_HOME` |
 
 Directories are created when something is first written there, with mode
-`0700`. Commands that only read (`simul tools`, `info`, `validate-config`,
+`0700`; a directory that already exists keeps its mode (it may be one you
+share, such as `SIMUL_HOME=$HOME`). Commands that only read (`simul tools`, `info`, `validate-config`,
 `logs paths`) create nothing, and a server whose home directory is read-only
 still starts: point `SIMUL_HOME` at a writable directory and everything lands
 there. The variable is read when a process starts, so set it in the MCP
@@ -118,9 +119,10 @@ variable, so Blender must see the same `SIMUL_HOME` as the server (or set
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LOGGING__LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `LOGGING__FILE_PATH` | `$SIMUL_HOME/logs/simul.log` (`~/.simul/...`) | Text log (rotated daily, 14 days kept) |
-| `LOGGING__AUDIT_PATH` | `$SIMUL_HOME/logs/audit.jsonl` (`~/.simul/...`) | One JSON line per tool call |
+| `LOGGING__LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` for simul's loggers and the console; `--log-level` sets it per run. Third-party loggers keep their quieter level unless this one is stricter |
+| `LOGGING__FORMAT` | `detailed` | Console and text log format: `detailed`, `simple` (`LEVEL - logger - message`) or `json` (one object per line: `ts`, `level`, `logger`, `request_id`, `tool`, `msg`, ...) |
+| `LOGGING__FILE_PATH` | `$SIMUL_HOME/logs/simul.log` (`~/.simul/...`) | Text log (rotated daily, `LOGGING__RETENTION_DAYS` days kept; shared by every server on the machine) |
+| `LOGGING__AUDIT_PATH` | `$SIMUL_HOME/logs/audit.jsonl` (`~/.simul/...`) | One JSON line per tool call (see [Audit log](#audit-log)) |
 | `ISAAC_SIM__ENABLED` | `auto` | Register the Isaac Sim tools: `auto` on Linux and Windows only (elsewhere when `--backends` names `isaac`), `true` on any OS, `false` never; see [isaac-sim.md](isaac-sim.md#platforms) |
 | `ISAAC_SIM__SOCKET_PORT` / `ISAAC_SIM__BRIDGE_PORT` | `8226` / `8229` | Isaac Sim transports |
 | `ISAAC_SIM__SOCKET_PROTOCOL` | `auto` | `python_server` (6.0+) or `vscode` (5.x) skips the one-time probe |
@@ -378,9 +380,19 @@ They are local reads an agent issues once per prim while it inspects an
 asset, and the per-tool burst refused most of a prim-by-prim pass over a
 small robot. Every other tool, including `load_usd_file`,
 `validate_usd_file`, `summarize_scene` and the USD edit tools, spends from
-both buckets. Raise `SECURITY__REQUESTS_PER_MINUTE` and
-`SECURITY__BURST_SIZE`, or set `SECURITY__RATE_LIMITING_ENABLED=false` for a
-trusted single-agent setup, if a workflow needs more. An Unreal tool's own argument checks (such as
+both buckets.
+
+The defaults are meant to stop a runaway loop, not parallel work: one tool
+takes `burst_size` (10) calls at once and then `requests_per_minute` (60, one
+a second), and the agent's calls across every tool take
+`global_requests_per_minute` (600) with a burst of ten seconds' worth (100).
+An agent that fans one tool out in parallel (`get_isaac_prim_detail` on 50
+prims at once) gets 10 answers and 40 `RateLimitError`s, each with
+`retry_after_seconds`. For such agents raise the per-tool burst, for example
+`SECURITY__BURST_SIZE=50` (the per-agent ceiling still applies), or turn the
+limit off with `SECURITY__RATE_LIMITING_ENABLED=false` when the server has a
+single trusted client. Over HTTP every sessionless client has its own budget
+(see [Multi-agent claims](#multi-agent-claims)). An Unreal tool's own argument checks (such as
 `capture_unreal_viewport`'s format, `execute_unreal_script`'s mode, the
 all-or-none camera groups of `set_unreal_camera_view` and `control_unreal_ui`'s
 control and property names) run inside the shared envelope, so a call they
@@ -441,8 +453,16 @@ protocol has no session there, and the server cannot tell one such client
 from another. Every such client acts as the agent `anonymous`: it uses the
 default Isaac instance and finds every live claim held by someone else.
 `set_active_isaac_instance`, `claim_isaac_instance` and
-`release_isaac_instance` refuse it with `SessionRequired`, and all such
-clients share one rate-limit budget. Connect agents that need their own
+`release_isaac_instance` refuse it with `SessionRequired`. For its rate-limit
+budget and in the usage and audit logs it is named by its TCP peer,
+`anonymous@<host>:<port>`, which the network assigns and a client keeps while
+its connection stays open, so each client has its own per-tool budget (it
+used to be one budget for all of them). The ceiling across every tool
+(`global_requests_per_minute`) is kept per host, `anonymous@<host>`, so a
+client that reconnects for every request is throttled all the same. This is
+not a security boundary. A client
+may name itself for the logs with an `X-Simul-Agent` header, recorded as
+`anonymous:<label>`; the label decides nothing. Connect agents that need their own
 instance or claim with the handshake (for example `fastmcp.Client(url,
 mode="legacy")`) or over stdio. With a [bearer token](#network-transports-http-and-sse)
 configured, sessionless clients are authenticated, and since they all present
@@ -461,8 +481,60 @@ shows it, and by the session's default label otherwise.
 ## Usage statistics
 
 Every tool call is recorded in a persistent JSONL log
-(`~/.simul/logs/tool_usage.jsonl`), each row with the agent label and the
-session label it came in on. Agents read their own session's calls with
-`get_tool_usage_stats` (`scope="server"` adds per-tool counts across every
-session, never other sessions' records); operators read everything with
-`simul stats` and clear it with `simul stats --reset`.
+(`~/.simul/logs/tool_usage.jsonl`), each row with the agent label, the
+session label it came in on and the `request_id` its audit row carries. A
+call the client cancels is recorded too, with `cancelled: true` and
+`executed`, whether the engine ran it all the same: cancelling the request
+does not stop the engine. `executed` is `false` for a call still waiting for
+the instance (`error: "cancelled_before_start"`); `true` for an Isaac call,
+which keeps the instance until the engine is done, and then the row keeps
+the engine's own `success` and `error`; and `"unknown"` for a call whose
+request was already sent and that nothing waited for (Unreal, Blender:
+`error: "cancelled"`), so check the scene before retrying. Every field of a
+row is bounded (names and agent labels at 128 characters, the error at
+2 000, a string parameter at 256, a list or mapping parameter by its length
+past 1 KB), so a call with a huge argument writes a small row. The log is
+rotated at 10 MB into `tool_usage.jsonl.1` ... `.5` (the oldest is dropped),
+and `simul stats` streams the files, keeping only the records it shows. A
+`claim_isaac_instance` or `set_active_isaac_instance` `agent_id` is at most
+128 characters and a `purpose` at most 1 000. Agents read their own session's calls with `get_tool_usage_stats`
+(`scope="server"` adds per-tool counts across every session, never other
+sessions' records); operators read everything with `simul stats` and clear
+it, rotated copies included, with `simul stats --reset`.
+
+## Audit log
+
+`audit.jsonl` has one row per tool call, written as the call ends:
+
+```json
+{"ts": "...", "request_id": "3c34508323c0", "tool": "load_usd_file", "duration_ms": 1.2,
+ "status": "error", "error_type": "SandboxError", "agent_id": "robot-1", "session": "session-3b00cb8d6c8f"}
+```
+
+`status` is `ok`, `error` (with the envelope's `error_type`, and `reason`
+`rate_limited`, `instance_busy` or `instance_claimed` for a call refused
+before it ran) or `cancelled`, with `executed` as in the usage row; an
+exception that escaped the tool adds `error_class`. `request_id` matches the
+call's usage row and the `[request_id tool]` prefix of its lines in
+`simul.log`. Each field is cut at 128 characters.
+
+Every server on the machine writes the same `audit.jsonl` and `simul.log`.
+They rotate together: each record is written under a lock on
+`<file>.lock`, to the file at its path opened afresh, and a file last
+written on an earlier day is renamed to `<file>.<YYYY-MM-DD>` by whichever
+process writes first that day. (Python's timed rotation, used before, kept
+each process writing into the file it had open, so after the first midnight
+the other servers' rows went into the previous day's file and retention
+deleted them.) Dated copies older than `LOGGING__RETENTION_DAYS` days are
+deleted. `audit.jsonl` is also rotated at 10 MB within a day, and at most 30
+copies are kept. The lock and the rotation never cost a record: when the lock
+cannot be had (an NFS home without a lock daemon, a log directory where the
+lock file cannot be created) or another process holds it for more than
+50 ms, or a rotation fails, the record is appended to the file as it is,
+locking is skipped for 30 s, and one warning goes to stderr.
+
+Log files are private to the user: directories simul creates for them are
+0700 and every log, audit and usage file, rotated copies, lock files and
+`simul.json` included, is created 0600. Existing files the user owns,
+`tool_usage.jsonl` and its rotated copies included, are tightened to 0600; an
+existing directory keeps its mode.
