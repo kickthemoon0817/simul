@@ -20,6 +20,7 @@ import pytest
 from simul.adapters import blender_runtime
 from simul.config import Settings
 from simul.utils.errors import exception_message
+from tests.fakes import fake_app_handlers
 
 POLL_FAILED = (
     "Operator bpy.ops.rigidbody.object_add.poll() failed, context is incorrect"
@@ -82,9 +83,16 @@ def _session(
         frame_set=lambda frame: None,
     )
     fake = SimpleNamespace(
-        app=SimpleNamespace(version=(5, 0, 1), version_string="5.0.1", background=True),
+        app=SimpleNamespace(
+            version=(5, 0, 1),
+            version_string="5.0.1",
+            background=False,
+            handlers=fake_app_handlers(),
+        ),
         data=SimpleNamespace(
-            objects=_Objects(Cube=cube), filepath=str(tmp_path / "scene.blend")
+            objects=_Objects(Cube=cube),
+            filepath=str(tmp_path / "scene.blend"),
+            is_dirty=False,
         ),
         context=SimpleNamespace(
             scene=scene,
@@ -100,6 +108,12 @@ def _session(
     monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
     settings = Settings(security={"allowed_paths": [str(tmp_path)]})
     return blender_runtime.BlenderRuntimeSession(settings)
+
+
+def _play_from_rest(session: Any) -> Any:
+    """Play with nothing playing yet, so the only operator called is animation_play."""
+    blender_runtime.bpy.context.screen.is_animation_playing = False
+    return session.play_animation("play")
 
 
 class _NullContext:
@@ -189,7 +203,7 @@ def test_file_failures_name_the_resolved_path(
     [
         ("wm", "save_mainfile", lambda s: s.save_blend_file()),
         ("screen", "animation_cancel", lambda s: s.play_animation("stop")),
-        ("screen", "animation_play", lambda s: s.play_animation("play")),
+        ("screen", "animation_play", lambda s: _play_from_rest(s)),
         ("object", "effector_add", lambda s: s.add_force_field("WIND")),
         ("ptcache", "bake_from_cache", lambda s: s.bake_simulation(1, 10)),
         ("ptcache", "free_bake", lambda s: s.free_bake()),

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Tuple
 from aiohttp import web
 
 import simul
+from simul.adapters._unreal_python import unwrap
 
 SRC = str(Path(simul.__file__).resolve().parents[1])
 ACTOR = "/Game/Map.Map:PersistentLevel.PointLight_0"
@@ -44,7 +45,7 @@ def _printed(text: str) -> Dict[str, Any]:
 async def _remote_control(request: web.Request) -> web.Response:
     if request.method == "GET":
         return web.json_response({"HttpRoutes": []})
-    code = (await request.json())["parameters"]["PythonCommand"]
+    code = unwrap(await request.json())["parameters"]["PythonCommand"]
     if "simul: set actor transform" in code:
         payload = {
             "actor_path": ACTOR,

@@ -7,7 +7,9 @@ optional `bpy` Python module.
 
 from __future__ import annotations
 
+import ast
 import base64
+import bisect
 import difflib
 import io
 import json
@@ -37,11 +39,20 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Union,
     overload,
 )
 
 # The Blender add-on bundles these modules next to this one; simready_usd
 # imports pxr only when it is called.
+from ..utils.asset_references import (
+    UncheckableReferences,
+    blender_fbx_reads as _fbx_reads,
+    blender_gltf_reads as _gltf_reads,
+    blender_obj_reads as _obj_reads,
+    outside_references,
+)
+from ..utils.asset_references import resolve_ncase as _resolve_ncase  # noqa: F401 - re-exported for tests
 from ..utils.regex_guard import exponential_regex_construct
 from .simready_usd import COLLIDER_TYPES as SIMREADY_COLLIDER_TYPES
 from .simready_usd import author_simready_layer, usd_identifier
@@ -1011,244 +1022,392 @@ def _channel_name(data_path: str, index: int) -> str:
     return data_path if index < 0 else f"{data_path}[{index}]"
 
 
+# Blender's frame limits (MAXFRAME, MINAFRAME and MINFRAME in
+# DNA_scene_types.h): the current frame may be negative, a scene's frame range
+# may not. Blender clamps an assignment outside them without saying so: on
+# 5.0.1 frame_end = 2_000_000 left 1_048_574 and frame_start = -5 left 0.
+FRAME_LIMIT = 1_048_574
+SCENE_FRAME_MIN = 0
+
+
+def _check_frame(name: str, value: int, minimum: int) -> None:
+    """Refuse a frame Blender would clamp to another one."""
+    if not minimum <= value <= FRAME_LIMIT:
+        raise ValueError(
+            f"{name} ({value}) is outside Blender's range {minimum}..{FRAME_LIMIT}; "
+            "Blender would clamp it to the nearest end"
+        )
+
+
+def scene_fps(scene: Any) -> float:
+    """Frames per second as Blender plays them: ``render.fps / render.fps_base``.
+
+    NTSC rates keep the integer in ``fps`` and the divisor in ``fps_base``:
+    29.97 fps is 30 / 1.001.
+    """
+    return float(scene.render.fps) / float(scene.render.fps_base)
+
+
+#: What play_blender_animation accepts.
+PLAYBACK_ACTIONS = ("play", "reverse", "pause", "stop")
+
+# The playback play_animation started: its direction and the frame it started
+# from. Blender keeps neither where Python can read them (the screen's
+# animation timer data is not in RNA), and screen.animation_play toggles
+# playback instead of starting it. Whatever else starts or stops playback (the
+# user, a script) clears this through the animation_playback_pre and
+# animation_playback_post handlers, so a direction recorded here is never
+# stale.
+_playback: Dict[str, Any] = {}
+
+
+def _forget_playback(*_args: Any) -> None:
+    """A playback handler: whoever started or stopped playback, the record is void."""
+    _playback.clear()
+
+
+def _watch_playback() -> None:
+    """Have every playback start and stop clear ``_playback``, from now on."""
+    blender_module: Any = bpy
+    handlers = blender_module.app.handlers
+    # Persistent, so loading a file keeps the handlers.
+    handler = handlers.persistent(_forget_playback)
+    for name in ("animation_playback_pre", "animation_playback_post"):
+        hooks = getattr(handlers, name)
+        if handler in hooks:
+            continue
+        # A reloaded add-on defines the function anew; drop the old copy.
+        for stale in [
+            hook
+            for hook in hooks
+            if getattr(hook, "__module__", None) == __name__
+            and getattr(hook, "__name__", None) == _forget_playback.__name__
+        ]:
+            hooks.remove(stale)
+        hooks.append(handler)
+
+
+def stop_watching_playback() -> None:
+    """Remove the playback handlers ``_watch_playback`` added, and forget the record.
+
+    The handlers are persistent, so they outlive a file load; the add-on's
+    unregister calls this so they do not outlive the add-on.
+    """
+    _playback.clear()
+    if not BLENDER_AVAILABLE:
+        return
+    blender_module: Any = bpy
+    handlers = blender_module.app.handlers
+    for name in ("animation_playback_pre", "animation_playback_post"):
+        hooks = getattr(handlers, name)
+        for hook in [
+            hook
+            for hook in hooks
+            if hook is _forget_playback
+            or (
+                getattr(hook, "__module__", None) == __name__
+                and getattr(hook, "__name__", None) == _forget_playback.__name__
+            )
+        ]:
+            hooks.remove(hook)
+
+
+#: Keyframe.interpolation values; None keeps Blender's preference (Bezier by default).
+KEYFRAME_INTERPOLATIONS = (
+    "CONSTANT",
+    "LINEAR",
+    "BEZIER",
+    "SINE",
+    "QUAD",
+    "CUBIC",
+    "QUART",
+    "QUINT",
+    "EXPO",
+    "CIRC",
+    "BACK",
+    "BOUNCE",
+    "ELASTIC",
+)
+#: keyframe_insert's keytype values.
+KEYFRAME_TYPES = (
+    "KEYFRAME",
+    "BREAKDOWN",
+    "MOVING_HOLD",
+    "EXTREME",
+    "JITTER",
+    "GENERATED",
+)
+
+# The last step of a data path: a custom property (["name"]) or an attribute.
+_CUSTOM_PROPERTY_STEP = re.compile(
+    r"(?P<owner>.*)\[(?P<key>\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*')\]"
+)
+_ATTRIBUTE_STEP = re.compile(r"(?:(?P<owner>.+)\.)?(?P<name>[A-Za-z_]\w*)")
+
+
+def _property_owner(id_data: Any, data_path: str) -> Tuple[Any, str, bool]:
+    """Split ``data_path`` into the struct holding the property, its name and
+    whether it is a custom property: ``pose.bones["J1"].location`` is the pose
+    bone J1 and ``location``, ``["mass"]`` the ID itself and ``mass``.
+
+    Raises:
+        ValueError: When the path does not name a property of ``id_data``.
+    """
+    custom = _CUSTOM_PROPERTY_STEP.fullmatch(data_path)
+    attribute = None if custom else _ATTRIBUTE_STEP.fullmatch(data_path)
+    if custom is not None:
+        owner_path, name = custom["owner"], str(ast.literal_eval(custom["key"]))
+    elif attribute is not None:
+        owner_path, name = attribute["owner"] or "", attribute["name"]
+    else:
+        raise ValueError(f"'{data_path}' does not end in a property name")
+    owner = id_data.path_resolve(owner_path) if owner_path else id_data
+    if custom is not None:
+        if name not in owner.keys():
+            raise ValueError(f"'{data_path}': no custom property '{name}'")
+    elif not hasattr(owner, name):
+        raise ValueError(f"'{data_path}': no property '{name}'")
+    return owner, name, custom is not None
+
+
+def _like(current: Any, value: float) -> Any:
+    """``value`` as the property's element type: a bool or int property takes a whole number."""
+    if isinstance(current, (bool, int)):
+        if not float(value).is_integer():
+            raise ValueError(f"{value} is not a whole number, as the property needs")
+        return int(value)
+    return float(value)
+
+
+# F-modifiers that leave an F-curve's keys in effect, as Blender judges them
+# (BKE_fcurve_are_keyframes_usable); a generator only when it adds to the keys.
+_KEY_SAFE_MODIFIERS = frozenset({"CYCLES", "STEPPED", "NOISE"})
+_ADDITIVE_MODIFIERS = frozenset({"GENERATOR", "FNGENERATOR"})
+
+
+def _unkeyable(fcurve: Any) -> Optional[str]:
+    """Why Blender keys nothing on an F-curve, or None when it does.
+
+    keyframe_insert refuses a locked F-curve (or one in a locked group), a
+    sampled one, and one under an F-modifier, not muted or invalid, that
+    overrides its keys: on Blender 5.0.1 a LIMITS modifier did.
+    """
+    group = fcurve.group
+    if fcurve.lock or (group is not None and group.lock):
+        return "is locked"
+    if len(fcurve.sampled_points):
+        return "is sampled"
+    for modifier in reversed(list(fcurve.modifiers)):
+        if modifier.mute or not modifier.is_valid:
+            continue
+        if modifier.type in _KEY_SAFE_MODIFIERS:
+            continue
+        if modifier.type in _ADDITIVE_MODIFIERS and modifier.use_additive:
+            continue
+        return f"has a {modifier.type} F-modifier that overrides its keys"
+    return None
+
+
+class _KeyedProperty:
+    """The property (or element of it) a keyframe call keys, read and written through its owner.
+
+    Holds the value it had when looked up, so ``restore`` puts that back.
+
+    Raises:
+        ValueError: When the data path names no keyable property of the ID,
+            or ``index`` is not one of its elements.
+    """
+
+    def __init__(self, id_data: Any, data_path: str, index: int) -> None:
+        self.data_path = data_path
+        self.index = index
+        self.owner, self.name, self.custom = _property_owner(id_data, data_path)
+        current = self._read()
+        if isinstance(current, str):
+            raise ValueError(f"'{data_path}' is a text property, which has no keyframes")
+        try:
+            self.length: Optional[int] = len(current)
+        except TypeError:
+            self.length = None
+        if index >= 0:
+            if self.length is None:
+                raise ValueError(f"'{data_path}' is not an array; key it with index -1")
+            if not index < self.length:
+                raise ValueError(
+                    f"index {index} is out of range: '{data_path}' has {self.length} elements"
+                )
+        self.original = self._value()
+
+    @property
+    def elements(self) -> int:
+        """The channels one key of this property makes."""
+        return 1 if self.index >= 0 or self.length is None else self.length
+
+    def _read(self) -> Any:
+        return self.owner[self.name] if self.custom else getattr(self.owner, self.name)
+
+    def _assign(self, new: Any) -> None:
+        if self.custom:
+            self.owner[self.name] = new
+        else:
+            setattr(self.owner, self.name, new)
+
+    def _value(self) -> Any:
+        current = self._read()
+        if self.index >= 0:
+            return current[self.index]
+        return current if self.length is None else list(current)
+
+    def coerce(self, value: Union[float, List[float]]) -> Any:
+        """``value`` checked against the property: one number per keyed element."""
+        channel = _channel_name(self.data_path, self.index)
+        if self.index >= 0:
+            if isinstance(value, list):
+                raise ValueError(f"{channel} is one channel: pass one number as value")
+            return _like(self.original, value)
+        if self.length is None:
+            if isinstance(value, list):
+                raise ValueError(
+                    f"'{self.data_path}' is not an array: pass one number as value"
+                )
+            return _like(self.original, value)
+        if not isinstance(value, list) or len(value) != self.length:
+            raise ValueError(
+                f"'{self.data_path}' has {self.length} elements: pass {self.length} "
+                "numbers as value, or one number with an index"
+            )
+        return [_like(old, new) for old, new in zip(self.original, value)]
+
+    def write(self, coerced: Any) -> None:
+        """Write a value ``coerce`` returned."""
+        if self.index >= 0:
+            self._read()[self.index] = coerced
+        else:
+            self._assign(coerced)
+
+    def restore(self) -> None:
+        """Put back the value the property had when it was looked up."""
+        self.write(self.original)
+
+
+# The JSON bytes one page of keyframes or trajectory samples may take. The
+# server cuts a result above its 40 000-byte budget (DEFAULT_RESULT_BUDGET_BYTES
+# in simul.mcp.result_budget, which this add-on module cannot import) to a
+# prefix with a hint about parameters these tools do not have; a page stops
+# here instead and says where the next one starts. The margin covers the
+# reply's other fields and the server's envelope.
+RESULT_PAGE_BYTES = 32_000
+#: The server's result budget: a reply larger than this is cut.
+RESULT_BUDGET_BYTES = 40_000
+#: What a trajectory reply's fields besides its trajectories take, at most.
+TRAJECTORY_OTHER_BYTES = 1_500
+#: Most keys insert_keyframes takes in one call: frames times elements, over all channels.
+MAX_KEYFRAMES_PER_CALL = 10_000
+#: What a trajectory sample can report besides its frame.
+TRAJECTORY_FIELDS = (
+    "time",
+    "location",
+    "rotation_euler",
+    "rotation_quaternion",
+    "local_rotation",
+    "velocity",
+)
+#: Most objects and bones get_trajectories samples in one call.
+MAX_TRAJECTORY_TARGETS = 32
+# Bodies times frames of unbaked rigid-body simulation a trajectory steps
+# through unasked. On Blender 5.0.1 (an M-series Mac) a body-frame took about
+# 35 microseconds headless and 61 in a GUI Blender, so this is some 12 s
+# there: well inside the 30 s an attached call waits by default
+# (BLENDER__CONNECTION_TIMEOUT). 400 000 took 24 s in the GUI.
+TRAJECTORY_SIMULATION_BUDGET = 200_000
+# A rigid-body memory cache's info when it is up to date ("1,000 frames in
+# memory (1.2 MiB)."); an outdated one ends ", cache is outdated!".
+_CACHED_FRAMES = re.compile(r"\s*(\d[\d,]*) frames in memory \([^)]*\)\.")
+
+
+def _json_size(value: Any) -> int:
+    """Bytes of ``value`` as the server encodes a result (``json.dumps`` defaults)."""
+    return len(json.dumps(value))
+
+
+def _f32(value: float) -> float:
+    """``value`` as the shortest float that is the same 32-bit float.
+
+    Blender keeps keys, handles and transforms as 32-bit floats, which Python
+    prints with 17 digits (0.30000001192092896). The shortest decimal of the
+    same float32 (0.3) is as exact and half the size. A value computed in
+    double precision from such floats (a velocity) is rounded to float32,
+    which is all the precision its inputs had.
+    """
+    number = float(value)
+    if not math.isfinite(number) or abs(number) > 3.4e38:
+        return number
+    packed = struct.pack("<f", number)
+    for digits in range(6, 10):
+        candidate = float(f"{number:.{digits}g}")
+        if struct.pack("<f", candidate) == packed:
+            return candidate
+    return number
+
+
+def _f32s(values: Any) -> List[float]:
+    return [_f32(v) for v in values]
+
+
+_BONE_PATH = re.compile(r'pose\.bones\["((?:[^"\\]|\\.)*)"\]')
+
+
+def _bone_path(bone_name: str) -> str:
+    """The data path of a pose bone, as Blender writes it: ``pose.bones["Bone"]``."""
+    escaped = bone_name.replace("\\", "\\\\").replace('"', '\\"')
+    return f'pose.bones["{escaped}"]'
+
+
+def _bone_of(data_path: str) -> Optional[str]:
+    """The pose bone a data path animates, or None for the object's own property."""
+    match = _BONE_PATH.match(data_path)
+    if match is None:
+        return None
+    return re.sub(r"\\(.)", r"\1", match.group(1))
+
+
+def _as_animated(current: Any, value: float) -> Any:
+    """An F-curve's value as Blender's animation writes it to a property holding ``current``.
+
+    Blender evaluates the F-curve of a boolean or integer property to whole
+    numbers (on 5.0.1 one keyed 1 and 8 gave 3.0 between them), so the
+    conversion is exact.
+    """
+    if isinstance(current, bool):
+        return bool(round(value))
+    if isinstance(current, int):
+        return int(round(value))
+    return float(value)
+
+
+# Blender replaces a key this close to a new one instead of adding another
+# (BEZT_BINARYSEARCH_THRESH), comparing the 32-bit frames: on Blender 5.0.1 a
+# key inserted at 11.005 replaced the one at 11 and stayed at frame 11.
+KEY_MERGE_DISTANCE = 0.01
+
+
+def _float32(value: float) -> float:
+    return float(struct.unpack("<f", struct.pack("<f", value))[0])
+
+
+def _same_key_frame(first: float, second: float) -> bool:
+    """Whether Blender keeps one key, not two, for keys on these frames of one channel."""
+    return abs(_float32(first) - _float32(second)) <= _float32(KEY_MERGE_DISTANCE)
+
+
 # -- Files an import reads besides the one named (B1-20) ---------------------
 #
-# The sandbox checked only the path handed to import_file, so a glTF inside the
-# allowed folders whose image URI pointed outside them imported that image, and
-# a later GLB export embedded it. Each function below lists, for one reference
-# the file makes, the paths Blender's importer tries in the order it tries
-# them; the first that exists is what it reads.
-
-# MTL texture options and how many arguments each takes at most (the OBJ
-# importer's parse_texture_option); numeric ones stop at the first non-number.
-_MTL_OPTION_ARGUMENTS = {
-    "-o": 3,
-    "-s": 3,
-    "-t": 3,
-    "-mm": 2,
-    "-bm": 1,
-    "-boost": 1,
-    "-texres": 1,
-    "-blendu": 1,
-    "-blendv": 1,
-    "-clamp": 1,
-    "-cc": 1,
-    "-imfchan": 1,
-    "-type": 1,
-}
-_MTL_NUMERIC_OPTIONS = frozenset({"-o", "-s", "-t", "-mm", "-bm", "-boost", "-texres"})
-_MTL_MAP_KEYWORDS = frozenset({"bump", "refl", "norm", "disp", "decal"})
+# The readers for glTF, OBJ and FBX live in utils/asset_references.py, shared
+# with the Unreal backend; the USD reader below follows a stage's layers with
+# the pxr Blender bundles.
 
 # USD layers an import composes, and so reads, besides textures.
 _USD_LAYER_EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
-
-
-def _unquote_path(text: str) -> str:
-    """Strip whitespace and the surrounding double quotes the OBJ importer strips."""
-    text = text.strip()
-    if len(text) > 2 and text.startswith('"') and text.endswith('"'):
-        text = text[1:-1]
-    return text
-
-
-def _joined(directory: str, path: str) -> str:
-    """Join as Blender's BLI_path_join does: a later absolute part stays inside."""
-    return os.path.normpath(os.path.join(directory, path.lstrip("/\\")))
-
-
-def _gltf_document(path: Path) -> Dict[str, Any]:
-    """Read the JSON of a .gltf, or the JSON chunk of a .glb."""
-    with path.open("rb") as handle:
-        header = handle.read(20)
-        if header[:4] == b"glTF":
-            length, kind = struct.unpack_from("<II", header, 12)
-            if kind != 0x4E4F534A:  # "JSON"
-                raise ValueError(f"{path.name} has no JSON chunk")
-            return dict(json.loads(handle.read(length)))
-        return dict(json.loads(header + handle.read()))
-
-
-def _gltf_reads(path: Path) -> List[List[str]]:
-    """List the buffer and image files a glTF or GLB names, as its importer opens them."""
-    from urllib.parse import unquote
-
-    document = _gltf_document(path)
-    base = str(path.parent)
-    reads = []
-    for key in ("buffers", "images"):
-        for entry in document.get(key) or []:
-            uri = entry.get("uri") if isinstance(entry, dict) else None
-            if not isinstance(uri, str) or not uri or uri.startswith("data:"):
-                continue
-            # io_scene_gltf2: join(dirname(gltf), normpath(unquote(uri))).
-            local = os.path.normpath(unquote(uri.replace("\\", "/")))
-            reads.append([os.path.join(base, local)])
-    return reads
-
-
-def _mtl_texture_path(rest: str) -> str:
-    """Return the image path of an MTL map line, after its options."""
-    text = rest.strip()
-    while text.startswith("-"):
-        option, _, text = text.partition(" ")
-        text = text.lstrip()
-        for _ in range(_MTL_OPTION_ARGUMENTS.get(option, 1)):
-            argument, _, remainder = text.partition(" ")
-            if not argument:
-                break
-            if option in _MTL_NUMERIC_OPTIONS:
-                try:
-                    float(argument)
-                except ValueError:
-                    break
-            text = remainder.lstrip()
-    return _unquote_path(text)
-
-
-def _obj_reads(path: Path) -> List[List[str]]:
-    """List the MTL libraries an OBJ names and the textures they name.
-
-    The OBJ importer joins each mtllib to the OBJ's folder, and tries a
-    texture joined to the MTL's folder, as given (absolute, or relative to the
-    working directory), with underscores turned to spaces, and its base name
-    in the MTL's folder.
-    """
-    reads: List[List[str]] = []
-    folder = str(path.parent)
-    libraries: List[str] = []
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            if line.startswith("mtllib"):
-                name = _unquote_path(line[6:])
-                if name:
-                    libraries.append(_joined(folder, name))
-    for library in dict.fromkeys(libraries):
-        reads.append([library])
-        if not os.path.isfile(library):
-            continue
-        library_folder = os.path.dirname(library)
-        with open(library, "r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                keyword, _, rest = line.strip().partition(" ")
-                keyword = keyword.lower()
-                if not (keyword.startswith("map_") or keyword in _MTL_MAP_KEYWORDS):
-                    continue
-                image = _mtl_texture_path(rest)
-                if image:
-                    reads.append(
-                        [
-                            _joined(library_folder, image),
-                            os.path.abspath(image),
-                            os.path.abspath(image.replace("_", " ")),
-                            os.path.join(library_folder, os.path.basename(image)),
-                        ]
-                    )
-    return reads
-
-
-def _resolve_ncase(path: str) -> str:
-    """Find a path's real spelling on a case-sensitive file system.
-
-    Mirrors ``bpy.path.resolve_ncase`` (Blender 4.2 through 5.0.1), which
-    ``bpy_extras.image_utils.load_image`` tries after each path: a component
-    that does not exist is matched case-insensitively among its folder's
-    entries. Returns the path unchanged when nothing matches.
-    """
-
-    def found(candidate: str) -> Tuple[str, bool]:
-        if not candidate or os.path.exists(candidate):
-            return candidate, True
-        filename, folder = os.path.basename(candidate), os.path.dirname(candidate)
-        suffix = ""
-        if not filename:
-            if len(folder) < len(candidate):
-                suffix = candidate[len(folder) :]
-            filename, folder = os.path.basename(folder), os.path.dirname(folder)
-        if not os.path.exists(folder):
-            if folder == candidate:
-                return candidate, False
-            folder, ok = found(folder)
-            if not ok:
-                return candidate, False
-        if not os.path.isdir(folder):
-            return candidate, False
-        try:
-            entries = os.listdir(folder)
-        except OSError:
-            return candidate, False
-        lower = filename.lower()
-        match = next((entry for entry in entries if entry.lower() == lower), None)
-        if match is None:
-            return candidate, False
-        return os.path.join(folder, match) + suffix, True
-
-    return found(path)[0]
-
-
-def _fbx_element_name(element: Any) -> str:
-    """An FBX object's name: the part of its name property before the class."""
-    props = getattr(element, "props", None) or []
-    if len(props) < 2 or not isinstance(props[-2], bytes):
-        return ""
-    return props[-2].split(b"\x00\x01")[0].decode("utf-8", "replace")
-
-
-def _fbx_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
-    """List the texture files an FBX names, as Blender's FBX importer looks for them.
-
-    blen_read_texture_image takes a texture's RelativeFilename joined to the
-    FBX's folder (stripped of a leading separator), else its FileName or
-    Filename, else the texture's name. bpy_extras.image_utils.load_image then
-    tries that path, the path joined to the folder and its base name there,
-    each also with its case resolved (resolve_ncase). Its recursive search of
-    folders, the importer's use_image_search, is switched off for an import
-    the sandbox checks (import_file), so it reads nothing found that way.
-    Blender's own FBX parser reads the file; a file it cannot parse fails the
-    import itself.
-    """
-    try:
-        from io_scene_fbx import parse_fbx  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise UncheckableReferences("Blender's FBX add-on is not available") from exc
-
-    try:
-        root, _version = parse_fbx.parse(str(path))
-    except Exception:
-        return []
-    base = str(path.parent)
-    reads: List[List[str]] = []
-    for section in root.elems:
-        if section.id != b"Objects":
-            continue
-        for element in section.elems:
-            if element.id not in (b"Texture", b"Video"):
-                continue
-            names: Dict[bytes, str] = {}
-            for prop in element.elems:
-                if prop.id in (b"RelativeFilename", b"FileName", b"Filename") and prop.props:
-                    value = prop.props[0]
-                    if isinstance(value, bytes):
-                        value = value.decode("utf-8", "replace")
-                    names.setdefault(prop.id, str(value))
-            relative = names.get(b"RelativeFilename")
-            if relative:
-                # str.lstrip(None) strips whitespace, as the importer's
-                # lstrip(os.path.altsep) does where altsep is None.
-                image = os.path.join(base, relative.lstrip(os.path.sep).lstrip(os.path.altsep))
-            else:
-                image = names.get(b"FileName") or names.get(b"Filename") or ""
-            if not image:
-                image = _fbx_element_name(element)
-            if not image:
-                continue
-            # bpy.path.native_pathsep, as load_image applies it.
-            image = image.replace("\\", "/") if os.sep == "/" else image.replace("/", "\\")
-            short = image[2:] if image[:2] == "//" else image
-            candidates = [image]
-            for variant in (image, os.path.join(base, image), os.path.join(base, os.path.basename(short))):
-                candidates.extend((variant, _resolve_ncase(variant)))
-            reads.append(list(dict.fromkeys(candidates)))
-    return reads
 
 
 def _usd_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
@@ -1355,10 +1514,6 @@ def _usda_text_reads(path: Path) -> List[List[str]]:
             )
         reads.append([os.path.normpath(os.path.join(str(path.parent), local))])
     return reads
-
-
-class UncheckableReferences(Exception):
-    """The files an import would read cannot be listed, so the sandbox cannot vouch for them."""
 
 
 # Importer options that search folders for a file a reference names, set off
@@ -5688,14 +5843,8 @@ class BlenderRuntimeSession:
                 ),
             )
             raise SandboxDenied(file_path, details) from exc
-        outside: List[str] = []
-        for candidates in reads:
-            found = next((c for c in candidates if os.path.exists(c)), None)
-            if found is not None and not self._path_policy.is_allowed(found):
-                # Reported as the file it is, without ../ steps or symlinks.
-                real = str(self._path_policy.resolve(found))
-                if real not in outside:
-                    outside.append(real)
+        # Each refused file is reported as it is, without ../ steps or symlinks.
+        outside = outside_references(reads, self._path_policy)
         if not outside:
             return
         details = self._path_policy.denial_details(outside[0])
@@ -5769,11 +5918,12 @@ class BlenderRuntimeSession:
         Set the current animation frame.
 
         Args:
-            frame: Frame number to set.
+            frame: Frame number to set, within -1048574..1048574 (Blender's limits).
 
         Returns:
             Dict with success status and frame number.
         """
+        _check_frame("frame", frame, -FRAME_LIMIT)
         blender_module: Any = bpy
         blender_module.context.scene.frame_set(frame)
         return {"frame": blender_module.context.scene.frame_current}
@@ -5783,7 +5933,9 @@ class BlenderRuntimeSession:
         Get the current frame number and animation range.
 
         Returns:
-            Dict with current_frame, frame_start, frame_end, fps.
+            Dict with current_frame, frame_start, frame_end, fps (frames per
+            second as Blender plays them, ``render.fps / render.fps_base``) and
+            fps_base.
         """
         blender_module: Any = bpy
         scene = blender_module.context.scene
@@ -5791,7 +5943,8 @@ class BlenderRuntimeSession:
             "current_frame": scene.frame_current,
             "frame_start": scene.frame_start,
             "frame_end": scene.frame_end,
-            "fps": float(scene.render.fps),
+            "fps": scene_fps(scene),
+            "fps_base": float(scene.render.fps_base),
         }
 
     def set_frame_range(self, frame_start: int, frame_end: int) -> Dict[str, Any]:
@@ -5803,19 +5956,24 @@ class BlenderRuntimeSession:
         range and the warning says what part of the scene range it leaves out.
 
         Args:
-            frame_start: Start frame of the animation range.
-            frame_end: End frame of the animation range.
+            frame_start: Start frame of the animation range, 0..1048574.
+            frame_end: End frame of the animation range, 0..1048574; may equal
+                frame_start for a one-frame range.
 
         Returns:
             Dict with the frame range that was set, rigid_body_cache and warning.
         """
-        if frame_start >= frame_end:
+        if frame_start > frame_end:
             raise ValueError(
-                f"frame_start ({frame_start}) must be less than "
+                f"frame_start ({frame_start}) must not be after "
                 f"frame_end ({frame_end})"
             )
+        _check_frame("frame_start", frame_start, SCENE_FRAME_MIN)
+        _check_frame("frame_end", frame_end, SCENE_FRAME_MIN)
         blender_module: Any = bpy
         scene = blender_module.context.scene
+        # Start first: Blender moves frame_end up to a frame_start set past it,
+        # and frame_end is then set to its own value.
         scene.frame_start = frame_start
         scene.frame_end = frame_end
         # An unbaked rigid-body cache follows the scene range (bodies froze at
@@ -5830,38 +5988,97 @@ class BlenderRuntimeSession:
 
     def play_animation(self, action: str = "play") -> Dict[str, Any]:
         """
-        Control animation playback.
+        Play, reverse, pause or stop animation playback; repeating a call changes nothing more.
+
+        ``play`` and ``reverse`` start playback in that direction, or turn it
+        around, and leave playback that already runs that way alone
+        (``screen.animation_play`` on its own toggles playback). ``pause``
+        stops it on the current frame; ``stop`` stops it and returns to the
+        frame playback started from, as Esc does in Blender. Playback needs
+        Blender's event loop to advance frames, so in background mode
+        (``blender -b`` or the ``bpy`` module) ``play`` and ``reverse`` are
+        refused rather than reported as playing on a frame that never moves.
 
         Args:
-            action: One of 'play', 'stop', or 'reverse'.
+            action: play (forward), reverse, pause (stop on the current frame) or
+                stop (stop and return to the frame playback started from).
 
         Returns:
-            Dict with action performed and playback state.
+            Dict with action, is_playing, direction ('forward' or 'reverse',
+            None when not playing), changed (whether the call changed playback)
+            and frame (the current frame afterwards).
         """
-        valid_actions = ("play", "stop", "reverse")
-        if action not in valid_actions:
+        if action not in PLAYBACK_ACTIONS:
             raise ValueError(
-                f"Invalid action '{action}'. Must be one of {valid_actions}"
+                f"Invalid action '{action}'. Must be one of {PLAYBACK_ACTIONS}"
             )
         blender_module: Any = bpy
+        scene = blender_module.context.scene
         screen = blender_module.context.screen
+        _watch_playback()
+        # Without a screen nothing plays: there is no animation timer to run.
+        playing = screen is not None and bool(screen.is_animation_playing)
+        if not playing:
+            _playback.clear()
+        # Read before stopping: the playback handlers clear the record.
+        direction = _playback.get("direction") if playing else None
+        start_frame = _playback.get("start_frame")
+        screen_ops = blender_module.ops.screen
 
-        if action == "stop":
-            if screen.is_animation_playing:
-                blender_module.ops.screen.animation_cancel(restore_frame=False)
+        if action in ("pause", "stop"):
+            if playing:
+                restore = action == "stop"
+                # A record names the frame this tool started from, also after it
+                # turned playback around (a restart in Blender). Without one,
+                # Blender's own start frame is the one Esc returns to.
+                screen_ops.animation_cancel(
+                    restore_frame=restore and start_frame is None
+                )
+                if restore and start_frame is not None:
+                    scene.frame_set(start_frame)
+            _playback.clear()
             return {
-                "action": "stop",
+                "action": action,
                 "is_playing": False,
+                "direction": None,
+                "changed": playing,
+                "frame": scene.frame_current,
             }
 
-        if action == "reverse":
-            blender_module.ops.screen.animation_play(reverse=True)
+        wanted = "reverse" if action == "reverse" else "forward"
+        if blender_module.app.background:
+            raise RuntimeError(
+                "Blender is running in background mode (blender -b or the bpy "
+                "module), where no event loop advances frames, so playback cannot "
+                "run; step the timeline with set_blender_frame, or sample frames "
+                "with get_blender_object_trajectory"
+            )
+        if screen is None:
+            raise RuntimeError(
+                "No Blender screen in this context, so playback has no timer to run"
+            )
+        if playing and direction == wanted:
+            return {
+                "action": action,
+                "is_playing": True,
+                "direction": wanted,
+                "changed": False,
+                "frame": scene.frame_current,
+            }
+        if playing:
+            # Running the other way, or started elsewhere in a direction nothing
+            # reports: Blender can only turn playback around by restarting it.
+            screen_ops.animation_cancel(restore_frame=False)
         else:
-            blender_module.ops.screen.animation_play()
-
+            start_frame = scene.frame_current
+        screen_ops.animation_play(reverse=wanted == "reverse")
+        _playback.update(direction=wanted, start_frame=start_frame)
         return {
             "action": action,
-            "is_playing": screen.is_animation_playing,
+            "is_playing": bool(screen.is_animation_playing),
+            "direction": wanted,
+            "changed": True,
+            "frame": scene.frame_current,
         }
 
     def insert_keyframe(
@@ -5870,32 +6087,91 @@ class BlenderRuntimeSession:
         data_path: str,
         frame: int,
         index: int = -1,
+        value: Optional[Union[float, List[float]]] = None,
+        interpolation: Optional[str] = None,
+        keyframe_type: str = "KEYFRAME",
     ) -> Dict[str, Any]:
         """
         Insert a keyframe on an object property at a given frame.
 
+        Without ``value`` Blender keys the property's current value, as the I
+        key does: set it first (set_blender_object_transform, for instance).
+        With ``value`` that value is keyed, and each channel keyed then shows
+        what its F-curve gives at the current frame: the keyed value on that
+        frame or where the key is the channel's only one. A GUI Blender showed
+        a first key at once and a later one only at the next frame change, and
+        background Blender neither. Only the keyed channels are written: every
+        other channel, an unkeyed edit on it included, keeps its value, as
+        Blender's own keying leaves it.
+
         Args:
             object_name: Name of the object.
-            data_path: Property data path (e.g. 'location', 'rotation_euler').
+            data_path: Property data path (e.g. 'location', 'rotation_euler',
+                'pose.bones["Bone"].rotation_quaternion', '["custom"]').
             frame: Frame number for the keyframe.
             index: Array index (-1 for all channels).
+            value: Value to key instead of the current one: one number for a
+                single channel (index >= 0, or a property that is not an array),
+                otherwise one number per element, such as [x, y, z] for location.
+                The keyed channels then show what their F-curves give at the
+                current frame; every other channel keeps its value.
+            interpolation: Interpolation from this key to the next (CONSTANT,
+                LINEAR, BEZIER, SINE, QUAD, CUBIC, QUART, QUINT, EXPO, CIRC, BACK,
+                BOUNCE or ELASTIC); None leaves Blender's choice: the previous
+                key's on a curve that already has two keys, else the preference
+                (Bezier by default).
+            keyframe_type: Blender's key type: KEYFRAME, BREAKDOWN, MOVING_HOLD,
+                EXTREME, JITTER or GENERATED.
 
         Returns:
-            Dict confirming the keyframe insertion.
+            Dict with object_name, data_path, frame, value_source ('given' or
+            'current') and keyframes: per keyed channel its array_index, value,
+            interpolation and keyframe_type as Blender stored them; and a
+            warning when the keys are not on that frame of the action (NLA
+            tweak mode) or the keyed channels keep their values until a frame
+            change (an object whose NLA tracks Blender blends).
 
         Raises:
             RuntimeError: When Blender inserted no keyframe: on an F-curve that
                 is locked, sampled or overridden by an F-modifier, or one its
                 NLA setup cannot remap a value to.
+            ValueError: When ``value`` does not fit the property, or
+                ``interpolation`` or ``keyframe_type`` is not one Blender has.
         """
+        if interpolation is not None and interpolation not in KEYFRAME_INTERPOLATIONS:
+            raise ValueError(
+                f"Invalid interpolation '{interpolation}'. Must be one of "
+                f"{KEYFRAME_INTERPOLATIONS}"
+            )
+        if keyframe_type not in KEYFRAME_TYPES:
+            raise ValueError(
+                f"Invalid keyframe_type '{keyframe_type}'. Must be one of {KEYFRAME_TYPES}"
+            )
         obj = self._get_object_or_raise(object_name)
-        # Blender reports refused keys by returning False, not by raising. On
-        # Blender 5.0.1 it refused a locked F-curve (or one in a locked group),
-        # a sampled one and one under an Envelope modifier, and, with "Due to
-        # the NLA stack setup", a key on an action at zero influence over an NLA
-        # strip or blended by Multiply over a strip that holds 0. With index -1
-        # it keys the channels it can and returns True.
-        if not obj.keyframe_insert(data_path, index=index, frame=frame):
+        restore = (
+            None
+            if value is None
+            else self._write_property(obj, data_path, index, value)
+        )
+        inserted = False
+        try:
+            # Blender reports refused keys by returning False, not by raising.
+            # On Blender 5.0.1 it refused a locked F-curve (or one in a locked
+            # group), a sampled one and one under an Envelope modifier, and,
+            # with "Due to the NLA stack setup", a key on an action at zero
+            # influence over an NLA strip or blended by Multiply over a strip
+            # that holds 0. With index -1 it keys the channels it can and
+            # returns True.
+            inserted = obj.keyframe_insert(
+                data_path, index=index, frame=frame, keytype=keyframe_type
+            )
+        finally:
+            # Keying the value through the property applies the NLA remapping
+            # keyframe_insert does. Restoring it leaves nothing changed when
+            # Blender refused the key.
+            if restore is not None:
+                restore()
+        if not inserted:
             raise RuntimeError(
                 f"Blender inserted no keyframe on '{object_name}' "
                 f"{_channel_name(data_path, index)} at frame {frame}; it refuses "
@@ -5904,11 +6180,386 @@ class BlenderRuntimeSession:
                 "onto the active action, such as an action at zero influence or "
                 "one blended over NLA strips in a way that cannot be inverted"
             )
-        return {
+        keys = self._keys_on_frame(obj, data_path, index, frame)
+        result: Dict[str, Any] = {
             "object_name": object_name,
             "data_path": data_path,
             "frame": frame,
+            "value_source": "current" if value is None else "given",
+            "keyframes": [],
         }
+        for fcurve, key in keys:
+            if interpolation is not None:
+                key.interpolation = interpolation
+            result["keyframes"].append(
+                {
+                    "array_index": fcurve.array_index,
+                    "value": float(key.co[1]),
+                    "interpolation": key.interpolation,
+                    "keyframe_type": key.type,
+                }
+            )
+        warnings = []
+        if not keys:
+            # In NLA tweak mode Blender maps the frame into the tweaked strip's
+            # own time, so the key is not on this frame of the action.
+            warnings.append(
+                f"Blender reported the key inserted, but the object's action has no "
+                f"key on {_channel_name(data_path, index)} at frame {frame} (in NLA "
+                "tweak mode keys land at the strip's own frame); "
+                + (
+                    "its interpolation was left as Blender set it"
+                    if interpolation is not None
+                    else "get_blender_keyframes lists the keyed channels"
+                )
+            )
+        if value is not None:
+            # After the interpolation is set: it shapes the curve after the key.
+            shown = self._show_keyed_channels(obj, [fcurve for fcurve, _key in keys])
+            if shown is not None:
+                warnings.append(shown)
+        if warnings:
+            result["warning"] = "; ".join(warnings)
+        return result
+
+    def _write_property(
+        self, obj: Any, data_path: str, index: int, value: Union[float, List[float]]
+    ) -> Callable[[], None]:
+        """Write ``value`` to the keyed property; return what writes the old value back.
+
+        Raises:
+            ValueError: When the path names no property, or the value does not
+                fit it: one number per keyed element.
+        """
+        keyed = _KeyedProperty(obj, data_path, index)
+        keyed.write(keyed.coerce(value))
+        return keyed.restore
+
+    def insert_keyframes(
+        self,
+        object_name: str,
+        channels: List[Dict[str, Any]],
+        interpolation: Optional[str] = None,
+        keyframe_type: str = "KEYFRAME",
+    ) -> Dict[str, Any]:
+        """
+        Insert many keyframes in one call: for each property, one value per frame.
+
+        Each value is keyed through its property, as insert_keyframe keys a
+        given value, so NLA remapping applies, and each keyed channel then
+        shows what its F-curve gives at the current frame; every other channel
+        keeps its value, an unkeyed edit included. Every entry is checked
+        before anything is keyed: a channel keyed twice on one frame, or on
+        frames Blender would merge into one key (within 0.01 of each other),
+        and an F-curve Blender keys nothing on (locked, sampled, or under an
+        F-modifier that overrides its keys), are refused up front. Should
+        Blender still refuse a key part way, the keys that went in stay,
+        recorded as one undo step in attached mode, and the reply is a
+        KeyframesPartlyInserted error naming them.
+
+        Args:
+            object_name: Name of the object.
+            channels: Up to 10 000 keys in all, as entries with data_path,
+                index (-1, the default, for every element), frames (more than
+                0.01 apart on any one channel, as Blender keeps one key for
+                keys closer than that), and values: one per frame, a number for
+                one channel (index >= 0, or a property that is not an array),
+                else one number per element. The keyed channels then show what
+                their F-curves give at the current frame; every other channel
+                keeps its value.
+            interpolation: Interpolation of every inserted key, as for
+                insert_keyframe; None leaves Blender's choice.
+            keyframe_type: Blender's key type of every inserted key.
+
+        Returns:
+            Dict with object_name, key_count (keys inserted, one per frame and
+            element), frame_range and channels: per keyed channel its
+            data_path, array_index, inserted (keys this call inserted) and
+            keyframe_count (keys on the channel afterwards); and a warning when
+            the keyed channels keep their values until a frame change (an
+            object with NLA tracks).
+        """
+        if interpolation is not None and interpolation not in KEYFRAME_INTERPOLATIONS:
+            raise ValueError(
+                f"Invalid interpolation '{interpolation}'. Must be one of "
+                f"{KEYFRAME_INTERPOLATIONS}"
+            )
+        if keyframe_type not in KEYFRAME_TYPES:
+            raise ValueError(
+                f"Invalid keyframe_type '{keyframe_type}'. Must be one of {KEYFRAME_TYPES}"
+            )
+        if not channels:
+            raise ValueError("channels is empty: give at least one data_path with frames")
+        obj = self._get_object_or_raise(object_name)
+        fcurves = action_fcurves(obj.animation_data, self._blender_version) or []
+        plans = []
+        total = 0
+        # (data_path, element) -> its frames so far, in order, each with the
+        # entry keying it; element -1 for a property that is not an array.
+        keyed_by: Dict[Tuple[str, int], List[Tuple[float, int]]] = {}
+        for number, channel in enumerate(channels):
+            label = f"channels[{number}]"
+            data_path = channel.get("data_path")
+            if not isinstance(data_path, str) or not data_path:
+                raise ValueError(f"{label}: data_path is required")
+            index = int(channel.get("index", -1))
+            frames = [float(frame) for frame in channel.get("frames") or []]
+            values = list(channel.get("values") or [])
+            if not frames:
+                raise ValueError(f"{label}: frames is empty")
+            if len(values) != len(frames):
+                raise ValueError(
+                    f"{label}: {len(frames)} frames but {len(values)} values; give one "
+                    "value per frame"
+                )
+            if not all(math.isfinite(frame) for frame in frames):
+                raise ValueError(f"{label}: frames must be finite")
+            try:
+                keyed = _KeyedProperty(obj, data_path, index)
+                coerced = [keyed.coerce(value) for value in values]
+            except ValueError as exc:
+                raise ValueError(f"{label}: {exc}") from None
+            if keyed.index >= 0:
+                elements = [keyed.index]
+            elif keyed.length is None:
+                elements = [-1]
+            else:
+                elements = list(range(keyed.length))
+            for frame in frames:
+                for element in elements:
+                    taken = keyed_by.setdefault((data_path, element), [])
+                    place = bisect.bisect_left(taken, (frame, -1))
+                    for near, earlier in taken[max(place - 1, 0) : place + 1]:
+                        if _same_key_frame(near, frame):
+                            raise ValueError(
+                                self._keyed_twice(
+                                    number, earlier, data_path, element, near, frame
+                                )
+                            )
+                    taken.insert(place, (frame, number))
+            for fcurve in fcurves:
+                if fcurve.data_path != data_path or index not in (-1, fcurve.array_index):
+                    continue
+                reason = _unkeyable(fcurve)
+                if reason is not None:
+                    # A property that is not an array has one channel, index 0.
+                    curve = _channel_name(
+                        data_path, -1 if keyed.length is None else fcurve.array_index
+                    )
+                    raise ValueError(
+                        f"{label}: the F-curve of {curve} {reason}, and Blender keys "
+                        "no such F-curve"
+                    )
+            total += len(frames) * keyed.elements
+            plans.append((keyed, frames, coerced))
+        if total > MAX_KEYFRAMES_PER_CALL:
+            raise ValueError(
+                f"{total} keys (frames times elements) is more than the "
+                f"{MAX_KEYFRAMES_PER_CALL} one call inserts; split the channels or "
+                "frames over several calls"
+            )
+
+        inserted = 0
+        # The properties that got a key: only their channels show the new keys.
+        keyed_some: List[_KeyedProperty] = []
+        refused: Optional[Dict[str, Any]] = None
+        try:
+            for keyed, frames, coerced in plans:
+                for frame, value in zip(frames, coerced):
+                    keyed.write(value)
+                    if not obj.keyframe_insert(
+                        keyed.data_path,
+                        index=keyed.index,
+                        frame=frame,
+                        keytype=keyframe_type,
+                    ):
+                        refused = {
+                            "data_path": keyed.data_path,
+                            "index": keyed.index,
+                            "frame": frame,
+                        }
+                        break
+                    if not keyed_some or keyed_some[-1] is not keyed:
+                        keyed_some.append(keyed)
+                    inserted += keyed.elements
+                if refused is not None:
+                    break
+        finally:
+            for keyed, _frames, _coerced in plans:
+                keyed.restore()
+        fcurves = action_fcurves(obj.animation_data, self._blender_version) or []
+        if refused is not None:
+            shown = self._show_keyed_channels(
+                obj,
+                [fcurve for keyed in keyed_some for fcurve in self._curves_of(fcurves, keyed)],
+            )
+            # Returned rather than raised: the keys that went in stay, and an
+            # attached add-on records a completed call as an undo step.
+            failure: Dict[str, Any] = {
+                "success": False,
+                "error": (
+                    f"Blender inserted no keyframe on '{object_name}' "
+                    f"{_channel_name(refused['data_path'], refused['index'])} at frame "
+                    f"{refused['frame']:g}, after this call inserted {inserted} keys, "
+                    "which stay; it refuses a key its NLA setup cannot remap onto the "
+                    "active action, such as an action at zero influence"
+                ),
+                "error_type": "KeyframesPartlyInserted",
+                "details": {"inserted": inserted, "refused": refused},
+            }
+            if shown is not None:
+                failure["warning"] = shown
+            return failure
+
+        report: List[Dict[str, Any]] = []
+        shown_curves: List[Any] = []
+        for keyed, frames, _coerced in plans:
+            ordered = sorted(frames)
+            for fcurve in self._curves_of(fcurves, keyed):
+                points = fcurve.keyframe_points
+                if interpolation is not None:
+                    for point in points:
+                        # A key Blender merged into an existing one kept that
+                        # key's frame; the frames of one channel are more than
+                        # Blender's merge distance apart.
+                        place = bisect.bisect_left(ordered, point.co[0])
+                        if any(
+                            _same_key_frame(point.co[0], frame)
+                            for frame in ordered[max(place - 1, 0) : place + 1]
+                        ):
+                            point.interpolation = interpolation
+                shown_curves.append(fcurve)
+                report.append(
+                    {
+                        "data_path": keyed.data_path,
+                        "array_index": fcurve.array_index,
+                        "inserted": len(frames),
+                        "keyframe_count": len(points),
+                    }
+                )
+        # After the interpolation is set: it shapes the curve after each key.
+        shown = self._show_keyed_channels(obj, shown_curves)
+        every_frame = [frame for _keyed, frames, _coerced in plans for frame in frames]
+        result: Dict[str, Any] = {
+            "object_name": object_name,
+            "key_count": inserted,
+            "frame_range": [_f32(min(every_frame)), _f32(max(every_frame))],
+            "channels": report,
+        }
+        if shown is not None:
+            result["warning"] = shown
+        return result
+
+    @staticmethod
+    def _curves_of(fcurves: List[Any], keyed: "_KeyedProperty") -> List[Any]:
+        """The F-curves of the channels ``keyed`` keys."""
+        return [
+            fcurve
+            for fcurve in fcurves
+            if fcurve.data_path == keyed.data_path and keyed.index in (-1, fcurve.array_index)
+        ]
+
+    @staticmethod
+    def _keyed_twice(
+        number: int, earlier: int, data_path: str, element: int, near: float, frame: float
+    ) -> str:
+        """Why insert_keyframes refuses entry ``number`` keying a channel's frame twice."""
+        label = f"channels[{number}]"
+        both = f"{label} keys" if earlier == number else f"{label} and channels[{earlier}] both key"
+        channel = _channel_name(data_path, element)
+        if _float32(near) == _float32(frame):
+            once = " twice" if earlier == number else ""
+            return f"{both} {channel} at frame {frame:g}{once}; give each channel's frame once"
+        low, high = sorted((near, frame))
+        return (
+            f"{both} {channel} at frames {low:g} and {high:g}, which Blender keeps as one "
+            f"key (a key within {KEY_MERGE_DISTANCE:g} frames of another replaces it); "
+            f"give each channel's frames more than {KEY_MERGE_DISTANCE:g} apart"
+        )
+
+    @staticmethod
+    def _show_keyed_channels(obj: Any, fcurves: List[Any]) -> Optional[str]:
+        """Write what each keyed F-curve gives at the current frame to its channel alone.
+
+        Keying a given value writes it, keys it and writes the old value back,
+        which the channel shows until Blender next evaluates the animation.
+        Evaluating the object's whole animation would also put every other
+        animated channel back to its F-curve, discarding unkeyed edits that
+        Blender's own keying keeps, so each keyed channel gets its own
+        F-curve's value at the scene's current time, as Blender's animation
+        writes it. A muted F-curve and a driven channel are left as they are,
+        as Blender's animation leaves them.
+
+        Args:
+            obj: The keyed object.
+            fcurves: The F-curves of the keyed channels.
+
+        Returns:
+            A warning when the object's NLA tracks blend its action, which
+            Blender works out only on a frame change, so the keyed channels
+            keep their values until then; else None.
+        """
+        anim_data = obj.animation_data
+        if anim_data is None or not fcurves:
+            return None
+        if anim_data.use_nla and len(anim_data.nla_tracks):
+            return (
+                f"'{obj.name}' has NLA tracks, which Blender blends with its action "
+                "on a frame change, so the keyed channels keep the values they had "
+                "until then"
+            )
+        blender_module: Any = bpy
+        scene = blender_module.context.scene
+        # The time Blender evaluates the animation at (BKE_scene_ctime_get): the
+        # frame and subframe, scaled by the render's time remapping. On 5.0.1,
+        # frame 5 under frame_map_old 100 and frame_map_new 200 evaluated 2.5.
+        render = scene.render
+        time = (
+            (scene.frame_current + scene.frame_subframe)
+            * render.frame_map_old
+            / render.frame_map_new
+        )
+        driven = {(driver.data_path, driver.array_index) for driver in anim_data.drivers}
+        for fcurve in fcurves:
+            group = fcurve.group
+            if fcurve.mute or (group is not None and group.mute):
+                continue
+            if (fcurve.data_path, fcurve.array_index) in driven:
+                continue
+            value = fcurve.evaluate(time)
+            owner, name, custom = _property_owner(obj, fcurve.data_path)
+            current = owner[name] if custom else getattr(owner, name)
+            try:
+                len(current)
+            except TypeError:
+                new = _as_animated(current, value)
+                if custom:
+                    owner[name] = new
+                else:
+                    setattr(owner, name, new)
+            else:
+                element = fcurve.array_index
+                current[element] = _as_animated(current[element], value)
+        return None
+
+    def _keys_on_frame(
+        self, obj: Any, data_path: str, index: int, frame: float
+    ) -> List[Tuple[Any, Any]]:
+        """The (F-curve, keyframe) pairs of the property's channels keyed on ``frame``.
+
+        A key Blender inserted next to an existing one replaced it and kept its
+        frame, so the key nearest ``frame`` within Blender's merge distance.
+        """
+        pairs = []
+        for fcurve in action_fcurves(obj.animation_data, self._blender_version) or []:
+            if fcurve.data_path != data_path or index not in (-1, fcurve.array_index):
+                continue
+            near = [
+                key for key in fcurve.keyframe_points if _same_key_frame(key.co[0], frame)
+            ]
+            if near:
+                pairs.append((fcurve, min(near, key=lambda key: abs(key.co[0] - frame))))
+        return sorted(pairs, key=lambda pair: pair[0].array_index)
 
     def delete_keyframe(
         self,
@@ -5954,44 +6605,287 @@ class BlenderRuntimeSession:
             "frame": frame,
         }
 
-    def get_keyframes(self, object_name: str) -> Dict[str, Any]:
+    def get_keyframes(
+        self,
+        object_name: str,
+        data_path: Optional[str] = None,
+        bone_name: Optional[str] = None,
+        include_keys: bool = False,
+        offset: int = 0,
+        key_offset: int = 0,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
-        Get a summary of keyframe data for an object.
+        List an object's keyed channels a page at a time, optionally with every key.
 
-        Returns summary data (channel data paths, keyframe counts, frame
-        ranges) rather than full curve data to keep responses compact.
         On Blender 4.4 and later an action can animate several objects, and
         only the channels of this object's action slot are listed
-        (``action_fcurves``).
+        (``action_fcurves``). A page holds as many channels (and keys) as fit
+        in one reply; next_offset and next_key_offset say where the next page
+        starts, and are None on the last one.
 
         Args:
             object_name: Name of the object.
+            data_path: Only this property's channels: its data path, such as
+                'location' or 'pose.bones["Bone"].rotation_quaternion', or with
+                bone_name the bone's property, such as 'rotation_quaternion'.
+            bone_name: Only the channels of this pose bone of an armature.
+            include_keys: Also return each key: frame, value, interpolation and
+                key type, plus the handles of a Bezier key and the easing of an
+                eased one.
+            offset: Index of the first channel to return, among those the
+                filters keep: the previous page's next_offset.
+            key_offset: With include_keys, index of the first key of that first
+                channel: the previous page's next_key_offset.
+            limit: Most channels to return; None returns as many as fit.
 
         Returns:
             Dict with object_name, has_animation (whether an action animates
-            the object) and channels list.
+            the object), total_channels (those the filters keep), offset,
+            channels (data_path, array_index, bone_name, keyframe_count,
+            frame_range, and with include_keys key_offset and keys),
+            next_offset, next_key_offset, truncated and truncation.
         """
+        if offset < 0 or key_offset < 0:
+            raise ValueError("offset and key_offset must not be negative")
+        if key_offset and not include_keys:
+            raise ValueError("key_offset pages through keys: pass include_keys=true")
+        if limit is not None and limit < 1:
+            raise ValueError(f"limit must be at least 1, got {limit}")
         obj = self._get_object_or_raise(object_name)
+        wanted, prefix = self._channel_filter(obj, data_path, bone_name)
         fcurves = action_fcurves(obj.animation_data, self._blender_version)
-        channels: List[Dict[str, Any]] = []
-        for fcurve in fcurves or []:
-            kps = fcurve.keyframe_points
-            if len(kps) == 0:
-                continue
-            frames = [int(kp.co[0]) for kp in kps]
-            channels.append(
-                {
-                    "data_path": fcurve.data_path,
-                    "array_index": fcurve.array_index,
-                    "keyframe_count": len(kps),
-                    "frame_range": [min(frames), max(frames)],
-                }
+        selected = [
+            fcurve
+            for fcurve in fcurves or []
+            if len(fcurve.keyframe_points)
+            and (wanted is None or fcurve.data_path == wanted)
+            and (
+                prefix is None
+                or fcurve.data_path.startswith(prefix + ".")
+                or fcurve.data_path.startswith(prefix + "[")
             )
-
-        return {
+        ]
+        result: Dict[str, Any] = {
             "object_name": object_name,
             "has_animation": fcurves is not None,
-            "channels": channels,
+            "total_channels": len(selected),
+            "offset": offset,
+            "channels": [],
+            "next_offset": None,
+            "next_key_offset": None,
+            "truncated": False,
+            "truncation": None,
+        }
+        # Room for the truncation notice, whether or not it is needed.
+        room = RESULT_PAGE_BYTES - _json_size(result) - 600
+        page: List[Dict[str, Any]] = result["channels"]
+        resume: Optional[Tuple[int, int]] = None
+        first_key = key_offset
+        index = offset
+        while index < len(selected):
+            if limit is not None and len(page) == limit:
+                resume = (index, 0)
+                break
+            fcurve = selected[index]
+            entry = self._channel_summary(fcurve)
+            if include_keys:
+                first_key = min(first_key, len(fcurve.keyframe_points))
+                entry["key_offset"] = first_key
+                entry["keys"] = []
+            # Two more bytes for the ", " between list items.
+            cost = _json_size(entry) + 2
+            if page and cost > room:
+                resume = (index, first_key)
+                break
+            position = first_key
+            if include_keys:
+                points = fcurve.keyframe_points
+                while position < len(points):
+                    key = self._key_entry(points[position])
+                    key_cost = _json_size(key) + 2
+                    # A page always makes progress: its first key goes in.
+                    if cost + key_cost > room and (page or entry["keys"]):
+                        break
+                    entry["keys"].append(key)
+                    cost += key_cost
+                    position += 1
+                if position < len(points):
+                    resume = (index, position)
+                    if entry["keys"] or not page:
+                        page.append(entry)
+                    break
+            page.append(entry)
+            room -= cost
+            index += 1
+            first_key = 0
+        if resume is not None:
+            index, next_key = resume
+            result["next_offset"] = index
+            result["next_key_offset"] = next_key
+            continuation = f"offset={index}" + (
+                f", key_offset={next_key}" if include_keys else ""
+            )
+            if wanted is None and prefix is None:
+                narrow = " data_path or bone_name keeps fewer channels."
+            elif include_keys:
+                narrow = " include_keys=false lists the channels without their keys."
+            else:
+                narrow = ""
+            result["truncated"] = True
+            result["truncation"] = {
+                "field": "channels",
+                "returned": len(page),
+                "total": len(selected),
+                "hint": (
+                    "More than one reply holds: call get_blender_keyframes again with "
+                    f"the same filters and {continuation} to continue.{narrow}"
+                ),
+            }
+        return result
+
+    def _channel_filter(
+        self, obj: Any, data_path: Optional[str], bone_name: Optional[str]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """The data path a channel must have, and the bone prefix its path must start with.
+
+        Raises:
+            ValueError: When bone_name names no pose bone of the object.
+        """
+        if bone_name is None:
+            return data_path, None
+        pose = getattr(obj, "pose", None)
+        if pose is None:
+            raise ValueError(f"'{obj.name}' is not an armature, so it has no bone '{bone_name}'")
+        if pose.bones.get(bone_name) is None:
+            raise ValueError(f"Armature '{obj.name}' has no bone '{bone_name}'")
+        prefix = _bone_path(bone_name)
+        if data_path is None:
+            return None, prefix
+        joint = "" if data_path.startswith("[") else "."
+        return f"{prefix}{joint}{data_path}", None
+
+    @staticmethod
+    def _channel_summary(fcurve: Any) -> Dict[str, Any]:
+        """A keyed channel: what it animates, how many keys it has, and over which frames."""
+        points = fcurve.keyframe_points
+        coordinates = [0.0] * (2 * len(points))
+        points.foreach_get("co", coordinates)
+        # Keys can sit between frames (an import, a scaled action, or a
+        # script's keyframe_points.insert): -0.5 is not frame 0.
+        frames = coordinates[0::2]
+        return {
+            "data_path": fcurve.data_path,
+            "array_index": fcurve.array_index,
+            "bone_name": _bone_of(fcurve.data_path),
+            "keyframe_count": len(points),
+            "frame_range": [_f32(min(frames)), _f32(max(frames))],
+        }
+
+    @staticmethod
+    def _key_entry(point: Any) -> Dict[str, Any]:
+        """One key as Blender stores it; handles only for Bezier, easing only for eased keys."""
+        key: Dict[str, Any] = {
+            "frame": _f32(point.co[0]),
+            "value": _f32(point.co[1]),
+            "interpolation": point.interpolation,
+            "keyframe_type": point.type,
+        }
+        if point.interpolation == "BEZIER":
+            key["handle_left"] = _f32s(point.handle_left)
+            key["handle_right"] = _f32s(point.handle_right)
+            key["handle_left_type"] = point.handle_left_type
+            key["handle_right_type"] = point.handle_right_type
+        elif point.interpolation not in ("CONSTANT", "LINEAR"):
+            key["easing"] = point.easing
+        return key
+
+    def set_pose_bone_transform(
+        self,
+        object_name: str,
+        bone_name: str,
+        location: Optional[List[float]] = None,
+        rotation_euler: Optional[List[float]] = None,
+        rotation_quaternion: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Set a pose bone's own location, rotation and/or scale.
+
+        These are the values of the bone's Transform panel in Pose Mode: its
+        pose relative to its rest position, before constraints. The rotation
+        is written in the bone's rotation_mode, which is kept (a new bone's is
+        QUATERNION, so Blender ignores rotation_euler written to it):
+        rotation_euler takes XYZ Euler angles and rotation_quaternion a
+        quaternion, either converted to that mode as set_blender_object_transform
+        converts an object's. A converted rotation keeps the bone's current
+        quaternion sign, or the Euler angles nearest its current ones. Every
+        value is checked before any is written. Channels the bone locks
+        (lock_location, lock_rotation, lock_scale) are written all the same, as
+        set_blender_object_transform writes an object's: the locks only stop
+        Blender's interactive transform tools. Key the result with
+        insert_blender_keyframe on 'pose.bones["<bone>"].<property>'.
+
+        Args:
+            object_name: The armature object.
+            bone_name: Its pose bone.
+            location: New location [x, y, z] relative to the rest position, or None to keep it.
+            rotation_euler: New rotation as XYZ Euler angles [rx, ry, rz] in radians,
+                converted to the bone's rotation_mode; None to keep it.
+            rotation_quaternion: New rotation as a quaternion [w, x, y, z], normalized
+                and converted to the bone's rotation_mode; instead of rotation_euler.
+            scale: New scale [sx, sy, sz], or None to keep it.
+
+        Returns:
+            Dict with object_name, bone_name, rotation_mode, location,
+            rotation_euler (XYZ), rotation_quaternion, rotation_in_mode (the
+            rotation as the mode stores it), scale, and world_head and
+            world_tail, where Blender evaluates the bone afterwards.
+
+        Raises:
+            ValueError: No such armature or bone, a value that is not finite, a
+                zero quaternion, or both rotations given.
+        """
+        obj = self._get_object_or_raise(object_name)
+        pose = getattr(obj, "pose", None)
+        if pose is None:
+            raise ValueError(f"'{object_name}' is not an armature, so it has no pose bones")
+        bone = pose.bones.get(bone_name)
+        if bone is None:
+            raise ValueError(f"Armature '{object_name}' has no bone '{bone_name}'")
+        if rotation_euler is not None and rotation_quaternion is not None:
+            raise ValueError("Give either rotation_euler or rotation_quaternion, not both")
+        new_location = None if location is None else _finite(location, 3, "location")
+        new_scale = None if scale is None else _finite(scale, 3, "scale")
+        if rotation_euler is not None:
+            _finite(rotation_euler, 3, "rotation_euler")
+        if rotation_quaternion is not None:
+            if not any(_finite(rotation_quaternion, 4, "rotation_quaternion")):
+                raise ValueError("rotation_quaternion must not have zero length")
+
+        if new_location is not None:
+            bone.location = new_location
+        if rotation_euler is not None or rotation_quaternion is not None:
+            # A pose bone keeps its rotation as an object does, so the object
+            # tools' conversion into its own mode applies unchanged.
+            write_rotation(bone, rotation_euler, rotation_quaternion)
+        if new_scale is not None:
+            bone.scale = new_scale
+
+        blender_module: Any = bpy
+        evaluated = obj.evaluated_get(blender_module.context.evaluated_depsgraph_get())
+        posed = evaluated.pose.bones.get(bone_name)
+        return {
+            "object_name": object_name,
+            "bone_name": bone_name,
+            "rotation_mode": bone.rotation_mode,
+            "location": _f32s(bone.location),
+            "rotation_euler": _f32s(local_rotation_euler(bone)),
+            "rotation_quaternion": _f32s(local_rotation_quaternion(bone)),
+            "rotation_in_mode": _f32s(stored_rotation(bone)),
+            "scale": _f32s(bone.scale),
+            "world_head": _f32s(evaluated.matrix_world @ posed.head),
+            "world_tail": _f32s(evaluated.matrix_world @ posed.tail),
         }
 
     # -- End Phase 5 methods -------------------------------------------------
@@ -6632,77 +7526,636 @@ class BlenderRuntimeSession:
         start_frame: int,
         end_frame: int,
         step: int = 1,
+        bone_name: Optional[str] = None,
+        fields: Optional[List[str]] = None,
+        offset: int = 0,
+        limit: Optional[int] = None,
+        max_simulated_frames: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Record object world position and rotation across a frame range.
+        Record the world pose of an object, or of one of its bones, across a frame range.
 
         Samples the evaluated world matrix, so parenting, constraints and
-        rigid-body simulation are reflected (``obj.location`` is none of these).
+        rigid-body simulation are reflected (``obj.location`` is none of these);
+        a bone's is its armature's world matrix times its pose matrix, its
+        location the bone's head. Each sample is a frame change, so the call
+        is not read-only: frame-change handlers run, an unbaked rigid-body
+        world is stepped on from where its cache ends (filling the cache), and
+        the frame and subframe current before the call are set again
+        afterwards. A page holds the samples that fit in one reply, measured
+        as they are written, and ends before a sample whose rigid-body
+        simulation would pass the bound; next_offset says where the next page
+        starts, and the pages of a request join into exactly what one long
+        reply would hold.
 
         Args:
-            object_name: Name of the object to track.
+            object_name: Name of the object to track (an armature for bone_name).
             start_frame: First frame of trajectory.
-            end_frame: Last frame of trajectory (inclusive).
-            step: Frame step size.
+            end_frame: Last frame of trajectory (inclusive); not before start_frame.
+            step: Frames between samples; at least 1.
+            bone_name: Track this pose bone of the armature instead of the object.
+            fields: What each sample reports besides its frame: any of time,
+                location, rotation_euler, rotation_quaternion, local_rotation and
+                velocity; None reports all. Fewer fields fit more samples a page.
+            offset: Index of the first sample to return (the previous page's
+                next_offset); the samples are start_frame, start_frame + step, ...
+            limit: Most samples to return; None returns as many as fit.
+            max_simulated_frames: Most frames of unbaked rigid-body simulation
+                the call may step through; the page ends before a sample that
+                needs more. None allows up to 200 000 bodies times frames, and a
+                request whose first sample needs more is refused.
 
         Returns:
-            Dict with object_name, point_count, points list.
+            Dict with object_name, bone_name, rotation_mode (the object's or
+            bone's), euler_order (of rotation_euler), fps (render.fps /
+            render.fps_base), time_origin_frame (the scene's frame_start),
+            total_points, offset, point_count, next_offset, truncated,
+            truncation, simulated_frames (frames of rigid-body simulation the
+            call stepped through), warning and points. Each point has frame;
+            time, the seconds since time_origin_frame; the world location;
+            rotation_euler, the world rotation in euler_order, each sample the
+            equivalent nearest the previous one (the first nearest the target's
+            own Euler rotation), so it stays continuous while the target turns
+            less than half a turn between samples; rotation_quaternion, the
+            world rotation (w, x, y, z), its sign kept continuous;
+            local_rotation, the target's own rotation channels as rotation_mode
+            stores them, unwrapped; and velocity, the change in world location
+            since the sample before per second, None for the first sample of
+            the request.
         """
+        result = self._trajectories(
+            [{"object_name": object_name, "bone_name": bone_name}],
+            start_frame,
+            end_frame,
+            step,
+            fields,
+            offset,
+            limit,
+            max_simulated_frames,
+        )
+        (trajectory,) = result.pop("trajectories")
+        result.update(trajectory)
+        return result
+
+    def get_trajectories(
+        self,
+        targets: List[Dict[str, Any]],
+        start_frame: int,
+        end_frame: int,
+        step: int = 1,
+        fields: Optional[List[str]] = None,
+        offset: int = 0,
+        limit: Optional[int] = None,
+        max_simulated_frames: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Record the world poses of several objects and bones in one pass over a frame range.
+
+        Each frame is set once for every target, which a call per target would
+        repeat; otherwise each target's samples are as get_object_trajectory's,
+        and so are the paging and the side effects. A page holds the same
+        frames for every target.
+
+        Args:
+            targets: 1 to 32 entries, each an object_name and, for a bone of an
+                armature, its bone_name. Targets whose names and one sample each
+                take more than one reply holds (long non-ASCII names) are
+                refused, with how many of them fit.
+            start_frame: First frame of trajectory.
+            end_frame: Last frame of trajectory (inclusive); not before start_frame.
+            step: Frames between samples; at least 1.
+            fields: What each sample reports besides its frame, as for
+                get_object_trajectory; None reports all.
+            offset: Index of the first sample to return (the previous page's
+                next_offset).
+            limit: Most samples per target to return; None returns as many as fit.
+            max_simulated_frames: Most frames of unbaked rigid-body simulation
+                the call may step through, as for get_object_trajectory; None
+                allows up to 200 000 bodies times frames.
+
+        Returns:
+            Dict with fps, time_origin_frame, total_points, offset, point_count
+            (per target), next_offset, truncated, truncation, simulated_frames,
+            warning and trajectories: per target its object_name, bone_name,
+            rotation_mode, euler_order and points.
+        """
+        if not targets:
+            raise ValueError("targets is empty: name at least one object")
+        if len(targets) > MAX_TRAJECTORY_TARGETS:
+            raise ValueError(
+                f"{len(targets)} targets is more than the {MAX_TRAJECTORY_TARGETS} one "
+                "call samples"
+            )
+        return self._trajectories(
+            [dict(target) for target in targets],
+            start_frame,
+            end_frame,
+            step,
+            fields,
+            offset,
+            limit,
+            max_simulated_frames,
+        )
+
+    def _trajectories(
+        self,
+        targets: List[Dict[str, Any]],
+        start_frame: int,
+        end_frame: int,
+        step: int,
+        fields: Optional[List[str]],
+        offset: int,
+        limit: Optional[int],
+        max_simulated_frames: Optional[int],
+    ) -> Dict[str, Any]:
+        """Sample one page of every target's trajectory over one walk of the frames."""
+        if step < 1:
+            raise ValueError(f"step must be at least 1, got {step}")
+        if start_frame > end_frame:
+            raise ValueError(
+                f"start_frame ({start_frame}) must not be after end_frame ({end_frame})"
+            )
+        if offset < 0:
+            raise ValueError(f"offset must not be negative, got {offset}")
+        if limit is not None and limit < 1:
+            raise ValueError(f"limit must be at least 1, got {limit}")
+        if max_simulated_frames is not None and max_simulated_frames < 0:
+            raise ValueError("max_simulated_frames must not be negative")
+        wanted = self._trajectory_fields(fields)
+        resolved = [
+            self._trajectory_target(target.get("object_name"), target.get("bone_name"))
+            for target in targets
+        ]
         blender_module: Any = bpy
-        obj = self._get_object_or_raise(object_name)
         scene = blender_module.context.scene
+        frames = range(start_frame, end_frame + 1, step)
+        total = len(frames)
+        if offset > total:
+            raise ValueError(f"offset {offset} is past the last of the {total} samples")
+        # A page holds the samples that fit in one reply, measured as they are
+        # written. Its most samples (each as narrow as a sample can be) bound
+        # the walk planned before any frame is set.
+        names = [
+            _json_size({key: value for key, value in target.items() if key != "obj"})
+            + len(', "points": []')
+            for target in resolved
+        ]
+        headers = sum(names)
+        narrow = _json_size(self._narrowest_point(wanted)) + 2
+        # Every page holds at least one sample of each target, which the server
+        # must not cut: a cut reply drops targets, and its next_offset skips
+        # samples. Targets whose names and one sample each overflow a reply
+        # are refused, with how many fit even the widest samples, so the
+        # advice holds on every page.
+        ceiling = RESULT_BUDGET_BYTES - TRAJECTORY_OTHER_BYTES
+        wide = _json_size(self._widest_point(wanted)) + 2
+        if headers + len(resolved) * narrow > ceiling:
+            raise self._targets_overflow(
+                f"at least {headers + len(resolved) * narrow}",
+                [size + wide for size in names],
+                ceiling,
+            )
+        room = RESULT_PAGE_BYTES - TRAJECTORY_OTHER_BYTES - headers
+        most = max(1, room // (len(resolved) * narrow))
+        count = min(total - offset, most if limit is None else min(limit, most))
+        # The sample before the page gives its first velocity and continuity.
+        seed = 1 if offset > 0 else 0
+        sampled = list(frames[offset - seed : offset + count])
+        walk, simulated, warning, usable, resume = self._trajectory_walk(
+            scene, sampled, max_simulated_frames, seed
+        )
+        count = min(count, usable - seed)
+        sampled = sampled[:usable]
+
         original_frame: int = scene.frame_current
-        fps: float = float(scene.render.fps)
-
-        points: List[Dict[str, Any]] = []
-        prev_location: Optional[List[float]] = None
-        sampled = set(range(start_frame, end_frame + 1, max(step, 1)))
-        # An unbaked rigid-body world only advances one frame at a time from
-        # its cache start; jumping straight to a sample frame leaves bodies
-        # at rest. Walk every frame from there and sample the requested ones.
-        walk: range = range(start_frame, end_frame + 1, max(step, 1))
-        rigidbody_world = getattr(scene, "rigidbody_world", None)
-        if (
-            sampled
-            and rigidbody_world is not None
-            and getattr(rigidbody_world, "enabled", True)
-            and not rigidbody_world.point_cache.is_baked
-        ):
-            cache_start = int(rigidbody_world.point_cache.frame_start)
-            walk = range(min(start_frame, cache_start), end_frame + 1)
-
+        original_subframe: float = scene.frame_subframe
+        fps = scene_fps(scene)
+        time_origin: int = scene.frame_start
+        returned = set(frames[offset : offset + count])
+        wanted_samples = set(sampled)
+        previous: List[Optional[Dict[str, Any]]] = [None] * len(resolved)
+        points: List[List[Dict[str, Any]]] = [[] for _ in resolved]
+        used = 0
+        last_set: Optional[int] = None
         try:
             for frame in walk:
                 scene.frame_set(frame)
-                if frame not in sampled:
+                last_set = frame
+                if frame not in wanted_samples:
                     continue
-                loc, rot = self._world_pose(obj)
-                time_sec = frame / fps
-
-                velocity: Optional[List[float]] = None
-                if prev_location is not None and step > 0:
-                    dt = step / fps
-                    if dt > 0:
-                        velocity = [(loc[i] - prev_location[i]) / dt for i in range(3)]
-
-                points.append(
-                    {
-                        "frame": frame,
-                        "time": time_sec,
-                        "location": loc,
-                        "rotation_euler": rot,
-                        "velocity": velocity,
-                    }
-                )
-                prev_location = loc
+                depsgraph = blender_module.context.evaluated_depsgraph_get()
+                samples = [
+                    self._trajectory_sample(depsgraph, target, previous[number])
+                    for number, target in enumerate(resolved)
+                ]
+                if frame in returned:
+                    row = [
+                        self._trajectory_point(
+                            frame, sample, previous[number], wanted, fps, time_origin, step
+                        )
+                        for number, sample in enumerate(samples)
+                    ]
+                    cost = sum(_json_size(point) + 2 for point in row)
+                    if points[0]:
+                        if used + cost > room:
+                            break
+                    elif headers + cost > ceiling:
+                        raise self._targets_overflow(
+                            str(headers + cost),
+                            [
+                                size + max(wide, _json_size(point) + 2)
+                                for size, point in zip(names, row)
+                            ],
+                            ceiling,
+                        )
+                    for number, point in enumerate(row):
+                        points[number].append(point)
+                    used += cost
+                previous = list(samples)
         finally:
-            scene.frame_set(original_frame)
+            scene.frame_set(original_frame, subframe=original_subframe)
 
+        count = len(points[0])
+        if simulated:
+            # A page that filled up early stepped only as far as the last frame set.
+            reached = resume if last_set is None else min(last_set, resume + simulated)
+            simulated = max(0, reached - resume)
+        next_offset = offset + count if offset + count < total else None
         return {
-            "object_name": object_name,
-            "point_count": len(points),
-            "points": points,
+            "fps": fps,
+            "time_origin_frame": time_origin,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "step": step,
+            "total_points": total,
+            "offset": offset,
+            "point_count": count,
+            "next_offset": next_offset,
+            "truncated": next_offset is not None,
+            "truncation": (
+                None
+                if next_offset is None
+                else {
+                    "field": "points",
+                    "returned": count,
+                    "total": total,
+                    "hint": (
+                        f"{count} of {total} samples from offset {offset}: call again "
+                        f"with the same arguments and offset={next_offset} to continue. "
+                        "Fewer fields, or a larger step, fit more samples a page."
+                    ),
+                }
+            ),
+            "simulated_frames": simulated,
+            "warning": warning,
+            "trajectories": [
+                {
+                    "object_name": target["object_name"],
+                    "bone_name": target["bone_name"],
+                    "rotation_mode": target["rotation_mode"],
+                    "euler_order": target["euler_order"],
+                    "points": points[number],
+                }
+                for number, target in enumerate(resolved)
+            ],
         }
+
+    @staticmethod
+    def _targets_overflow(needed: str, needs: List[int], ceiling: int) -> ValueError:
+        """The refusal of targets whose names and one sample each overflow a reply.
+
+        The server writes each non-ASCII character as a 6-byte ``\\u`` escape,
+        so 32 bones of an armature with a long non-ASCII name outgrew the
+        budget. ``details`` say how many of the targets, in order, fit.
+
+        Args:
+            needed: The bytes the page would take, as the message states them.
+            needs: Per target, the bytes of its header and of its widest sample.
+            ceiling: The bytes a reply's trajectories may take.
+        """
+        fit, used = 0, 0
+        for need in needs:
+            if used + need > ceiling:
+                break
+            used += need
+            fit += 1
+        advice = (
+            f"split the targets over calls (the first {fit} fit in one)"
+            if fit
+            else "ask for fewer fields"
+        )
+        error = ValueError(
+            f"The {len(needs)} targets' names and one sample of each take {needed} "
+            f"bytes of JSON, more than the {ceiling} a reply holds (the server "
+            f"writes each non-ASCII character of a name as a 6-byte escape); {advice}"
+        )
+        setattr(
+            error,
+            "details",
+            {"targets": len(needs), "targets_that_fit": fit, "reply_bytes": ceiling},
+        )
+        return error
+
+    @staticmethod
+    def _trajectory_fields(fields: Optional[List[str]]) -> Tuple[str, ...]:
+        if fields is None:
+            return TRAJECTORY_FIELDS
+        unknown = [name for name in fields if name not in TRAJECTORY_FIELDS]
+        if unknown:
+            raise ValueError(
+                f"Unknown trajectory fields {unknown}; choose from {TRAJECTORY_FIELDS}"
+            )
+        return tuple(name for name in TRAJECTORY_FIELDS if name in fields)
+
+    @staticmethod
+    def _widest_point(fields: Tuple[str, ...]) -> Dict[str, Any]:
+        """A sample as wide as these fields make it with values below 1e14.
+
+        In its shortest form a float32 below 1e14 in magnitude takes at most
+        17 characters (-12345679000000.0), and a time, written to 12 digits,
+        at most 18.
+        """
+        value = -1.2345678901e-30
+        point: Dict[str, Any] = {"frame": -FRAME_LIMIT}
+        wide: Dict[str, Any] = {
+            "time": -1.23456789012e-30,
+            "location": [value] * 3,
+            "rotation_euler": [value] * 3,
+            "rotation_quaternion": [value] * 4,
+            "local_rotation": [value] * 4,
+            "velocity": [value] * 3,
+        }
+        for name in fields:
+            point[name] = wide[name]
+        return point
+
+    @staticmethod
+    def _narrowest_point(fields: Tuple[str, ...]) -> Dict[str, Any]:
+        """A sample as narrow as these fields can make it: what bounds a page's samples."""
+        point: Dict[str, Any] = {"frame": 0}
+        narrow: Dict[str, Any] = {
+            "time": 0.0,
+            "location": [0.0] * 3,
+            "rotation_euler": [0.0] * 3,
+            "rotation_quaternion": [0.0] * 4,
+            "local_rotation": [0.0] * 3,
+            "velocity": None,
+        }
+        for name in fields:
+            point[name] = narrow[name]
+        return point
+
+    def _trajectory_target(
+        self, object_name: Any, bone_name: Optional[str]
+    ) -> Dict[str, Any]:
+        """The object (and bone) a trajectory samples, with its rotation mode.
+
+        Raises:
+            ValueError: No such object or bone. A name that is a bone of an
+                armature says which armature to pass.
+        """
+        if not isinstance(object_name, str) or not object_name:
+            raise ValueError("Each target needs an object_name")
+        try:
+            obj = self._get_object_or_raise(object_name)
+        except ValueError:
+            owner = self._armature_with_bone(object_name)
+            if owner is None:
+                raise
+            raise ValueError(
+                f"Object not found: {object_name}; it is a bone of armature "
+                f"'{owner}': pass object_name='{owner}' and bone_name='{object_name}'"
+            ) from None
+        if bone_name is None:
+            mode = obj.rotation_mode
+        else:
+            pose = getattr(obj, "pose", None)
+            if pose is None:
+                raise ValueError(
+                    f"'{object_name}' is not an armature, so it has no bone '{bone_name}'"
+                )
+            bone = pose.bones.get(bone_name)
+            if bone is None:
+                raise ValueError(f"Armature '{object_name}' has no bone '{bone_name}'")
+            mode = bone.rotation_mode
+        return {
+            "obj": obj,
+            "object_name": object_name,
+            "bone_name": bone_name,
+            "rotation_mode": mode,
+            "euler_order": mode if len(mode) == 3 else "XYZ",
+        }
+
+    def _armature_with_bone(self, bone_name: str) -> Optional[str]:
+        """The name of an armature in scope that has a pose bone ``bone_name``."""
+        blender_module: Any = bpy
+        objects = (
+            blender_module.context.scene.objects
+            if self._scene_scope
+            else blender_module.data.objects
+        )
+        for candidate in objects:
+            pose = getattr(candidate, "pose", None)
+            if pose is not None and pose.bones.get(bone_name) is not None:
+                return str(candidate.name)
+        return None
+
+    def _trajectory_walk(
+        self,
+        scene: Any,
+        samples: List[int],
+        max_simulated_frames: Optional[int],
+        seed: int = 0,
+    ) -> Tuple[List[int], int, Optional[str], int, int]:
+        """The frames to set, in order, so each sample shows its frame's simulation.
+
+        An unbaked rigid-body world advances only from one frame to the next,
+        so jumping to a frame it has not simulated leaves the bodies where they
+        were. Frames its memory cache holds are read, not simulated again: the
+        walk jumps to the last of them and steps on from there, to the last
+        sample or the cache end, after which Blender holds the bodies. The
+        walk serves the samples, in order, whose simulation stays within the
+        budget (or ``max_simulated_frames``); the page ends before the others.
+
+        Args:
+            scene: The scene to walk.
+            samples: The frames to sample, ascending.
+            max_simulated_frames: The confirmed most frames to simulate, or None
+                for the bodies x frames budget.
+            seed: How many leading samples only seed the page (its velocity):
+                a walk that serves none of the rest is refused.
+
+        Returns:
+            The frames to set, the frames of simulation they step through, a
+            warning for samples past the cache end, how many of the samples the
+            walk serves, and the frame the stepping resumes from.
+
+        Raises:
+            ValueError: When even the page's first sample needs more simulation
+                than the budget, or than ``max_simulated_frames``.
+        """
+        world = getattr(scene, "rigidbody_world", None)
+        if world is None or not getattr(world, "enabled", True) or not samples:
+            return list(samples), 0, None, len(samples), 0
+        cache = world.point_cache
+        start, end = int(cache.frame_start), int(cache.frame_end)
+        resume = max(self._cached_through(cache), start)
+        usable = len(samples)
+        if not cache.is_baked:
+            bodies = self._rigid_bodies(world)
+            allowed = (
+                max_simulated_frames
+                if max_simulated_frames is not None
+                else TRAJECTORY_SIMULATION_BUDGET // max(bodies, 1)
+            )
+            usable = sum(
+                1 for frame in samples if max(0, min(frame, end) - resume) <= allowed
+            )
+            if usable <= seed:
+                first = min(samples[seed], end)
+                needed = first - resume
+                every = max(0, min(samples[-1], end) - resume)
+                limit = (
+                    f"max_simulated_frames is {max_simulated_frames}"
+                    if max_simulated_frames is not None
+                    else f"that is over the {TRAJECTORY_SIMULATION_BUDGET} bodies x "
+                    "frames a call steps through unasked, and can take minutes on "
+                    "Blender's main thread"
+                )
+                raise ValueError(
+                    f"Sampling frame {samples[seed]} steps the unbaked rigid-body "
+                    f"simulation through {needed} frames (frames {resume + 1}-{first}) "
+                    f"of {bodies} bodies, {needed * max(bodies, 1)} bodies x frames; "
+                    f"{limit}. Bake it first with bake_blender_simulation, sample "
+                    f"fewer frames, or pass max_simulated_frames={needed} or more to go "
+                    f"ahead ({every} for every sample of this page); a walk that "
+                    "outlasts the client's timeout (BLENDER__CONNECTION_TIMEOUT, 30 s "
+                    "by default) keeps running in Blender after the call gives up"
+                )
+        served = samples[:usable]
+        warning = None
+        if served[-1] > end:
+            warning = (
+                f"Samples after frame {end} are past the rigid-body cache end: "
+                f"Blender simulates nothing later and holds the bodies at their "
+                f"frame-{end} pose there"
+            )
+        if cache.is_baked:
+            return served, 0, warning, usable, resume
+        last = min(served[-1], end)
+        simulated = max(0, last - resume)
+        stepped = range(resume, last + 1) if simulated else range(0)
+        return sorted(set(served) | set(stepped)), simulated, warning, usable, resume
+
+    @staticmethod
+    def _cached_through(cache: Any) -> int:
+        """The last frame an unbaked rigid-body cache holds without a gap from its start.
+
+        Blender simulates, and caches, frames one after another from the cache
+        start, so the N frames its info reports in memory are the first N. The
+        info is Blender's interface text: anything but the English "N frames
+        in memory (size)." of a cache that is up to date (outdated, frames
+        skipped, a translated interface) counts as nothing cached, which only
+        costs a slower walk.
+
+        Returns:
+            That frame, or the frame before the cache start when none is known.
+        """
+        start = int(cache.frame_start)
+        if cache.is_outdated:
+            return start - 1
+        match = _CACHED_FRAMES.fullmatch(str(cache.info))
+        if match is None:
+            return start - 1
+        return start + int(match.group(1).replace(",", "")) - 1
+
+    @staticmethod
+    def _rigid_bodies(world: Any) -> int:
+        """How many objects the rigid-body world simulates."""
+        collection = getattr(world, "collection", None)
+        return len(collection.all_objects) if collection is not None else 0
+
+    @staticmethod
+    def _trajectory_sample(
+        depsgraph: Any, target: Dict[str, Any], previous: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """The evaluated world pose and own rotation channels of a target at this frame.
+
+        ``previous`` is the sample before, whose rotations keep this one's
+        continuous; the Euler before the first is the target's own rotation.
+        """
+        evaluated = target["obj"].evaluated_get(depsgraph)
+        if target["bone_name"] is None:
+            matrix = evaluated.matrix_world
+            channels = evaluated
+        else:
+            channels = evaluated.pose.bones.get(target["bone_name"])
+            matrix = evaluated.matrix_world @ channels.matrix
+        mode = target["rotation_mode"]
+        if mode == "QUATERNION":
+            local = channels.rotation_quaternion
+        elif mode == "AXIS_ANGLE":
+            local = channels.rotation_axis_angle
+        else:
+            local = channels.rotation_euler
+        order = target["euler_order"]
+        if previous is not None:
+            compatible = previous["euler"]
+        elif len(mode) == 3:
+            compatible = _mathutils().Euler(tuple(local), order)
+        else:
+            compatible = None
+        # The rotation nearest the matrix, as get_object_info reads it: a
+        # turned child of a parent with non-uniform scale has a sheared matrix,
+        # from which to_euler and to_quaternion read different rotations.
+        nearest = _nearest_rotation([[float(v) for v in row][:3] for row in matrix][:3])
+        rotation = matrix if nearest is None else _mathutils().Matrix(nearest)
+        euler = (
+            rotation.to_euler(order)
+            if compatible is None
+            else rotation.to_euler(order, compatible)
+        )
+        quaternion = [float(v) for v in rotation.to_quaternion()]
+        if previous is not None and (
+            sum(a * b for a, b in zip(quaternion, previous["rotation_quaternion"])) < 0
+        ):
+            quaternion = [-v for v in quaternion]
+        return {
+            "location": [float(v) for v in matrix.translation],
+            "euler": euler,
+            "rotation_quaternion": quaternion,
+            "local_rotation": [float(v) for v in local],
+        }
+
+    @staticmethod
+    def _trajectory_point(
+        frame: int,
+        sample: Dict[str, Any],
+        previous: Optional[Dict[str, Any]],
+        fields: Tuple[str, ...],
+        fps: float,
+        time_origin: int,
+        step: int,
+    ) -> Dict[str, Any]:
+        """One reported sample: its frame and the requested fields, in float32 precision."""
+        point: Dict[str, Any] = {"frame": frame}
+        for name in fields:
+            if name == "time":
+                point["time"] = float(f"{(frame - time_origin) / fps:.12g}")
+            elif name == "velocity":
+                point["velocity"] = (
+                    None
+                    if previous is None
+                    else _f32s(
+                        (now - before) * fps / step
+                        for now, before in zip(sample["location"], previous["location"])
+                    )
+                )
+            elif name == "rotation_euler":
+                point["rotation_euler"] = _f32s(sample["euler"])
+            else:
+                point[name] = _f32s(sample[name])
+        return point
 
     def bake_simulation(
         self,
