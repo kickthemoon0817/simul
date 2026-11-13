@@ -630,7 +630,12 @@ def test_articulation_joints_come_in_kinematic_order(
     (articulation,) = result["articulations"]
     names = [joint["prim_path"].rsplit("/", 1)[1] for joint in articulation["joints"]]
     assert names == ["z_root", "m_shoulder", "b_elbow", "a_wrist", "c_branch"]
-    assert [joint["index"] for joint in articulation["joints"]] == [0, 1, 2, 3, 4]
+    assert [joint["tree_index"] for joint in articulation["joints"]] == [0, 1, 2, 3, 4]
+    # Isaac's DOF order is breadth first from the root link without the fixed joint.
+    assert [joint["dof_index"] for joint in articulation["joints"]] == [None, 0, 2, 3, 1]
+    assert [path.rsplit("/", 1)[1] for path in articulation["dof_paths"]] == [
+        "m_shoulder", "c_branch", "b_elbow", "a_wrist",
+    ]
     assert articulation["fixed_base"] is True
     assert articulation["root_body"] == "/World/Robot/base"
     assert articulation["bodies"] == [

@@ -30,8 +30,10 @@ class RenderMixin:
             "pointcloud) report the array's stats (per-field ranges and a record count for "
             "bounding boxes) plus an info summary such as idToLabels. Common AOVs: "
             "HdrColor, DirectDiffuse, DirectSpecular, IndirectDiffuse, Reflections, "
-            "AmbientOcclusion, Depth, SmoothNormal, normals. Use list_isaac_aovs for the "
-            "registered set."
+            "AmbientOcclusion, distance_to_camera, SmoothNormal, normals. Use "
+            "list_isaac_aovs for the registered set. Frames are stepped through Replicator's "
+            "orchestrator, which also runs any Replicator randomizers and writers the scene "
+            "has set up (writers may write files); the reply warns when the scene has them."
         ),
         read_only=False,
     )
@@ -88,6 +90,16 @@ class RenderMixin:
             camera = {_camera}
             res = tuple({_res})
             num_frames = {num_frames}
+
+            # Read before this call adds its own render product: whether the
+            # scene already has a Replicator graph (randomizers, writers) that
+            # the orchestrator step below will run too.
+            try:
+                import omni.usd
+                _scene = omni.usd.get_context().get_stage()
+                scene_has_replicator = bool(_scene) and _scene.GetPrimAtPath("/Replicator").IsValid()
+            except Exception:
+                scene_has_replicator = False
 
             rp = rep.create.render_product(camera, res)
             annotators = {{}}
@@ -260,6 +272,12 @@ class RenderMixin:
             # caller parses stdout as one JSON object, and a second object
             # would turn the whole AOV result into a parse error.
             warnings = []
+            if frame_strategy == "orchestrator" and scene_has_replicator:
+                warnings.append(
+                    "Stepping Replicator's orchestrator also ran the scene's own Replicator graph "
+                    "(/Replicator: randomizers and attached writers) once per frame; its writers "
+                    "may have written output."
+                )
             rp_path = _extract_rp_path(rp)
             for ann in annotators.values():
                 try:

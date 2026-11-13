@@ -908,13 +908,18 @@ APPLY_RIGID_BODY_CORE = """\
         }
 """
 
+# A CollisionAPI makes a shape only on geometry the physics parser knows; on
+# an Xform or Scope (an asset root) it is ignored. So the API goes on the
+# geometry at or under prim_path, and the approximation, a MeshCollisionAPI
+# token, on meshes only: Cube, Sphere and the other implicit shapes always
+# collide analytically. Going down a tree, render-purpose (visual-only) and
+# guide geometry is skipped unless all_purposes, so a robot's high-detail
+# visual meshes do not become colliders beside its collision meshes. An
+# instanceable prim's geometry lives in the shared prototype, edited in the
+# source asset, so it is skipped and reported. (The explanation lives here,
+# not in the script: create_isaac_object's script must fit one 5.x socket read.)
 APPLY_COLLISION_CORE = """\
-    def _apply_collision(stage, prim_path, approximation, recursive=True):
-        # A CollisionAPI makes a shape only on geometry the physics parser
-        # knows; on an Xform or Scope (an asset root) it is ignored. So the
-        # API goes on the geometry at or under prim_path, and the
-        # approximation, a MeshCollisionAPI token, on meshes only: Cube,
-        # Sphere and the other implicit shapes always collide analytically.
+    def _apply_collision(stage, prim_path, approximation, recursive=True, all_purposes=False):
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             return {"error": "Prim not found: " + prim_path}
@@ -933,14 +938,18 @@ APPLY_COLLISION_CORE = """\
 
         targets = []
         skipped_instances = []
+        skipped_purpose = []
         if recursive:
             for candidate in Usd.PrimRange(prim):
                 if candidate.IsInstance():
-                    # Its geometry lives in the shared prototype, which is
-                    # edited in the source asset, not through the instance.
                     skipped_instances.append(str(candidate.GetPath()))
-                if _is_shape(candidate):
-                    targets.append(candidate)
+                if not _is_shape(candidate):
+                    continue
+                purpose = UsdGeom.Imageable(candidate).ComputePurpose()
+                if not all_purposes and candidate != prim and purpose in (UsdGeom.Tokens.render, UsdGeom.Tokens.guide):
+                    skipped_purpose.append({"path": str(candidate.GetPath()), "purpose": str(purpose)})
+                    continue
+                targets.append(candidate)
         elif _is_shape(prim):
             targets.append(prim)
         if not targets:
@@ -950,6 +959,11 @@ APPLY_COLLISION_CORE = """\
             )
             if not recursive:
                 message += "; pass recursive=true to apply collision to the geometry below it"
+            if skipped_purpose:
+                message += (
+                    "; " + str(len(skipped_purpose)) + " render- or guide-purpose shape(s) skipped, "
+                    "pass all_purposes=true to include them"
+                )
             if skipped_instances:
                 message += "; instanced geometry is not editable here: " + ", ".join(skipped_instances[:5])
             return {"error": message}
@@ -1006,6 +1020,9 @@ APPLY_COLLISION_CORE = """\
                 str(len(skipped_instances)) + " instanceable prim(s) skipped; their geometry "
                 "must be given collision in the source asset"
             )
+        if skipped_purpose:
+            result["skipped_purpose"] = skipped_purpose[:max_listed]
+            result["skipped_purpose_count"] = len(skipped_purpose)
         if warnings:
             result["warnings"] = warnings
         return result

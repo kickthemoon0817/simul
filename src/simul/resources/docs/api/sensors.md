@@ -1,5 +1,20 @@
 # Isaac Sim 5.1.0 Sensor API Reference
 
+> **Version note: this page is the Isaac Sim 5.1 API.** In Isaac Sim 6.0.x the
+> four modules it covers, `isaacsim.sensors.camera`, `isaacsim.sensors.physics`,
+> `isaacsim.sensors.physx` and `isaacsim.sensors.rtx`, are in the deprecated
+> set (`source/deprecated/` in the v6.0.1 sources): they may still load but are
+> slated for removal. Their 6.0 successors are
+> `isaacsim.sensors.experimental.physics` (contact, IMU, effort, joint-state and
+> raycast sensors) and `isaacsim.sensors.experimental.rtx` (RTX camera, tiled
+> and depth cameras, lidar, radar, acoustic); `isaacsim.core.experimental.objects`
+> also has a camera object. The 6.0.1 sources have no successor for the PhysX
+> LiDAR of `isaacsim.sensors.physx`. Class and argument names differ from the
+> ones below, so check the version first (`get_isaac_runtime_info` →
+> `app.isaac_version`) and, on 6.0, read the experimental module's API in the
+> running install (for example `help()` through `execute_isaac_script`) rather
+> than porting these snippets as written.
+
 Practical reference for the sensor APIs shipped with Isaac Sim 5.1.0.
 All sensors follow the same lifecycle: construct → configure → attach to stage → call `get_current_frame()` (or a typed getter) each physics/render step.
 

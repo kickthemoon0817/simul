@@ -665,8 +665,10 @@ class PhysicsMixin:
             "prim_path, so an asset root Xform gets colliders on its meshes rather than an "
             "API the physics parser ignores. approximation (none, convexHull, "
             "convexDecomposition, meshSimplification, boundingSphere, boundingCube) is set on "
-            "meshes through MeshCollisionAPI; implicit shapes stay analytic. Reports every "
-            "shape it applied collision to; fails when there is no geometry."
+            "meshes through MeshCollisionAPI; implicit shapes stay analytic. Going down the "
+            "tree, render-purpose (visual-only) and guide geometry is skipped and reported "
+            "unless all_purposes=true. Reports every shape it applied collision to; fails "
+            "when there is no geometry."
         ),
         read_only=False,
     )
@@ -675,6 +677,7 @@ class PhysicsMixin:
         prim_path: str,
         approximation: Optional[str] = None,
         recursive: bool = True,
+        all_purposes: bool = False,
     ) -> Dict[str, Any]:
         """
         Apply CollisionAPI to the collision geometry at or under a prim.
@@ -692,10 +695,15 @@ class PhysicsMixin:
                 With false, prim_path itself must be a geometry prim.
                 Instanceable prims are skipped and reported: their geometry
                 is edited in the source asset.
+            all_purposes: With recursive, also give collision to geometry
+                whose purpose is render (visual-only, such as a robot's
+                high-detail visual meshes) or guide. Off by default; a
+                prim_path given directly is always included.
 
         Returns:
             Dict with ``shapes`` (path, type, the approximation in effect,
-            and whether it already had collision) and ``shape_count``, or an
+            and whether it already had collision), ``shape_count`` and
+            ``skipped_purpose`` for render/guide geometry left out, or an
             error when no collision geometry was found.
         """
         if approximation is not None and approximation not in COLLISION_APPROXIMATIONS:
@@ -721,7 +729,9 @@ class PhysicsMixin:
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                print(json.dumps(_apply_collision(stage, {_prim_path}, {_approx}, {_recursive})))
+                print(json.dumps(_apply_collision(
+                    stage, {_prim_path}, {_approx}, {_recursive}, {_pyval(bool(all_purposes))}
+                )))
             """,
         )
         return await self._execute_json_script(script)

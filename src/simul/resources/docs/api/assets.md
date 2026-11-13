@@ -258,7 +258,7 @@ Drives an articulation's joints by receiving position, velocity, or effort array
 | `inputs:execIn` | `execution` | Execution trigger |
 | `outputs:execOut` | `execution` | Passes execution downstream |
 
-Node type path: `omni.isaac.core_nodes.IsaacArticulationController`
+Node type path: `isaacsim.core.nodes.IsaacArticulationController`
 
 ### IsaacArticulationState
 
@@ -275,7 +275,7 @@ Reads current joint state from an articulation each physics step.
 | `outputs:effortState` | `float[]` | Current joint efforts (N·m or N) |
 | `outputs:execOut` | `execution` | Passes execution downstream |
 
-Node type path: `omni.isaac.core_nodes.IsaacArticulationState`
+Node type path: `isaacsim.core.nodes.IsaacArticulationState`
 
 ### IsaacCreateRenderProduct
 
@@ -291,7 +291,7 @@ Creates a render product (camera + resolution) used by synthetic-data sensors.
 | `outputs:renderProductPath` | `token` | USD path to the created render product |
 | `outputs:execOut` | `execution` | Passes execution downstream |
 
-Node type path: `omni.isaac.core_nodes.IsaacCreateRenderProduct`
+Node type path: `isaacsim.core.nodes.IsaacCreateRenderProduct`
 
 ### Wiring OmniGraph Nodes in Python
 
@@ -305,9 +305,9 @@ keys = og.Controller.Keys
     {
         keys.CREATE_NODES: [
             ("OnPlaybackTick",    "omni.graph.action.OnPlaybackTick"),
-            ("ArtState",          "omni.isaac.core_nodes.IsaacArticulationState"),
-            ("ArtController",     "omni.isaac.core_nodes.IsaacArticulationController"),
-            ("CreateRenderProd",  "omni.isaac.core_nodes.IsaacCreateRenderProduct"),
+            ("ArtState",          "isaacsim.core.nodes.IsaacArticulationState"),
+            ("ArtController",     "isaacsim.core.nodes.IsaacArticulationController"),
+            ("CreateRenderProd",  "isaacsim.core.nodes.IsaacCreateRenderProduct"),
         ],
         keys.SET_VALUES: [
             ("ArtState.inputs:robotPath",         "/World/robot"),
