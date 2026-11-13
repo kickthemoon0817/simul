@@ -677,3 +677,53 @@ def test_an_older_addon_still_lists_searches_and_deletes(
         ("delete_object", "Cube"),
     ]
     assert paged["success"] is False and "offset" in paged["error"]
+
+
+class _AddonBeforeAnimationPages:
+    """The session of an add-on built before keyframe and trajectory paging,
+    bone sampling and keyframe filters: it refuses those keywords."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def get_keyframes(self, object_name: str) -> dict:
+        self.calls.append(("get_keyframes", object_name))
+        return {"object_name": object_name, "has_animation": False, "channels": []}
+
+    def get_object_trajectory(
+        self, object_name: str, start_frame: int, end_frame: int, step: int = 1
+    ) -> dict:
+        self.calls.append(("get_object_trajectory", object_name, start_frame, end_frame))
+        return {"object_name": object_name, "point_count": 0, "points": []}
+
+
+def test_an_older_addon_still_lists_keyframes_and_samples_trajectories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sent on every call, the new filters and paging made an add-on built before
+    them refuse every get_blender_keyframes and get_blender_object_trajectory call
+    (TypeError 'data_path', TypeError 'bone_name')."""
+    session = _AddonBeforeAnimationPages()
+    instance = _strict_server(monkeypatch, session, "attached")  # type: ignore[arg-type]
+
+    listed = _call(instance, "get_blender_keyframes", {"object_name": "Cube"})
+    sampled = _call(
+        instance,
+        "get_blender_object_trajectory",
+        {"object_name": "Cube", "start_frame": 1, "end_frame": 3},
+    )
+    paged = _call(instance, "get_blender_keyframes", {"object_name": "Cube", "offset": 5})
+    bone = _call(
+        instance,
+        "get_blender_object_trajectory",
+        {"object_name": "Rig", "start_frame": 1, "end_frame": 3, "bone_name": "J1"},
+    )
+
+    assert listed["success"] is True and listed["next_offset"] is None
+    assert sampled["success"] is True and sampled["next_offset"] is None
+    assert session.calls == [
+        ("get_keyframes", "Cube"),
+        ("get_object_trajectory", "Cube", 1, 3),
+    ]
+    assert paged["success"] is False and "offset" in paged["error"]
+    assert bone["success"] is False and "bone_name" in bone["error"]
