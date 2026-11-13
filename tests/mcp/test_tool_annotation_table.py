@@ -177,6 +177,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "get_unreal_interchange_info": (RO, True, True),
     "get_unreal_loaded_map": (RO, True, True),
     "get_unreal_material_info": (RO, True, True),
+    "get_unreal_physics_state": (RO, True, True),
     "get_unreal_simulation_status": (RO, True, True),
     "get_unreal_viewport_info": (RO, True, True),
     "import_unreal_usd": (DESTRUCTIVE, False, True),  # replace_existing replaces assets and actors
@@ -184,6 +185,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "list_unreal_actor_components": (RO, True, True),
     "list_unreal_actors": (RO, True, True),
     "list_unreal_instances": (RO, True, True),
+    "list_unreal_simulation_actors": (RO, True, True),
     "ping_unreal": (RO, True, True),
     "query_unreal_scene_graph": (RO, True, True),
     "remesh_unreal_mesh": (DESTRUCTIVE, False, True),
@@ -199,6 +201,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "set_unreal_material_params": (DESTRUCTIVE, True, True),
     "set_unreal_physics_params": (DESTRUCTIVE, True, True),
     "set_unreal_render_settings": (DESTRUCTIVE, True, True),
+    "setup_unreal_physics_bulk": (DESTRUCTIVE, True, True),
     "simplify_unreal_mesh": (DESTRUCTIVE, False, True),
     "spawn_unreal_actor": (RW, False, True),
     "subdivide_unreal_mesh": (DESTRUCTIVE, False, True),
