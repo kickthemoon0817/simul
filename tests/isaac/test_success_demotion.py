@@ -136,16 +136,25 @@ def test_ping_success_tracks_reachability(monkeypatch: pytest.MonkeyPatch) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_raw_script_demotes_success_on_a_suffixed_error_key() -> None:
-    """execute_script used ``setdefault("success", "error" not in parsed)``.
+def test_raw_script_keeps_a_suffixed_error_key_as_data() -> None:
+    """What an agent's script prints is its data, ``*_error`` keys included (round-2 B-1).
 
-    That let ``timeline_error`` beside a result report green; it now uses the
-    same ``apply_success_from_error`` rule as the granular tools.
+    The granular tools' ``apply_success_from_error`` rule is for simul's own
+    scripts; an agent reports a failure by raising or printing
+    ``"success": false``.
     """
     tools = _tools_with_output({"frames": 3, "timeline_error": "no timeline"})
     result = asyncio.run(tools.execute_script("print('x')"))
-    assert result["success"] is False
+    assert result["success"] is True
     assert result["frames"] == 3
+    assert result["timeline_error"] == "no timeline"
+
+
+def test_raw_script_fails_on_a_printed_success_false() -> None:
+    tools = _tools_with_output({"frames": 3, "success": False})
+    result = asyncio.run(tools.execute_script("print('x')"))
+    assert result["success"] is False
+    assert result["error_type"] == "ScriptError"
 
 
 def test_raw_script_keeps_success_for_a_clean_object() -> None:

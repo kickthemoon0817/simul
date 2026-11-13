@@ -1812,12 +1812,15 @@ class SimulMCPServer(LoggerMixin):
                 payload = await self._call_outcome(
                     tool_name, run, request_model, request_kwargs, response_model, input_echo
                 )
-                if payload.get("success") is False:
+                # ``success`` decides, as it decides isError: a successful
+                # script result may carry the script's own ``error`` key.
+                failed = payload.get("success") is False
+                if failed:
                     normalize_error_payload(payload)
-                error = payload.get("error")
+                error = payload.get("error") if failed else None
                 record(
                     (time.monotonic() - started) * 1000,
-                    payload.get("success") is not False and not error,
+                    not failed,
                     str(error) if error else None,
                     error_type=payload.get("error_type"),
                 )
@@ -1836,11 +1839,11 @@ class SimulMCPServer(LoggerMixin):
                 record(duration, False, "cancelled_before_start", status="cancelled", executed=False)
             elif isinstance(drained, CancelledOutcome) and drained.payload is not None:
                 outcome = drained.payload
-                failed = outcome.get("success") is False or bool(outcome.get("error"))
+                failed = outcome.get("success") is False
                 record(
                     duration,
                     not failed,
-                    str(outcome.get("error") or "") or None,
+                    (str(outcome.get("error") or "") or None) if failed else None,
                     status="cancelled",
                     error_type=outcome.get("error_type"),
                     executed=drained.executed,

@@ -740,8 +740,13 @@ def exec_script(
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Execute Python code inside Unreal Engine, in a fresh namespace discarded when it ends."""
-    from simul.adapters.unreal_runtime import UNREAL_EXEC_MODES
+    """Execute Python code inside Unreal Engine, in a fresh namespace discarded when it ends.
+
+    Exits 1 when the script raised or printed a JSON object with
+    ``"success": false``; any other key it prints, ``error`` included, is data.
+    """
+    from simul.adapters.unreal_runtime import UNREAL_EXEC_MODES, UnrealRuntimeSession
+    from simul.utils.script_result import reported_failure_message, script_reported_failure
 
     if mode not in UNREAL_EXEC_MODES:
         msg = f"Invalid mode '{mode}'. Must be one of: {', '.join(sorted(UNREAL_EXEC_MODES))}"
@@ -789,11 +794,23 @@ def exec_script(
         if success
         else str(raw_result.get("CommandResult") or "Python execution failed")
     )
+    # What the script prints is data, so an error or *_error key in it does
+    # not fail the command; the script reports a failure as on every backend,
+    # by printing "success": false (the first JSON object, as
+    # execute_unreal_script reads it).
+    printed = (
+        UnrealRuntimeSession._first_json_object(raw_result)
+        if success and mode != "EvaluateStatement"
+        else None
+    )
+    if printed is not None and script_reported_failure(printed):
+        success = False
+        error_text = reported_failure_message(printed)
 
     if is_json_mode() and not raw:
         payload: Dict[str, Any] = {
             "success": success,
-            "return_value": success,
+            "return_value": bool(raw_result.get("ReturnValue", False)),
             "output": output_text,
             "warnings": warnings_text,
             "errors": errors_text,
@@ -801,6 +818,7 @@ def exec_script(
         }
         if not success:
             payload["error"] = error_text
+            payload["error_type"] = "ScriptError"
         print(json.dumps(payload, default=str))
         if not success:
             raise typer.Exit(1)

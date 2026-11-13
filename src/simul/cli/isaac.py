@@ -38,6 +38,7 @@ from simul.cli.output import (
     console,
     emit,
     exit_if_failed,
+    exit_with_failure,
     fail,
     is_json_mode,
     read_script_arg,
@@ -1234,15 +1235,23 @@ def exec_script(
     timeout: Optional[float] = _timeout_opt,
     raw: bool = typer.Option(False, "--raw", "-r", help="Print raw output without formatting"),
 ) -> None:
-    """Execute Python code inside Isaac Sim. Accepts a code string or .py file path."""
+    """Execute Python code inside Isaac Sim. Accepts a code string or .py file path.
+
+    A JSON object the script prints is its result, and its keys are data: an
+    ``error`` or ``*_error`` key does not fail the command. It exits 1 when the
+    script raised or printed ``"success": false``.
+    """
+    from simul.mcp.error_types import normalize_error_payload
+
     code = read_script_arg(script)
 
     tools = _tools(host, port, timeout)
     # Same path the MCP tool takes, rather than reaching through _client into
     # the adapter with a second copy of the transport rules.
     payload = asyncio.run(tools.execute_script(code, keep_raw_output=raw))
-    if payload.get("error"):
-        fail(payload["error"], payload.get("error_type", "Error"))
+    if payload.get("success") is False:
+        # Named and worded as the MCP envelope sends it.
+        exit_with_failure(normalize_error_payload(payload), show_traceback=True)
 
     # execute_script unwraps a JSON object when the script printed one. It only
     # carries stdout as well when asked, which --raw does — otherwise the whole

@@ -176,6 +176,12 @@ bad invocation, and sends nothing to Isaac Sim when:
   encoding. Pass such a script in a `.py` file or on stdin, which are always
   read as UTF-8.
 
+A JSON object the script prints is its result, and its keys are data: an
+`error` or `*_error` key (a `position_error` metric) does not fail the
+command. `exec` exits 1 when the script raised or printed `"success": false`
+(with `error_type: ScriptError` unless it printed its own); see
+[tools.md](tools.md#script-results).
+
 ## `simul unreal`
 
 Commands accept `-H/--host` and `-p/--port` for the Remote Control endpoint
@@ -219,7 +225,9 @@ locally.
 
 `exec` runs its code as `execute_unreal_script` does, in a fresh namespace
 that is discarded when the call ends; see
-[tools.md](tools.md#unreal-engine).
+[tools.md](tools.md#unreal-engine). It prints what the script printed and
+exits 1 when the script raised or its first printed JSON object says
+`"success": false` ([script results](tools.md#script-results)).
 
 ## `simul blender`
 

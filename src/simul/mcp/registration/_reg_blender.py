@@ -212,6 +212,12 @@ from ..schemas.simready import (
     SimReadyValidateRequest,
     SimReadyValidateResponse,
 )
+from ...utils.script_result import (
+    SCRIPT_ERROR,
+    printed_json_object,
+    reported_failure_message,
+    script_reported_failure,
+)
 from ._constraints import from_request_model
 from ._helpers import surface_tool, with_param_descriptions
 
@@ -223,6 +229,30 @@ ToolWrapper = Callable[..., Coroutine[Any, Any, ToolResult]]
 # Called with the open session (and the validated request when the tool has a
 # request model); returns the payload.
 SessionCall = Callable[..., Dict[str, Any]]
+
+
+def _execute_script(session: Any, **arguments: Any) -> Dict[str, Any]:
+    """Run an agent's script; it fails when it raised or printed ``"success": false``.
+
+    The printed output stays text in ``output``, so nothing the script prints
+    under ``error`` or ``*_error`` can fail the call. A script that reports a
+    failure itself does so as the other backends' scripts do: its whole
+    output is one JSON object with ``"success": false``, whose ``error`` (and
+    ``error_type``, default ``ScriptError``) the failed call carries.
+    """
+    payload: Dict[str, Any] = session.execute_script(**arguments)
+    if payload.get("error") or payload.get("output_truncated"):
+        return payload
+    printed = printed_json_object(payload.get("output"))
+    if printed is None or not script_reported_failure(printed):
+        return payload
+    error_type = printed.get("error_type")
+    return {
+        **payload,
+        "success": False,
+        "error": reported_failure_message(printed),
+        "error_type": error_type if isinstance(error_type, str) and error_type else SCRIPT_ERROR,
+    }
 
 
 @dataclass(frozen=True)
@@ -1574,10 +1604,14 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "a cut sets output_truncated=true and output_total_chars to the full length. "
             "Write larger results to a file and return its path instead. Anything the script "
             "raises, including SystemExit from sys.exit(), is reported in error and never "
-            "ends Blender. In attached mode each call is one undo step."
+            "ends Blender. What the script prints is data, so an error or *_error key in "
+            "printed JSON does not fail the call; it fails only when the script raises or "
+            "its whole output is one JSON object with \"success\": false (its error is "
+            "the message). In attached mode each call is one undo step."
         ),
         hints=DESTRUCTIVE,
         operation="execute_script",
+        call=_execute_script,
         request=BlenderExecuteScriptRequest,
         response=BlenderExecuteScriptResponse,
         script=True,

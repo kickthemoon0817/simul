@@ -37,6 +37,7 @@ from ..utils.regex_guard import UNREAL_TAG_LENGTH, RegexRefused
 from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
+from ..utils.script_result import apply_script_success
 from ._unreal_errors import (
     CAMERA_NOT_APPLIED,
     CONNECTION_ERROR,
@@ -2898,14 +2899,18 @@ class UnrealRuntimeSession(LoggerMixin):
         ``CommandResult``) as ``result``. The file and statement modes return
         the first JSON object the script printed; a script that ran but
         printed no JSON returns its printed ``output`` instead of failing.
+        That object is the script's data: an ``error`` or ``*_error`` key in
+        it (a ``position_error`` metric) does not fail the call. The script
+        fails it by raising or by printing ``"success": false``
+        (``apply_script_success``).
 
         Args:
             code: Python source code.
             mode: ``ExecuteFile``, ``EvaluateStatement`` or ``ExecuteStatement``.
 
         Returns:
-            The script's JSON object, ``result``/``output`` fields, or a
-            ``ScriptError`` envelope when the Python raised.
+            The script's JSON object with ``success`` set, ``result``/``output``
+            fields, or a ``ScriptError`` envelope when the Python raised.
         """
         raw = await self._execute_python(code, mode=mode)
         failure = self._python_failure(raw)
@@ -2923,9 +2928,7 @@ class UnrealRuntimeSession(LoggerMixin):
         parsed = self._first_json_object(raw)
         if parsed is None:
             return {"success": True, "output": output}
-        if parsed.get("error"):
-            return {"success": False, "error_type": "ScriptError", **parsed}
-        return parsed
+        return apply_script_success(parsed)
 
     @staticmethod
     def _parse_marker_json(result: Dict[str, Any], marker: str) -> Dict[str, Any]:

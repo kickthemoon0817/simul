@@ -2717,6 +2717,31 @@ Behaviour worth knowing:
 |---|---|
 | `get_tool_usage_stats` | Per-tool call counts, success rates and durations for the calling MCP session; `scope="server"` counts every session's calls. The recent call log (`include_recent`, `limit` 1 to 200) is always the caller's own, because records carry parameters, file paths and agent labels. Operators read every session with `simul stats`; clearing it is operator-only: `simul stats --reset` |
 
+## Script results
+
+What an agent's own script prints is data, on every backend
+(`execute_isaac_script`, `execute_unreal_script`, `execute_blender_script`,
+`simul isaac exec`, `simul unreal exec`). A call fails only when:
+
+- the script **raises** (`error_type: ScriptError`, the exception named in
+  `details.exception_type` where the engine reports it), or
+- the script **prints `"success": false`** in its JSON object. Its `error`
+  becomes the message (without one, the message lists the object's `*_error`
+  keys), and `error_type` is `ScriptError` unless the object names another.
+
+Any other key, `error` and `*_error` included, is returned as printed:
+`{"position_error": 0.002}` is a successful call carrying a metric, and
+`{"error": 0.0}` keeps its `0.0`. A `success` value other than `false` reads
+as success. Isaac returns the JSON object the whole output is; Unreal the
+first JSON object printed on its own line; Blender keeps the printed text in
+`output` and fails the call only when that whole output is one JSON object
+with `"success": false`. The skills' error-safe template
+(`{"success": False, "error": str(e)}` in an `except`) follows this rule.
+
+simul's own granular tools work differently: their generated scripts report
+a failure under `error`, or a partial one under a `*_error` key such as
+`timeline_error`, and the envelope reads those keys (`EngineError` below).
+
 ## Errors
 
 Every failed call has the same shape, on every backend and whichever layer
