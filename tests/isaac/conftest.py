@@ -72,3 +72,65 @@ def run_on_stage(monkeypatch: pytest.MonkeyPatch) -> RunOnStage:
         return json.loads(stdout.getvalue())
 
     return _run
+
+
+StageTools = Callable[..., Tuple[IsaacTools, List[str]]]
+
+
+@pytest.fixture
+def stage_tools(monkeypatch: pytest.MonkeyPatch) -> StageTools:
+    """An IsaacTools whose client runs every script against a ``Usd.Stage``.
+
+    For tools that send more than one script per call, where replaying a
+    captured script by hand would skip the tool's own handling between them.
+    Returns the tools and the list of scripts they sent.
+    """
+
+    def _make(
+        stage: Any,
+        settings: Settings | None = None,
+        modules: Dict[str, Any] | None = None,
+    ) -> Tuple[IsaacTools, List[str]]:
+        """Build the tools; ``modules`` adds Kit stand-ins (``omni.kit.commands``)."""
+        sent: List[str] = []
+        context = types.SimpleNamespace(
+            get_stage=lambda: stage,
+            get_stage_url=lambda: "anon:memory.usda",
+            get_selection=lambda: types.SimpleNamespace(get_selected_prim_paths=lambda: []),
+        )
+        fake_usd = types.ModuleType("omni.usd")
+        fake_usd.get_context = lambda: context  # type: ignore[attr-defined]
+        fake_omni = types.ModuleType("omni")
+        fake_omni.usd = fake_usd  # type: ignore[attr-defined]
+
+        extra = dict(modules or {})
+        if "omni.kit" in extra:
+            fake_omni.__path__ = []  # type: ignore[attr-defined]
+            fake_omni.kit = extra["omni.kit"]  # type: ignore[attr-defined]
+
+        def _execute(code: str, **_kwargs: Any) -> ScriptResult:
+            sent.append(code)
+            monkeypatch.setitem(sys.modules, "omni", fake_omni)
+            monkeypatch.setitem(sys.modules, "omni.usd", fake_usd)
+            for name, module in extra.items():
+                monkeypatch.setitem(sys.modules, name, module)
+            stdout = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(stdout):
+                    exec(compile(code, "<isaac-script>", "exec"), {"__name__": "__isaac_script__"})
+            except Exception as exc:  # noqa: BLE001 - reported the way Kit reports it
+                return ScriptResult(False, stdout.getvalue(), type(exc).__name__, str(exc))
+            return ScriptResult(True, stdout.getvalue())
+
+        client = MagicMock()
+        client.address = "127.0.0.1:8226"
+        client.timeout_seconds = 30.0
+        client.bridge_enabled = False
+        client.fallback_to_vscode = True
+        client.execute = AsyncMock(side_effect=_execute)
+        client.execute_vscode_only = AsyncMock(side_effect=_execute)
+        client.execute_bridge_script_only = AsyncMock(side_effect=_execute)
+        client.bridge_request = AsyncMock(return_value=None)
+        return IsaacTools(client, settings=settings or Settings()), sent
+
+    return _make

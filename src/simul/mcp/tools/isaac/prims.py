@@ -490,6 +490,36 @@ REPARENT_PRIM_CORE = """\
                     changed.append(str(attr.GetPath()))
         return changed
 
+    def _retarget_arcs(layer, old_path, new_path):
+        # Internal references and payloads, inherits and specializes in the
+        # edit target that name the old path or something under it.
+        changed = []
+        prim_paths = []
+        layer.Traverse(Sdf.Path.absoluteRootPath, lambda path: prim_paths.append(path) if path.IsPrimPath() else None)
+        for spec_path in prim_paths:
+            spec = layer.GetPrimAtPath(spec_path)
+            if not spec:
+                continue
+            for proxy, kind in ((spec.inheritPathList, "inherits"), (spec.specializesList, "specializes")):
+                for item in list(proxy.GetAddedOrExplicitItems()):
+                    if item.HasPrefix(old_path):
+                        proxy.ReplaceItemEdits(item, item.ReplacePrefix(old_path, new_path))
+                        changed.append(str(spec_path) + " " + kind)
+            for proxy, cls, kind in (
+                (spec.referenceList, Sdf.Reference, "references"),
+                (spec.payloadList, Sdf.Payload, "payload"),
+            ):
+                for item in list(proxy.GetAddedOrExplicitItems()):
+                    if not item.assetPath and not item.primPath.isEmpty and item.primPath.HasPrefix(old_path):
+                        moved = item.primPath.ReplacePrefix(old_path, new_path)
+                        if cls is Sdf.Reference:
+                            replacement = Sdf.Reference("", moved, item.layerOffset, item.customData)
+                        else:
+                            replacement = Sdf.Payload("", moved, item.layerOffset)
+                        proxy.ReplaceItemEdits(item, replacement)
+                        changed.append(str(spec_path) + " " + kind)
+        return changed
+
     def _reparent_prim(stage, prim_path, new_parent_path, keep_world_transform):
         default_time = Usd.TimeCode.Default()
         prim = stage.GetPrimAtPath(prim_path)
@@ -615,30 +645,36 @@ REPARENT_PRIM_CORE = """\
 
         fixups = []
         retargeted = _retarget(stage, old_path, new_path)
+        if not method.startswith("omni.kit"):
+            # Kit's MovePrim rewrites the arcs that name a moved prim; a bare
+            # namespace edit leaves them on the old path.
+            retargeted += _retarget_arcs(stage.GetEditTarget().GetLayer(), old_path, new_path)
         if retargeted:
             fixups.append("retargeted relationships/connections")
         kept = None
         if world_before is not None:
             moved_xf = UsdGeom.Xformable(stage.GetPrimAtPath(new_path))
-            if not Gf.IsClose(moved_xf.ComputeLocalToWorldTransform(default_time), world_before, 1e-6) and keep_parts:
-                outcome = _set_prim_transform(stage, str(new_path), keep_parts[0], keep_parts[1], keep_parts[2])
-                if "error" in outcome:
-                    result["world_transform_error"] = outcome["error"]
-                fixups.append("adjusted the local transform")
-            kept = Gf.IsClose(moved_xf.ComputeLocalToWorldTransform(default_time), world_before, 1e-5)
+            if Gf.IsClose(moved_xf.ComputeLocalToWorldTransform(default_time), world_before, 1e-6):
+                kept = True
+            elif keep_parts:
+                # Written by a second script: the transform core would take
+                # this one past the size Isaac Sim 5.1's socket accepts.
+                result["pending_world_fix"] = {
+                    "translation": keep_parts[0],
+                    "rotation_euler": keep_parts[1],
+                    "scale": keep_parts[2],
+                    "world": [world_before[i][j] for i in range(4) for j in range(4)],
+                }
+            else:
+                kept = False
         result.update({
             "reparented": True,
             "method": method,
             "retargeted": retargeted[:50],
             "retargeted_count": len(retargeted),
             "world_transform_kept": kept,
-            "undoable": method.startswith("omni.kit") and not fixups,
+            "fixups": fixups,
         })
-        if method.startswith("omni.kit") and fixups:
-            result["undo_note"] = (
-                "The move is on Kit's undo stack; the " + " and ".join(fixups) + " step is not, so undoing "
-                "the move leaves it behind."
-            )
         default_prim = stage.GetRootLayer().defaultPrim
         if old_path.GetParentPath().IsAbsoluteRootPath() and default_prim == name:
             result["note"] = "It was the stage's default prim; defaultPrim still names " + default_prim + "."
@@ -1178,8 +1214,6 @@ class PrimEditMixin:
             import omni.usd
             from pxr import Gf, Sdf, Usd, UsdGeom
             """,
-            XFORM_READ_CORE,
-            SET_PRIM_TRANSFORM_CORE,
             PRIM_LAYERING_CORE,
             REPARENT_PRIM_CORE,
             f"""\
@@ -1190,4 +1224,51 @@ class PrimEditMixin:
                 print(json.dumps(_reparent_prim(stage, {_prim_path}, {_new_parent}, {_keep})))
             """,
         )
-        return await self._execute_json_script(script)
+        result = await self._execute_json_script(script)
+        fixups = list(result.pop("fixups", None) or [])
+        pending = result.pop("pending_world_fix", None)
+        if pending is not None:
+            # The move left the world pose behind (no Kit to keep it): write
+            # the local transform that restores it, in a script of its own.
+            fix = await self._execute_json_script(
+                _compose_script(
+                    """\
+                    import json
+                    import omni.usd
+                    from pxr import Gf, Usd, UsdGeom
+                    """,
+                    XFORM_READ_CORE,
+                    SET_PRIM_TRANSFORM_CORE,
+                    f"""\
+                    stage = omni.usd.get_context().get_stage()
+                    path = {_pyval(result.get("new_path"))}
+                    outcome = _set_prim_transform(
+                        stage, path, {_pyval(pending["translation"])},
+                        {_pyval(pending["rotation_euler"])}, {_pyval(pending["scale"])}
+                    )
+                    expected = Gf.Matrix4d(*{_pyval(pending["world"])})
+                    world = UsdGeom.Xformable(stage.GetPrimAtPath(path)).ComputeLocalToWorldTransform(
+                        Usd.TimeCode.Default()
+                    )
+                    print(json.dumps({{
+                        "kept": "error" not in outcome and Gf.IsClose(world, expected, 1e-5),
+                        "transform_error": outcome.get("error"),
+                    }}))
+                    """,
+                )
+            )
+            fixups.append("adjusted the local transform")
+            result["world_transform_kept"] = bool(fix.get("kept"))
+            failure = fix.get("transform_error") or (fix.get("error") if fix.get("success") is False else None)
+            if failure or not fix.get("kept"):
+                result["world_transform_error"] = failure or "The world pose did not come back after the move"
+                result["success"] = False
+        if result.get("reparented"):
+            method = str(result.get("method") or "")
+            result["undoable"] = method.startswith("omni.kit") and not fixups
+            if method.startswith("omni.kit") and fixups:
+                result["undo_note"] = (
+                    "The move is on Kit's undo stack; the " + " and ".join(fixups)
+                    + " step is not, so undoing the move leaves it behind."
+                )
+        return result

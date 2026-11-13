@@ -241,13 +241,36 @@ def _compose_script(*fragments: str) -> str:
     f-string template would indent only its first line, so each fragment is
     dedented on its own and the pieces are concatenated at column zero.
 
+    Full-line comments and blank lines are dropped on the way: they explain
+    the cores to whoever reads this module, but Isaac Sim 5.1's stock socket
+    takes at most 32 KiB per script, and the cores' comments alone were a
+    sixth of create_isaac_object's. Generated scripts hold no multi-line
+    string literals, the one place this would change behaviour.
+
     Args:
         *fragments: Source fragments, each indented however its literal is.
 
     Returns:
         The concatenated script.
     """
-    return "\n".join(textwrap.dedent(fragment) for fragment in fragments)
+    return "\n".join(_script_source(fragment) for fragment in fragments)
+
+
+def _script_source(fragment: str) -> str:
+    """Return ``fragment`` dedented, without full-line comments or blank lines.
+
+    Args:
+        fragment: Python source as written in a script core or template.
+
+    Returns:
+        The source as ``_compose_script`` embeds it.
+    """
+    kept = [
+        line
+        for line in textwrap.dedent(fragment).splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return "\n".join(kept) + "\n"
 
 
 # Traversal predicate for the listing tools. Isaac robot assets keep their
@@ -265,6 +288,24 @@ TRAVERSAL_PREDICATE_CORE = """\
             flags = Usd.PrimIsActive & Usd.PrimIsDefined & Usd.PrimIsLoaded & ~Usd.PrimIsAbstract
         return Usd.TraverseInstanceProxies(flags) if include_instance_proxies else flags
 """
+
+
+def _listing_predicate(include_instance_proxies: bool, include_inactive: bool) -> str:
+    """Return the script expression that builds a listing's traversal predicate.
+
+    The script must embed ``TRAVERSAL_PREDICATE_CORE``.
+
+    Args:
+        include_instance_proxies: Descend into instanceable prims.
+        include_inactive: Also visit deactivated prims.
+
+    Returns:
+        Python source for the predicate, e.g. ``_traversal_predicate(True, False)``.
+    """
+    return (
+        f"_traversal_predicate({_pyval(bool(include_instance_proxies))}, "
+        f"{_pyval(bool(include_inactive))})"
+    )
 
 # What the mass and rigid_body aspects say beside a null centre of mass.
 # MassAPI's fallback is (-inf, -inf, -inf), the normal state after

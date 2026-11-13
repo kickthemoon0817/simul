@@ -41,17 +41,22 @@ def _bridge_listing_stands(result: Optional[Dict[str, Any]], offset: int) -> boo
 
 # Prefix for every generated script that counts prims. get_isaac_scene_summary
 # and get_isaac_scene_stats embed the same generator so their totals and type
-# labels agree: every prim Usd.PrimRange visits under the root with the default
-# predicate (active, defined, loaded, non-abstract), minus the pseudo-root,
-# which is a container and not a scene prim.
-COUNTED_PRIMS_HELPER = textwrap.dedent("""\
-    from pxr import Usd as _CountUsd
+# labels agree with each other and with list_isaac_prims: every prim the
+# listings' traversal visits under the root (instance proxies included by
+# default, inactive prims on request), minus the pseudo-root, which is a
+# container and not a scene prim. The default predicate stopped at
+# instanceable prims, so a scene built from instanced assets counted no meshes.
+COUNTED_PRIMS_HELPER = (
+    "from pxr import Usd\n\n"
+    + textwrap.dedent(TRAVERSAL_PREDICATE_CORE)
+    + textwrap.dedent("""\
 
-    def _counted_prims(stage, root_path):
+    def _counted_prims(stage, root_path, include_instance_proxies=True, include_inactive=False):
         root = stage.GetPrimAtPath(root_path)
         if not root.IsValid():
             return
-        for prim in _CountUsd.PrimRange(root):
+        predicate = _traversal_predicate(include_instance_proxies, include_inactive)
+        for prim in Usd.PrimRange(root, predicate):
             if prim.IsPseudoRoot():
                 continue
             yield prim
@@ -59,6 +64,7 @@ COUNTED_PRIMS_HELPER = textwrap.dedent("""\
     def _prim_type_label(prim):
         return prim.GetTypeName() or "Typeless"
 """)
+)
 
 
 class SceneInspectionMixin:
@@ -117,7 +123,11 @@ class SceneInspectionMixin:
                 start = stage.GetStartTimeCode()
                 end = stage.GetEndTimeCode()
                 fps = stage.GetFramesPerSecond()
-                total = sum(1 for _ in stage.Traverse()) if {_include_prim_count} else None
+                # Counted as the listings and get_isaac_scene_summary count:
+                # instance proxies included, the pseudo-root left out.
+                total = None
+                if {_include_prim_count}:
+                    total = sum(1 for _ in stage.Traverse(Usd.TraverseInstanceProxies()))
                 layer_stack = stage.GetLayerStack()
                 default_prim = stage.GetDefaultPrim()
                 dp_path = str(default_prim.GetPath()) if default_prim else None
@@ -242,6 +252,10 @@ class SceneInspectionMixin:
                         if max_d >= 0 and depth >= max_d:
                             prim_iter.PruneChildren()
                         if max_d >= 0 and depth > max_d:
+                            continue
+                        # The pseudo-root is a container, not a scene prim;
+                        # the counting tools leave it out too.
+                        if p.IsPseudoRoot():
                             continue
                         ptype = p.GetTypeName()
                         if type_filter and ptype != type_filter:
@@ -625,35 +639,46 @@ class SceneInspectionMixin:
             "and meters per unit. Counts prims the same way as get_isaac_scene_stats. Use "
             "get_isaac_scene_summary to orient before listing; use get_isaac_scene_stats "
             "for geometry totals (vertices, faces, meshes, lights, cameras, materials) "
-            "under a chosen root."
+            "under a chosen root. Counts inside instanceable prims (where Isaac assets keep "
+            "their meshes) unless include_instance_proxies=false; include_inactive=true "
+            "also counts deactivated prims."
         ),
         read_only=True,
         idempotent=True,
     )
-    async def get_isaac_scene_summary(self) -> Dict[str, Any]:
+    async def get_isaac_scene_summary(
+        self, include_instance_proxies: bool = True, include_inactive: bool = False
+    ) -> Dict[str, Any]:
         """
         Get a high-level summary of the current Isaac Sim scene.
+
+        Args:
+            include_instance_proxies: Count the prims inside instanceable
+                prims, as list_isaac_prims does.
+            include_inactive: Also count deactivated prims.
 
         Returns:
             Dict with prim counts by type, total prims, hierarchy depth, etc.
             Prims are counted the same way as get_isaac_scene_stats.
         """
-        script = COUNTED_PRIMS_HELPER + textwrap.dedent("""\
+        _proxies = _pyval(bool(include_instance_proxies))
+        _inactive = _pyval(bool(include_inactive))
+        script = COUNTED_PRIMS_HELPER + textwrap.dedent(f"""\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom, UsdPhysics
 
             stage = omni.usd.get_context().get_stage()
             if stage is None:
-                print(json.dumps({"error": "No stage is currently open"}))
+                print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                type_counts = {}
+                type_counts = {{}}
                 total = 0
                 max_depth = 0
                 has_physics = False
                 has_animation = stage.GetEndTimeCode() > stage.GetStartTimeCode()
 
-                for p in _counted_prims(stage, "/"):
+                for p in _counted_prims(stage, "/", {_proxies}, {_inactive}):
                     total += 1
                     t = _prim_type_label(p)
                     type_counts[t] = type_counts.get(t, 0) + 1
@@ -665,7 +690,7 @@ class SceneInspectionMixin:
                             has_physics = True
 
                 root_prims = [str(p.GetPath()) for p in stage.GetPseudoRoot().GetChildren()]
-                print(json.dumps({
+                print(json.dumps({{
                     "stage_url": str(omni.usd.get_context().get_stage_url()),
                     "total_prims": total,
                     "max_depth": max_depth,
@@ -675,6 +700,8 @@ class SceneInspectionMixin:
                     "root_prims": root_prims,
                     "up_axis": UsdGeom.GetStageUpAxis(stage),
                     "meters_per_unit": UsdGeom.GetStageMetersPerUnit(stage),
-                }))
+                    "include_instance_proxies": {_proxies},
+                    "include_inactive": {_inactive},
+                }}))
         """)
         return await self._execute_json_script(script)

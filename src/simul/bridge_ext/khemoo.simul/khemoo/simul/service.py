@@ -469,7 +469,7 @@ class BridgeCommandService:
     def _handle_get_stage_info(self, request: BridgeRequest) -> BridgeResponse:
         """Return metadata for the currently open stage."""
         import omni.usd
-        from pxr import UsdGeom
+        from pxr import Usd, UsdGeom
 
         ctx = omni.usd.get_context()
         stage = ctx.get_stage()
@@ -497,8 +497,12 @@ class BridgeCommandService:
             "start_time": stage.GetStartTimeCode(),
             "end_time": stage.GetEndTimeCode(),
             "frame_rate": stage.GetFramesPerSecond(),
+            # Counted as the listings and get_isaac_scene_summary count:
+            # instance proxies included, the pseudo-root left out.
             "total_prims": (
-                sum(1 for _ in stage.Traverse()) if include_prim_count else None
+                sum(1 for _ in stage.Traverse(Usd.TraverseInstanceProxies()))
+                if include_prim_count
+                else None
             ),
             "root_prims": root_prims,
             "layer_count": len(stage.GetLayerStack()),
@@ -550,6 +554,10 @@ class BridgeCommandService:
             if max_depth >= 0 and depth >= max_depth:
                 prim_iter.PruneChildren()
             if max_depth >= 0 and depth > max_depth:
+                continue
+            # The pseudo-root is a container, not a scene prim; the counting
+            # tools leave it out too.
+            if prim.IsPseudoRoot():
                 continue
             prim_type_name = prim.GetTypeName()
             if prim_type and prim_type_name != prim_type:
