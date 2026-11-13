@@ -23,17 +23,19 @@ import logging.config
 import logging.handlers
 import os
 import queue
+import re
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 import yaml
 
 from .config import Settings, get_settings
 from .resources import find_checkout_root, resource_filesystem_path
+from .utils.filelock import exclusive_file_lock
 
 
 _CHECKOUT_ROOT: Optional[Path] = find_checkout_root()
@@ -123,27 +125,322 @@ def setup_logging(
         logger.info(f"Using logging profile: {profile}")
 
 
+#: Mode of the log and audit files simul writes. They record tool calls with
+#: their arguments (scripts, file paths), so on a shared machine no other local
+#: user may read them.
+LOG_FILE_MODE = 0o600
+#: Mode of the directories simul creates for them.
+LOG_DIR_MODE = 0o700
+
+
+def _simul_state_root() -> Path:
+    """The directory simul owns its state under (``$SIMUL_HOME``, default ``~/.simul``)."""
+    from .utils.paths import state_dir
+
+    return state_dir()
+
+
+def make_private_dir(path: Path) -> None:
+    """Create ``path`` and any missing parents with mode 0700.
+
+    ``Path.mkdir(mode=..., parents=True)`` applies the mode only to the last
+    directory, so each missing level is created on its own. An existing
+    directory keeps its mode: simul did not create it, and a user may have
+    pointed ``SIMUL_HOME`` or the log paths at a directory they share (their
+    home). The files simul writes there are 0600 all the same.
+
+    Raises:
+        OSError: A missing directory could not be created.
+    """
+    path = Path(path).expanduser()
+    missing: List[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, LOG_DIR_MODE)
+        except FileExistsError:
+            pass
+        else:
+            # mkdir's mode passes through the umask, which may only narrow it.
+            _tighten(directory, LOG_DIR_MODE)
+
+
+def _tighten(path: Path, mode: int) -> None:
+    """Drop group and other permissions from a file or directory this user owns."""
+    if os.name == "nt":  # pragma: no cover - POSIX modes only
+        return
+    try:
+        info = path.stat()
+    except OSError:
+        return
+    if info.st_uid != os.getuid() or (info.st_mode & 0o077) == 0:
+        return
+    try:
+        os.chmod(path, (info.st_mode & 0o7777) & mode)
+    except OSError:
+        pass
+
+
+def tighten_log_files(base: Path) -> None:
+    """Make ``base`` and its rotated copies (``base.*``) 0600 when this user owns them."""
+    base = Path(base).expanduser()
+    candidates = [base]
+    try:
+        candidates += [p for p in base.parent.glob(f"{base.name}.*") if p.is_file()]
+    except OSError:
+        pass
+    for candidate in candidates:
+        _tighten(candidate, LOG_FILE_MODE)
+
+
+def _open_private(filename: str, mode: str, encoding: Optional[str], errors: Optional[str]) -> Any:
+    """Open a log file the way logging's handlers do, creating it with mode 0600."""
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if "a" in mode else os.O_TRUNC)
+    fd = os.open(filename, flags, LOG_FILE_MODE)
+    return open(fd, mode, encoding=encoding, errors=errors)
+
+
+class PrivateFileHandler(logging.FileHandler):
+    """A FileHandler whose file is created with mode 0600."""
+
+    def _open(self) -> Any:
+        return _open_private(self.baseFilename, self.mode, self.encoding, self.errors)
+
+
+class PrivateTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """A TimedRotatingFileHandler whose files, rotated ones included, are mode 0600.
+
+    Rotation renames the current file (keeping its mode) and opens a new one
+    through ``_open``.
+    """
+
+    def _open(self) -> Any:
+        return _open_private(self.baseFilename, self.mode, self.encoding, self.errors)
+
+
+class SharedRotatingFileHandler(logging.Handler):
+    """A log file every simul process on the machine appends to and rotates together.
+
+    Each server process writes the same ``simul.log`` and ``audit.jsonl``.
+    Python's TimedRotatingFileHandler keeps its file open and rotates on its
+    own schedule, so after the first midnight every process but the one that
+    rotated went on writing into the previous day's file, and the retention
+    of the next rotation deleted those rows. This handler holds a lock on
+    ``<file>.lock`` for each record, rotates under it, and appends to the file
+    at its path opened afresh (``O_APPEND``, mode 0600), so no process writes
+    to a file another one has rotated away. Under the lock, before writing:
+
+    * a file last written on an earlier day is renamed to
+      ``<file>.<YYYY-MM-DD>`` (the day it was written; the names
+      TimedRotatingFileHandler used);
+    * a file that has reached ``maxBytes`` (when set) is renamed to
+      ``<file>.<YYYY-MM-DD>`` or, when that is taken, ``<file>.<YYYY-MM-DD>.<n>``;
+
+    and copies older than ``backupCount`` days are deleted, as are the oldest
+    beyond ``maxBackups`` copies (when set).
+
+    Nothing about the lock or the rotation can lose a record: it is appended
+    unlocked and unrotated instead, with one warning on stderr, when the lock
+    cannot be had (``ENOLCK`` on an NFS home whose lock daemon is gone, a log
+    directory where the lock file cannot be created) or another process holds
+    it for longer than ``_LOCK_TIMEOUT_SECONDS`` (a stopped or debugged
+    process; the handlers of simul.log run on the server's event loop, so a
+    long wait would stall it). After either, locking is skipped for
+    ``_LOCK_BACKOFF_SECONDS``. A rotation that fails (a copy another program
+    holds open on Windows) is skipped the same way.
+
+    Args:
+        filename: The log file.
+        when: ``"midnight"`` (daily rotation) or anything else (none).
+        backupCount: Days of rotated copies kept; 0 keeps them all.
+        maxBytes: Size at which the file is rotated; 0 never.
+        maxBackups: Most rotated copies kept; 0 no limit.
+        encoding: Text encoding of the records.
+    """
+
+    _LOCK_TIMEOUT_SECONDS = 0.05
+    _LOCK_BACKOFF_SECONDS = 30.0
+
+    def __init__(
+        self,
+        filename: str,
+        when: str = "midnight",
+        backupCount: int = 14,
+        maxBytes: int = 0,
+        maxBackups: int = 0,
+        encoding: Optional[str] = "utf-8",
+        errors: Optional[str] = None,
+        **_unused: Any,
+    ) -> None:
+        super().__init__()
+        self.baseFilename = os.path.abspath(os.fspath(Path(filename).expanduser()))
+        self.daily = str(when).lower() == "midnight"
+        self.backupCount = max(0, int(backupCount))
+        self.maxBytes = max(0, int(maxBytes))
+        self.maxBackups = max(0, int(maxBackups))
+        self.encoding = encoding or "utf-8"
+        self.errors = errors
+        self._unlocked_until = 0.0
+        self._warned = False
+        self._rotated_name = re.compile(
+            re.escape(os.path.basename(self.baseFilename))
+            + r"\.(\d{4}-\d{2}-\d{2})(?:\.(\d+))?$"
+        )
+
+    @staticmethod
+    def _day(timestamp: float) -> date:
+        """The local day a timestamp falls on (a test may make days shorter)."""
+        return date.fromtimestamp(timestamp)
+
+    def _today(self) -> date:
+        return self._day(time.time())
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            data = (self.format(record) + "\n").encode(self.encoding, self.errors or "strict")
+            with contextlib.ExitStack() as held:
+                if self._lock(held):
+                    try:
+                        self._rotate(len(data))
+                    except OSError as exc:
+                        self._warn_once(f"could not rotate it ({exc}); appending to it as it is")
+                self._append(data)
+        except Exception:
+            self.handleError(record)
+
+    def _lock(self, held: contextlib.ExitStack) -> bool:
+        """Take the cross-process lock into ``held``; False when it cannot be had now."""
+        if time.monotonic() < self._unlocked_until:
+            return False
+        try:
+            held.enter_context(
+                exclusive_file_lock(
+                    Path(self.baseFilename + ".lock"), timeout=self._LOCK_TIMEOUT_SECONDS
+                )
+            )
+            return True
+        except TimeoutError:
+            reason = "another process holds its lock"
+        except OSError as exc:
+            reason = f"its lock is not available ({exc})"
+        self._unlocked_until = time.monotonic() + self._LOCK_BACKOFF_SECONDS
+        self._warn_once(f"{reason}; appending to it without the lock or rotation")
+        return False
+
+    def _warn_once(self, message: str) -> None:
+        """Say once on stderr that the file is written without its lock or rotation."""
+        if self._warned:
+            return
+        self._warned = True
+        try:
+            sys.stderr.write(f"simul: {self.baseFilename}: {message}\n")
+        except Exception:  # pragma: no cover - stderr closed
+            pass
+
+    def _append(self, data: bytes) -> None:
+        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, LOG_FILE_MODE)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+
+    def _rotate(self, incoming: int) -> None:
+        try:
+            info = os.stat(self.baseFilename)
+        except FileNotFoundError:
+            return
+        today = self._today()
+        written = self._day(info.st_mtime)
+        if self.daily and written < today:
+            self._move(written)
+        elif self.maxBytes and info.st_size and info.st_size + incoming > self.maxBytes:
+            self._move(today)
+        else:
+            return
+        self._prune(today)
+
+    def _move(self, day: date) -> None:
+        target = f"{self.baseFilename}.{day:%Y-%m-%d}"
+        index = 0
+        while os.path.exists(target if index == 0 else f"{target}.{index}"):
+            index += 1
+        os.replace(self.baseFilename, target if index == 0 else f"{target}.{index}")
+
+    def _prune(self, today: date) -> None:
+        directory = os.path.dirname(self.baseFilename)
+        copies = []
+        for name in os.listdir(directory):
+            match = self._rotated_name.fullmatch(name)
+            if match is None:
+                continue
+            try:
+                day = date.fromisoformat(match.group(1))
+            except ValueError:
+                continue
+            copies.append((day, int(match.group(2) or 0), os.path.join(directory, name)))
+        copies.sort()
+        if self.backupCount:
+            oldest = today - timedelta(days=self.backupCount)
+            for day, _index, path in [copy for copy in copies if copy[0] < oldest]:
+                _remove_quietly(path)
+            copies = [copy for copy in copies if copy[0] >= oldest]
+        if self.maxBackups and len(copies) > self.maxBackups:
+            for _day, _index, path in copies[: len(copies) - self.maxBackups]:
+                _remove_quietly(path)
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+#: Size at which ``audit.jsonl`` is rotated within a day, and the most
+#: rotated copies kept (with ``retention_days`` of daily ones).
+AUDIT_MAX_BYTES = 10 * 1024 * 1024
+AUDIT_MAX_BACKUPS = 30
+
+# The handler classes the YAML names and their private counterparts.
+_PRIVATE_HANDLER_CLASSES = {
+    "logging.FileHandler": "simul.logging.PrivateFileHandler",
+    "logging.handlers.TimedRotatingFileHandler": "simul.logging.SharedRotatingFileHandler",
+    "simul.logging.PrivateTimedRotatingFileHandler": "simul.logging.SharedRotatingFileHandler",
+}
+
+
 def _ensure_log_directories(config: Dict[str, Any]) -> None:
     """Ensure all log directories exist; expand ~ in handler filenames.
 
     Python's RotatingFileHandler does not call ``expanduser`` on the path it
     receives, so a filename like ``~/.simul/logs/simul.log`` would create
     a literal ``~`` directory in the CWD. We expand here and write the
-    resolved absolute path back into the dictConfig payload.
+    resolved absolute path back into the dictConfig payload. Directories are
+    created 0700 and the handlers create their files 0600 (see
+    ``make_private_dir`` and ``PrivateTimedRotatingFileHandler``); existing
+    log files simul writes are tightened to 0600.
     """
     handlers = config.get("handlers", {})
 
     for handler_config in handlers.values():
         if "filename" not in handler_config:
             continue
+        handler_class = handler_config.get("class")
+        if handler_class in _PRIVATE_HANDLER_CLASSES:
+            handler_config["class"] = _PRIVATE_HANDLER_CLASSES[handler_class]
         log_file = Path(handler_config["filename"]).expanduser()
         handler_config["filename"] = str(log_file)
-        log_dir = log_file.parent
-        if not log_dir.exists():
-            try:
-                log_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                print(f"Warning: Could not create log directory {log_dir}: {e}", file=sys.stderr)
+        try:
+            make_private_dir(log_file.parent)
+        except Exception as e:
+            print(f"Warning: Could not create log directory {log_file.parent}: {e}", file=sys.stderr)
+            continue
+        tighten_log_files(log_file)
 
 
 def _resolve_logging_config_path(config_file: Union[str, Path]) -> Path:
@@ -223,7 +520,11 @@ def _apply_retention_to_timed_handlers(
         cfg = handlers.get(name)
         if not cfg:
             continue
-        if cfg.get("class") == "logging.handlers.TimedRotatingFileHandler":
+        if cfg.get("class") in (
+            "logging.handlers.TimedRotatingFileHandler",
+            "simul.logging.PrivateTimedRotatingFileHandler",
+            "simul.logging.SharedRotatingFileHandler",
+        ):
             cfg["backupCount"] = retention_days
 
 
@@ -264,10 +565,12 @@ def _start_audit_listener(audit_path: Path, retention_days: int) -> None:
         _audit_listener = None
     _audit_queue = queue.Queue(-1)
 
-    file_handler = logging.handlers.TimedRotatingFileHandler(
+    file_handler = SharedRotatingFileHandler(
         filename=str(audit_path),
         when="midnight",
         backupCount=retention_days,
+        maxBytes=AUDIT_MAX_BYTES,
+        maxBackups=AUDIT_MAX_BACKUPS,
         encoding="utf8",
     )
     file_handler.setFormatter(AuditFormatter())
@@ -306,7 +609,8 @@ def _setup_audit_handler(config: Dict[str, Any], settings: Settings) -> None:
         return
 
     audit_path = _audit_filename_for(settings)
-    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    make_private_dir(audit_path.parent)
+    tighten_log_files(audit_path)
 
     _start_audit_listener(audit_path, settings.logging.retention_days)
     assert _audit_queue is not None  # set by _start_audit_listener
@@ -378,9 +682,86 @@ def _apply_settings_to_dictconfig(
             if handler and handler.get("formatter") == "colored":
                 handler["formatter"] = "simple"
 
+    _apply_level(config, settings.logging.level)
+    _apply_format(config, settings.logging.format)
+
     component_levels = settings.logging.components or {}
     for logger_name, level in component_levels.items():
         config.setdefault("loggers", {}).setdefault(logger_name, {})["level"] = level
+
+
+#: Values ``logging.format`` takes, and the formatter each puts on the console
+#: and the text log file (``detailed`` keeps the YAML's own).
+LOG_FORMATS: Dict[str, Optional[Dict[str, str]]] = {
+    "detailed": None,
+    "simple": {"console": "simple", "console_simple": "simple", "file": "simple"},
+    "json": {"console": "json", "console_simple": "json", "file": "json"},
+}
+
+_CONSOLE_HANDLERS = ("console", "console_simple")
+
+
+def _numeric_level(level: Any, default: int = logging.INFO) -> int:
+    value = logging.getLevelName(str(level).upper())
+    return value if isinstance(value, int) else default
+
+
+def _apply_level(config: Dict[str, Any], level: str) -> None:
+    """Make ``logging.level`` (``LOGGING__LEVEL``, ``--log-level``) the level simul logs at.
+
+    The YAML pins its loggers at INFO, so the setting never reached them:
+    ERROR still wrote INFO lines and DEBUG wrote none. Now simul's loggers and
+    the console handlers take the level. The root logger and third-party
+    loggers (fastmcp, mcp, asyncio, ...) keep their quieter YAML level unless
+    the setting is stricter, so DEBUG for simul does not turn on every
+    library's debug output, while ERROR silences them too. The audit logger
+    is not a log level matter and stays at INFO.
+    """
+    numeric = _numeric_level(level)
+    name = logging.getLevelName(numeric)
+    loggers = config.setdefault("loggers", {})
+    scopes = list(loggers.items())
+    if isinstance(config.get("root"), dict):
+        scopes.append(("<root>", config["root"]))
+    for logger_name, logger_config in scopes:
+        if not isinstance(logger_config, dict) or logger_name == _AUDIT_LOGGER_NAME:
+            continue
+        if logger_name == "simul" or logger_name.startswith("simul."):
+            logger_config["level"] = name
+        elif numeric > _numeric_level(logger_config.get("level", "WARNING"), logging.WARNING):
+            logger_config["level"] = name
+    for handler_name in _CONSOLE_HANDLERS:
+        handler = config.get("handlers", {}).get(handler_name)
+        if isinstance(handler, dict):
+            handler["level"] = name
+
+
+def _apply_format(config: Dict[str, Any], log_format: str) -> None:
+    """Apply ``logging.format`` (``LOGGING__FORMAT``): ``detailed``, ``simple`` or ``json``.
+
+    ``json`` writes the console and the text log as one JSON object per line
+    (the ``JsonFormatter`` schema), ``simple`` as ``LEVEL - logger - message``.
+    An unknown value is reported on stderr and leaves the YAML's formatters.
+    """
+    key = str(log_format or "detailed").strip().lower()
+    if key not in LOG_FORMATS:
+        print(
+            f"Warning: unknown logging.format {log_format!r}; "
+            f"use one of {', '.join(LOG_FORMATS)}. Keeping the default.",
+            file=sys.stderr,
+        )
+        return
+    choice = LOG_FORMATS[key]
+    if choice is None:
+        return
+    formatters = config.setdefault("formatters", {})
+    formatters.setdefault("json", {"()": "simul.logging.JsonFormatter"})
+    formatters.setdefault("simple", {"format": "%(levelname)s - %(name)s - %(message)s"})
+    handlers = config.get("handlers", {})
+    for handler_name, formatter in choice.items():
+        handler = handlers.get(handler_name)
+        if isinstance(handler, dict):
+            handler["formatter"] = formatter
 
 
 def _setup_fallback_logging(
@@ -396,8 +777,9 @@ def _setup_fallback_logging(
     if settings.logging.file_enabled:
         log_path = Path(settings.logging.file_path).expanduser()
         log_dir = log_path.parent
-        log_dir.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(str(log_path), encoding="utf-8"))
+        make_private_dir(log_dir)
+        tighten_log_files(log_path)
+        handlers.append(PrivateFileHandler(str(log_path), encoding="utf-8"))
 
     if not handlers:
         handlers.append(logging.NullHandler())
@@ -534,25 +916,113 @@ def emit_audit(
     status: str,
     error_class: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
+    error_type: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    session: Optional[str] = None,
+    reason: Optional[str] = None,
+    executed: Optional[Union[bool, str]] = None,
 ) -> None:
-    """Emit one audit JSONL record describing a completed tool-call boundary."""
+    """Emit one audit JSONL record describing a completed tool-call boundary.
+
+    Every text field is cut at ``AUDIT_MAX_FIELD_CHARS``.
+
+    Args:
+        tool: The tool called.
+        request_id: The call's correlation id, shared with its usage record.
+        duration_ms: Wall time of the whole call, refusals included.
+        status: ``ok``, ``error`` (the call failed, ``error_type`` says how),
+            or ``cancelled`` (the client gave up).
+        error_class: The exception class, when one escaped the tool.
+        extra: Free-form context.
+        error_type: The failed envelope's ``error_type``.
+        agent_id: The agent the call acted as (its claim's label, else the
+            session's).
+        session: The session label the call came in on.
+        reason: Why the envelope refused the call before it ran
+            (``rate_limited``, ``instance_busy``, ``instance_claimed``).
+        executed: For a cancelled call, whether the engine ran it anyway
+            (True, False or ``"unknown"``).
+    """
     audit_logger = logging.getLogger(_AUDIT_LOGGER_NAME)
     payload: Dict[str, Any] = {
         "ts": _utc_now_iso(),
-        "request_id": request_id,
-        "tool": tool,
+        "request_id": _bounded(request_id),
+        "tool": _bounded(tool),
         "duration_ms": round(duration_ms, 3),
-        "status": status,
+        "status": _bounded(status),
     }
-    if error_class:
-        payload["error_class"] = error_class
+    for key, value in (
+        ("error_type", error_type),
+        ("error_class", error_class),
+        ("reason", reason),
+        ("agent_id", agent_id),
+        ("session", session),
+    ):
+        if value:
+            payload[key] = _bounded(str(value))
+    if executed is not None:
+        payload["executed"] = executed if isinstance(executed, bool) else _bounded(str(executed))
     if extra:
         payload["extra"] = extra
     audit_logger.info("", extra={"audit": payload})
 
 
+#: Longest value an audit row keeps in a field (a tool name a client made
+#: up, an agent label); longer ones are cut, saying how much was left out.
+AUDIT_MAX_FIELD_CHARS = 128
+
+
+def _bounded(value: str) -> str:
+    if len(value) <= AUDIT_MAX_FIELD_CHARS:
+        return value
+    return f"{value[:AUDIT_MAX_FIELD_CHARS]}... <{len(value) - AUDIT_MAX_FIELD_CHARS} more characters>"
+
+
+# What the envelope reports about the call in progress, for the audit row:
+# a dict the middleware sets per call and ``note_call_outcome`` fills in.
+_CALL_OUTCOME_VAR: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "simul_call_outcome", default=None
+)
+
+
+def current_request_id() -> Optional[str]:
+    """Return the correlation id of the tool call in progress, or None outside one."""
+    request_id = _REQUEST_ID_VAR.get()
+    return None if request_id == "-" else request_id
+
+
+def note_call_outcome(**fields: Any) -> None:
+    """Tell the audit row of the call in progress how it ended.
+
+    Called by the MCP server's envelope with ``status``, ``error_type``,
+    ``agent_id``, ``session`` and ``reason``; a no-op outside a tool call.
+    """
+    outcome = _CALL_OUTCOME_VAR.get()
+    if outcome is not None:
+        outcome.update({key: value for key, value in fields.items() if value is not None})
+
+
+def _outcome_of_result(result: Any) -> Dict[str, Any]:
+    """Read the status of a tool result the envelope did not describe (an unknown tool)."""
+    if not getattr(result, "is_error", False):
+        return {"status": "ok"}
+    outcome: Dict[str, Any] = {"status": "error"}
+    for block in reversed(list(getattr(result, "content", None) or [])):
+        text = getattr(block, "text", None)
+        if not isinstance(text, str):
+            continue
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            break
+        if isinstance(payload, dict) and isinstance(payload.get("error_type"), str):
+            outcome["error_type"] = payload["error_type"]
+        break
+    return outcome
+
+
 @contextlib.contextmanager
-def _tool_call_context(tool_name: str) -> Iterator[str]:
+def _tool_call_context(tool_name: str) -> Iterator[Dict[str, Any]]:
     """Scope one tool call: fresh request id, ContextVars, timing and audit row.
 
     Generates a 12-char hex correlation id, sets the ``request_id`` and
@@ -560,28 +1030,59 @@ def _tool_call_context(tool_name: str) -> Iterator[str]:
     wall-time and emits one audit record on exit (success or failure). The
     ContextVars are reset on every path, including ``BaseException``, so a
     stale id never leaks into later log records.
+
+    Yields the call's outcome dict: the envelope fills it through
+    ``note_call_outcome`` (``status``, ``error_type``, ``agent_id``,
+    ``session``, ``reason``) and the caller may add the ``result`` to read a
+    status from when the envelope never ran. ``request_id`` is in it too.
     """
     request_id = uuid.uuid4().hex[:12]
+    outcome: Dict[str, Any] = {"request_id": request_id}
+    # A made-up tool name can be any length; records and log lines keep a cut one.
+    tool_name = _bounded(str(tool_name))
     rid_token = _REQUEST_ID_VAR.set(request_id)
     tn_token = _TOOL_NAME_VAR.set(tool_name)
+    outcome_token = _CALL_OUTCOME_VAR.set(outcome)
     start = time.monotonic()
     error_class: Optional[str] = None
     try:
-        yield request_id
+        yield outcome
     except BaseException as exc:
         error_class = type(exc).__name__
         raise
     finally:
         duration_ms = (time.monotonic() - start) * 1000.0
         try:
-            emit_audit(
-                tool=tool_name,
-                request_id=request_id,
-                duration_ms=duration_ms,
-                status="error" if error_class else "ok",
-                error_class=error_class,
-            )
+            if error_class == "CancelledError":
+                status = "cancelled"
+            elif error_class is not None:
+                status = "error"
+            elif "status" in outcome:
+                status = str(outcome["status"])
+            else:
+                derived = _outcome_of_result(outcome.get("result"))
+                status = derived["status"]
+                outcome.setdefault("error_type", derived.get("error_type"))
+            if status == "cancelled" and "executed" not in outcome:
+                outcome["executed"] = "unknown"
+            try:
+                emit_audit(
+                    tool=tool_name,
+                    request_id=request_id,
+                    duration_ms=duration_ms,
+                    status=status,
+                    error_class=error_class,
+                    error_type=outcome.get("error_type"),
+                    agent_id=outcome.get("agent_id"),
+                    session=outcome.get("session"),
+                    reason=outcome.get("reason"),
+                    executed=outcome.get("executed"),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                # The audit row never fails the call it describes.
+                _logger.warning("Could not write the audit row of %s: %s", _bounded(tool_name), exc)
         finally:
+            _CALL_OUTCOME_VAR.reset(outcome_token)
             _REQUEST_ID_VAR.reset(rid_token)
             _TOOL_NAME_VAR.reset(tn_token)
 
@@ -599,6 +1100,9 @@ def build_request_context_middleware() -> Any:
         * audit emission happens once per ``CallTool`` request, not once per
           internal tool invocation
         * sync and async tools both flow through ``call_next`` uniformly
+        * the row records how the call really ended: the envelope reports
+          its status, ``error_type`` and agent through ``note_call_outcome``,
+          and a result the envelope never saw is read for ``isError``
     """
     from fastmcp.server.middleware import Middleware
 
@@ -607,8 +1111,10 @@ def build_request_context_middleware() -> Any:
 
         async def on_call_tool(self, context: Any, call_next: Any) -> Any:
             tool_name = getattr(context.message, "name", "tool")
-            with _tool_call_context(tool_name):
-                return await call_next(context)
+            with _tool_call_context(tool_name) as outcome:
+                result = await call_next(context)
+                outcome["result"] = result
+                return result
 
     return RequestContextMiddleware()
 

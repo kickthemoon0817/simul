@@ -14,10 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
-
-import pytest
 
 
 from simul.adapters.isaac_socket_client import ScriptResult
@@ -123,7 +120,9 @@ def test_failed_script_reports_the_traceback() -> None:
 
     result = asyncio.run(tools.execute_script("foo"))
 
-    assert result["error_type"] == "NameError"
+    # The agent's script raised: ScriptError, naming what it raised.
+    assert result["error_type"] == "ScriptError"
+    assert result["details"]["exception_type"] == "NameError"
     assert result["details"]["traceback"] == "Traceback..."
 
 

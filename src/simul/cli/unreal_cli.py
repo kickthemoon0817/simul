@@ -25,6 +25,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from simul.adapters.unreal_setup import (
+    GEOMETRY_SCRIPTING_RESTART_WARNING,
     LauncherNotFound,
     ensure_remote_control_config,
     is_loopback_bind,
@@ -1066,7 +1067,7 @@ def setup(
     ``RemoteControl`` / ``PythonScriptPlugin`` in the .uproject and editing
     ``Config/DefaultRemoteControl.ini`` before every simul session.
 
-    What gets enabled (the only two plugins required by simul):
+    What gets enabled (the plugins simul's tools need):
 
       * ``RemoteControl``       — UE's HTTP/WebSocket API server (the thing
                                   simul talks to). Not the Marketplace
@@ -1075,6 +1076,10 @@ def setup(
       * ``PythonScriptPlugin``  — embedded Python interpreter for the
                                   remote ``exec`` endpoint. Required because
                                   ``bEnableRemotePythonExecution=True``.
+      * ``GeometryScripting``   — the GeometryScript library the mesh tools
+                                  (``*_unreal_mesh*``) run on. Prebuilt with
+                                  the engine; a running editor loads it only
+                                  after a restart.
 
     See ``docs/unreal-setup.md`` for the full disambiguation, including which
     similarly-named plugins (PixelStreaming, Concert, Remote Control Presets,
@@ -1200,12 +1205,23 @@ def setup(
         console.print(f"[red]config patch failed: {exc}[/red]")
         raise typer.Exit(1)
 
+    # An editor setup launches itself loads the plugins it just enabled; only one
+    # already running needs the restart.
+    uproject_warnings = [
+        warning
+        for warning in patch.uproject.warnings
+        if not (launch and warning == GEOMETRY_SCRIPTING_RESTART_WARNING)
+    ]
     if not is_json_mode():
         console.print(patch.uproject.summary())
         console.print(patch.ini.summary())
         if patch.engine_ini is not None and patch.engine_ini.changed:
             console.print(patch.engine_ini.summary())
-        for warning in patch.ini.warnings + (patch.engine_ini.warnings if patch.engine_ini else []):
+        for warning in (
+            uproject_warnings
+            + patch.ini.warnings
+            + (patch.engine_ini.warnings if patch.engine_ini else [])
+        ):
             console.print(f"[yellow]warning:[/yellow] {warning}")
 
     # Launch if requested.
@@ -1254,6 +1270,7 @@ def setup(
                 "changed": patch.uproject.changed,
                 "added": patch.uproject.added,
                 "updated": patch.uproject.updated,
+                "warnings": uproject_warnings,
             },
             "ini": {
                 "changed": patch.ini.changed,

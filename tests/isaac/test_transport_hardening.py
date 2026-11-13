@@ -372,6 +372,60 @@ def test_an_interrupt_by_request_is_not_dressed_as_a_timeout() -> None:
     assert result.error_value == "interrupted by request"
 
 
+def _ok_frame_with_a_list_payload(request: Dict[str, Any]) -> bytes:
+    body = json.dumps({"request_id": request["request_id"], "status": "ok", "payload": [1]})
+    return len(body).to_bytes(4, "big") + body.encode()
+
+
+@pytest.mark.parametrize(
+    ("bridge", "reply"),
+    [
+        (False, b"\xff\xfe not utf-8"),
+        (True, (9).to_bytes(4, "big") + b"\xffgarbage!"),
+        (True, _ok_frame_with_a_list_payload),
+    ],
+    ids=["stock-socket-bytes", "bridge-bytes", "bridge-payload-not-an-object"],
+)
+def test_ping_reads_a_garbage_reply_as_unreachable(bridge: bool, reply: Any) -> None:
+    """Something else on the port: ping answers False instead of raising."""
+
+    async def scenario() -> bool:
+        async def _garbage(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            # Take the request first, so the reply is read rather than reset.
+            if callable(reply):
+                size = int.from_bytes(await reader.readexactly(4), "big")
+                writer.write(reply(json.loads(await reader.readexactly(size))))
+            elif bridge:
+                await reader.readexactly(int.from_bytes(await reader.readexactly(4), "big"))
+                writer.write(reply)
+            else:
+                await reader.read(65536)
+                writer.write(reply)
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(_garbage, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        options: Dict[str, Any] = {"timeout_seconds": 2.0, "socket_protocol": "vscode"}
+        if bridge:
+            options.update(
+                prefer_bridge=True,
+                bridge_host="127.0.0.1",
+                bridge_port=port,
+                fallback_to_vscode=False,
+            )
+        else:
+            options["port"] = port
+        client = IsaacSocketClient(**options)
+        try:
+            return await client.ping()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    assert asyncio.run(scenario()) is False
+
+
 def test_a_stock_socket_read_timeout_says_the_script_may_still_run() -> None:
     async def scenario() -> BaseException:
         async def _never_reply(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

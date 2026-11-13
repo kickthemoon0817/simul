@@ -84,6 +84,11 @@ class BackendSpec:
             Called with the settings and whether ``--backends`` named the
             backend, it returns why the tools stay unregistered, or None to
             register them. None means the backend has no such gate.
+        script_tool: The backend's arbitrary-code tool, which registers only
+            with ``security.allow_script_execution`` on.
+        script_guidance: Instructions about ``script_tool``, stated at the head
+            of ``guidance`` only when that tool is registered, so the
+            instructions never point at a tool the client cannot see.
     """
 
     name: str
@@ -95,6 +100,8 @@ class BackendSpec:
     summary: str
     guidance: str = ""
     skip_check: Optional[SkipCheck] = None
+    script_tool: Optional[str] = None
+    script_guidance: str = ""
 
 
 def is_isaac_platform_supported(platform: Optional[str] = None) -> bool:
@@ -241,13 +248,16 @@ def _register_blender(server: "SimulMCPServer") -> None:
     register_blender_tools(server, thin=server.settings.blender.tool_surface == "thin")
 
 
-_ISAAC_GUIDANCE = (
-    "ISAAC SIM — for GUI/app state (windows, focus, selection, timeline) use "
-    "get_isaac_ui_state; to inspect one window's widget tree use get_isaac_ui_window. "
+_ISAAC_SCRIPT_GUIDANCE = (
     "Reach for execute_isaac_script when no granular tool covers the operation (custom "
     "extensions, replicator workflows, robotics APIs, warp kernels). Read the "
     "'simul://isaac-sim/skills' resource for scripting patterns and API reference when "
-    "writing scripts.\n"
+    "writing scripts."
+)
+
+_ISAAC_GUIDANCE = (
+    "ISAAC SIM — for GUI/app state (windows, focus, selection, timeline) use "
+    "get_isaac_ui_state; to inspect one window's widget tree use get_isaac_ui_window.\n"
     "  Finding prims: get_isaac_scene_summary for counts first; list_isaac_prims to "
     "browse a level; get_isaac_subtree for the structure under one prim; "
     "search_isaac_prims by name or exact type anywhere below a root; "
@@ -277,6 +287,8 @@ BACKENDS: Tuple[BackendSpec, ...] = (
         ),
         guidance=_ISAAC_GUIDANCE,
         skip_check=_isaac_skip_check,
+        script_tool="execute_isaac_script",
+        script_guidance=_ISAAC_SCRIPT_GUIDANCE,
     ),
     BackendSpec(
         name="usd",

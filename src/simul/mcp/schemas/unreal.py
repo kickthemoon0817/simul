@@ -1574,183 +1574,215 @@ class UnrealGetActorBySemanticLabelResponse(BaseModel):
 
 # ----------------------------------------------------------------------
 # Phase 8: Geometry & Modeling
+#
+# Each model declares exactly the fields its editor script
+# (adapters/_unreal_mesh_scripts.py) emits; tests/unreal/test_mesh_tools.py
+# checks the two against each other.
 # ----------------------------------------------------------------------
+
+
+def _mesh_warnings_field() -> Any:
+    """The ``warnings`` field of the mesh responses."""
+    return Field(
+        default_factory=list,
+        description="Warnings GeometryScript reported while the operation succeeded",
+    )
 
 
 class UnrealGenerateMeshPrimitiveResponse(BaseModel):
     """Response after creating a mesh primitive."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    actor_path: str = Field(..., description="Created actor path")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    actor_path: str = Field(..., description="Created DynamicMeshActor path")
     primitive_type: str = Field(..., description="Primitive type created")
     triangle_count: int = Field(..., description="Number of triangles")
     vertex_count: int = Field(..., description="Number of vertices")
+    warnings: List[str] = _mesh_warnings_field()
 
 
 class UnrealApplyMeshBooleanResponse(BaseModel):
     """Response after boolean operation."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    target_mesh_path: str = Field(..., description="Modified mesh path")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    target_mesh_path: str = Field(..., description="Modified mesh actor path")
     operation: str = Field(..., description="Operation performed")
-    result_triangle_count: int = Field(
-        ..., description="Triangle count after operation"
-    )
+    previous_triangle_count: int = Field(..., description="Target triangle count before the operation")
+    result_triangle_count: int = Field(..., description="Triangle count after operation")
     result_vertex_count: int = Field(..., description="Vertex count after operation")
+    warnings: List[str] = _mesh_warnings_field()
 
 
 class UnrealComputeConvexHullResponse(BaseModel):
     """Response after convex hull computation."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    mesh_path: str = Field(..., description="Source mesh path")
-    hull_actor_path: str = Field(..., description="Created convex hull actor path")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    mesh_path: str = Field(..., description="Source mesh actor path")
+    hull_actor_path: str = Field(..., description="Created convex hull DynamicMeshActor path")
     hull_vertex_count: int = Field(..., description="Hull vertex count")
     hull_triangle_count: int = Field(..., description="Hull triangle count")
-    volume_ratio: float = Field(..., description="Hull volume / original volume ratio")
+    source_triangle_count: int = Field(..., description="Source mesh triangle count")
+    hull_volume: float = Field(..., description="Hull volume in cm^3, in the mesh's local space")
+    source_volume: Optional[float] = Field(
+        ..., description="Source mesh volume in cm^3; null when the source is not closed"
+    )
+    volume_ratio: Optional[float] = Field(
+        ..., description="Hull volume over source volume (1.0 or more); null when the source is not closed"
+    )
+    warnings: List[str] = _mesh_warnings_field()
+
+
+class UnrealConvexHullPart(BaseModel):
+    """One convex piece of a decomposition."""
+
+    index: int = Field(..., description="Piece index in the decomposition mesh")
+    vertex_count: int = Field(..., description="Piece vertex count")
+    triangle_count: int = Field(..., description="Piece triangle count")
+    volume: float = Field(..., description="Piece volume in cm^3, in the mesh's local space")
+    bounds_min: List[float] = Field(..., description="Minimum corner of the piece's local bounds [x, y, z] in cm")
+    bounds_max: List[float] = Field(..., description="Maximum corner of the piece's local bounds [x, y, z] in cm")
 
 
 class UnrealDecomposeConvexHullResponse(BaseModel):
-    """Response after V-HACD decomposition."""
+    """Response after convex decomposition."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    mesh_path: str = Field(..., description="Source mesh path")
-    hull_count: int = Field(..., description="Number of convex hulls generated")
-    hulls: List[Dict[str, Any]] = Field(
-        ..., description="Per-hull info (path, vertex_count, volume)"
-    )
-    total_vertices: int = Field(..., description="Total vertices across all hulls")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    mesh_path: str = Field(..., description="Source mesh actor path")
+    decomp_actor_path: str = Field(..., description="Created DynamicMeshActor holding every piece")
+    hull_count: int = Field(..., description="Number of convex pieces")
+    hulls: List[UnrealConvexHullPart] = Field(..., description="The pieces")
+    total_vertices: int = Field(..., description="Total vertices across all pieces")
+    total_triangles: int = Field(..., description="Total triangles across all pieces")
+    warnings: List[str] = _mesh_warnings_field()
 
 
 class UnrealEditMeshTopologyResponse(BaseModel):
     """Response after topology edit."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    mesh_path: str = Field(..., description="Modified mesh path")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    mesh_path: str = Field(..., description="Modified mesh actor path")
     operation: str = Field(..., description="Operation performed")
-    faces_affected: int = Field(0, description="Faces affected")
-    edges_affected: int = Field(0, description="Edges affected")
+    previous_triangle_count: int = Field(..., description="Triangle count before the edit")
     result_triangle_count: int = Field(..., description="Triangle count after edit")
+    result_vertex_count: int = Field(..., description="Vertex count after edit")
+    warnings: List[str] = _mesh_warnings_field()
 
 
 class UnrealSubdivideMeshResponse(BaseModel):
     """Response after mesh subdivision."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    mesh_path: str = Field(..., description="Subdivided mesh path")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    mesh_path: str = Field(..., description="Subdivided mesh actor path")
     level: int = Field(..., description="Subdivision level applied")
     scheme: str = Field(..., description="Scheme used")
-    result_triangle_count: int = Field(
-        ..., description="Triangle count after subdivision"
-    )
+    previous_triangle_count: int = Field(..., description="Triangle count before subdivision")
+    result_triangle_count: int = Field(..., description="Triangle count after subdivision")
     result_vertex_count: int = Field(..., description="Vertex count after subdivision")
+    warnings: List[str] = _mesh_warnings_field()
 
 
 class UnrealSimplifyMeshResponse(BaseModel):
     """Response after mesh simplification."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    mesh_path: str = Field(..., description="Simplified mesh path")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    mesh_path: str = Field(..., description="Simplified mesh actor path")
     original_triangles: int = Field(..., description="Original triangle count")
-    result_triangles: int = Field(
-        ..., description="Triangle count after simplification"
-    )
-    reduction_ratio: float = Field(..., description="Reduction ratio achieved")
+    result_triangles: int = Field(..., description="Triangle count after simplification")
+    result_vertex_count: int = Field(..., description="Vertex count after simplification")
+    reduction_ratio: float = Field(..., description="Fraction of the triangles removed")
+    warnings: List[str] = _mesh_warnings_field()
 
 
 class UnrealCutMeshPlaneResponse(BaseModel):
     """Response after plane cut."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    mesh_path: str = Field(..., description="Cut mesh path")
-    pieces: List[str] = Field(..., description="Resulting piece actor paths")
-    cut_faces_added: int = Field(0, description="Number of fill faces added")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    mesh_path: str = Field(..., description="Cut mesh actor path")
+    pieces: List[str] = Field(..., description="Actor paths holding the result")
+    cut_faces_added: int = Field(..., description="Triangles the hole fill added (0 without fill_holes)")
+    previous_triangle_count: int = Field(..., description="Triangle count before the cut")
+    result_triangle_count: int = Field(..., description="Triangle count after the cut")
+    result_vertex_count: int = Field(..., description="Vertex count after the cut")
+    warnings: List[str] = _mesh_warnings_field()
 
 
 class UnrealValidateMeshResponse(BaseModel):
     """Response after mesh validation."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    mesh_path: str = Field(..., description="Validated mesh actor path")
+    is_valid: bool = Field(..., description="Whether the mesh is watertight and compact")
+    checks: Dict[str, bool] = Field(
+        ..., description="Per-check pass/fail: watertight, compact (no triangle ID gaps), has_normals"
     )
-    mesh_path: str = Field(..., description="Validated mesh path")
-    is_valid: bool = Field(..., description="Overall validation result")
-    checks: Dict[str, bool] = Field(..., description="Per-check pass/fail results")
-    issues: List[str] = Field(default_factory=list, description="Detected issues")
+    issues: List[str] = Field(default_factory=list, description="What failed, in words")
     triangle_count: int = Field(..., description="Current triangle count")
     vertex_count: int = Field(..., description="Current vertex count")
+    open_border_edges: int = Field(..., description="Edges with a triangle on one side only")
+    open_border_loops: int = Field(..., description="Loops those edges form")
+    connected_components: int = Field(..., description="Separate connected pieces of the mesh")
+    has_normals: bool = Field(..., description="Whether the mesh has a normals attribute")
+    warnings: List[str] = _mesh_warnings_field()
 
 
 class UnrealConvertMeshFormatResponse(BaseModel):
     """Response after mesh format conversion."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
+    error: Optional[str] = Field(None, description="Error message when success is False")
     source_path: str = Field(..., description="Source mesh path")
-    result_path: str = Field(..., description="Converted mesh path")
-    source_format: str = Field(..., description="Original format")
-    target_format: str = Field(..., description="Converted format")
+    source_format: str = Field(..., description="Format of the source")
+    result_path: str = Field(..., description="Path of the converted mesh")
+    target_format: str = Field(..., description="Format of the result")
     triangle_count: int = Field(..., description="Result triangle count")
+    vertex_count: int = Field(..., description="Result vertex count")
+    warnings: List[str] = _mesh_warnings_field()
 
 
 class UnrealRemeshMeshResponse(BaseModel):
     """Response after remeshing."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    mesh_path: str = Field(..., description="Remeshed mesh path")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    mesh_path: str = Field(..., description="Remeshed mesh actor path")
     mode: str = Field(..., description="Remesh mode used")
     original_triangles: int = Field(..., description="Original triangle count")
     result_triangles: int = Field(..., description="Triangle count after remesh")
+    result_vertex_count: int = Field(..., description="Vertex count after remesh")
     average_edge_length: float = Field(
-        ..., description="Average edge length after remesh"
+        ..., description="Mean length of the result's triangle edges, in cm"
     )
+    warnings: List[str] = _mesh_warnings_field()
 
 
 class UnrealComputeMeshUvResponse(BaseModel):
     """Response after UV computation."""
 
     success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    mesh_path: str = Field(..., description="Mesh path")
-    method: str = Field(..., description="UV method used")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    mesh_path: str = Field(..., description="Mesh actor path")
+    method: str = Field(..., description="UV method that ran: xatlas or patch_builder")
+    requested_method: str = Field(..., description="UV method asked for: auto, xatlas or patch_builder")
     uv_channel: int = Field(..., description="UV channel written")
-    island_count: int = Field(..., description="Number of UV islands")
-    coverage_ratio: float = Field(..., description="UV space coverage (0.0-1.0)")
-    overlap_detected: bool = Field(
-        False, description="Whether UV overlaps were detected"
+    island_count: int = Field(..., description="Number of UV islands in the channel")
+    coverage_ratio: float = Field(
+        ...,
+        description=(
+            "UV-space area of the triangles over the area of the unit UV square (or of the UV bounds, "
+            "when they extend past it)"
+        ),
     )
+    triangle_count: int = Field(..., description="Triangle count")
+    vertex_count: int = Field(..., description="Vertex count")
+    warnings: List[str] = _mesh_warnings_field()
 
 
 __all__ = [
@@ -1811,6 +1843,7 @@ __all__ = [
     "UnrealGenerateMeshPrimitiveResponse",
     "UnrealApplyMeshBooleanResponse",
     "UnrealComputeConvexHullResponse",
+    "UnrealConvexHullPart",
     "UnrealDecomposeConvexHullResponse",
     "UnrealEditMeshTopologyResponse",
     "UnrealSubdivideMeshResponse",

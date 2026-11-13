@@ -49,6 +49,7 @@ from pydantic import BaseModel, StrictInt
 
 from ...adapters.blender_runtime import BlenderRuntimeSession
 from ...tool_surfaces import THIN_BLENDER_TOOLS
+from .. import error_types
 from ..schemas.blender import (
     LISTING_JSON_BYTES_MAX,
     SCRIPT_OUTPUT_CHARS_DEFAULT,
@@ -210,6 +211,7 @@ from ..schemas.simready import (
     SimReadyValidateRequest,
     SimReadyValidateResponse,
 )
+from ._constraints import from_request_model
 from ._helpers import surface_tool, with_param_descriptions
 
 if TYPE_CHECKING:
@@ -241,9 +243,10 @@ READ_ONLY = Hints(read_only=True, idempotent=True)
 ADDITIVE = Hints(read_only=False, idempotent=False)
 #: Changes the view, frame or attachment target; repeating the call changes nothing more.
 IDEMPOTENT = Hints(read_only=False, idempotent=True)
-#: Overwrites state; repeating the call changes nothing more.
+#: Overwrites or deletes named state or files (a delete, a save, an export to a
+#: path); repeating the call changes nothing more.
 OVERWRITING = Hints(read_only=False, idempotent=True, destructive=True)
-#: Deletes or replaces state or files, or runs arbitrary code.
+#: Replaces state in a way that repeating compounds, or runs arbitrary code.
 DESTRUCTIVE = Hints(read_only=False, idempotent=False, destructive=True)
 
 # Marks a Param field that keeps what the operation's signature declares.
@@ -419,6 +422,8 @@ def _advertised_parameters(
             default = override.default_from(settings)
         elif default is _FROM_OPERATION:
             default = parameter.default
+        # The schema states the bounds and choices the request model enforces.
+        annotation = from_request_model(spec.request, name, annotation)
         parameters.append(parameter.replace(annotation=annotation, default=default))
     return parameters
 
@@ -578,7 +583,7 @@ def _attach(server: "SimulMCPServer", request: Any) -> Dict[str, Any]:
         return {
             "success": False,
             "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
-            "error_type": "ValueError",
+            "error_type": "UnsupportedOperation",
         }
     from ...adapters.blender_connection import BlenderAttachments
 
@@ -587,11 +592,12 @@ def _attach(server: "SimulMCPServer", request: Any) -> Dict[str, Any]:
         return attachments.attach(request.instance_id, request.window_id)
     except (ValueError, RuntimeError) as exc:
         # List the candidates so the agent can choose without a shell.
+        fields = error_types.exception_fields(exc)
         return {
             "success": False,
             "error": str(exc),
-            "error_type": type(exc).__name__,
-            "details": {"instances": attachments.instances()},
+            "error_type": fields["error_type"],
+            "details": {**(fields["details"] or {}), "instances": attachments.instances()},
         }
 
 
@@ -1156,7 +1162,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "every agent edit counts, as each is an undo step); save them first with "
             "save_blender_file, or pass discard_unsaved=true to discard them."
         ),
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="open_blend_file",
         request=BlenderOpenFileRequest,
         response=BlenderOpenFileResponse,
@@ -1203,7 +1209,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "not replaced unless overwrite_companion_files, and files_written lists every "
             "file written."
         ),
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="export_file",
         request=BlenderExportFileRequest,
         response=BlenderExportFileResponse,
@@ -1283,7 +1289,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="delete_blender_keyframe",
         description="Delete a keyframe from an object property.",
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="delete_keyframe",
         request=BlenderDeleteKeyframeRequest,
         response=BlenderDeleteKeyframeResponse,
@@ -1685,7 +1691,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Refuses when validation finds errors; skip_checks leaves a check out, force=true "
             "ignores every error. Returns each object's prim path."
         ),
-        hints=DESTRUCTIVE,
+        hints=OVERWRITING,
         operation="export_simready_usd",
         request=SimReadyExportRequest,
         response=SimReadyExportResponse,

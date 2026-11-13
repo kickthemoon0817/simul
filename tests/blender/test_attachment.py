@@ -145,7 +145,8 @@ def test_document_change_during_attach_does_not_publish(
 def test_no_bridge_never_creates_an_embedded_scene(settings: Settings) -> None:
     with pytest.raises(RuntimeError, match="No matching GUI"):
         BlenderAttachments(settings).attach()
-    with pytest.raises(RuntimeError, match="No Blender window attached"):
+    # Nothing to connect to: a ConnectionError, not a RuntimeError.
+    with pytest.raises(ConnectionError, match="No Blender window attached"):
         BlenderConnection(settings).create_object("CUBE")
 
 
@@ -498,10 +499,27 @@ def test_attach_blender_window_tool_attaches_and_lists_candidates_when_ambiguous
     info["windows"].append({**info["windows"][0], "window_id": "second"})
     payload = json.loads(asyncio.run(tool.func()).content[0].text)
     assert payload["success"] is False
-    assert payload["error_type"] == "ValueError"
+    # Raised as ValueError by the attachment; ValidationError in the shared taxonomy.
+    assert payload["error_type"] == "ValidationError"
+    assert payload["details"]["exception_type"] == "ValueError"
     assert {w["window_id"] for w in payload["details"]["instances"][0]["windows"]} == {"window", "second"}
     payload = json.loads(asyncio.run(tool.func(window_id="second")).content[0].text)
     assert payload["success"] is True and payload["window"]["window_id"] == "second"
+
+
+def test_attach_blender_window_with_no_bridge_is_a_connection_error(
+    settings: Settings, fake_fastmcp: Any
+) -> None:
+    """A bare RuntimeError read as EngineError; nothing answered, so it is a ConnectionError."""
+    server = SimulMCPServer(settings, backends={"blender"})
+    tool = next(t for t in server.mcp.tools if t.name == "attach_blender_window")
+
+    payload = json.loads(asyncio.run(tool.func()).content[0].text)
+
+    assert payload["success"] is False
+    assert payload["error_type"] == "ConnectionError"
+    assert payload["details"] == {"instances": []}
+    assert "No matching GUI Blender bridge" in payload["error"]
 
 
 def test_attach_blender_window_tool_requires_attached_mode(
