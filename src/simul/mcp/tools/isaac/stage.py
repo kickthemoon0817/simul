@@ -3,12 +3,14 @@
 import textwrap
 from typing import Any, Dict, List, Optional
 
+from ... import error_types
 from ...schemas.common import ErrorResponse
 from ._shared import (
     OPEN_ASSET_CORE,
     _compose_script,
     _pyval,
 )
+from ._physics_units import physics_units_source
 from .graph import script_guard_source
 from .._meta import SandboxedPath, tool_meta
 
@@ -136,6 +138,10 @@ REFERENCE_ASSET_CORE = """\
         rotate_x = None
         if asset_up is not None and asset_up != stage_up:
             rotate_x = 90.0 if (asset_up, stage_up) == ("Y", "Z") else -90.0
+        # kilogramsPerUnit has a defined fallback (1.0, kilograms), unlike
+        # metersPerUnit, so an asset that does not author it is in kilograms.
+        asset_kilograms = float(root.GetInfo("kilogramsPerUnit")) if root.HasInfo("kilogramsPerUnit") else 1.0
+        stage_kilograms = float(UsdPhysics.GetStageKilogramsPerUnit(stage)) or 1.0
         notes = []
         if asset_meters is None:
             notes.append("the asset does not author metersPerUnit (USD's fallback is centimetres); no scale applied")
@@ -144,12 +150,31 @@ REFERENCE_ASSET_CORE = """\
         return {
             "asset_meters_per_unit": asset_meters,
             "asset_up_axis": asset_up,
+            "asset_kilograms_per_unit": asset_kilograms,
             "stage_meters_per_unit": stage_meters,
             "stage_up_axis": stage_up,
+            "stage_kilograms_per_unit": stage_kilograms,
             "scale_needed": scale,
             "rotate_x_needed": rotate_x,
+            "mass_ratio": asset_kilograms / stage_kilograms,
             "applied": False,
             "notes": notes,
+        }
+
+    def _physics_units(root, units, apply):
+        # PhysX reads physics values in stage units whatever the transform
+        # does. The tool's second script, which carries the units table,
+        # rescales (or, when not applying, only counts) the values in asset
+        # units; this records what it needs.
+        length_ratio = units["scale_needed"] if units["scale_needed"] is not None else 1.0
+        mass_ratio = units["mass_ratio"]
+        if math.isclose(length_ratio, 1.0, rel_tol=1e-12) and math.isclose(mass_ratio, 1.0, rel_tol=1e-12):
+            return
+        units["physics"] = {
+            "pending": str(root.GetPath()),
+            "applied": bool(apply),
+            "length_ratio": length_ratio,
+            "mass_ratio": mass_ratio,
         }
 
     def _needs_correction(units):
@@ -274,6 +299,7 @@ REFERENCE_ASSET_CORE = """\
         if refusal is not None:
             stage.RemovePrim(created)
             return refusal
+        _physics_units(holder, units, correct_units)
         result = {
             "referenced_prim": root_path or "/" + root_name,
             "used_default_prim": root_path is None,
@@ -300,6 +326,12 @@ REFERENCE_ASSET_CORE = """\
             return _failure("Prim is inside an instance and cannot be edited here: " + prim_path, "ValidationError",
                             "INSTANCE_PROXY")
         undo = _references_undo(stage, prim)
+        prior = prim.GetMetadata("references")
+        had_references = bool(prior and list(prior.GetAppliedItems()))
+        # What the prim held before this reference is in the stage's units;
+        # a correction here would convert it along with the asset.
+        prior_children = [child.GetName() for child in prim.GetAllChildren()]
+        prior_values = [attr.GetName() for attr in prim.GetAttributes() if attr.HasAuthoredValue()]
 
         def _roll_back():
             if created is not None:
@@ -319,7 +351,34 @@ REFERENCE_ASSET_CORE = """\
             return refusal
         units = _metrics(stage, layer)
         declined = None
-        if _needs_correction(units) and correct_units:
+        mismatch = _needs_correction(units) or units["mass_ratio"] != 1.0
+        # By namespace: the units table travels in the second script only.
+        prior_physics = [
+            name for name in prior_values
+            if name.split(":")[0].startswith(("physics", "physx")) or name.split(":")[0] in ("drive", "limit", "state")
+        ]
+        if correct_units and mismatch and (prior_children or prior_physics):
+            held = []
+            if prior_children:
+                held.append("children (" + ", ".join(prior_children[:5])
+                            + (", ..." if len(prior_children) > 5 else "") + ")")
+            if prior_physics:
+                held.append("physics values (" + ", ".join(prior_physics[:5])
+                            + (", ..." if len(prior_physics) > 5 else "") + ")")
+            declined = (
+                "correct_units was not applied: the prim already had " + " and ".join(held)
+                + " in the stage's units, which a correction here would convert too. "
+                "import_isaac_asset wraps the reference in a corrected Xform instead."
+            )
+        elif correct_units and had_references and mismatch:
+            # Values from the prim's other references are in their own units;
+            # rescaling the subtree here would convert them too.
+            declined = (
+                "correct_units was not applied: the prim also references other assets, whose "
+                "values a correction here would convert too. import_isaac_asset wraps the "
+                "reference in a corrected Xform instead."
+            )
+        elif _needs_correction(units) and correct_units:
             own_ops = [
                 op.GetOpName() for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
                 if not op.GetOpName().endswith(":unitsResolve")
@@ -339,10 +398,11 @@ REFERENCE_ASSET_CORE = """\
                 )
             else:
                 _add_correction_ops(prim, units)
-            if declined is not None:
-                units["notes"].append(declined)
         elif _needs_correction(units):
             units["notes"].append("mismatch reported, not corrected (correct_units=false)")
+        if declined is not None:
+            units["notes"].append(declined)
+        _physics_units(prim, units, correct_units and declined is None)
         result = {
             "already_referenced": False,
             "referenced_prim": root_path or "/" + root_name,
@@ -539,7 +599,9 @@ class StageAssetMixin:
                         print(json.dumps({{"error": f"Failed to save stage: {{error}}"}}))
                 """,
             )
-            return await self._execute_json_script(script)
+            # Writing a large stage outlasts the default budget; a timeout
+            # would report failure for a save Kit then finishes.
+            return await self._execute_json_script(script, timeout_seconds=self._heavy_script_timeout())
 
         probe = await self._execute_json_script(SAVE_PROBE_SCRIPT)
         if not probe.get("success"):
@@ -597,7 +659,9 @@ class StageAssetMixin:
                     print(json.dumps({{"error": f"Failed to save stage: {{error}}"}}))
             """,
         )
-        return await self._execute_json_script(script)
+        # Writing a large stage outlasts the default budget; a timeout
+        # would report failure for a save Kit then finishes.
+        return await self._execute_json_script(script, timeout_seconds=self._heavy_script_timeout())
 
     @tool_meta(
         name="new_isaac_stage",
@@ -714,7 +778,7 @@ class StageAssetMixin:
             """\
             import json
             import omni.usd
-            from pxr import Gf, Sdf, UsdGeom
+            from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
             """,
             OPEN_ASSET_CORE,
             script_guard_source(),
@@ -753,7 +817,7 @@ class StageAssetMixin:
                 print(json.dumps(result))
             """,
         )
-        return await self._execute_json_script(script)
+        return await self._rescale_physics_values(await self._execute_json_script(script))
 
     @tool_meta(
         name="add_isaac_reference",
@@ -763,7 +827,8 @@ class StageAssetMixin:
             "referenced (reported), or pass asset_prim_path; a reference that composes nothing "
             "is undone and fails, and the same reference twice is reported, not duplicated. "
             "A metersPerUnit/upAxis mismatch is reported; correct_units=true adds unitsResolve "
-            "ops on the prim only when it has no transform ops of its own (otherwise use "
+            "ops and rescales the asset's physics values only when the prim had no children, "
+            "physics values, other references or transform ops of its own (otherwise use "
             "import_isaac_asset, which wraps the reference). With "
             "security.allow_script_execution off, an asset containing code-running OmniGraph "
             "nodes or Python Scripting Components (OmniScriptingAPI), or payloads that are not "
@@ -792,11 +857,14 @@ class StageAssetMixin:
                 none.
             correct_units: Correct a metersPerUnit/upAxis mismatch the asset
                 authors with ``unitsResolve`` scale and rotateX ops on the
-                prim. Applied only when the prim then has no other transform
-                ops: ops the asset root brings are in asset units and would
-                stay unconverted (reported in ``units.notes``; use
-                import_isaac_asset, which wraps the reference). Off by default
-                here: the prim may carry other references.
+                prim, and rescale the asset's physics values. Applied only
+                when the prim then has no other transform ops (ops the asset
+                root brings are in asset units and would stay unconverted)
+                and had no children, physics values or other references
+                before (those are in stage units and would be converted
+                too). A decline is reported in ``units.notes`` and
+                ``warning``; use import_isaac_asset, which wraps the
+                reference. Off by default here.
 
         Returns:
             Dict with ``added`` (false when the same reference was already
@@ -813,7 +881,7 @@ class StageAssetMixin:
             """\
             import json
             import omni.usd
-            from pxr import Gf, Sdf, UsdGeom
+            from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
             """,
             OPEN_ASSET_CORE,
             script_guard_source(),
@@ -852,7 +920,85 @@ class StageAssetMixin:
                 print(json.dumps(result))
             """,
         )
-        return await self._execute_json_script(script)
+        return await self._rescale_physics_values(await self._execute_json_script(script))
+
+    async def _rescale_physics_values(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Run the physics-units pass an import or reference asked for.
+
+        The units table is a third of a script, so it travels in a second
+        script, sent only when the asset's units differ from the stage's.
+
+        Args:
+            result: The import or reference script's result. Its
+                ``units.physics`` holds ``pending`` (the prim to walk) when a
+                pass is due.
+
+        Returns:
+            ``result`` with ``units.physics`` replaced by the pass's report,
+            and a warning for values the pass could not rescale.
+        """
+        units = result.get("units") if result.get("success") else None
+        pending = units.get("physics") if isinstance(units, dict) else None
+        if not isinstance(pending, dict) or "pending" not in pending:
+            return result
+        root_path = pending.pop("pending")
+        apply = bool(pending["applied"])
+        script = _compose_script(
+            """\
+            import json
+            import omni.usd
+            from pxr import Usd, UsdPhysics
+            """,
+            physics_units_source(),
+            f"""\
+            root_path = {_pyval(root_path)}
+            length_ratio = {_pyval(float(pending["length_ratio"]))}
+            mass_ratio = {_pyval(float(pending["mass_ratio"]))}
+            apply = {_pyval(apply)}
+            """,
+            """\
+            stage = omni.usd.get_context().get_stage()
+            root = stage.GetPrimAtPath(root_path) if stage is not None else None
+            if root is None or not root.IsValid():
+                print(json.dumps({"error": "The referenced prim is gone: " + root_path}))
+            else:
+                print(json.dumps(_physics_unit_correction(stage, root, length_ratio, mass_ratio, apply)))
+            """,
+        )
+        report = await self._execute_json_script(script, timeout_seconds=self._heavy_script_timeout())
+        if not report.get("success"):
+            units["physics"] = dict(pending, applied=False, failure=report.get("error"))
+            if report.get("error_type") in (error_types.TIMEOUT_ERROR, error_types.CONNECTION_ERROR):
+                # Kit runs a sent script to the end whether or not its reply
+                # arrives, so the values may yet be rescaled.
+                warning = (
+                    "The asset was referenced, but the physics-units pass did not answer ("
+                    + str(report.get("error")) + "); it may still finish in Kit, so check the "
+                    "physics values before simulating."
+                )
+            else:
+                # The pass may have stopped partway through the subtree.
+                warning = (
+                    "The asset was referenced, but the physics-units pass failed ("
+                    + str(report.get("error")) + "); some or all physics values may still be in "
+                    "asset units, which PhysX reads as stage units."
+                )
+        else:
+            report.pop("success", None)
+            units["physics"] = report
+            warning = None
+            if not apply and report.get("attribute_count"):
+                units["notes"].append(
+                    f"{report['attribute_count']} physics value(s) in asset units were not rescaled"
+                )
+            if report.get("uncorrected_count"):
+                warning = (
+                    f"{report['uncorrected_count']} physics value(s) in asset units could not be "
+                    "rescaled (see units.physics.uncorrected); PhysX will read them in stage units."
+                )
+        if warning is not None:
+            result["warning"] = f"{result['warning']} {warning}" if result.get("warning") else warning
+        return result
 
 
 def _asset_prim_path_problem(asset_prim_path: Optional[str]) -> Optional[Dict[str, Any]]:

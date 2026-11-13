@@ -1,5 +1,20 @@
 # Robots API Reference — Isaac Sim 5.1.0
 
+> **Version note: this page is the Isaac Sim 5.1 API.** In Isaac Sim 6.0.x
+> `isaacsim.robot.manipulators` (with its grippers, controllers and
+> kinematics), `isaacsim.robot.wheeled_robots`,
+> `isaacsim.robot_motion.motion_generation` and `isaacsim.robot_motion.lula`
+> are in the deprecated set (`source/deprecated/` in the v6.0.1 sources): they
+> may still load but are slated for removal. The 6.0 extensions in their place
+> are `isaacsim.robot.experimental.wheeled_robots`,
+> `isaacsim.robot_motion.experimental.motion_generation`,
+> `isaacsim.robot_motion.cumotion` and `isaacsim.robot_motion.pink`;
+> `isaacsim.robot.surface_gripper` carries on. Drive joints directly through
+> `isaacsim.core.experimental.prims.Articulation` (see the core reference's
+> 6.0 section). Check the version first (`get_isaac_runtime_info` →
+> `app.isaac_version`); on 6.0 read the new module's API in the running
+> install rather than porting these snippets as written.
+
 ## ArticulationAction
 
 Dataclass representing a command sent to an articulation.
