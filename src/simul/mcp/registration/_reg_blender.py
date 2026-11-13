@@ -32,6 +32,7 @@ import typing
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
     Callable,
     Coroutine,
@@ -45,7 +46,7 @@ from typing import (
 )
 
 from fastmcp.tools import ToolResult
-from pydantic import BaseModel, StrictInt
+from pydantic import BaseModel, Field, StrictInt
 
 from ...adapters.blender_runtime import BlenderRuntimeSession
 from ...tool_surfaces import THIN_BLENDER_TOOLS
@@ -794,6 +795,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         request=BlenderSearchObjectsRequest,
         response=BlenderSearchObjectsResponse,
         added_params=("offset",),
+        # The regex guard's own work grows with the pattern.
+        params={"name_pattern": Param(Optional[Annotated[str, Field(max_length=512)]])},
     ),
     BlenderTool(
         name="summarize_blender_scene",

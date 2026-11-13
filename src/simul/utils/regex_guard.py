@@ -36,6 +36,11 @@ _STEP_SECONDS = 12e-9
 _STEP_SECONDS_IGNORECASE = 20e-9
 #: Alternatives multiply the sequences a search tries; more are not bounded.
 _MAX_SEQUENCES = 256
+#: The longest pattern searched; the bound's own work grows with it.
+MAX_PATTERN_LENGTH = 512
+#: Quantifiers in one sequence that the bound still counts; past them the
+#: bound itself takes long, so the pattern is left to the linear-time search.
+_MAX_LOOPS = 32
 #: Instructions the linear-time search compiles a pattern to, at most.
 _MAX_PROGRAM = 5000
 #: Cached steps of the linear-time search before the cache starts over.
@@ -56,10 +61,16 @@ class RegexRefused(ValueError):
 
     error_type = "ValidationError"
 
-    def __init__(self, message: str, construct: str, estimate_seconds: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        construct: str,
+        estimate_seconds: Optional[float] = None,
+        code: str = "regex_backtracking",
+    ) -> None:
         super().__init__(message)
         self.construct = construct
-        self.details: Dict[str, Any] = {"code": "regex_backtracking", "construct": construct}
+        self.details: Dict[str, Any] = {"code": code, "construct": construct}
         if estimate_seconds is not None:
             self.details["estimate_seconds"] = round(estimate_seconds, 3)
 
@@ -86,11 +97,16 @@ def exponential_regex_construct(
     characters between them (``.*.*``, ``\\w+_\\w+``, ``[a-z]*[0-9]*[a-z]*``
     through the empty ``[0-9]*``) multiply each other's choices, as in Weber and
     Seidl's degree of ambiguity, as do further such pairs after them. An
-    unanchored search adds one more choice, where it starts. The steps are
+    unanchored search adds one more choice, where it starts. ``re`` matches
+    what a lookaround holds again each time the search reaches it, so that is
+    counted from there as if the pattern went on into it. The steps are
     counted for a name of ``max_length`` characters and refused above
     SEARCH_BUDGET_SECONDS. A quantifier ending the pattern (``.*leg.*``) never
     gives anything back and does not count; possessive quantifiers do not
-    either. Back-references count as a quantifier over any characters.
+    either. Back-references count as a quantifier over any characters. A
+    pattern over MAX_PATTERN_LENGTH characters, or with more than 32
+    quantifiers in one sequence, is not bounded: the bound's own work grows
+    with them.
 
     Args:
         pattern: A valid regular expression.
@@ -104,16 +120,23 @@ def exponential_regex_construct(
     # The stdlib's own parser, private since 3.11 (formerly sre_parse).
     from re import _constants as sre, _parser  # type: ignore[attr-defined]
 
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        return f"more than {MAX_PATTERN_LENGTH} characters"
     parsed = _parser.parse(pattern, flags)
     found = _nested_repetition(parsed, sre)
     if found:
         return found
     try:
-        seconds, factors = _bound(parsed, sre, max_length)
+        seconds, factors, unlooked = _bound(parsed, sre, max_length)
     except _Unbounded as exc:
         return str(exc)
     if seconds <= SEARCH_BUDGET_SECONDS:
         return None
+    if unlooked <= SEARCH_BUDGET_SECONDS:
+        return (
+            "a lookaround, which re matches again wherever the search reaches it (a failing "
+            f"search of a {max_length}-character name can take about {_readable(seconds)})"
+        )
     return (
         f"{factors} quantifiers that can divide the same characters between them, as in "
         f".*.*.* (a failing search of a {max_length}-character name can take about "
@@ -143,12 +166,20 @@ def name_searcher(
 
     Raises:
         re.error: The pattern is not valid.
-        RegexRefused: Neither way can search it in bounded time: a construct
+        RegexRefused: It is longer than MAX_PATTERN_LENGTH (``details.code``
+            ``pattern_too_long``), or neither way can search it in bounded
+            time: a construct
             that ``re`` backtracks on, together with one the linear-time
             search does not support (a back-reference, an atomic group, a
             possessive quantifier, a conditional, or a lookaround that cannot
             be bounded itself).
     """
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        raise RegexRefused(
+            f"{subject} is {len(pattern)} characters long; at most {MAX_PATTERN_LENGTH} are searched",
+            f"more than {MAX_PATTERN_LENGTH} characters",
+            code="pattern_too_long",
+        )
     compiled = re.compile(pattern, flags)
     construct = exponential_regex_construct(pattern, flags, max_length)
     if construct is None:
@@ -209,7 +240,7 @@ class _Element:
     ``\\A`` at the start).
     """
 
-    __slots__ = ("kind", "predicate", "mandatory", "width", "group", "inside")
+    __slots__ = ("kind", "predicate", "mandatory", "width", "group", "inside", "body", "matches")
 
     def __init__(
         self, kind: str, predicate: Optional[Predicate] = None, mandatory: bool = False, width: int = 0
@@ -222,6 +253,10 @@ class _Element:
         self.group: Optional[int] = None
         #: The optional groups this element is inside.
         self.inside: Tuple[int, ...] = ()
+        #: For a lookaround's check, the sequences of what it holds.
+        self.body: List[List["_Element"]] = []
+        #: The sample characters ``predicate`` matches, once computed.
+        self.matches: Optional[frozenset] = None
 
 
 class _Context:
@@ -245,22 +280,55 @@ class _Context:
             self.sample.append(char)
 
 
-def _bound(parsed: Any, sre: Any, max_length: int, anchored: bool = False) -> Tuple[float, int]:
+def _bound(
+    parsed: Any, sre: Any, max_length: int, anchored: bool = False
+) -> Tuple[float, int, float]:
     """Steps' worth of seconds a failing search may take, and the factors behind it.
 
     ``anchored`` bounds one match attempt at one position instead of a search.
+
+    Returns:
+        The seconds, the most loop factors in one sequence, and the seconds
+        without what lookarounds add.
     """
     context = _Context(sre, max_length)
     context.ignorecase = bool(parsed.state.flags & sre.SRE_FLAG_IGNORECASE)
     sequences = _expand(parsed, parsed.state.flags, False, context)
-    steps = 0
-    factors = 0
+    steps = unlooked = factors = 0
     for sequence in sequences:
-        count, width_factors = _sequence_steps(sequence, context, anchored)
+        count, width_factors, plain = _steps(sequence, context, anchored, 0)
         steps += count
+        unlooked += plain
         factors = max(factors, width_factors)
     step = _STEP_SECONDS_IGNORECASE if context.ignorecase else _STEP_SECONDS
-    return steps * step, factors
+    return steps * step, factors, unlooked * step
+
+
+def _steps(
+    sequence: List[_Element], context: _Context, anchored: bool, start: int
+) -> Tuple[int, int, int]:
+    """Bound a sequence's steps with what its lookarounds from ``start`` on add.
+
+    re matches what a lookaround holds wherever the search reaches it, from
+    the characters the elements before it left: as many attempts as those
+    elements have ways to divide the name, each going on into the
+    lookaround's contents as if the pattern continued there.
+
+    Returns:
+        The steps, the most loop factors, and the steps without lookarounds.
+    """
+    plain, factors = _sequence_steps(sequence, context, anchored)
+    count = plain
+    for index in range(start, len(sequence)):
+        for body in sequence[index].body:
+            if not any(element.kind == "loop" or element.body for element in body):
+                # A few fixed characters, tested within the step that reaches
+                # them, as the characters of the sequence itself are.
+                continue
+            inner, inner_factors, _plain = _steps(sequence[:index] + body, context, anchored, index)
+            count += inner
+            factors = max(factors, inner_factors)
+    return count, factors, plain
 
 
 def _expand(items: Any, flags: int, optional: bool, context: _Context) -> List[List[_Element]]:
@@ -330,9 +398,11 @@ def _expand_item(op: Any, av: Any, flags: int, optional: bool, context: _Context
         )
         return [[context.element("anchor" if start else "check")]]
     if op in (sre.ASSERT, sre.ASSERT_NOT):
-        # A lookaround searches at the positions it is reached from, so what it
-        # holds counts where it stands; none of it has to match there.
-        return [[context.element("check")] + sequence for sequence in _expand(av[1], flags, True, context)]
+        # A lookaround takes no characters from the search; _steps counts
+        # what it holds where the search reaches it.
+        check = context.element("check")
+        check.body = _expand(av[1], flags, False, context)
+        return [[check]]
     if op == sre.GROUPREF:
         # It matches what its group took, so treat it as any number of any characters.
         return [[context.element("loop", lambda char: True, False, context.max_length)]]
@@ -358,25 +428,28 @@ def _sequence_steps(
     ):
         elements.pop()
     loops = [index for index, element in enumerate(elements) if element.kind == "loop"]
+    if len(loops) > _MAX_LOOPS:
+        raise _Unbounded(f"more than {_MAX_LOOPS} quantifiers in a row")
     sample = context.sample
+
+    def matches(element: _Element) -> frozenset:
+        if element.matches is None:
+            predicate = element.predicate
+            assert predicate is not None
+            element.matches = frozenset(char for char in sample if predicate(char))
+        return element.matches
 
     def linked(first: int, second: int) -> bool:
         """Both loops can take a stretch, and everything required between them, of one text."""
         if elements[first].group in elements[second].inside:
             # Skipping the group skips this loop too: no choice is made twice.
             return False
-        a = elements[first].predicate
-        b = elements[second].predicate
-        assert a is not None and b is not None
-        shared = [char for char in sample if a(char) and b(char)]
+        shared = matches(elements[first]) & matches(elements[second])
         if not shared:
             return False
         for element in elements[first + 1 : second]:
-            if element.kind == "char" and element.mandatory:
-                predicate = element.predicate
-                assert predicate is not None
-                if not any(predicate(char) for char in shared):
-                    return False
+            if element.kind == "char" and element.mandatory and not shared & matches(element):
+                return False
         return True
 
     # A path's factors are the first loop of a linked pair and each loop a pair
@@ -663,7 +736,7 @@ class _LinearSearch:
             return self._add([_ASSERT, self._check(op, av, flags), follow])
         if op in (sre.ASSERT, sre.ASSERT_NOT):
             body = av[1]
-            seconds, _factors = _bound(body, sre, self._max_length, anchored=True)
+            seconds, _factors, _unlooked = _bound(body, sre, self._max_length, anchored=True)
             # It runs at every position of the name.
             if seconds * (self._max_length + 1) > SEARCH_BUDGET_SECONDS:
                 raise _Unbounded("a lookaround that can itself backtrack for long")

@@ -1050,6 +1050,49 @@ def test_a_reply_right_after_a_late_acknowledgement_is_kept() -> None:
     assert result == {"ok": 1}
 
 
+def test_a_client_stalled_past_the_grace_still_sees_the_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-review: the grace ended at a fixed time, so a stalled client never looked.
+
+    Another thread holding the GIL (json.dumps of a large mesh) kept the
+    client from reading for longer than the grace; the acknowledgement had
+    come meanwhile and the call ran, but it was reported as not executed.
+    """
+    from simul.blender_bridge import protocol
+
+    original = protocol._Lines.next
+    stalled: list = []
+
+    def stalls_once(self: Any, deadline: float) -> Optional[bytes]:
+        line = original(self, deadline)
+        if line is None and not stalled:
+            stalled.append(True)
+            time.sleep(protocol.ACK_GRACE_SECONDS + 0.4)
+        return line
+
+    monkeypatch.setattr(protocol._Lines, "next", stalls_once)
+    bridge = _FakeBridge(_late_ack_then_answer)
+    try:
+        result = BridgeWire.request(bridge.endpoint(), {"request_id": "r"}, 0.2)
+    finally:
+        bridge.close()
+    assert stalled
+    assert result == {"ok": 1}
+
+
+def test_a_line_that_arrived_is_read_even_past_the_deadline() -> None:
+    from simul.blender_bridge.protocol import _Lines
+
+    ours, theirs = socket.socketpair()
+    with ours, theirs:
+        theirs.sendall(b'{"request_id": "r", "started": true}\n')
+        time.sleep(0.05)
+        lines = _Lines(ours)
+        assert lines.next(time.monotonic() - 1) == b'{"request_id": "r", "started": true}'
+        assert lines.next(time.monotonic() - 1) is None
+
+
 def test_a_request_expired_in_the_queue_says_it_did_not_run(
     settings: Settings, advertised: tuple, monkeypatch: pytest.MonkeyPatch, fake_fastmcp: Any
 ) -> None:

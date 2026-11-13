@@ -1888,16 +1888,22 @@ Behaviour worth knowing:
   it. Which patterns `re` may search is bounded in `simul.utils.regex_guard`:
   every quantifier, optional element and alternative is a choice, quantifiers
   that can divide the same characters between them multiply each other's
-  choices (through quantifiers that can match nothing, optional groups and
-  lookarounds too), and an unanchored search adds one for where it starts; the
-  steps are counted for a 255-character name, Blender 5's limit. A pattern that
-  also needs a back-reference, an atomic group, a possessive quantifier or a
-  conditional, which the linear-time search lacks, is refused with
-  `error_type: "ValidationError"` and `details.code: "regex_backtracking"`.
+  choices (through quantifiers that can match nothing and optional groups too),
+  and an unanchored search adds one for where it starts. What a lookaround
+  holds is counted where the search reaches it, as if the pattern went on into
+  it there, since `re` matches it again on every arrival. The steps are counted
+  for a 255-character name, Blender 5's limit. A pattern that also needs a
+  back-reference, an atomic group, a possessive quantifier, a conditional or a
+  lookaround that itself backtracks for long (`(?=.*.*.*\d)`), which the
+  linear-time search lacks, is refused with `error_type: "ValidationError"`
+  and `details.code: "regex_backtracking"`. A pattern with more than 32
+  quantifiers in a row goes to the linear-time search without being bounded,
+  and one over 512 characters is refused with `details.code:
+  "pattern_too_long"`.
   `get_unreal_actor_by_semantic_label` searches tags in the editor with `re`
   and `re.IGNORECASE`, so in regex mode it refuses the patterns that bound does
-  not allow for a 1023-character tag under IGNORECASE (`.*.*x`, `A*a*x`), with
-  the same error; contains mode takes any label.
+  not allow for a 1023-character tag under IGNORECASE (`.*.*x`, `A*a*x`,
+  `\w*(?=\w*\d)`), with the same error; contains mode takes any label.
 - `execute_blender_script` returns the first `max_output_chars` characters of
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a

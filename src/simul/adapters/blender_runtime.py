@@ -1815,7 +1815,9 @@ class BlenderRuntimeSession:
                 name. One that Python's re could search for long, such as (\\w+)+
                 or .*.*.*x, is searched in time linear in the name instead; it is
                 refused only if it also needs a back-reference, an atomic group, a
-                possessive quantifier or a conditional, which that search lacks.
+                possessive quantifier, a conditional or a lookaround that itself
+                backtracks for long, which that search lacks, or if it is longer
+                than 512 characters.
             object_type: Blender object type filter (MESH, LIGHT, etc.), in any case.
             max_results: Maximum number of results.
             offset: How many matching objects to skip, as next_offset gives it.

@@ -158,24 +158,36 @@ class _Lines:
         self.buffer = bytearray()
 
     def next(self, deadline: float) -> Optional[bytes]:
-        """Return the next line, or None once ``deadline`` (monotonic) passes."""
+        """Return the next line, or None once ``deadline`` (monotonic) passes.
+
+        Past the deadline it still reads what has already arrived, without
+        waiting: a thread that resumes late (another thread held the GIL) must
+        not miss an acknowledgement that came while it was stalled.
+        """
         while b"\n" not in self.buffer:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                if not self._receive(0.0):
+                    return None
+            elif not self._receive(remaining):
                 return None
-            self.connection.settimeout(remaining)
-            try:
-                chunk = self.connection.recv(65536)
-            except (TimeoutError, socket.timeout):
-                return None
-            if not chunk:
-                raise ConnectionError("Blender bridge closed without a response")
-            self.buffer.extend(chunk)
-            if len(self.buffer) > MAX_MESSAGE_BYTES:
-                raise ValueError("Blender bridge response exceeds 32 MiB")
         line, _, rest = bytes(self.buffer).partition(b"\n")
         self.buffer = bytearray(rest)
         return line
+
+    def _receive(self, wait: float) -> bool:
+        """Read one chunk, waiting up to ``wait`` seconds; whether one came."""
+        self.connection.settimeout(wait)
+        try:
+            chunk = self.connection.recv(65536)
+        except (BlockingIOError, InterruptedError, TimeoutError, socket.timeout):
+            return False
+        if not chunk:
+            raise ConnectionError("Blender bridge closed without a response")
+        self.buffer.extend(chunk)
+        if len(self.buffer) > MAX_MESSAGE_BYTES:
+            raise ValueError("Blender bridge response exceeds 32 MiB")
+        return True
 
 
 class BridgeWire:
@@ -307,13 +319,16 @@ class BridgeWire:
                 connection.sendall(message)
                 sent = True
                 lines = _Lines(connection)
-                # An acknowledgement sent just before the deadline may still be in
-                # flight (the bridge starts nothing after it), and the reply may
-                # follow it at once.
-                grace = deadline + ACK_GRACE_SECONDS
                 while True:
                     line = lines.next(deadline)
                     if line is None and acknowledged and not started:
+                        # An acknowledgement sent just before the deadline may
+                        # still be in flight (the bridge starts nothing after
+                        # it), and the reply may follow it at once. The grace
+                        # runs from when this thread got to look, which a stall
+                        # (another thread holding the GIL) can put past the
+                        # deadline.
+                        grace = max(deadline, time.monotonic()) + ACK_GRACE_SECONDS
                         line = lines.next(grace)
                         if line is not None and _is_ack(json.loads(line)):
                             started, started_at = True, time.monotonic()

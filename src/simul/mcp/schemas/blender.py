@@ -411,11 +411,13 @@ class BlenderSearchObjectsRequest(BaseModel):
 
     name_pattern: Optional[str] = Field(
         None,
+        max_length=512,
         description=(
             "Python regular expression searched for in each object name; one that Python's "
             "re could backtrack on for long, such as (\\w+)+ or .*.*.*x, is searched in "
             "linear time instead, and refused only when it also needs a back-reference, "
-            "an atomic group, a possessive quantifier or a conditional"
+            "an atomic group, a possessive quantifier, a conditional or a lookaround that "
+            "backtracks itself, as in (?=.*.*.*\\d)"
         ),
     )
     object_type: Optional[str] = Field(

@@ -63,6 +63,15 @@ def _refused(pattern: str, caller: tuple = BLENDER) -> Optional[str]:
         (r"\d*\d*x[a-z]*[a-z]*y", "3 quantifiers"),
         # Optional characters are choices: a?{25}a{25} takes 2**25 tries.
         ("a?" * 25 + "a" * 25, "25 quantifiers"),
+        # Re-review: what a lookaround holds was not counted. The first froze
+        # Blender for 2.16 s on one 128-character name; the second took 0.97 s
+        # on 255 characters.
+        (r"(?=.*.*.*.*\d)", "a lookaround"),
+        (r"(?=.*.*.*\d)", "a lookaround"),
+        (r"x(?!.*.*.*\d)", "a lookaround"),
+        # The bound's own work grew with the quantifiers: 6.5 s for 200.
+        (".*" * 200 + "x", "more than 32 quantifiers"),
+        ("a" * 513, "more than 512 characters"),
     ],
 )
 def test_patterns_whose_failing_search_backtracks_are_refused(
@@ -81,6 +90,9 @@ def test_patterns_whose_failing_search_backtracks_are_refused(
         ".*.*x",
         ".*a.*a.*x",
         ".*left.*front.*wheel.*joint",
+        # Re-review: 1.08 s and 1.75 s on one 1023-character tag.
+        r"\w*(?=\w*\d)",
+        r"[a-z]*(?=[a-z]*\d)",
     ],
 )
 def test_unreal_tags_are_guarded_as_unreal_searches_them(pattern: str) -> None:
@@ -112,6 +124,11 @@ def test_unreal_tags_are_guarded_as_unreal_searches_them(pattern: str) -> None:
         (".{0,8}.{0,8}.{0,8}x", [BLENDER]),
         (r"^(?!.*Light).*$", [BLENDER, UNREAL]),
         (r".*(?<!_proxy)$", [BLENDER, UNREAL]),
+        (r"(?=.*\d)", [BLENDER, UNREAL]),
+        (r"^(?=.*left)(?=.*wheel)", [BLENDER, UNREAL]),
+        (r"(?<=_)\d+$", [BLENDER, UNREAL]),
+        # Nothing after the last quantifiers can fail, however many there are.
+        (".*" * 100, [BLENDER, UNREAL]),
         # It matches the empty name, so any search succeeds at once.
         ("(a.*.*.*x)?", [BLENDER, UNREAL]),
     ],
@@ -136,6 +153,11 @@ def _random_pattern(rng: random.Random, longest: int = 8) -> str:
         if rng.random() < 0.15:
             inner = "".join(rng.choice(_ATOMS) + rng.choice(_QUANTIFIERS[:5]) for _ in range(rng.randint(1, 2)))
             parts.append(f"(?:{inner})?")
+            continue
+        if rng.random() < 0.1:
+            # Re-review: what a lookaround held was not counted.
+            inner = "".join(rng.choice(_ATOMS) + rng.choice(_QUANTIFIERS) for _ in range(rng.randint(1, 4)))
+            parts.append("(?" + rng.choice("=!") + inner + rng.choice(["", "x", r"\d"]) + ")")
             continue
         atom, quantifier = rng.choice(_ATOMS), rng.choice(_QUANTIFIERS)
         if atom == "(?:a|b)" and quantifier not in ("", "?"):
@@ -235,6 +257,26 @@ def test_blender_searches_backtracking_patterns_in_linear_time(pattern: str, mat
     assert time.perf_counter() - start < _TEST_BUDGET_SECONDS
     assert search(matching) is True
     assert search(matching.replace("x", "y").replace("2", "3").replace("_", "-").lower()[:2]) is False
+
+
+def test_the_guard_bounds_a_long_pattern_quickly() -> None:
+    """Re-review: the guard took 6.5 s on Blender's main thread for .* repeated 200 times."""
+    start = time.perf_counter()
+    search = name_searcher(".*" * 200 + "x")
+    assert time.perf_counter() - start < _TEST_BUDGET_SECONDS
+    assert search("box") is True
+    assert search("b" * BLENDER_NAME_LENGTH) is False
+    with pytest.raises(RegexRefused) as refused:
+        name_searcher("a" * 513, subject="name_pattern")
+    assert refused.value.details["code"] == "pattern_too_long"
+    assert "513 characters" in str(refused.value)
+
+
+def test_a_backtracking_lookaround_is_refused_rather_than_searched() -> None:
+    """Re-review: (?=.*.*.*.*\\d) went to re and froze Blender's main thread."""
+    with pytest.raises(RegexRefused, match="a lookaround") as refused:
+        name_searcher(r"(?=.*.*.*.*\d)", subject="name_pattern")
+    assert refused.value.details["code"] == "regex_backtracking"
 
 
 def test_a_pattern_neither_search_can_bound_is_refused_with_its_reason() -> None:
