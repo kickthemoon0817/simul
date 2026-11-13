@@ -1013,9 +1013,11 @@ class TestUnrealRuntimeSessionPhase3:
                 parts = json["Requests"]
                 steps.append(["batch"] + [p["Body"].get("access", "call") for p in parts])
                 answers = [
-                    python_json_response({"transaction": 0, "emptied": False})._json_data,
+                    python_json_response({"transaction": 0, "readable": True})._json_data,
                     {},
                     python_json_response({"finished": True})._json_data,
+                    {"Mobility": "Movable"},
+                    python_json_response({"applied": True, "restored": False, "closed": "ended"})._json_data,
                     {"Mobility": "Movable"},
                 ]
                 return FakeResponse({"Responses": [
@@ -1051,8 +1053,7 @@ class TestUnrealRuntimeSessionPhase3:
         }
         assert steps == [
             "preflight", "READ_ACCESS",
-            ["batch", "call", "WRITE_ACCESS", "call", "READ_ACCESS"],
-            "close",
+            ["batch", "call", "WRITE_ACCESS", "call", "READ_ACCESS", "call", "READ_ACCESS"],
         ]
 
     # -- call_actor_function --

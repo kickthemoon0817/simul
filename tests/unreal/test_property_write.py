@@ -32,6 +32,7 @@ wrong on UE 5.7.4:
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import io
 import json
@@ -174,7 +175,6 @@ class Editor:
         self.console: Dict[str, Any] = {"__name__": "__main__"}
         self.drop_batch_answer = False
         self.dirty = False  # the level's package
-        self.lost_closes = 0  # requests running PROPERTY_END that never arrive
 
     # -- undo -----------------------------------------------------------------------
     def modify(self, obj: Obj) -> None:
@@ -339,12 +339,8 @@ class Editor:
 
     async def __call__(self, request: web.Request) -> web.StreamResponse:
         body = await request.json()
-        command = str((body.get("parameters") or {}).get("PythonCommand", ""))
-        if request.path == "/remote/object/call" and self.lost_closes and "def end(" in command:
-            self.lost_closes -= 1
-            request.transport.close()  # it never arrives
-            raise ConnectionResetError
-        code, answer = self.dispatch(request.path, body)
+        await asyncio.sleep(0)  # let a concurrent call's request in between, as the network does
+        code, answer = self.dispatch(request.path, body)  # one request, a batch whole, at a time
         if request.path == "/remote/batch" and self.drop_batch_answer:
             self.drop_batch_answer = False
             request.transport.close()  # the batch ran; its answer is lost
@@ -612,12 +608,33 @@ async def test_a_write_through_a_setter_is_one_undo_step_and_marks_the_level_cha
 
 
 @pytest.mark.asyncio
-async def test_a_setter_write_put_back_leaves_the_level_unchanged() -> None:
+async def test_a_setter_records_the_components_attached_below_its_target() -> None:
+    """SetMobility(Movable) moves the components attached below too; undo puts them all back."""
+    async with editor_session() as (session, editor):
+        child = editor.add(ActorComponent(editor, MESH + ".Child", "StaticMeshComponent", {"Mobility": "Static"}, {},
+                                          owner=editor.objects[ACTOR]))
+        mesh = editor.objects[MESH]
+        mesh.get_children_components = lambda all_descendants: [child]  # type: ignore[attr-defined]
+
+        def spread(obj: Obj, name: str) -> None:
+            if obj.props[name] == "Movable":
+                child.props["Mobility"] = "Movable"
+
+        mesh.meta["Mobility"]["post_edit"] = spread
+        result = await session.set_actor_property(MESH, "Mobility", '"Movable"')
+
+        assert result["applied"] is True and child.props["Mobility"] == "Movable"
+        editor.undo()
+        assert (mesh.props["Mobility"], child.props["Mobility"]) == ("Static", "Static")
+
+
+@pytest.mark.asyncio
+async def test_a_setter_write_put_back_leaves_no_undo_step() -> None:
     async with editor_session() as (session, editor):
         result = await session.set_actor_property(MESH, "StaticMesh", '"/Engine/BasicShapes/NoSuchMesh"')
 
         assert (result["error_type"], result["restored"]) == ("PropertyNotApplied", True)
-        assert editor.dirty is False and editor.history == []
+        assert editor.objects[MESH].props["StaticMesh"] == SPHERE and editor.history == []
 
 
 @pytest.mark.asyncio
@@ -661,38 +678,58 @@ async def test_a_struct_written_in_part_keeps_its_other_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_lost_batch_answer_puts_the_previous_value_back() -> None:
-    """The batch ran and its answer was lost: the call fails, so the level is left as it was."""
+async def test_a_lost_batch_answer_leaves_nothing_open_and_reports_what_unreal_holds() -> None:
+    """The batch ran whole in the editor, its transaction closed inside it; only the answer was lost."""
     async with editor_session() as (session, editor):
         editor.drop_batch_answer = True
         result = await session.set_actor_property(ACTOR, "Tags", '["x"]')
 
-        assert (result["success"], result["error_type"], result["restored"]) == (False, "ConnectionError", True)
+        assert (result["success"], result["error_type"]) == (False, "ConnectionError")
         assert "whether the request ran is unknown" in result["error"]
-        assert editor.objects[ACTOR].props["Tags"] == ["seed"]
-        assert editor.depth == 0 and editor.open_transactions() == {} and editor.history == []
+        assert result["value"] == ["x"] and "restored" not in result
+        assert editor.depth == 0 and editor.open_transactions() == {} and len(editor.history) == 1
 
 
 @pytest.mark.asyncio
-async def test_a_transaction_whose_closes_were_lost_is_closed_by_the_next_write() -> None:
-    """Both closing requests lost: nesting stayed at 1, and the editor's undo waited on it."""
+async def test_two_writes_at_once_are_two_undo_steps_and_one_undo_reverts_one() -> None:
+    """A transaction used to span the write's requests, so a concurrent call's write landed in it.
+
+    The second call's rollback was recorded inside the first call's
+    transaction: one undo reverted Intensity and also put back the materials
+    the rejected call had reported restored.
+    """
     async with editor_session() as (session, editor):
-        editor.lost_closes = 2
-        first = await session.set_actor_property(ACTOR, "Tags", '["first"]')
+        rejected, kept = await asyncio.gather(
+            session.set_actor_property(MESH, "OverrideMaterials", json.dumps([MATERIAL_A, MATERIAL_B])),
+            session.set_actor_property(LIGHT, "Intensity", "100"),
+        )
 
-        assert first["applied"] is True and "stays open" in first["warning"]
-        assert editor.depth == 1 and len(editor.open_transactions()) == 1
-
-        second = await session.set_actor_property(ACTOR, "bHidden", "true")
-
-        assert second["applied"] is True and "warning" not in second
-        assert editor.depth == 0 and len(editor.history) == 2
-        # The first call's entry stays, transaction closed, for its own late close.
-        assert [entry["index"] for entry in editor.open_transactions().values()] == [None]
+        assert (rejected["error_type"], rejected["restored"]) == ("PropertyNotApplied", True)
+        assert kept["applied"] is True
+        assert editor.objects[MESH].props["OverrideMaterials"] == []
+        assert len(editor.history) == 1 and editor.depth == 0 and editor.open_transactions() == {}
         editor.undo()
-        assert editor.objects[ACTOR].props["bHidden"] is False
-        editor.undo()
+        assert editor.objects[LIGHT].props["Intensity"] == 5000.0
+        assert editor.objects[MESH].props["OverrideMaterials"] == []
+        assert editor.history == []
+
+
+@pytest.mark.asyncio
+async def test_many_writes_at_once_each_leave_their_own_undo_step() -> None:
+    async with editor_session() as (session, editor):
+        results = await asyncio.gather(
+            *(session.set_actor_property(ACTOR, "Tags", json.dumps([f"t{n}"])) for n in range(4)),
+            session.set_actor_property(LIGHT, "Intensity", "7"),
+            session.set_actor_property(MESH, "StaticMesh", '"/Engine/BasicShapes/NoSuchMesh"'),
+        )
+
+        assert [r.get("applied") for r in results] == [True] * 5 + [False]
+        assert len(editor.history) == 5 and editor.depth == 0 and editor.open_transactions() == {}
+        for _ in range(5):
+            editor.undo()
         assert editor.objects[ACTOR].props["Tags"] == ["seed"]
+        assert editor.objects[LIGHT].props["Intensity"] == 5000.0
+        assert editor.objects[MESH].props["StaticMesh"] == SPHERE
 
 
 # -- the target: the level's actors and components, as actor_at resolves them ----------

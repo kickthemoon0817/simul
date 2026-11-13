@@ -737,35 +737,39 @@ Behaviour worth knowing:
     (`value_not_a_list`, `value_not_an_object`): Remote Control wrote what it
     could of another shape, `5` into `Tags` as `['None']`.
   - **The write.** Remote Control does the write, converting structs, enums by
-    name and objects by path. It is one undo step, with the transaction kept
-    open until the read-back is compared. The object is recorded in that
-    transaction before anything changes, and the level is marked changed when
-    the write stays. Remote Control's own write of a property with a setter
-    (a light's `Intensity`, `Mobility`, `StaticMesh`, `RelativeLocation`)
-    records nothing: it used to leave no undo step, so the next undo reverted
-    the edit before it, and a save of the changed packages skipped it. The write and the read-back go in
-    one Remote Control batch, so no editor tick runs between them, and a
-    function call sits between the two. That call is what makes Remote
-    Control finish the write: Unreal's `PostEditChangeProperty` runs only on
-    the next call. So `value` is what Unreal kept, for example materials
-    trimmed to the mesh's slots.
+    name and objects by path. The whole write is one Remote Control batch, so
+    no editor tick and no other request runs between its parts: the undo
+    transaction opens and records the target and the components attached
+    below it, the container is emptied, Remote Control writes, a function call
+    makes Remote Control finish the write (Unreal's `PostEditChangeProperty`
+    runs only on the next call), and the editor compares what it holds with
+    what was written, then keeps the write or puts the previous value back.
+    The transaction closes inside the batch, so two calls at once are two
+    undo steps and one undo reverts exactly one of them. A write that stays
+    is one undo step and marks the level changed. Remote Control's own write
+    of a property with a setter (a light's `Intensity`, `Mobility`,
+    `StaticMesh`, `RelativeLocation`) records nothing: it used to leave no
+    undo step, so the next undo reverted the edit before it, and a save of
+    the changed packages skipped it. A setter that changes objects other than
+    its target and the components attached below it (its actor's other
+    components, other actors) records only those two. `value` is what Unreal
+    kept, for example materials trimmed to the mesh's slots.
   - **A value that does not stick.** A value Unreal does not keep fails with
     `PropertyNotApplied`, with `details.expected` and `details.actual`.
     Examples are an object path that loads nothing (written as None), more
     materials than slots, or an enum name Unreal does not have. The previous
-    value is then put back in the same transaction, which is cancelled, so the
-    level is as it was and the call leaves no undo step; `restored` says
-    whether it held. A write Remote Control refuses (an `EditConst` or
-    protected property) is put back the same way and fails with Remote
-    Control's error type, `ValidationError`, and `restored`. So is a write
-    whose answer was lost (`ConnectionError`) or came back unreadable. A
-    refused write of a property without a setter still leaves the level
-    marked changed: Remote Control marks it before it writes, and Unreal
-    offers no way to clear a map package's flag.
-  - **Lost closing requests.** When neither request closing the transaction
-    is answered, the reply carries a `warning`, and the next
-    `set_unreal_actor_property` call ends that transaction first. Until then
-    the editor's undo waits on it.
+    value is then put back through the editor's Python API in the same
+    transaction, which is cancelled, so the call leaves no undo step;
+    `restored` says whether it held. A write Remote Control refuses (an
+    `EditConst` or protected property) is put back the same way and fails
+    with Remote Control's error type, `ValidationError`, and `restored`. The
+    level stays marked changed after a put-back: Unreal marks it while it
+    writes, and offers no way to clear a map package's flag. When the
+    editor's Python cannot read the property, nothing can be put back, and a
+    value that does not stick is reported with `restored: false`.
+  - **A lost answer.** When the batch's answer is lost, the call fails with
+    `ConnectionError`: the batch may have run, kept or put back, in the
+    editor. The reply's `value` is the property read again afterwards.
   - **The reply.** It has `value`, `previous_value` and `applied`. `applied`
     is `null`, with a `warning`, when Unreal will not read the property back,
     or when the two values cannot be compared (an enum written as a number). A
