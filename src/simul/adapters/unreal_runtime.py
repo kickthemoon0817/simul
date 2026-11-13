@@ -51,16 +51,21 @@ from ._unreal_errors import (
     script_not_found,
 )
 from ._unreal_mesh_scripts import (
+    BOOLEAN_ALIASES,
+    BOOLEAN_OPERATIONS,
     COMPUTE_UV,
     CONVERT,
     CONVEX_DECOMPOSITION,
     CONVEX_HULL,
+    EDGE_SELECTION_SYNTAX,
     EDIT_TOPOLOGY,
+    FACE_SELECTION_SYNTAX,
     GENERATE_PRIMITIVE,
-    MESH_BOOLEAN,
+    HULL_OUTPUTS,
     MAX_REMESH_TARGET_TRIANGLES,
     MAX_RESULT_TRIANGLES,
     MAX_SEGMENTS,
+    MESH_BOOLEAN,
     MESH_COMMIT_MARGIN_S,
     MESH_REFUSALS,
     MESH_SCRIPT_TIMEOUT_S,
@@ -71,17 +76,19 @@ from ._unreal_mesh_scripts import (
     REMESH_OVERSHOOT,
     SIMPLIFY,
     SUBDIVIDE,
+    SUBDIVISION_SCHEMES,
     TARGET_FORMATS,
     TOPOLOGY_OPERATIONS,
     UV_METHODS,
     VALIDATE,
+    VALIDATION_CHECKS,
     attachment_refusal,
-    invalid_choice,
     is_loopback,
-    mesh_script,
     mesh_timeout_error,
-    refusal,
 )
+from ._unreal_mesh_scripts import edge_selection as parse_edge_selection
+from ._unreal_mesh_scripts import face_selection as parse_face_selection
+from ._unreal_mesh_scripts import invalid_choice, mesh_script, primitive_dimensions, refusal
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_python import isolate, python_command
 from ._unreal_scripts import (
@@ -5958,7 +5965,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
     # The scripts are in _unreal_mesh_scripts, which says what they share:
     # the GeometryScripting check, actor_at lookups, a GeometryScriptDebug
     # check after every call, edits on a copy swapped in inside one
-    # transaction, and the PIE refusal.
+    # transaction, world-space inputs, and the PIE refusal. Each method
+    # checks its arguments first and refuses bad ones before the editor is
+    # asked.
     # ------------------------------------------------------------------
 
     async def generate_mesh_primitive(
@@ -5972,18 +5981,31 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Create a parametric mesh primitive as a new DynamicMeshActor.
 
-        The spawn and its mesh are one undoable transaction.
+        Every primitive is centred on the actor, in Unreal's axes (X forward,
+        Y right, Z up), with quad polygroups so Catmull-Clark can subdivide
+        it. The spawn and its mesh are one undoable transaction.
 
         Args:
-            primitive_type: box, sphere, cylinder, cone or capsule.
-            dimensions: Type-specific dimensions.
-            segments: Tessellation segments, 3 to 512 (a 512-segment sphere
-                has 522,240 triangles).
+            primitive_type: box, sphere, cylinder, cone, capsule or torus.
+            dimensions: In cm, by type (defaults in brackets): box width (X,
+                100), depth (Y, 100), height (Z, 100); sphere radius (50);
+                cylinder radius (50), height (Z, 100); cone base_radius (50),
+                top_radius (0), height (Z, 100); capsule radius (30), length
+                (the straight part along Z, 75; the capsule is length + 2 x
+                radius tall); torus major_radius (50, to the tube's centre),
+                minor_radius (20, the tube's), around Z. Other names are
+                refused.
+            segments: Steps around the shape (3 to 512): a sphere's
+                longitude and latitude steps, a cylinder's, cone's or
+                capsule's sides, a torus's steps around its axis (half as
+                many around the tube). A 512-segment sphere has 522,240
+                triangles.
             location: Spawn location [x, y, z] in cm.
             actor_label: Optional label for the actor.
 
         Returns:
-            Dict with actor_path, primitive_type, triangle/vertex counts and
+            Dict with actor_path, primitive_type, the dimensions and segments
+            used, triangle/vertex counts, the mesh's local bounds and
             warnings, or an error envelope.
         """
         kind = primitive_type.lower()
@@ -5992,13 +6014,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             problem = refusal("INVALID_SEGMENTS", f"segments must be {MIN_SEGMENTS} to {MAX_SEGMENTS}, not {segments}")
         if problem is not None:
             return problem
+        resolved, problem = primitive_dimensions(kind, dict(dimensions or {}))
+        if problem is not None:
+            return problem
         return await self._run_mesh_script(
             GENERATE_PRIMITIVE,
             primitive_type=kind,
-            dimensions={key: float(value) for key, value in (dimensions or {}).items()},
+            dimensions=resolved,
             segments=int(segments),
             location=[float(value) for value in (location or [0.0, 0.0, 0.0])],
-            label=actor_label or f"DynMesh_{primitive_type}",
+            label=actor_label or f"DynMesh_{kind}",
         )
 
     async def apply_mesh_boolean(
@@ -6008,67 +6033,128 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         operation: str,
     ) -> Dict[str, Any]:
         """
-        Apply a boolean operation between two meshes via GeometryScript.
+        Apply a boolean between two DynamicMeshActors' meshes, in place.
+
+        Both meshes take part at their actors' world transforms (location,
+        rotation, scale), and the result replaces the target's mesh in its
+        own local space. The tool actor is left as it was.
 
         Args:
             target_mesh_path: Target mesh actor (modified in-place).
             tool_mesh_path: Tool mesh actor (operand).
-            operation: union, subtract, or intersect.
+            operation: union, subtract (alias difference) or intersect
+                (alias intersection).
 
         Returns:
-            Dict with target_mesh_path, operation, previous and result
-            triangle counts, result vertex count and warnings.
+            Dict with target and tool paths, operation (canonical) and
+            requested_operation, previous and result triangle counts, result
+            vertex count, previous and result volume (cm3, null for an open
+            mesh), result_components and warnings.
         """
+        requested = operation.lower()
+        canonical = BOOLEAN_ALIASES.get(requested, requested)
+        problem = invalid_choice(
+            "operation", canonical, tuple(BOOLEAN_OPERATIONS) + tuple(BOOLEAN_ALIASES), "UNKNOWN_OPERATION"
+        )
+        if problem is not None:
+            return problem
         return await self._run_mesh_script(
-            MESH_BOOLEAN, target=target_mesh_path, tool=tool_mesh_path, operation=operation
+            MESH_BOOLEAN,
+            target=target_mesh_path,
+            tool=tool_mesh_path,
+            operation=canonical,
+            requested_operation=requested,
         )
 
     async def compute_convex_hull(
         self,
         mesh_path: str,
+        max_faces: int = 250,
+        output: str = "actor",
     ) -> Dict[str, Any]:
         """
-        Compute the convex hull of a mesh as a new DynamicMeshActor.
+        Compute the convex hull of a DynamicMeshActor's mesh as simple collision.
 
         Args:
             mesh_path: Source mesh actor path.
+            max_faces: Simplify the hull to at most this many triangles; 0
+                keeps every face of the exact hull.
+            output: 'actor' (a new DynamicMeshActor at the source's transform
+                whose mesh and simple collision are the hull), 'collision'
+                (the hull replaces the source's simple collision) or 'both'.
 
         Returns:
-            Dict with hull_actor_path, hull vertex/triangle counts, the
-            source triangle count, hull_volume, source_volume and volume_ratio
-            (both None for a source that is not closed) and warnings.
+            Dict with output, hull_actor_path (null for 'collision'), hull
+            vertex/triangle counts, max_faces, the source triangle count,
+            hull_volume, source_volume and volume_ratio (null for an open
+            source), collision (each actor given the hull and its collision
+            shape count) and warnings.
         """
-        return await self._run_mesh_script(CONVEX_HULL, mesh=mesh_path)
+        problem = invalid_choice("output", output.lower(), HULL_OUTPUTS, "UNKNOWN_OUTPUT")
+        if problem is None and not 0 <= int(max_faces) <= 10_000:
+            problem = refusal("INVALID_MAX_FACES", f"max_faces must be 0 to 10000, not {max_faces}")
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            CONVEX_HULL, mesh=mesh_path, max_faces=int(max_faces), output=output.lower()
+        )
 
     async def decompose_convex_hull(
         self,
         mesh_path: str,
-        max_hulls: int = 16,
+        max_hulls: int = 8,
         max_vertices_per_hull: int = 32,
-        min_cluster_size: int = 256,
-        resolution: int = 100000,
+        error_tolerance: float = 0.0,
+        min_part_thickness: float = 0.1,
+        output: str = "actor",
     ) -> Dict[str, Any]:
         """
-        Convex decomposition of a mesh, as one new DynamicMeshActor.
+        Decompose a DynamicMeshActor's mesh into convex hulls, as simple collision.
+
+        Uses GeometryScript's convex decomposition (Unreal's own, the one
+        its collision generation uses; not V-HACD), with sphere, box and
+        capsule detection off so the result is always hulls.
 
         Args:
             mesh_path: Source mesh actor path.
-            max_hulls: Maximum convex pieces.
-            max_vertices_per_hull: Simplifies each piece to this many
-                triangles.
-            min_cluster_size: Unused.
-            resolution: Unused.
+            max_hulls: Most convex pieces (1 to 64).
+            max_vertices_per_hull: Each piece is simplified to at most this
+                many vertices (4 to 256; 2 x this - 4 triangles).
+            error_tolerance: Stop adding pieces once the volume error is below
+                this, in cm; 0 uses max_hulls pieces.
+            min_part_thickness: Pieces thinner than this (cm) are merged into
+                their neighbours.
+            output: 'actor' (a new DynamicMeshActor at the source's transform
+                whose mesh and simple collision are the pieces), 'collision'
+                (the pieces replace the source's simple collision) or 'both'.
 
         Returns:
-            Dict with decomp_actor_path, hull_count, hulls (per hull: index,
-            vertex_count, triangle_count, volume, bounds), total vertices and
-            triangles, and warnings.
+            Dict with output, decomp_actor_path (null for 'collision'),
+            hull_count, hulls (per piece: index, vertex/triangle counts,
+            volume, local bounds), the limits used, the largest piece's
+            vertex count, totals, hulls_volume, source_volume, volume_ratio,
+            collision and warnings.
         """
+        problem = invalid_choice("output", output.lower(), HULL_OUTPUTS, "UNKNOWN_OUTPUT")
+        for name, value, low, high in (
+            ("max_hulls", max_hulls, 1, 64),
+            ("max_vertices_per_hull", max_vertices_per_hull, 4, 256),
+        ):
+            if problem is None and not low <= int(value) <= high:
+                problem = refusal("INVALID_LIMIT", f"{name} must be {low} to {high}, not {value}")
+        for name, number in (("error_tolerance", error_tolerance), ("min_part_thickness", min_part_thickness)):
+            if problem is None and not (math.isfinite(float(number)) and float(number) >= 0):
+                problem = refusal("INVALID_LIMIT", f"{name} must be 0 cm or more, not {number}")
+        if problem is not None:
+            return problem
         return await self._run_mesh_script(
             CONVEX_DECOMPOSITION,
             mesh=mesh_path,
             max_hulls=int(max_hulls),
             max_vertices_per_hull=int(max_vertices_per_hull),
+            error_tolerance=float(error_tolerance),
+            min_part_thickness=float(min_part_thickness),
+            output=output.lower(),
         )
 
     async def edit_mesh_topology(
@@ -6079,36 +6165,85 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         edge_selection: Optional[str] = None,
         distance: Optional[float] = None,
         offset: Optional[float] = None,
-        scale: Optional[List[float]] = None,
         count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Edit mesh topology (extrude, bevel, inset).
+        Extrude or inset selected faces, or bevel edges, of a DynamicMeshActor's mesh.
+
+        Selections are in the mesh's local space (before the actor's
+        transform).
 
         Args:
             mesh_path: Mesh actor path.
-            operation: extrude_faces, bevel_edges or inset_faces.
-            face_selection: Face selection filter (unused in current impl).
-            edge_selection: Edge selection filter (unused in current impl).
-            distance: Extrude/bevel distance.
-            offset: Inset offset.
-            scale: Scale factors [x, y, z] (unused in current impl).
-            count: Subdivision count for bevel.
+            operation: extrude_faces (moves the selected faces along their
+                average normal by distance, building side walls), inset_faces
+                (insets each face of the selection by offset) or bevel_edges.
+            face_selection: The faces extrude_faces and inset_faces change
+                (required) and, for bevel_edges, a region whose border edges
+                are bevelled: 'all', 'normal:x,y,z[,max_angle_deg]'
+                (triangles facing that way, within 15 degrees by default) or
+                'box:min_x,min_y,min_z,max_x,max_y,max_z' (triangles inside).
+            edge_selection: The edges bevel_edges bevels when no
+                face_selection is given: 'polygroup' (every polygroup edge,
+                a primitive's face edges) or 'sharp[:min_angle_deg]' (20
+                degrees by default).
+            distance: Extrude distance in cm (20 by default; negative pushes
+                inward), or bevel distance (5 by default).
+            offset: Inset distance in cm (5 by default).
+            count: Bevel subdivisions, 0 to 16 (0 by default: one flat face
+                per bevelled edge).
 
         Returns:
-            Dict with mesh_path, operation, previous and result triangle
-            counts, result vertex count and warnings.
+            Dict with mesh_path, operation, the selections, faces_affected
+            and edges_affected (null where the operation selects none of
+            them), the distance, offset or subdivisions used, previous and
+            result triangle counts, result vertex count, result_volume and
+            warnings.
         """
-        refusal = invalid_choice("operation", operation.lower(), TOPOLOGY_OPERATIONS, "UNKNOWN_OPERATION")
-        if refusal is not None:
-            return refusal
+        op = operation.lower()
+        problem = invalid_choice("operation", op, TOPOLOGY_OPERATIONS, "UNKNOWN_OPERATION")
+        if problem is not None:
+            return problem
+        faces = edges = None
+        if face_selection:
+            faces, problem = parse_face_selection(face_selection)
+        elif op != "bevel_edges":
+            problem = refusal(
+                "SELECTION_REQUIRED",
+                f"{op} needs a face_selection: {FACE_SELECTION_SYNTAX}",
+            )
+        elif edge_selection:
+            edges, problem = parse_edge_selection(edge_selection)
+        else:
+            problem = refusal(
+                "SELECTION_REQUIRED",
+                f"bevel_edges needs an edge_selection ({EDGE_SELECTION_SYNTAX}) or a face_selection",
+            )
+        if problem is None and edge_selection and face_selection:
+            problem = refusal("SELECTION_CONFLICT", "Give face_selection or edge_selection, not both")
+        if problem is None and op != "bevel_edges" and edge_selection:
+            problem = refusal("SELECTION_CONFLICT", f"{op} changes faces; edge_selection applies to bevel_edges")
+        default_distance = 5.0 if op == "bevel_edges" else 20.0
+        moved = float(distance) if distance is not None else default_distance
+        inset = float(offset) if offset is not None else 5.0
+        subdivisions = int(count) if count is not None else 0
+        if problem is None and (not math.isfinite(moved) or moved == 0 or (op == "bevel_edges" and moved < 0)):
+            problem = refusal("INVALID_DISTANCE", f"distance must be a non-zero number of cm, not {distance}")
+        if problem is None and not (math.isfinite(inset) and inset > 0):
+            problem = refusal("INVALID_DISTANCE", f"offset must be above 0 cm, not {offset}")
+        if problem is None and not 0 <= subdivisions <= 16:
+            problem = refusal("INVALID_COUNT", f"count must be 0 to 16, not {count}")
+        if problem is not None:
+            return problem
         return await self._run_mesh_script(
             EDIT_TOPOLOGY,
             mesh=mesh_path,
-            operation=operation.lower(),
-            distance=float(distance) if distance is not None else 20.0,
-            offset=float(offset) if offset is not None else 5.0,
-            count=int(count) if count is not None else 1,
+            operation=op,
+            faces=faces,
+            edges=edges,
+            distance=moved,
+            offset=inset,
+            subdivisions=subdivisions,
         )
 
     async def subdivide_mesh(
@@ -6118,22 +6253,29 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         scheme: str = "catmull_clark",
     ) -> Dict[str, Any]:
         """
-        Catmull-Clark or uniform tessellation subdivision.
+        Subdivide a DynamicMeshActor's mesh.
 
         A result over ``MAX_RESULT_TRIANGLES`` triangles is refused before
         anything runs (``RESULT_TOO_LARGE``).
 
         Args:
             mesh_path: Mesh actor path.
-            level: Subdivision level, clamped to 1-4.
-            scheme: catmull_clark; any other value runs uniform
-                tessellation.
+            level: Subdivision level, 1 to 4.
+            scheme: catmull_clark (OpenSubdiv over the polygroups, which must
+                form quads), loop (OpenSubdiv over the triangles) or uniform
+                (splits each triangle into (level + 1)^2).
 
         Returns:
             Dict with mesh_path, level, scheme, previous and result triangle
             counts, result vertex count and warnings.
         """
-        return await self._run_mesh_script(SUBDIVIDE, mesh=mesh_path, level=int(level), scheme=scheme)
+        chosen = scheme.lower()
+        problem = invalid_choice("scheme", chosen, SUBDIVISION_SCHEMES, "UNKNOWN_SCHEME")
+        if problem is None and not 1 <= int(level) <= 4:
+            problem = refusal("INVALID_LEVEL", f"level must be 1 to 4, not {level}")
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(SUBDIVIDE, mesh=mesh_path, level=int(level), scheme=chosen)
 
     async def simplify_mesh(
         self,
@@ -6143,23 +6285,54 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         max_error: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Simplify/decimate a mesh.
+        Simplify a DynamicMeshActor's mesh.
+
+        Give at most one target; with none, half the triangles are kept. A
+        target that would not remove a triangle is refused.
 
         Args:
             mesh_path: Mesh actor path.
-            target_triangle_count: Target triangle count.
-            target_percentage: Fraction of the triangles to keep (0.0-1.0).
-            max_error: Unused.
+            target_triangle_count: Triangles to keep (4 or more).
+            target_percentage: Fraction of the triangles to keep, above 0
+                and below 1 (0.25 keeps a quarter).
+            max_error: Simplify as far as the surface stays within this many
+                cm of the original.
 
         Returns:
-            Dict with original/result triangles, result vertex count,
+            Dict with method (triangle_count or tolerance),
+            target_triangle_count and tolerance (the max_error used; a
+            payload key ending in _error would read as a failure),
+            original/result triangles, result vertex count,
             reduction ratio and warnings.
         """
+        given = [name for name, value in (
+            ("target_triangle_count", target_triangle_count),
+            ("target_percentage", target_percentage),
+            ("max_error", max_error),
+        ) if value is not None]
+        problem = None
+        if len(given) > 1:
+            problem = refusal("CONFLICTING_TARGETS", f"Give one of {', '.join(given)}, not several")
+        elif target_triangle_count is not None and int(target_triangle_count) < 4:
+            problem = refusal(
+                "INVALID_TARGET", f"target_triangle_count must be 4 or more, not {target_triangle_count}"
+            )
+        elif target_percentage is not None and not 0 < float(target_percentage) < 1:
+            problem = refusal(
+                "INVALID_TARGET",
+                f"target_percentage is the fraction to keep, above 0 and below 1 (0.25 keeps a quarter), "
+                f"not {target_percentage}",
+            )
+        elif max_error is not None and not (math.isfinite(float(max_error)) and float(max_error) > 0):
+            problem = refusal("INVALID_TARGET", f"max_error must be above 0 cm, not {max_error}")
+        if problem is not None:
+            return problem
         return await self._run_mesh_script(
             SIMPLIFY,
             mesh=mesh_path,
-            target_triangle_count=target_triangle_count,
-            target_percentage=target_percentage,
+            target_triangle_count=int(target_triangle_count) if target_triangle_count is not None else None,
+            target_percentage=float(target_percentage) if target_percentage is not None else None,
+            max_error=float(max_error) if max_error is not None else None,
         )
 
     async def cut_mesh_plane(
@@ -6169,28 +6342,53 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         plane_normal: List[float],
         fill_holes: bool = True,
         keep_both_sides: bool = False,
+        space: str = "world",
     ) -> Dict[str, Any]:
         """
-        Cut a mesh along a plane, keeping one side.
+        Cut a DynamicMeshActor's mesh with a plane.
+
+        The half the normal points into is removed, or, with
+        keep_both_sides, placed in a new DynamicMeshActor at the same
+        transform, in the same undoable transaction. A plane that misses
+        the mesh is refused with nothing changed.
 
         Args:
             mesh_path: Mesh actor path.
-            plane_origin: Plane origin [x, y, z] in cm, in the mesh's space.
-            plane_normal: Plane normal [x, y, z].
-            fill_holes: Fill cut holes with faces.
-            keep_both_sides: Keep both halves (unused: the cut keeps one side).
+            plane_origin: A point on the plane [x, y, z] in cm.
+            plane_normal: The plane's normal [x, y, z].
+            fill_holes: Close the cut with new faces.
+            keep_both_sides: Keep the removed half as a second actor.
+            space: 'world' (the default: the plane as placed in the level)
+                or 'local' (the mesh's own space).
 
         Returns:
-            Dict with mesh_path, pieces (the cut actor), cut_faces_added
-            (triangles the hole fill added), previous and result triangle
-            counts, result vertex count and warnings.
+            Dict with mesh_path, space, the plane in the mesh's local space,
+            pieces (the cut actor, then the second one), their triangle
+            counts, removed_triangle_count (the removed half, null when kept),
+            cut_faces_added (triangles the hole fill added to the kept half),
+            previous and result triangle counts, result vertex count and
+            warnings.
         """
+        chosen = space.lower()
+        problem = invalid_choice("space", chosen, ("world", "local"), "UNKNOWN_SPACE")
+        origin = [float(value) for value in plane_origin]
+        normal = [float(value) for value in plane_normal]
+        if problem is None and (len(origin) != 3 or len(normal) != 3):
+            problem = refusal("INVALID_PLANE", "plane_origin and plane_normal each need three numbers")
+        if problem is None and not all(math.isfinite(value) for value in origin + normal):
+            problem = refusal("INVALID_PLANE", "plane_origin and plane_normal must be finite numbers")
+        if problem is None and math.hypot(*normal) == 0:
+            problem = refusal("INVALID_PLANE", "plane_normal must not be zero")
+        if problem is not None:
+            return problem
         return await self._run_mesh_script(
             PLANE_CUT,
             mesh=mesh_path,
-            origin=[float(value) for value in plane_origin[:3]],
-            normal=[float(value) for value in plane_normal[:3]],
+            origin=origin,
+            normal=normal,
+            space=chosen,
             fill_holes=bool(fill_holes),
+            keep_both_sides=bool(keep_both_sides),
         )
 
     async def validate_mesh(
@@ -6199,20 +6397,38 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         checks: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Validate mesh geometry using GeometryScript query functions.
+        Check a DynamicMeshActor's mesh.
 
-        Reads only, so it also runs while Play In Editor runs.
+        Reads only, so it also runs while Play In Editor runs. No check finds
+        self-intersections.
 
         Args:
             mesh_path: Mesh actor path.
-            checks: Checks to run (currently all checks always run).
+            checks: The checks to run; all of them when empty: closed (no
+                open border edges), manifold (no bowtie vertices),
+                degenerate_triangles (none with an area under 0.001 cm2 or an
+                edge under 0.0001 cm), orientation (a closed mesh encloses a
+                positive volume, so its faces point out), compact (no ID
+                gaps), normals (a normals attribute), uvs (a UV channel, and
+                every triangle has UVs in channel 0).
 
         Returns:
-            Dict with is_valid, checks (watertight, compact, has_normals),
-            issues, triangle/vertex counts, border/component info and
+            Dict with is_valid (every check run passed), checks (per check:
+            passed, count where it counts something, detail), issues, the
+            triangle/vertex counts, connected_components, uv_channels, local
+            bounds, surface_area, volume (null for an open mesh) and
             warnings.
         """
-        return await self._run_mesh_script(VALIDATE, mesh=mesh_path)
+        names = [name.lower() for name in checks] if checks else list(VALIDATION_CHECKS)
+        unknown = sorted(set(names) - set(VALIDATION_CHECKS))
+        if unknown:
+            return refusal(
+                "UNKNOWN_CHECK",
+                f"Unknown checks {', '.join(unknown)}; use any of: {', '.join(VALIDATION_CHECKS)}",
+                choices=list(VALIDATION_CHECKS),
+            )
+        ordered = [name for name in VALIDATION_CHECKS if name in names]
+        return await self._run_mesh_script(VALIDATE, mesh=mesh_path, checks=ordered)
 
     async def convert_mesh_format(
         self,
@@ -6234,9 +6450,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             target_format, triangle/vertex counts and warnings.
         """
         target = target_format.lower()
-        refusal = invalid_choice("target_format", target, TARGET_FORMATS, "UNKNOWN_FORMAT")
-        if refusal is not None:
-            return refusal
+        problem = invalid_choice("target_format", target, TARGET_FORMATS, "UNKNOWN_FORMAT")
+        if problem is not None:
+            return problem
         return await self._run_mesh_script(CONVERT, mesh=mesh_path, target_format=target)
 
     async def remesh_mesh(
@@ -6248,40 +6464,55 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         smoothing_iterations: int = 3,
     ) -> Dict[str, Any]:
         """
-        Remesh for clean topology using GeometryScript_Remeshing.
+        Uniformly remesh a DynamicMeshActor's mesh for evenly sized triangles.
 
-        The remesher makes up to ``REMESH_OVERSHOOT`` times the triangles a
+        Give at most one target; with none, the triangle count is kept. The
+        remesher makes up to ``REMESH_OVERSHOOT`` times the triangles a
         target asks for, so a target predicted over ``MAX_RESULT_TRIANGLES``
         is refused before anything runs (``RESULT_TOO_LARGE``), as is a
         result over it.
 
         Args:
             mesh_path: Mesh actor path.
-            mode: 'uniform' (only mode currently supported).
+            mode: 'uniform', the only mode GeometryScript offers.
             target_edge_length: Target edge length in cm.
             target_triangle_count: Target triangle count, 4 to
                 ``MAX_REMESH_TARGET_TRIANGLES``.
-            smoothing_iterations: Smoothing passes (remesh_iterations).
+            smoothing_iterations: Remesh passes (1 to 50); more passes give
+                more even triangles and take longer.
 
         Returns:
-            Dict with original/result triangles, result vertex count,
+            Dict with mode, target_type and the target used, passes,
+            original/result triangles, result vertex count,
             average_edge_length (the mean length of the result's triangle
             edges, in cm) and warnings.
         """
-        if target_triangle_count is not None and not 4 <= int(target_triangle_count) <= MAX_REMESH_TARGET_TRIANGLES:
-            return refusal(
+        problem = invalid_choice("mode", mode.lower(), ("uniform",), "UNKNOWN_MODE")
+        if problem is None and target_edge_length is not None and target_triangle_count is not None:
+            problem = refusal("CONFLICTING_TARGETS", "Give target_edge_length or target_triangle_count, not both")
+        if problem is None and target_edge_length is not None and not (
+            math.isfinite(float(target_edge_length)) and float(target_edge_length) > 0
+        ):
+            problem = refusal("INVALID_TARGET", f"target_edge_length must be above 0 cm, not {target_edge_length}")
+        if problem is None and target_triangle_count is not None and not (
+            4 <= int(target_triangle_count) <= MAX_REMESH_TARGET_TRIANGLES
+        ):
+            problem = refusal(
                 "INVALID_TARGET",
                 f"target_triangle_count must be 4 to {MAX_REMESH_TARGET_TRIANGLES}, not {target_triangle_count}: "
                 f"the remesher makes up to {REMESH_OVERSHOOT:g} times the target, and a result over "
                 f"{MAX_RESULT_TRIANGLES} triangles is refused",
             )
+        if problem is None and not 1 <= int(smoothing_iterations) <= 50:
+            problem = refusal("INVALID_PASSES", f"smoothing_iterations must be 1 to 50, not {smoothing_iterations}")
+        if problem is not None:
+            return problem
         return await self._run_mesh_script(
             REMESH,
             mesh=mesh_path,
-            mode=mode,
-            target_edge_length=target_edge_length,
-            target_triangle_count=target_triangle_count,
-            smoothing_iterations=int(smoothing_iterations),
+            target_edge_length=float(target_edge_length) if target_edge_length is not None else None,
+            target_triangle_count=int(target_triangle_count) if target_triangle_count is not None else None,
+            passes=int(smoothing_iterations),
         )
 
     async def compute_mesh_uv(
@@ -6290,9 +6521,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         method: str = "auto",
         uv_channel: int = 0,
         island_padding: float = 2.0,
+        texture_resolution: int = 1024,
     ) -> Dict[str, Any]:
         """
-        Generate UV coordinates using GeometryScript_UVs.
+        Generate UVs for a DynamicMeshActor's mesh, unwrapped and packed.
 
         XAtlas unwraps meshes of at most ``XATLAS_MAX_TRIANGLES`` triangles:
         it crashed the editor on larger ones. ``auto`` picks XAtlas up to that
@@ -6303,22 +6535,44 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             mesh_path: Mesh actor path.
             method: 'auto' (default; 'auto_uv' is the same), 'xatlas' or
                 'patch_builder'.
-            uv_channel: UV channel index; it must exist on the mesh.
-            island_padding: Unused.
+            uv_channel: UV channel index (0 to 7); it must exist on the mesh.
+            island_padding: Gap between packed islands, in texels of a
+                texture_resolution-wide texture (above 0).
+            texture_resolution: Texture width the padding is measured in
+                (64 to 8192).
 
         Returns:
             Dict with method (the one that ran), requested_method,
-            uv_channel, island_count, coverage_ratio (the UV area of the
-            triangles over the area of the unit UV square, or of the UV
-            bounds when they extend past it), triangle/vertex counts and
-            warnings.
+            uv_channel, island_padding (the padding packed, which differs
+            when the packing resolution was clamped to 16-4096),
+            texture_resolution, packing_resolution, island_count,
+            coverage_ratio (the UV area of the triangles over the area of
+            the unit UV square, or of the UV bounds when they extend past
+            it), triangle/vertex counts and warnings.
         """
         requested = method.lower()
         requested = {"auto_uv": "auto", "patchbuilder": "patch_builder"}.get(requested, requested)
-        refusal = invalid_choice("method", requested, UV_METHODS, "UNKNOWN_UV_METHOD")
-        if refusal is not None:
-            return refusal
-        return await self._run_mesh_script(COMPUTE_UV, mesh=mesh_path, method=requested, uv_channel=int(uv_channel))
+        problem = invalid_choice("method", requested, UV_METHODS, "UNKNOWN_UV_METHOD")
+        if problem is None and not 0 <= int(uv_channel) <= 7:
+            problem = refusal("INVALID_UV_CHANNEL", f"uv_channel must be 0 to 7, not {uv_channel}")
+        if problem is None and not (math.isfinite(float(island_padding)) and 0 < float(island_padding) <= 64):
+            problem = refusal(
+                "INVALID_PADDING", f"island_padding must be above 0 and at most 64 texels, not {island_padding}"
+            )
+        if problem is None and not 64 <= int(texture_resolution) <= 8192:
+            problem = refusal(
+                "INVALID_RESOLUTION", f"texture_resolution must be 64 to 8192, not {texture_resolution}"
+            )
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            COMPUTE_UV,
+            mesh=mesh_path,
+            method=requested,
+            uv_channel=int(uv_channel),
+            island_padding=float(island_padding),
+            texture_resolution=int(texture_resolution),
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers

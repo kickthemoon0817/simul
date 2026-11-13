@@ -1686,8 +1686,12 @@ class UnrealGenerateMeshPrimitiveResponse(BaseModel):
     error: Optional[str] = Field(None, description="Error message when success is False")
     actor_path: str = Field(..., description="Created DynamicMeshActor path")
     primitive_type: str = Field(..., description="Primitive type created")
+    dimensions: Dict[str, float] = Field(..., description="Every dimension used, in cm, defaults included")
+    segments: int = Field(..., description="Segments used")
     triangle_count: int = Field(..., description="Number of triangles")
     vertex_count: int = Field(..., description="Number of vertices")
+    bounds_min: List[float] = Field(..., description="Minimum corner of the mesh's local bounds [x, y, z] in cm")
+    bounds_max: List[float] = Field(..., description="Maximum corner of the mesh's local bounds [x, y, z] in cm")
     warnings: List[str] = _mesh_warnings_field()
 
 
@@ -1697,11 +1701,25 @@ class UnrealApplyMeshBooleanResponse(BaseModel):
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
     target_mesh_path: str = Field(..., description="Modified mesh actor path")
-    operation: str = Field(..., description="Operation performed")
+    tool_mesh_path: str = Field(..., description="Tool mesh actor path (left as it was)")
+    operation: str = Field(..., description="Operation performed: union, subtract or intersect")
+    requested_operation: str = Field(..., description="Operation asked for, aliases such as difference included")
     previous_triangle_count: int = Field(..., description="Target triangle count before the operation")
     result_triangle_count: int = Field(..., description="Triangle count after operation")
     result_vertex_count: int = Field(..., description="Vertex count after operation")
+    previous_volume: Optional[float] = Field(
+        ..., description="Target volume before, cm3 in its local space; null for an open mesh"
+    )
+    result_volume: Optional[float] = Field(..., description="Target volume after; null for an open mesh")
+    result_components: int = Field(..., description="Separate connected pieces of the result")
     warnings: List[str] = _mesh_warnings_field()
+
+
+class UnrealMeshCollisionTarget(BaseModel):
+    """An actor a hull or decomposition was set on as simple collision."""
+
+    actor_path: str = Field(..., description="Actor whose DynamicMeshComponent got the simple collision")
+    collision_shape_count: int = Field(..., description="Simple collision shapes it has now")
 
 
 class UnrealComputeConvexHullResponse(BaseModel):
@@ -1710,16 +1728,23 @@ class UnrealComputeConvexHullResponse(BaseModel):
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
     mesh_path: str = Field(..., description="Source mesh actor path")
-    hull_actor_path: str = Field(..., description="Created convex hull DynamicMeshActor path")
+    output: str = Field(..., description="Where the hull went: actor, collision or both")
+    hull_actor_path: Optional[str] = Field(
+        ..., description="Created hull DynamicMeshActor (at the source's transform); null for output collision"
+    )
     hull_vertex_count: int = Field(..., description="Hull vertex count")
     hull_triangle_count: int = Field(..., description="Hull triangle count")
+    max_faces: int = Field(..., description="The triangle limit the hull was simplified to; 0 for none")
     source_triangle_count: int = Field(..., description="Source mesh triangle count")
     hull_volume: float = Field(..., description="Hull volume in cm^3, in the mesh's local space")
     source_volume: Optional[float] = Field(
         ..., description="Source mesh volume in cm^3; null when the source is not closed"
     )
     volume_ratio: Optional[float] = Field(
-        ..., description="Hull volume over source volume (1.0 or more); null when the source is not closed"
+        ..., description="Hull volume over source volume; null when the source is not closed"
+    )
+    collision: List[UnrealMeshCollisionTarget] = Field(
+        ..., description="The actors given the hull as their simple collision"
     )
     warnings: List[str] = _mesh_warnings_field()
 
@@ -1741,11 +1766,26 @@ class UnrealDecomposeConvexHullResponse(BaseModel):
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
     mesh_path: str = Field(..., description="Source mesh actor path")
-    decomp_actor_path: str = Field(..., description="Created DynamicMeshActor holding every piece")
+    output: str = Field(..., description="Where the pieces went: actor, collision or both")
+    decomp_actor_path: Optional[str] = Field(
+        ...,
+        description="Created DynamicMeshActor holding every piece (at the source's transform); null for collision",
+    )
     hull_count: int = Field(..., description="Number of convex pieces")
     hulls: List[UnrealConvexHullPart] = Field(..., description="The pieces")
+    max_hulls: int = Field(..., description="The piece limit used")
+    max_vertices_per_hull: int = Field(..., description="The per-piece vertex limit used")
+    largest_hull_vertex_count: int = Field(..., description="Vertices of the piece with the most")
     total_vertices: int = Field(..., description="Total vertices across all pieces")
     total_triangles: int = Field(..., description="Total triangles across all pieces")
+    hulls_volume: float = Field(..., description="Sum of the pieces' volumes, cm^3 in the mesh's local space")
+    source_volume: Optional[float] = Field(..., description="Source volume; null when the source is not closed")
+    volume_ratio: Optional[float] = Field(
+        ..., description="Pieces' volume over the source's (below 1 means they under-cover it); null when open"
+    )
+    collision: List[UnrealMeshCollisionTarget] = Field(
+        ..., description="The actors given the pieces as their simple collision"
+    )
     warnings: List[str] = _mesh_warnings_field()
 
 
@@ -1756,9 +1796,19 @@ class UnrealEditMeshTopologyResponse(BaseModel):
     error: Optional[str] = Field(None, description="Error message when success is False")
     mesh_path: str = Field(..., description="Modified mesh actor path")
     operation: str = Field(..., description="Operation performed")
+    face_selection: Optional[str] = Field(..., description="The face selection used")
+    edge_selection: Optional[str] = Field(..., description="The edge selection used")
+    faces_affected: Optional[int] = Field(..., description="Triangles selected; null for an edge selection")
+    edges_affected: Optional[int] = Field(
+        ..., description="Edges bevelled (sharp edges, or the face region's border); null otherwise"
+    )
+    distance: Optional[float] = Field(..., description="Extrude or bevel distance used, cm")
+    offset: Optional[float] = Field(..., description="Inset distance used, cm")
+    subdivisions: Optional[int] = Field(..., description="Bevel subdivisions used")
     previous_triangle_count: int = Field(..., description="Triangle count before the edit")
     result_triangle_count: int = Field(..., description="Triangle count after edit")
     result_vertex_count: int = Field(..., description="Vertex count after edit")
+    result_volume: Optional[float] = Field(..., description="Volume after the edit, cm^3; null for an open mesh")
     warnings: List[str] = _mesh_warnings_field()
 
 
@@ -1782,6 +1832,9 @@ class UnrealSimplifyMeshResponse(BaseModel):
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
     mesh_path: str = Field(..., description="Simplified mesh actor path")
+    method: str = Field(..., description="triangle_count or tolerance")
+    target_triangle_count: Optional[int] = Field(..., description="Triangles asked for; null for tolerance")
+    tolerance: Optional[float] = Field(..., description="max_error used, cm; null for a triangle target")
     original_triangles: int = Field(..., description="Original triangle count")
     result_triangles: int = Field(..., description="Triangle count after simplification")
     result_vertex_count: int = Field(..., description="Vertex count after simplification")
@@ -1795,12 +1848,27 @@ class UnrealCutMeshPlaneResponse(BaseModel):
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
     mesh_path: str = Field(..., description="Cut mesh actor path")
-    pieces: List[str] = Field(..., description="Actor paths holding the result")
+    space: str = Field(..., description="Space the plane was given in: world or local")
+    plane_origin_local: List[float] = Field(..., description="The plane's origin in the mesh's local space")
+    plane_normal_local: List[float] = Field(..., description="The plane's normal in the mesh's local space")
+    pieces: List[str] = Field(..., description="Actor paths holding the result: the cut actor, then the kept half")
+    piece_triangle_counts: List[int] = Field(..., description="Triangle count of each piece")
+    removed_triangle_count: Optional[int] = Field(
+        ..., description="Triangles of the half removed; null when keep_both_sides kept it"
+    )
     cut_faces_added: int = Field(..., description="Triangles the hole fill added (0 without fill_holes)")
     previous_triangle_count: int = Field(..., description="Triangle count before the cut")
     result_triangle_count: int = Field(..., description="Triangle count after the cut")
     result_vertex_count: int = Field(..., description="Vertex count after the cut")
     warnings: List[str] = _mesh_warnings_field()
+
+
+class UnrealMeshCheck(BaseModel):
+    """One check of validate_unreal_mesh."""
+
+    passed: bool = Field(..., description="Whether the mesh passed")
+    count: Optional[int] = Field(..., description="What the check counted (edges, vertices, triangles, channels)")
+    detail: str = Field(..., description="The result in words")
 
 
 class UnrealValidateMeshResponse(BaseModel):
@@ -1809,17 +1877,22 @@ class UnrealValidateMeshResponse(BaseModel):
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
     mesh_path: str = Field(..., description="Validated mesh actor path")
-    is_valid: bool = Field(..., description="Whether the mesh is watertight and compact")
-    checks: Dict[str, bool] = Field(
-        ..., description="Per-check pass/fail: watertight, compact (no triangle ID gaps), has_normals"
+    is_valid: bool = Field(..., description="Whether every check that ran passed")
+    checks: Dict[str, UnrealMeshCheck] = Field(
+        ...,
+        description=(
+            "Per check that ran: closed, manifold, degenerate_triangles, orientation, compact, normals, uvs"
+        ),
     )
     issues: List[str] = Field(default_factory=list, description="What failed, in words")
     triangle_count: int = Field(..., description="Current triangle count")
     vertex_count: int = Field(..., description="Current vertex count")
-    open_border_edges: int = Field(..., description="Edges with a triangle on one side only")
-    open_border_loops: int = Field(..., description="Loops those edges form")
     connected_components: int = Field(..., description="Separate connected pieces of the mesh")
-    has_normals: bool = Field(..., description="Whether the mesh has a normals attribute")
+    uv_channels: int = Field(..., description="UV channels on the mesh")
+    bounds_min: List[float] = Field(..., description="Minimum corner of the local bounds [x, y, z] in cm")
+    bounds_max: List[float] = Field(..., description="Maximum corner of the local bounds [x, y, z] in cm")
+    surface_area: float = Field(..., description="Surface area in cm^2")
+    volume: Optional[float] = Field(..., description="Enclosed volume in cm^3; null for an open mesh")
     warnings: List[str] = _mesh_warnings_field()
 
 
@@ -1843,7 +1916,11 @@ class UnrealRemeshMeshResponse(BaseModel):
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
     mesh_path: str = Field(..., description="Remeshed mesh actor path")
-    mode: str = Field(..., description="Remesh mode used")
+    mode: str = Field(..., description="Remesh mode used (uniform)")
+    target_type: str = Field(..., description="edge_length or triangle_count")
+    target_edge_length: Optional[float] = Field(..., description="Edge length asked for, cm")
+    target_triangle_count: Optional[int] = Field(..., description="Triangle count asked for (or kept)")
+    passes: int = Field(..., description="Remesh passes run")
     original_triangles: int = Field(..., description="Original triangle count")
     result_triangles: int = Field(..., description="Triangle count after remesh")
     result_vertex_count: int = Field(..., description="Vertex count after remesh")
@@ -1862,6 +1939,11 @@ class UnrealComputeMeshUvResponse(BaseModel):
     method: str = Field(..., description="UV method that ran: xatlas or patch_builder")
     requested_method: str = Field(..., description="UV method asked for: auto, xatlas or patch_builder")
     uv_channel: int = Field(..., description="UV channel written")
+    island_padding: float = Field(..., description="Gap packed between islands, in texels of texture_resolution")
+    texture_resolution: int = Field(..., description="Texture width the padding is measured in")
+    packing_resolution: int = Field(
+        ..., description="Resolution Unreal's packer ran at (its one-texel gutter is the padding)"
+    )
     island_count: int = Field(..., description="Number of UV islands in the channel")
     coverage_ratio: float = Field(
         ...,
@@ -1934,6 +2016,8 @@ __all__ = [
     "UnrealApplyMeshBooleanResponse",
     "UnrealComputeConvexHullResponse",
     "UnrealConvexHullPart",
+    "UnrealMeshCheck",
+    "UnrealMeshCollisionTarget",
     "UnrealDecomposeConvexHullResponse",
     "UnrealEditMeshTopologyResponse",
     "UnrealSubdivideMeshResponse",
