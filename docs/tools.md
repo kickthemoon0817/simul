@@ -641,7 +641,10 @@ Behaviour worth knowing:
   `root_path`). `total_actors` and `total_depth` describe the whole tree. A
   `class_filter` keeps the matching actors and the actors above them, which
   carry `matches_filter: false`; `include_components` adds each actor's
-  components (name, class, root flag, the component it is attached to).
+  components (name, class, root flag, the component it is attached to), the
+  first 50 of them, with `component_count` counting them all and
+  `components_truncated` (plus a warning naming the actor) when it has more:
+  `list_unreal_actor_components` pages through those.
 - In a World Partition map the editor loads only some regions' actors, and
   the scene reads see only loaded actors. `summarize_unreal_scene`,
   `list_unreal_actors`, `get_unreal_actor_by_semantic_label` and
@@ -1488,7 +1491,16 @@ Behaviour worth knowing:
   HighResShot writes into a JPEG beside it in the editor (about a tenth of the
   size: a 640x360 capture is about 27 KB), and `inline_max_size` inlines a copy
   scaled to that many pixels on its longer side while the file keeps full
-  size; the JPEG replaces the PNG. `view` picks what is captured, and the
+  size; the JPEG replaces the PNG and carries the call's token in its name
+  (`HighresScreenshot00004_<token>.jpg`), because Unreal gives the removed
+  PNG's number to its next shot. The call waits for the file up to 15 s plus
+  0.25 s per megapixel (82 s for 16384x16384, which a headless UE 5.7.4
+  editor wrote in 24 s, 30 s as JPEG): rendering a large shot holds the
+  editor. Past that it fails with `CaptureError`, and since Unreal cannot
+  cancel the shot, `details.pending_path` names the file Unreal has begun to
+  write (null until one appears: an editor shot's number is chosen when its
+  pane draws), `details.pending_dir` the directory it lands in and
+  `details.deadline_s` the wait. `view` picks what is captured, and the
   reply says which (`view`, `pie_active`): `editor` is the level editor
   viewport, whose camera `set_unreal_camera_view` moves; `game` is the
   player's view during a Play In Editor session (HighResShot run in the game
@@ -1726,9 +1738,25 @@ Behaviour worth knowing:
 - Every Python call simul makes runs in a namespace of its own, and that
   namespace is cleared when the call ends, whether it returns or raises. This
   covers its own tools, `execute_unreal_script`, `simul unreal exec`, and
-  `batch_unreal_operations` calls to `ExecutePythonCommandEx` or
-  `ExecutePythonCommand`. (`call_unreal_actor_function` takes only actors of
-  the level open in the editor, so it never reaches the Python library.)
+  calls to `ExecutePythonCommandEx` or `ExecutePythonCommand` inside any
+  `/remote/batch`, `batch_unreal_operations`' and the batch
+  `set_unreal_actor_property` sends alike. (`call_unreal_actor_function` takes
+  only actors of the level open in the editor, so it never reaches the Python
+  library.) The session refuses to send any request that would hand Python a
+  `PythonCommand` past that runner, whatever object it calls, with a
+  `ValidationError` (`details.code: "python_outside_runner"`). The property
+  write's batch used to embed the value in commands sent past it, so a value
+  naming a `.py` file followed by a space (a tag `see setup.py first`) was
+  written but reported as failed, and left the editor's undo transaction
+  open for the rest of the session. A write whose closing step does not run
+  in its batch is now closed by a request of its own, and its reply reads
+  back what Unreal holds.
+  - **Printing is cheap.** While a call runs, Unreal's `sys.stdout` and
+    `sys.stderr` are replaced by streams that make the same log entries in the
+    same order without writing Unreal's log to disk after every line, which
+    took about 11 ms a line (400 printed lines: 4.8 s, now 0.04 s); the log is
+    written once when the call ends. A last line the script leaves without a
+    newline is part of that call's output, not the next call's.
   - **Why it matters.** UE 5.7 runs all literal Python in one dict that every
     call and the editor's own Python console share, and `FileExecutionScope`
     applies only to `.py` files. A name a script leaves there keeps its object
@@ -2693,10 +2721,15 @@ Behaviour worth knowing:
   quantifiers in a row goes to the linear-time search without being bounded,
   and one over 512 characters is refused with `details.code:
   "pattern_too_long"`.
-  `get_unreal_actor_by_semantic_label` searches tags in the editor with `re`
-  and `re.IGNORECASE`, so in regex mode it refuses the patterns that bound does
-  not allow for a 1023-character tag under IGNORECASE (`.*.*x`, `A*a*x`,
-  `\w*(?=\w*\d)`), with the same error; contains mode takes any label.
+  `get_unreal_actor_by_semantic_label` in regex mode searches each tag in the
+  editor with the same `name_searcher` (the module's own source, installed in
+  the editor's `sys.modules` once per editor process and simul version), under
+  `re.IGNORECASE` and bounded for a 1023-character tag: `re` when the bound
+  allows it, the linear-time search otherwise (`.*.*x`, `A*a*x`, `(\w+)+`).
+  Both backends therefore take the same patterns, with the same errors and the
+  same 512-character cap, except one that needs what only `re` has (a
+  back-reference, say) and that `re` is bounded on for Blender's 255-character
+  names but not for a 1023-character tag; contains mode takes any label.
 - `execute_blender_script` returns the first `max_output_chars` characters of
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a

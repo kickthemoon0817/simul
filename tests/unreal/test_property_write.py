@@ -46,6 +46,7 @@ import pytest
 from aiohttp import web
 
 from simul.adapters import unreal_runtime
+from simul.adapters._unreal_python import RUNNER_MODULE, isolate_request, unwrap_command
 from simul.adapters.unreal_runtime import PROPERTY_TRANSACTIONS, UnrealRuntimeSession
 from simul.config import Settings
 
@@ -175,6 +176,10 @@ class Editor:
         self.pending: List[Tuple[Obj, str]] = []
         self.writes: List[str] = []
         self.console: Dict[str, Any] = {"__name__": "__main__"}
+        # Every command Remote Control was handed that simul's runner did not
+        # wrap: editor_session fails a test that leaves any.
+        self.outside_runner: List[str] = []
+        self.skip_decide = 0
         self.drop_batch_answer = False
         self.dirty = False  # the level's package
 
@@ -258,6 +263,24 @@ class Editor:
             self.post_edit(obj, name)
         self.pending = []
         command = body["parameters"]["PythonCommand"]
+        unwrapped = unwrap_command(command)
+        if unwrapped is None:
+            self.outside_runner.append(command)
+        elif self.skip_decide and "def decide(" in unwrapped[1]:
+            # The verdict never runs, as when Unreal could not run its command.
+            self.skip_decide -= 1
+            return 200, {"ReturnValue": False, "CommandResult": "Could not load Python file 'x.py'", "LogOutput": []}
+        if body["parameters"].get("ExecutionMode", "ExecuteFile") == "ExecuteFile":
+            # UE 5.7 takes an ExecuteFile command whose first .py is followed
+            # by whitespace, or ends it, for the path of a file to run
+            # (TryExtractPathnameAndCommand), and runs nothing else.
+            first = command.find(".py")
+            if first >= 0 and (first + 3 == len(command) or command[first + 3].isspace()):
+                return 200, {
+                    "ReturnValue": False,
+                    "CommandResult": f"Could not load Python file '{command[: first + 3]}'",
+                    "LogOutput": [],
+                }
         output = io.StringIO()
         sys.modules["unreal"] = self.module()  # type: ignore[assignment]
         try:
@@ -443,11 +466,16 @@ async def editor_session(**unreal: Any) -> AsyncIterator[Tuple[UnrealRuntimeSess
     session = UnrealRuntimeSession(settings)
     try:
         yield session, editor
+        # Mechanically, for every test: no Python reached the editor past the
+        # runner, where a value naming a .py file ran nothing (B1).
+        assert editor.outside_runner == []
     finally:
         await session.close()
         await runner.cleanup()
         sys.modules.pop("unreal", None)
         sys.modules.pop(PROPERTY_TRANSACTIONS, None)
+        sys.modules.pop(RUNNER_MODULE, None)
+        sys.__dict__.pop("_simul_unreal_kept_v1", None)
 
 
 def elements(editor: Editor) -> List[Any]:
@@ -846,9 +874,66 @@ async def test_nothing_is_left_in_the_shared_console_namespace() -> None:
 
 
 def test_the_batched_parts_name_nothing_in_the_shared_dict() -> None:
-    body = unreal_runtime._python_call("x = 1\n", {"a": 1})
+    batch = {"Requests": [{"RequestId": 1, "URL": "/remote/object/call", "Verb": "PUT",
+                           "Body": unreal_runtime._python_call("x = 1\n", {"a": 1})}]}
+    sent = isolate_request("/remote/batch", batch)
     console: Dict[str, Any] = {}
-
-    exec(body["parameters"]["PythonCommand"], console)  # noqa: S102 - runs as the editor would
+    sys.modules["unreal"] = SimpleNamespace()  # type: ignore[assignment]
+    try:
+        exec(sent["Requests"][0]["Body"]["parameters"]["PythonCommand"], console)  # noqa: S102 - as the editor
+    finally:
+        sys.modules.pop("unreal", None)
+        sys.modules.pop(RUNNER_MODULE, None)
 
     assert sorted(k for k in console if k != "__builtins__") == []
+
+
+# -- a value is data, never a file name (B1) ---------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ['["see setup.py first"]', '["run.py\\tnow", "x.py"]', '["a.py\\nb"]'])
+async def test_a_value_naming_a_py_file_is_written_and_reported_whole(value: str) -> None:
+    """Round 2 B1: the batch's Python ran past the runner, as ExecuteFile commands embedding the value.
+
+    UE took "exec('... setup.py first ...')" for the path of a file, ran
+    nothing, and the verdict that closes the undo transaction never ran: the
+    tag was written, the reply said it failed, and every later edit of the
+    session landed in the open transaction.
+    """
+    async with editor_session() as (session, editor):
+        result = await session.set_actor_property(ACTOR, "Tags", value)
+
+        assert result.get("success", True) is True and result["applied"] is True, result
+        assert "warning" not in result
+        assert editor.objects[ACTOR].props["Tags"] == json.loads(value)
+        assert editor.depth == 0 and editor.open_transactions() == {} and len(editor.history) == 1
+        editor.undo()
+        assert editor.objects[ACTOR].props["Tags"] == ["seed"]
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_that_did_not_run_in_the_batch_still_closes_the_transaction() -> None:
+    """Whatever stops PROPERTY_DECIDE inside the batch, it is run again on its own."""
+    async with editor_session() as (session, editor):
+        editor.skip_decide = 1
+        result = await session.set_actor_property(ACTOR, "Tags", '["x"]')
+
+        assert result["applied"] is True and result["value"] == ["x"], result
+        assert "decided in a request of its own" in result["warning"]
+        assert editor.depth == 0 and editor.open_transactions() == {} and len(editor.history) == 1
+        editor.undo()
+        assert editor.objects[ACTOR].props["Tags"] == ["seed"]
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_that_never_runs_says_what_unreal_holds() -> None:
+    async with editor_session() as (session, editor):
+        editor.skip_decide = 2
+        result = await session.set_actor_property(ACTOR, "Tags", '["x"]')
+
+        assert (result["success"], result["error_type"]) == (False, "EngineError")
+        assert "may still be open" in result["error"] and "deciding it again failed too" in result["error"]
+        # What the reply says was written is what Unreal holds.
+        assert (result["value"], result["applied"]) == (["x"], True)
+        assert editor.objects[ACTOR].props["Tags"] == ["x"]

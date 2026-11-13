@@ -266,6 +266,7 @@ class Editor:
             get_active_viewport_config_key=lambda: VIEWPORT,
             editor_get_game_view=lambda viewport: False,
             get_pilot_level_actor=lambda viewport: None,
+            editor_invalidate_viewports=lambda: None,
         )
         unreal_editor = SimpleNamespace(
             get_editor_world=lambda: None if editor.pie else editor.editor_world,
@@ -1030,6 +1031,73 @@ def test_named_controls_are_refused_during_pie_but_inspect_works(
         inspected["is_playing"] is True
         and inspected["map_path"] == "/Game/Maps/Lab.Lab"
     )
+
+
+def _control_ui(editor: Editor, action: str, target: Optional[str]) -> Dict[str, Any]:
+    args = {
+        "action": action, "target": target, "property_name": None, "value": None, "enabled": None,
+        "viewport": VIEWPORT, "actions": [], "agent_id": "agent", "position": None, "activity": None,
+    }
+    return _attached_run(editor, attach_scripts.EDITOR_STATE + f"args = {args!r}\n" + attach_scripts.CONTROL_UI)
+
+
+class _Twin(Actor):
+    """A second actor with another's label, at its own path."""
+
+    def get_path_name(self) -> str:
+        return LEVEL + self.name + "_2"
+
+
+@pytest.mark.parametrize(
+    ("action", "target", "selected", "error_type", "code"),
+    [
+        ("select_actor", "Nope", [], "NotFoundError", None),
+        ("select_actor", LEVEL + "Gone", [], "NotFoundError", None),
+        ("pilot_actor", "Nope", [], "NotFoundError", None),
+        ("select_actor", "Crate", [], "ValidationError", "ambiguous_target"),
+        ("select_actor", None, [], "ValidationError", "not_one_selected"),
+        ("set_property", None, ["Floor", "Lamp"], "ValidationError", "not_one_selected"),
+    ],
+)
+def test_an_actor_action_without_exactly_one_actor_is_a_typed_refusal(
+    editor: Editor, action: str, target: Optional[str], selected: List[str], error_type: str, code: Optional[str]
+) -> None:
+    """Round 2: a missing or ambiguous target raised a ValueError, which arrived as a ScriptError traceback."""
+    editor.level.append(_Twin("Crate"))
+    editor.selection = [actor for actor in editor.level if actor.get_actor_label() in selected]
+
+    refused = _control_ui(editor, action, target)
+
+    assert (refused["success"], refused["error_type"]) == (False, error_type), refused
+    assert "Traceback" not in refused["error"]
+    assert refused.get("details", {}).get("code") == code
+    if code == "ambiguous_target":
+        assert refused["details"]["candidates"] == [LEVEL + "Crate", LEVEL + "Crate_2"]
+    assert editor.selection_calls == []
+
+
+def test_select_actor_by_a_unique_label_or_path_selects_it(editor: Editor) -> None:
+    editor.level.append(_Twin("Crate"))
+
+    by_path = _control_ui(editor, "select_actor", LEVEL + "Crate_2")
+    by_label = _control_ui(editor, "select_actor", "Floor")
+
+    assert by_path["actor_path"] == LEVEL + "Crate_2" and by_label["actor_path"] == LEVEL + "Floor"
+    assert [actor.get_path_name() for actor in editor.selection] == [LEVEL + "Floor"]
+
+
+@pytest.mark.asyncio
+async def test_control_ui_reports_the_refusal_typed(editor: Editor, tmp_path: Any) -> None:
+    session = unreal_runtime.UnrealRuntimeSession(Settings())
+    session._load_attachment = lambda: {"viewport": VIEWPORT}  # type: ignore[method-assign]
+    session._execute_python = lambda code, **kwargs: asyncio.sleep(0, editor.run(code))  # type: ignore[method-assign]
+
+    result = await session.control_ui("select_actor", target="Nope")
+
+    assert result == {
+        "success": False, "error_type": "NotFoundError",
+        "error": "No actor of the attached level has the path or label 'Nope'", "details": {"target": "Nope"},
+    }
 
 
 # ---------------------------------------------------------------------------

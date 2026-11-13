@@ -104,6 +104,38 @@ result = {"agent_control": action, "execution_method": "unreal_editor_api", "vie
 if action in ("move_cursor", "clear_cursor") and overlay is None:
     raise RuntimeError("Agent overlay unavailable. Close this project and run "
                        "simul unreal setup <project> --agent-overlay --yes, then attach again")
+picked = None
+
+# The actor an actor action acts on: target names one level actor by its full
+# path or its label, or, without target, the one selected actor. Returns the
+# refusal when there is not exactly one, as the actor tools refuse: a target
+# nothing has is NotFoundError, a label several actors share and a selection
+# of other than one actor are ValidationError.
+def pick_actor(target):
+    global picked
+    if target:
+        candidates = [a for a in actors.get_all_level_actors() if target in (a.get_path_name(), a.get_actor_label())]
+        if not candidates:
+            return {"success": False, "error_type": "NotFoundError",
+                    "error": "No actor of the attached level has the path or label " + repr(target),
+                    "details": {"target": target}}
+        if len(candidates) > 1:
+            return {"success": False, "error_type": "ValidationError",
+                    "error": str(len(candidates)) + " actors have the label " + repr(target)
+                             + "; pass one's full path, as list_unreal_actors reports it",
+                    "details": {"code": "ambiguous_target", "target": target, "candidate_count": len(candidates),
+                                "candidates": [a.get_path_name() for a in candidates[:20]]}}
+        picked = candidates[0]
+        return None
+    selected = list(actors.get_selected_level_actors())
+    if len(selected) != 1:
+        return {"success": False, "error_type": "ValidationError",
+                "error": ("No actor is selected" if not selected else str(len(selected)) + " actors are selected")
+                         + "; pass target, an actor's full path or unique label",
+                "details": {"code": "not_one_selected", "selected_count": len(selected)}}
+    picked = selected[0]
+    return None
+
 if action == "inspect":
     result.update(_simul_editor.identity())
     result["selected_actors"] = [{"path": a.get_path_name(), "label": a.get_actor_label()}
@@ -118,16 +150,11 @@ elif action == "clear_cursor":
     result["removed"] = overlay.clear_cursor(viewport, args["agent_id"])
 elif pie_active():
     result = pie_refusal("change editor controls")
+elif action in ("select_actor", "set_property", "pilot_actor") and (refusal := pick_actor(args["target"])):
+    result = refusal
 else:
-    actor = None
-    if action in ("select_actor", "set_property", "pilot_actor"):
-        target = args["target"]
-        candidates = ([a for a in actors.get_all_level_actors()
-                       if target in (a.get_path_name(), a.get_actor_label())]
-                      if target else list(actors.get_selected_level_actors()))
-        if len(candidates) != 1:
-            raise ValueError("Select exactly one actor or supply its unique full path")
-        actor = candidates[0]
+    actor = picked
+    if actor is not None:
         result["actor_path"] = actor.get_path_name()
     if action == "select_actor":
         actors.set_selected_level_actors([actor])

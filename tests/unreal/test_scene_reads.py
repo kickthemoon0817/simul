@@ -30,6 +30,7 @@ import pytest
 from aiohttp import web
 from fastmcp import Client
 
+from simul.adapters._unreal_scripts import GRAPH_COMPONENTS
 from simul.adapters.unreal_runtime import PAGE_BUDGET_BYTES, UnrealRuntimeSession
 from simul.config import Settings
 from simul.mcp.result_budget import DEFAULT_RESULT_BUDGET_BYTES
@@ -725,9 +726,40 @@ async def test_include_components_lists_each_actors_components(
         {"name": "LightComponent0", "class_name": "PointLightComponent", "is_root": False, "attach_parent": "Root"},
         {"name": "Spin", "class_name": "RotatingMovementComponent", "is_root": False, "attach_parent": None},
     ]
+    assert (node["component_count"], "components_truncated" in node) == (3, False)
     # The camera's root is attached to the lamp's: reported as the actor's parent, not here.
     assert node["children"][0]["components"][0]["attach_parent"] is None
     assert "components" not in (await session.query_scene_graph())["root"]["children"][0]
+    assert not any("components" in warning for warning in graph["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_a_node_lists_its_first_components_and_counts_them_all(
+    session: UnrealRuntimeSession, editor: Editor
+) -> None:
+    """Round 2: an actor with 1,502 components made a 160 KB scene graph page."""
+    actors = family(editor)
+    lamp, cup = actors["Lamp"], actors["Cup"]
+    for owner, count in ((lamp, 1501), (cup, GRAPH_COMPONENTS)):
+        owner.components.extend(
+            ActorComponent(owner, f"Spin{index}", MOVEMENT_CLASS) for index in range(count - len(owner.components))
+        )
+
+    graph = await session.query_scene_graph(include_components=True)
+
+    node = graph["root"]["children"][2]
+    assert (len(node["components"]), node["component_count"], node["components_truncated"]) == (
+        GRAPH_COMPONENTS, 1501, True)
+    assert node["components"][0]["is_root"] is True
+    full = graph["root"]["children"][1]["children"][0]
+    assert (full["name"], len(full["components"])) == ("Cup", GRAPH_COMPONENTS)
+    assert full["component_count"] == GRAPH_COMPONENTS
+    assert "components_truncated" not in full
+    (warning,) = [warning for warning in graph["warnings"] if "components" in warning]
+    assert f"1 actor(s) list only their first {GRAPH_COMPONENTS} components" in warning
+    assert lamp.path + " (1501)" in warning and "list_unreal_actor_components" in warning
+    assert len(json.dumps(graph)) < 20_000
+    UnrealQuerySceneGraphResponse(**{k: v for k, v in graph.items() if k != "_chars"})
 
 
 @pytest.mark.asyncio

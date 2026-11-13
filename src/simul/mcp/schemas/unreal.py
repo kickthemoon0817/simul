@@ -1776,7 +1776,8 @@ class UnrealQuerySceneGraphResponse(BaseModel):
             "The tree: the level (class_name World) or the root_path actor, with name, path, "
             "class_name, child_count and children; each actor nests the same way, with "
             "children_truncated when its children are below max_depth, matches_filter with a "
-            "class_filter, and components with include_components"
+            "class_filter, and components (the first 50) with component_count and, when it has more, "
+            "components_truncated with include_components"
         ),
     )
     total_actors: int = Field(
