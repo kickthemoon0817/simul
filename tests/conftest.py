@@ -15,6 +15,7 @@ need.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Iterator, Type
@@ -78,6 +79,52 @@ def simul_state_outside_home(tmp_path_factory: pytest.TempPathFactory) -> Iterat
         config._get_cached_settings.cache_clear()
         yield
     config._get_cached_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def restore_logging_state() -> Iterator[None]:
+    """Put every logger back as the test found it.
+
+    ``setup_logging`` (which ``simul server`` and other commands run) applies
+    ``logging.level`` to simul's loggers and turns their propagation off, so a
+    test that starts a command with ``--log-level warning`` would otherwise
+    hide INFO records from every later test's ``caplog``. Levels, handlers,
+    propagation and the disabled flag of the root and of every named logger
+    are restored; handlers a test added are closed.
+    """
+
+    def all_loggers() -> list:
+        named = [
+            logger
+            for logger in logging.root.manager.loggerDict.values()
+            if isinstance(logger, logging.Logger)
+        ]
+        return [logging.getLogger(), *named]
+
+    saved = {
+        id(logger): (logger.level, list(logger.handlers), logger.propagate, logger.disabled)
+        for logger in all_loggers()
+    }
+    yield
+    for logger in all_loggers():
+        state = saved.get(id(logger))
+        kept = state[1] if state else []
+        for handler in list(logger.handlers):
+            if handler not in kept:
+                logger.removeHandler(handler)
+                handler.close()
+        if state is None:
+            logger.setLevel(logging.NOTSET)
+            logger.propagate = True
+            logger.disabled = False
+            continue
+        level, handlers, propagate, disabled = state
+        for handler in handlers:
+            if handler not in logger.handlers:
+                logger.addHandler(handler)
+        logger.setLevel(level)
+        logger.propagate = propagate
+        logger.disabled = disabled
 
 
 @pytest.fixture
