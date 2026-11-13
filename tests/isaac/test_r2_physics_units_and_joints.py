@@ -176,6 +176,45 @@ def test_add_reference_rescales_physics_with_an_in_place_correction(
     assert _value(stage, "/World/Ref/slide", "physics:upperLimit") == pytest.approx(0.04)
 
 
+def test_add_reference_leaves_a_prims_own_children_in_stage_units(
+    open_tools: Any, run_on_stage: Any, tmp_path: Path
+) -> None:
+    asset = _cm_robot(tmp_path / "robot.usda")
+    stage = _world_stage()
+    UsdGeom.Xform.Define(stage, "/World/Rig")
+    UsdPhysics.PrismaticJoint.Define(stage, "/World/Rig/LocalSlider").CreateLowerLimitAttr(-1.0)
+
+    result = _call(
+        open_tools, run_on_stage, stage, "add_isaac_reference",
+        prim_path="/World/Rig", reference_path=asset, correct_units=True,
+    )
+
+    # Converting the asset's values would convert LocalSlider's metres too,
+    # and the scale op would move it, so neither is applied.
+    assert _value(stage, "/World/Rig/LocalSlider", "physics:lowerLimit") == pytest.approx(-1.0)
+    assert result["units"]["applied"] is False and result["units"]["physics"]["applied"] is False
+    assert not UsdGeom.Xformable(stage.GetPrimAtPath("/World/Rig")).GetOrderedXformOps()
+    assert "LocalSlider" in result["warning"]
+    assert any("already had children" in note for note in result["units"]["notes"])
+
+
+def test_add_reference_leaves_a_prims_own_physics_values_in_stage_units(
+    open_tools: Any, run_on_stage: Any, tmp_path: Path
+) -> None:
+    asset = _cm_robot(tmp_path / "robot.usda")
+    stage = _world_stage()
+    UsdPhysics.MassAPI.Apply(UsdGeom.Xform.Define(stage, "/World/Rig").GetPrim()).CreateDensityAttr(1000.0)
+
+    result = _call(
+        open_tools, run_on_stage, stage, "add_isaac_reference",
+        prim_path="/World/Rig", reference_path=asset, correct_units=True,
+    )
+
+    assert _value(stage, "/World/Rig", "physics:density") == pytest.approx(1000.0)
+    assert result["units"]["physics"]["applied"] is False
+    assert "physics:density" in result["warning"]
+
+
 def test_the_built_in_table_carries_the_units_db_exponents() -> None:
     """Spot checks against pxr/PhysicsSchemaTools/units_db.py (Isaac Sim 5.0 tree)."""
     assert PHYSICS_UNIT_EXPONENTS["physics:density"] == (1, -3)

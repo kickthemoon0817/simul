@@ -447,7 +447,10 @@ Notes:
   `pxr.PhysicsSchemaTools.units_db`, as Kit's metrics assembler does for its
   own reference commands; `units.physics` lists what was scaled and what could
   not be (values inside instances). A failed import removes every prim it
-  created.
+  created. `add_isaac_reference(correct_units=true)` declines the correction,
+  with a warning, on a prim that already had children, physics values, other
+  references or transform ops: those are in the stage's units and would be
+  converted along with the asset.
 - `save_isaac_stage` checks an in-place save's files against the write
   sandbox, needs `overwrite=true` for URL targets, and refuses while the
   timeline is playing or paused unless `allow_while_playing=true`.

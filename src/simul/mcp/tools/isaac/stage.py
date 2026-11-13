@@ -311,6 +311,10 @@ REFERENCE_ASSET_CORE = """\
         undo = _references_undo(stage, prim)
         prior = prim.GetMetadata("references")
         had_references = bool(prior and list(prior.GetAppliedItems()))
+        # What the prim held before this reference is in the stage's units;
+        # a correction here would convert it along with the asset.
+        prior_children = [child.GetName() for child in prim.GetAllChildren()]
+        prior_values = [attr.GetName() for attr in prim.GetAttributes() if attr.HasAuthoredValue()]
 
         def _roll_back():
             if created is not None:
@@ -330,7 +334,22 @@ REFERENCE_ASSET_CORE = """\
             return _code_nodes_refusal(found)
         units = _metrics(stage, layer)
         declined = None
-        if correct_units and had_references and (_needs_correction(units) or units["mass_ratio"] != 1.0):
+        mismatch = _needs_correction(units) or units["mass_ratio"] != 1.0
+        prior_physics = [name for name in prior_values if _unit_exponents(name, prim) not in (None, (0, 0))]
+        if correct_units and mismatch and (prior_children or prior_physics):
+            held = []
+            if prior_children:
+                held.append("children (" + ", ".join(prior_children[:5])
+                            + (", ..." if len(prior_children) > 5 else "") + ")")
+            if prior_physics:
+                held.append("physics values (" + ", ".join(prior_physics[:5])
+                            + (", ..." if len(prior_physics) > 5 else "") + ")")
+            declined = (
+                "correct_units was not applied: the prim already had " + " and ".join(held)
+                + " in the stage's units, which a correction here would convert too. "
+                "import_isaac_asset wraps the reference in a corrected Xform instead."
+            )
+        elif correct_units and had_references and mismatch:
             # Values from the prim's other references are in their own units;
             # rescaling the subtree here would convert them too.
             declined = (
@@ -787,7 +806,8 @@ class StageAssetMixin:
             "referenced (reported), or pass asset_prim_path; a reference that composes nothing "
             "is undone and fails, and the same reference twice is reported, not duplicated. "
             "A metersPerUnit/upAxis mismatch is reported; correct_units=true adds unitsResolve "
-            "ops on the prim only when it has no transform ops of its own (otherwise use "
+            "ops and rescales the asset's physics values only when the prim had no children, "
+            "physics values, other references or transform ops of its own (otherwise use "
             "import_isaac_asset, which wraps the reference). With "
             "security.allow_script_execution off, an asset containing code-running OmniGraph "
             "nodes is refused. "
@@ -815,11 +835,14 @@ class StageAssetMixin:
                 none.
             correct_units: Correct a metersPerUnit/upAxis mismatch the asset
                 authors with ``unitsResolve`` scale and rotateX ops on the
-                prim. Applied only when the prim then has no other transform
-                ops: ops the asset root brings are in asset units and would
-                stay unconverted (reported in ``units.notes``; use
-                import_isaac_asset, which wraps the reference). Off by default
-                here: the prim may carry other references.
+                prim, and rescale the asset's physics values. Applied only
+                when the prim then has no other transform ops (ops the asset
+                root brings are in asset units and would stay unconverted)
+                and had no children, physics values or other references
+                before (those are in stage units and would be converted
+                too). A decline is reported in ``units.notes`` and
+                ``warning``; use import_isaac_asset, which wraps the
+                reference. Off by default here.
 
         Returns:
             Dict with ``added`` (false when the same reference was already
