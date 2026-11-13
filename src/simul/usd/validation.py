@@ -39,7 +39,7 @@ from .stage_files import public_identifier
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import USDConfig
-    from .sandbox import CompositionSandbox
+    from .sandbox import CompositionSandbox, OutsidePath
 
 ERROR = "error"
 WARNING = "warning"
@@ -446,6 +446,69 @@ def composition_issues(stage: "Usd.Stage", severity: str = ERROR) -> List[Valida
     return issues
 
 
+# pxr findings about an Unreal content path, which names an editor object
+# rather than a file: Unreal's own USD exports carry them on every mesh.
+_CONTENT_PATH_CODES = frozenset({"UnresolvableDependency", "MissingSourceTypeInRegistry"})
+_CONTENT_PATH_NOTE = (
+    " It is an Unreal content path, which names an object in an Unreal project's content rather "
+    "than a file, as Unreal's USD exporter writes one; only Unreal resolves it."
+)
+
+
+def unreal_content_issues(entries: Iterable["OutsidePath"], severity: str = WARNING) -> List[ValidationIssue]:
+    """Say which asset paths were let through as Unreal content paths rather than files.
+
+    Args:
+        entries: ``CompositionSandbox.content_paths`` (or
+            ``unreal_content_paths``): each asset value and the layer
+            authoring it.
+        severity: The severity to report them at.
+
+    Returns:
+        One ``UnrealContentPath`` issue per path.
+    """
+    return [
+        ValidationIssue(
+            severity,
+            "UnrealContentPath",
+            f"{entry.asset_path} names an object in an Unreal project's content, as Unreal's USD "
+            "exporter writes one, not a file: the sandbox let it through, nothing here reads it, "
+            "and only Unreal resolves it.",
+            layer=Sdf.Layer.SplitIdentifier(entry.layer)[0] if entry.layer else None,
+            asset_path=entry.asset_path,
+        )
+        for entry in entries
+    ]
+
+
+def _names_content_path(
+    stage: "Usd.Stage",
+    code: str,
+    asset_path: Optional[str],
+    location: Dict[str, Optional[str]],
+    content_paths: Set[str],
+) -> bool:
+    """Whether a pxr finding is only about one of ``content_paths``.
+
+    ``UnresolvableDependency`` quotes the asset path;
+    ``MissingSourceTypeInRegistry`` sits on the shader's
+    ``info:<sourceType>:sourceAsset`` attribute, whose value is checked.
+    """
+    if not content_paths or code not in _CONTENT_PATH_CODES:
+        return False
+    if code == "UnresolvableDependency":
+        return asset_path in content_paths
+    property_path = location.get("property_path")
+    if not property_path:
+        return False
+    try:
+        attribute = stage.GetAttributeAtPath(property_path)
+        value = attribute.Get() if attribute else None
+    except Exception:  # pragma: no cover - a malformed site keeps the error
+        return False
+    return getattr(value, "path", None) in content_paths
+
+
 def _default_prim_path(token: str) -> str:
     return token if token.startswith("/") else f"/{token}"
 
@@ -666,7 +729,11 @@ def _site_location(site: Any) -> Dict[str, Optional[str]]:
 
 
 def compliance_issues(
-    stage: "Usd.Stage", *, package: bool, known_assets: Iterable[str] = ()
+    stage: "Usd.Stage",
+    *,
+    package: bool,
+    known_assets: Iterable[str] = (),
+    content_paths: Iterable[str] = (),
 ) -> Tuple[List[ValidationIssue], List[str]]:
     """Run pxr's UsdValidation validators over the stage.
 
@@ -676,6 +743,10 @@ def compliance_issues(
             usdz package rules (``UsdzValidators``) run.
         known_assets: Asset paths composition_issues already reported, so the
             unresolved-dependency validator does not repeat them.
+        content_paths: Unreal content paths (asset values naming editor
+            objects, not files). pxr's ``UnresolvableDependency`` and
+            ``MissingSourceTypeInRegistry`` errors about exactly these become
+            warnings, with a note saying why.
 
     Returns:
         The issues, and the names of the validators that ran.
@@ -699,6 +770,7 @@ def compliance_issues(
         UsdValidation.ValidationErrorType.Info: INFO,
     }
     reported: Set[str] = set(known_assets)
+    content = set(content_paths)
     # Overlapping validators (the root-package and every-package usdz rules)
     # report the same finding; keep one.
     seen: Set[Tuple[str, str, Optional[str]]] = set()
@@ -730,9 +802,13 @@ def compliance_issues(
         if key in seen:
             continue
         seen.add(key)
+        severity = severities.get(error.GetType(), WARNING)
+        if severity == ERROR and _names_content_path(stage, code, asset_path, location, content):
+            severity = WARNING
+            message += _CONTENT_PATH_NOTE
         issues.append(
             ValidationIssue(
-                severities.get(error.GetType(), WARNING),
+                severity,
                 code,
                 message,
                 source=source,
@@ -890,6 +966,12 @@ def validate_usd_file(
     report.up_axis = str(UsdGeom.GetStageUpAxis(stage))
     report.meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
 
+    if sandbox is not None and sandbox.enabled:
+        content = sandbox.content_paths
+    else:
+        from .sandbox import unreal_content_paths
+
+        content = unreal_content_paths(stage.GetUsedLayers())
     composition = composition_issues(stage, ERROR)
     report.issues.extend(composition)
     report.issues.extend(metadata_issues(stage, root_layer))
@@ -898,6 +980,7 @@ def validate_usd_file(
         stage,
         package=bool(file_format.IsPackage()),
         known_assets=[issue.asset_path for issue in composition if issue.asset_path],
+        content_paths=[entry.asset_path for entry in content],
     )
     report.issues.extend(compliance)
     report.validators = names
@@ -923,6 +1006,7 @@ __all__ = [
     "physics_issues",
     "resolver_uri_schemes",
     "tf_error_messages",
+    "unreal_content_issues",
     "unsaved_edit_issues",
     "url_scheme",
     "validate_usd_file",

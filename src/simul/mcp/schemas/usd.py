@@ -108,7 +108,9 @@ class StageInfo(BaseModel):
         default_factory=list,
         description=(
             "Problems the stage loaded despite: missing sublayers, references or "
-            "payloads, unresolved reference prim paths"
+            "payloads, unresolved reference prim paths, and (with the sandbox on) "
+            "UnrealContentPath for each Unreal content path (/Engine/.../Name.Name in an "
+            "asset value) the sandbox let through as an editor object rather than a file"
         ),
     )
 

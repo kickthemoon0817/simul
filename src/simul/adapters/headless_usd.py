@@ -26,7 +26,7 @@ from ..usd import editing, stage_files
 from ..usd.editing import USDEditError
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
-from ..usd.sandbox import CompositionSandbox
+from ..usd.sandbox import CompositionSandbox, OutsidePath
 from ..usd.validation import (
     USDLoadError,
     check_usd_file,
@@ -74,11 +74,15 @@ class _StageRecord:
             for anonymous sessionless HTTP requests).
         mtimes: Modification time of each file the stage composes, as of
             the load, the last reload or the last save.
+        unreal_content: The Unreal content paths the composition sandbox
+            let through as editor objects rather than files, as of the load
+            or the last reload.
     """
 
     file_path: str
     owner: Optional[str]
     mtimes: Dict[str, Optional[int]] = field(default_factory=dict)
+    unreal_content: List[OutsidePath] = field(default_factory=list)
 
 
 class HeadlessUSDSession(LoggerMixin):
@@ -326,10 +330,32 @@ class HeadlessUSDSession(LoggerMixin):
             self._active_stages[stage_id] = stage
             self._bbox_caches[stage_id] = BBoxCache(stage)
             self._stage_records[stage_id] = _StageRecord(
-                file_path=file_path, owner=owner, mtimes=stage_files.file_mtimes(stage)
+                file_path=file_path,
+                owner=owner,
+                mtimes=stage_files.file_mtimes(stage),
+                unreal_content=sandbox.content_paths if sandbox is not None else [],
             )
         self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
         return stage_id
+
+    def unreal_content_paths(self, stage_id: str) -> List[OutsidePath]:
+        """
+        The Unreal content paths the sandbox let through for a loaded stage.
+
+        Each is an asset value shaped like ``/Engine/.../Name.Name`` that
+        names an editor object, not a file (see
+        ``simul.usd.sandbox.is_unreal_content_path``), as Unreal's USD
+        exporter writes one. Empty when the load ran without a sandbox.
+
+        Args:
+            stage_id: Stage identifier
+
+        Returns:
+            The paths, with the layer authoring each; empty for an unknown stage.
+        """
+        with self._registry:
+            record = self._stage_records.get(stage_id)
+            return list(record.unreal_content) if record is not None else []
 
     def _refresh_shared(self, stage: Usd.Stage) -> List[str]:
         """
@@ -764,8 +790,9 @@ class HeadlessUSDSession(LoggerMixin):
             ) from exc
         self._invalidate_bbox_cache(stage_id)
         if factory is not None:
+            checker = factory()
             try:
-                _checked(lambda: factory().check_stage(stage))
+                _checked(lambda: checker.check_stage(stage))
             except SandboxDenied:
                 self._drop(stage_id)
                 self.logger.warning(
@@ -774,6 +801,8 @@ class HeadlessUSDSession(LoggerMixin):
                 raise
         with self._registry:
             record.mtimes = stage_files.file_mtimes(stage)
+            if factory is not None:
+                record.unreal_content = checker.content_paths
         reloaded_files = sorted(set(changed) | set(reloaded) | {record.file_path})
         self.logger.info(f"Reloaded USD stage {stage_id} (discarded unsaved edits: {dirty})")
         return {
