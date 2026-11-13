@@ -2067,7 +2067,9 @@ Behaviour worth knowing:
   captures through another camera without changing the scene camera or the
   view. `capture_blender_viewport_sequence` writes JPEG files and returns their
   paths, at most `max_frames` (50, at most 100) per call and no new frame after
-  10 s, with `next_start_frame` to continue.
+  10 s, with `next_start_frame` to continue. It replaces frame files of the
+  same numbers already in `output_dir`, so it is annotated destructive, not
+  read-only.
 - `get_blender_viewport_info` reports, besides the render settings, `view3d`:
   the attached window's largest 3D View (the one captures use) with its
   `view_matrix` (world to view), `eye_location`, `view_perspective`, `lens`,
@@ -2663,7 +2665,8 @@ Behaviour worth knowing:
   (`rigid_body_cache.is_baked`).
 - `get_blender_physics_state` steps an unbaked simulation from the cache start
   to the current frame before reading the pose (`step_simulation`, default
-  true, at most 400 000 frames x bodies), as playback would: an unbaked
+  true, at most 400 000 frames x bodies), as playback would, so like
+  `get_blender_object_trajectory` it is not read-only: an unbaked
   simulation advances one frame at a time, so after `set_blender_frame` jumped
   from 1 to 48 a falling body still sat at its starting pose. Frames Blender has
   cached are read, not simulated again. `pose_source` says where the pose comes
@@ -2879,8 +2882,11 @@ rule on every backend, pinned for all tools by
   included (`capture_blender_viewport`);
 - **destructive**: overwrites or deletes existing state or files, or runs
   arbitrary code (`capture_isaac_viewport` deletes the oldest captures in its
-  directory, so it is destructive; `capture_unreal_viewport` writes a new
-  screenshot and is only additive);
+  directory and `capture_blender_viewport_sequence` replaces same-numbered
+  frame files, so both are destructive; `capture_unreal_viewport` writes a new
+  screenshot and is only additive). Every tool that is not read-only states
+  `destructiveHint`, `false` included, because a client reads a missing one as
+  `true`; a read-only tool leaves it out;
 - **idempotent**: repeating the call with the same arguments changes nothing
   more (a set, a delete, a save or export to the same path, a focus); a
   create, a step, a capture that writes a new file or an edit that compounds

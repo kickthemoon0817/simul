@@ -134,7 +134,8 @@ def test_registration_follows_the_table(
         hints = tool.kwargs["annotations"].model_dump(by_alias=True, exclude_none=True)
         assert hints == {
             "readOnlyHint": spec.hints.read_only,
-            **({"destructiveHint": True} if spec.hints.destructive else {}),
+            # Stated on every tool that is not read-only: a missing one means true.
+            **({} if spec.hints.read_only else {"destructiveHint": spec.hints.destructive}),
             **({"idempotentHint": True} if spec.hints.idempotent else {}),
         }, spec.name
         assert tool.kwargs["output_schema"] is None, spec.name

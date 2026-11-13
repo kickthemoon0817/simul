@@ -11,7 +11,9 @@ every backend:
 - ``destructiveHint`` is true when the tool overwrites or deletes existing
   state or files, or runs arbitrary code. Additive tools (create, add, spawn,
   import) and runtime control (play, pause, step, focus, enable) are not
-  destructive.
+  destructive, and say so: the MCP spec's default for a missing
+  ``destructiveHint`` is true, so every tool that is not read-only carries it
+  explicitly (round-2 audit m-1). A read-only tool leaves it off.
 - ``idempotentHint`` is true when repeating the call with the same arguments
   leaves things as the first call left them: a set, a delete, a save or an
   export to the same path, a focus. A create, a step, a capture that writes a
@@ -22,7 +24,10 @@ The three viewport captures differ because they do different things:
 ``capture_unreal_viewport`` writes a new screenshot file (additive), and
 ``capture_isaac_viewport`` writes a new PNG and deletes the oldest captures in
 its directory (destructive). None of them is idempotent except the read-only
-one. Hints matching the client's assumed default are omitted.
+one. ``capture_blender_viewport_sequence`` writes JPEG files and replaces
+same-numbered frames in a caller-chosen folder, so it is destructive and not
+read-only (round-2 audit M-4). Other hints matching the client's assumed
+default (idempotent false, open world true) are omitted.
 """
 
 from __future__ import annotations
@@ -222,7 +227,9 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "attach_blender_window": (RW, True, True),  # selects the target; Blender untouched
     "bake_blender_simulation": (DESTRUCTIVE, True, True),  # replaces the bake cache of the range
     "capture_blender_viewport": (RO, True, True),  # base64 only, no file
-    "capture_blender_viewport_sequence": (RO, True, True),  # base64 only, frame restored
+    # Writes JPEG files and replaces same-numbered frames in a caller-chosen
+    # folder; without output_dir each call writes a new folder.
+    "capture_blender_viewport_sequence": (DESTRUCTIVE, False, True),
     "check_blender_object_bounds": (RO, True, True),
     "clean_blender_mesh": (DESTRUCTIVE, True, True),
     "clear_blender_object_parent": (DESTRUCTIVE, True, True),
@@ -249,7 +256,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "get_blender_mesh_info": (RO, True, True),
     "get_blender_object_info": (RO, True, True),
     "get_blender_object_trajectory": (RW, True, True),  # steps the scene, restores the frame
-    "get_blender_physics_state": (RO, True, True),
+    "get_blender_physics_state": (RW, True, True),  # steps the scene by default, fills the cache
     "get_blender_rigid_body_world": (RO, True, True),
     "get_blender_trajectories": (RW, True, True),
     "get_blender_viewport_info": (RO, True, True),
@@ -284,8 +291,8 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
 
 def _expected_hints(kind: str, idempotent: bool, open_world: bool) -> Dict[str, Any]:
     hints: Dict[str, Any] = {"readOnlyHint": kind == RO}
-    if kind == DESTRUCTIVE:
-        hints["destructiveHint"] = True
+    if kind != RO:
+        hints["destructiveHint"] = kind == DESTRUCTIVE
     if idempotent:
         hints["idempotentHint"] = True
     if not open_world:
@@ -348,3 +355,43 @@ def test_reset_tool_usage_stats_is_not_on_the_agent_surface(
 ) -> None:
     assert "reset_tool_usage_stats" not in registered
     assert "get_tool_usage_stats" in registered
+
+
+def test_every_tool_that_is_not_read_only_states_destructive_hint_on_the_wire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client reads tools/list, where a missing destructiveHint means true (round-2 m-1)."""
+    import asyncio
+
+    from fastmcp import Client
+
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: True)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+    monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", AvailableAdapter)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", AvailableAdapter)
+    base = Settings()
+    instance = server_module.SimulMCPServer(
+        settings=base.model_copy(
+            update={
+                "unreal": base.unreal.model_copy(update={"tool_surface": "full"}),
+                "blender": base.blender.model_copy(update={"tool_surface": "full"}),
+            }
+        )
+    )
+
+    async def listing() -> Dict[str, Dict[str, Any]]:
+        async with Client(instance.mcp) as client:
+            return {
+                tool.name: tool.annotations.model_dump(by_alias=True, exclude_none=True)
+                for tool in await client.list_tools()
+            }
+
+    wire = asyncio.run(listing())
+
+    assert len(wire) >= 200
+    unstated = [
+        name for name, hints in wire.items() if not hints["readOnlyHint"] and "destructiveHint" not in hints
+    ]
+    assert unstated == []
+    assert wire["capture_unreal_viewport"]["destructiveHint"] is False
+    assert wire["capture_blender_viewport_sequence"] == {"readOnlyHint": False, "destructiveHint": True}

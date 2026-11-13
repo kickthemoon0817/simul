@@ -1011,10 +1011,15 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             f"max_frames (default {SEQUENCE_FRAMES_DEFAULT}, at most {SEQUENCE_FRAMES_MAX}) and "
             f"starts no frame after {SEQUENCE_TIME_BUDGET_SECONDS:g} s, since Blender is busy "
             "meanwhile; then complete is false and next_start_frame says where to continue. "
+            "Frame files already in output_dir with the same numbers are replaced. Each frame is "
+            "a frame change, so frame-change handlers run and an unbaked rigid-body cache "
+            "fills; the current frame is set again afterwards. "
             "In attached mode, briefly show an agent eye badge and border pulse after success. "
             "Agent annotations are excluded from the captured images."
         ),
-        hints=READ_ONLY,
+        # Writes files and replaces same-numbered frames in a caller-chosen
+        # folder; each call without output_dir writes a new folder.
+        hints=DESTRUCTIVE,
         operation="capture_viewport_sequence",
         request=BlenderCaptureSequenceRequest,
         response=BlenderCaptureSequenceResponse,
@@ -1481,9 +1486,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "400 000 body-frames). pose_source and simulated_for_frame say whether the "
             "pose is the simulation's for this frame; frames past the cache end hold "
             "the bodies at its last frame (past_cache_end). rigid_body_cache reports "
-            "the cache range and bake state."
+            "the cache range and bake state. Not read-only by default: stepping runs "
+            "frame-change handlers and fills the unbaked cache, as "
+            "get_blender_object_trajectory does; step_simulation=false only reads."
         ),
-        hints=READ_ONLY,
+        # Steps the scene by default, like get_blender_object_trajectory.
+        hints=IDEMPOTENT,
         operation="get_physics_state",
         request=BlenderGetPhysicsStateRequest,
         response=BlenderGetPhysicsStateResponse,

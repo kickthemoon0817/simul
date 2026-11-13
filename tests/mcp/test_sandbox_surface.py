@@ -100,7 +100,7 @@ def test_creating_a_prim_is_destructive_only_where_it_can_replace(
     """create_isaac_prim only adds; the USD create_prim can re-type an existing
     prim with redefine_existing=true, so it carries the destructive hint."""
     instance = _make_server(monkeypatch)
-    assert "destructiveHint" not in _hints(instance, "create_isaac_prim")
+    assert _hints(instance, "create_isaac_prim").get("destructiveHint") is False
     assert _hints(instance, "create_prim").get("destructiveHint") is True
     assert "redefine_existing" in _tool(instance, "create_prim").kwargs["description"]
 

@@ -57,7 +57,22 @@ class Choices:
     enforced: bool = True
 
 
-Constraint = Union[Bounds, Choices]
+@dataclass(frozen=True)
+class ItemBounds:
+    """Numeric limits of each item of a list parameter.
+
+    Attributes:
+        each: The bounds every item has.
+        positions: Bounds per position instead, for a fixed-length list whose
+            items differ (``[width, height]``); the list is then advertised as
+            exactly that many items.
+    """
+
+    each: Optional[Bounds] = None
+    positions: Tuple[Bounds, ...] = ()
+
+
+Constraint = Union[Bounds, Choices, ItemBounds]
 
 #: A count of results per page (``max_results = max(1, min(max_results, N))``).
 _PAGE = Bounds(ge=1, le=1000)

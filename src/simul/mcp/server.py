@@ -2430,11 +2430,14 @@ class SimulMCPServer(LoggerMixin):
     ) -> Optional[Any]:
         """Build the MCP annotations for one tool.
 
-        Every hint the call site computes is preserved: a hint is omitted only
-        when it equals the value a client assumes for a missing hint
-        (destructive and idempotent false, open world true), so nothing is
-        dropped and the listing stays small. readOnlyHint is always emitted
-        because auto-approval policies key on it.
+        Every hint the call site computes is preserved. readOnlyHint is always
+        emitted because auto-approval policies key on it, and so is
+        destructiveHint on every tool that is not read-only: the MCP spec's
+        default for a missing one is true, so leaving it off an additive tool
+        told spec-following clients it was destructive. A read-only tool
+        leaves it off (the spec gives it meaning only for a tool that is not
+        read-only), as it leaves off a hint equal to the spec's default
+        (idempotent false, open world true).
 
         Args:
             read_only: The tool does not modify its environment.
@@ -2448,8 +2451,8 @@ class SimulMCPServer(LoggerMixin):
             not expose the model.
         """
         annotations: Dict[str, Any] = {"readOnlyHint": read_only}
-        if destructive:
-            annotations["destructiveHint"] = True
+        if not read_only:
+            annotations["destructiveHint"] = destructive
         if idempotent:
             annotations["idempotentHint"] = True
         if not open_world:
