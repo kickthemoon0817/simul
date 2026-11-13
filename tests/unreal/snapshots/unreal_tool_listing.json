@@ -1709,7 +1709,7 @@
   {
    "name": "set_unreal_light_params",
    "title": "Set Unreal Light Params",
-   "description": "Set light component parameters (intensity, color, temperature, shadows); a parameter left out keeps its current value.",
+   "description": "Set a light's parameters (intensity, sRGB color, temperature, attenuation, shadows) in one undoable editor transaction and read them back; a parameter left out keeps its current value, and with none the light is only read. Works on point, spot, rect and directional lights and a SkyLight's intensity, color and shadows. Intensity is in the light's unit, returned as intensity_unit: lux for a directional light, the light's Intensity Units (candelas by default, or lumens, ev, nits, unitless) for a point, spot or rect light, a multiplier for a SkyLight. Values are range-checked before anything is written, and when Unreal stores one differently every value is put back, so a failed call changes nothing.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1721,6 +1721,8 @@
      "intensity": {
       "anyOf": [
        {
+        "maximum": 1000000000.0,
+        "minimum": 0.0,
         "type": "number"
        },
        {
@@ -1728,7 +1730,7 @@
        }
       ],
       "default": null,
-      "description": "Light intensity."
+      "description": "Light intensity, 0 to 1e9, in the light's unit."
      },
      "color": {
       "anyOf": [
@@ -1747,11 +1749,13 @@
        }
       ],
       "default": null,
-      "description": "Light color as [r, g, b], each channel 0-1; None keeps the current color."
+      "description": "Light color as sRGB [r, g, b], each channel 0-1; None keeps the current color."
      },
      "temperature": {
       "anyOf": [
        {
+        "maximum": 15000.0,
+        "minimum": 1000.0,
         "type": "number"
        },
        {
@@ -1759,7 +1763,7 @@
        }
       ],
       "default": null,
-      "description": "Color temperature in Kelvin."
+      "description": "Color temperature in Kelvin, 1000 to 15000, the range Unreal's blackbody color covers (it clamps others); applies with use_temperature."
      },
      "use_temperature": {
       "anyOf": [
@@ -1783,7 +1787,7 @@
        }
       ],
       "default": null,
-      "description": "Light attenuation radius in cm (point and spot lights only)."
+      "description": "Light attenuation radius in cm, more than 0 (point, spot and rect lights only)."
      },
      "cast_shadows": {
       "anyOf": [
@@ -1859,19 +1863,28 @@
   {
    "name": "control_unreal_simulation",
    "title": "Control Unreal Simulation",
-   "description": "Control Play-In-Editor: start, stop, pause or resume. Exact frame stepping is unsupported. While PIE runs, Unreal's editor spawns and deletes no actors, so those tools return PIEActive until it stops; level reads keep working and report pie_active.",
+   "description": "Start, stop, pause or resume the editor's simulation. start begins Simulate In Editor (the level runs and its physics steps, no player) or, with mode play, a Play session that spawns the player's pawn. Exact frame stepping is unsupported (step is refused). While either runs, Unreal's editor spawns and deletes no actors, so those tools return PIEActive until it stops; level reads keep working and report pie_active. apply_unreal_force, get_unreal_physics_state and list_unreal_simulation_actors act on and read the simulation's copies of the actors; physics and collision edits given an editor path change the editor world, which the running simulation does not see.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "action": {
-      "description": "One of start, stop, pause, resume, step.",
+      "description": "start, stop, pause or resume; step is refused (UnsupportedOperation).",
       "enum": [
        "start",
        "stop",
        "pause",
        "resume",
        "step"
+      ],
+      "type": "string"
+     },
+     "mode": {
+      "default": "simulate",
+      "description": "For start: simulate (Simulate In Editor: physics runs, no player, the viewport keeps the editor camera) or play (a Play session in the level viewport: the game mode possesses a pawn, and when it stops Unreal puts the game camera's view in the viewport). Ignored by the other actions.",
+      "enum": [
+       "simulate",
+       "play"
       ],
       "type": "string"
      }
@@ -1899,7 +1912,7 @@
   {
    "name": "get_unreal_simulation_status",
    "title": "Get Unreal Simulation Status",
-   "description": "Get current Play-In-Editor simulation status (playing, paused, stopped).",
+   "description": "Get the editor's simulation status (Play or Simulate In Editor: playing, paused, stopped).",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2027,33 +2040,33 @@
   {
    "name": "apply_unreal_force",
    "title": "Apply Unreal Force",
-   "description": "Apply a force or impulse to an actor's physics body.",
+   "description": "Apply a force or impulse to an actor's body in the running simulation (start it with control_unreal_simulation; the editor world's bodies never move, so the call is refused without one). Editor and simulation paths are both accepted. Units are Unreal's: force in kg cm/s^2 and impulse in kg cm/s (1 N or 1 N s is 100), or N and N s with units si; the application point is a world location in cm, fixed in the world while the body moves. An impulse changes the velocity at once by impulse / mass; a force acts for one physics step unless duration keeps it on for that many seconds of physics time, in step with gravity. Returns the copy acted on, its mass and the expected change of velocity.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
-      "description": "Full actor object path.",
+      "description": "Full actor object path, in the editor or the simulation's world.",
       "type": "string"
      },
      "force_x": {
       "default": 0.0,
-      "description": "Force X component.",
+      "description": "Force or impulse X component.",
       "type": "number"
      },
      "force_y": {
       "default": 0.0,
-      "description": "Force Y component.",
+      "description": "Force or impulse Y component.",
       "type": "number"
      },
      "force_z": {
       "default": 0.0,
-      "description": "Force Z component.",
+      "description": "Force or impulse Z component.",
       "type": "number"
      },
      "is_impulse": {
       "default": false,
-      "description": "True for impulse, False for continuous force.",
+      "description": "True for an impulse (instant change of momentum), False for a force.",
       "type": "boolean"
      },
      "location_x": {
@@ -2066,7 +2079,7 @@
        }
       ],
       "default": null,
-      "description": "Application point X (None = center of mass)."
+      "description": "Application point X in world cm (None = center of mass), fixed in the world for the whole duration."
      },
      "location_y": {
       "anyOf": [
@@ -2091,6 +2104,22 @@
       ],
       "default": null,
       "description": "Application point Z."
+     },
+     "duration": {
+      "default": 0.0,
+      "description": "Seconds of physics time a force keeps acting, 0 to 600: every frame the body gets, as an impulse, the force's momentum over the physics time that frame simulated (the frame time, at most Unreal's physics step limit, 1/30 s by default), so it keeps pace with gravity; paused time adds nothing. 0 acts for one physics step. Not for an impulse.",
+      "maximum": 600.0,
+      "minimum": 0.0,
+      "type": "number"
+     },
+     "units": {
+      "default": "unreal",
+      "description": "unreal: kg cm/s^2 (force), kg cm/s (impulse); si: N, N s.",
+      "enum": [
+       "unreal",
+       "si"
+      ],
+      "type": "string"
      }
     },
     "required": [
@@ -2185,6 +2214,243 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "setup_unreal_physics_bulk",
+   "title": "Setup Unreal Physics Bulk",
+   "description": "Set up physics on many editor actors in one call and one undoable transaction: the actor_paths plus every actor with tag, in the outliner folder and matching actor_filter (each that is given), at most 1000. Each is made simulated, kinematic or not physical as enable_unreal_physics does, after an optional collision preset (PhysicsActor makes props physics-ready) and with optional mass, damping and gravity. Every actor is checked first, and one that cannot be set up, or does not take the setup once written, refuses the call with every actor put back as it was, unless skip_failures sets up the rest (a call that sets up none fails). Use it instead of one call per actor, which runs into the rate limit.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "actor_paths": {
+      "default": "",
+      "description": "Comma-separated editor actor paths (empty: none, select by tag or folder).",
+      "type": "string"
+     },
+     "tag": {
+      "default": "",
+      "description": "Also every editor actor with this actor tag, such as a procedural scene's tag.",
+      "type": "string"
+     },
+     "folder": {
+      "default": "",
+      "description": "Also every editor actor in this outliner folder or one under it, such as Simul/Room_5_7ee55bcd; with tag, only actors with both.",
+      "type": "string"
+     },
+     "actor_filter": {
+      "default": "",
+      "description": "Also every editor actor whose label or path contains this text, ignoring case; with tag or folder, only actors matching those too (a procedural scene's tag with _Box_ picks its props, not its floor and walls).",
+      "type": "string"
+     },
+     "enable": {
+      "default": true,
+      "description": "As enable_unreal_physics: false turns physics off.",
+      "type": "boolean"
+     },
+     "kinematic": {
+      "default": false,
+      "description": "As enable_unreal_physics: kinematic, not simulated.",
+      "type": "boolean"
+     },
+     "make_movable": {
+      "default": true,
+      "description": "As enable_unreal_physics.",
+      "type": "boolean"
+     },
+     "allow_detach": {
+      "default": false,
+      "description": "As enable_unreal_physics.",
+      "type": "boolean"
+     },
+     "collision_preset": {
+      "default": "",
+      "description": "Collision preset set first, such as PhysicsActor; empty keeps each actor's collision.",
+      "type": "string"
+     },
+     "mass": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Mass override in kg, 0.001 to 1e9."
+     },
+     "linear_damping": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Linear damping, 0 to 1e6."
+     },
+     "angular_damping": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Angular damping, 0 to 1e6."
+     },
+     "enable_gravity": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Whether gravity affects the bodies."
+     },
+     "skip_failures": {
+      "default": false,
+      "description": "Set up the actors that can be and list the rest, instead of refusing the call.",
+      "type": "boolean"
+     }
+    }
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "get_unreal_physics_state",
+   "title": "Get Unreal Physics State",
+   "description": "Read bodies' live physics state: location, rotation, linear and angular velocity, awake or asleep, mass and center of mass. While a simulation runs each actor is read through its copy there (the editor world's actors stay where they were placed), otherwise in the editor world; world picks one. Editor and simulation paths are both accepted, and each body lists both. Paged: total counts every body, next_offset starts the next page.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "actor_paths": {
+      "default": "",
+      "description": "Comma-separated actor paths (editor or simulation paths); empty when tag_filter is given.",
+      "type": "string"
+     },
+     "tag_filter": {
+      "default": "",
+      "description": "Also read every actor with this actor tag in the world read (empty: none).",
+      "type": "string"
+     },
+     "world": {
+      "default": "auto",
+      "description": "auto: the running simulation while one runs, else the editor world; simulation (refused when none runs); editor.",
+      "enum": [
+       "auto",
+       "simulation",
+       "editor"
+      ],
+      "type": "string"
+     },
+     "max_results": {
+      "default": 100,
+      "description": "Most bodies on this page, 1 to 1000; a page also stops before 30,000 characters.",
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Bodies to skip: the previous page's next_offset.",
+      "minimum": 0,
+      "type": "integer"
+     }
+    }
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": true,
+    "destructiveHint": null,
+    "idempotentHint": true,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "list_unreal_simulation_actors",
+   "title": "List Unreal Simulation Actors",
+   "description": "List the running simulation's actors with their simulation and editor paths (null editor path for an actor the simulation spawned, such as the player's pawn) and whether they simulate physics, a page at a time (total, next_offset). Refused when no simulation runs.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "class_filter": {
+      "default": "",
+      "description": "Only actors of this class, by name or path (empty: any).",
+      "type": "string"
+     },
+     "tag_filter": {
+      "default": "",
+      "description": "Only actors with this actor tag (empty: any).",
+      "type": "string"
+     },
+     "simulating_only": {
+      "default": false,
+      "description": "Only actors with a body that simulates physics.",
+      "type": "boolean"
+     },
+     "max_results": {
+      "default": 200,
+      "description": "Most actors on this page, 1 to 5000; a page also stops before 30,000 characters.",
+      "maximum": 5000,
+      "minimum": 1,
+      "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Actors to skip: the previous page's next_offset.",
+      "minimum": 0,
+      "type": "integer"
+     }
+    }
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": true,
+    "destructiveHint": null,
     "idempotentHint": true,
     "openWorldHint": null
    },
@@ -2548,7 +2814,7 @@
   {
    "name": "analyze_unreal_scene_for_robotics",
    "title": "Analyze Unreal Scene For Robotics",
-   "description": "Classify level actors for robotics from their collision setup: floor-like surfaces a robot can stand on, small Movable objects it can grasp, and collision counts and problems (static meshes with physics collision but no simple shapes). Uses the bounding box of each actor's collision-enabled components; the thresholds come back as criteria.",
+   "description": "Classify level actors for robotics from their collision setup: floor-like surfaces a robot can stand on, small Movable objects it can grasp, and collision counts and problems (static meshes with physics collision but no simple shapes). Measures each actor by the oriented box of its physics-collision components, so rotated pieces keep their size and tilt, and each instance of an instanced mesh (ISM, HISM, foliage) by itself; the thresholds come back as criteria. Both lists are paged together (max_results each from offset; totals counts every match, next_offset starts the next page), and the pages after the first read the first page's scan, so a large level is scanned once.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2569,6 +2835,19 @@
       ],
       "default": null,
       "description": "Only analyze actors whose label or object path contains this text, ignoring case; empty or null analyzes every actor."
+     },
+     "max_results": {
+      "default": 50,
+      "description": "Most entries per category on this page, 1 to 500; a page is cut further, the same for both lists, to fit the response budget.",
+      "maximum": 500,
+      "minimum": 1,
+      "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Entries of each category to skip: the previous page's next_offset.",
+      "minimum": 0,
+      "type": "integer"
      }
     }
    },
@@ -2591,7 +2870,7 @@
   {
    "name": "generate_unreal_procedural_scene",
    "title": "Generate Unreal Procedural Scene",
-   "description": "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside the bounds, in one undoable transaction; the same arguments give the same layout. Returns the spawned actor paths and the tag and outliner folder that group them, both unique to the call.",
+   "description": "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside the bounds, in one undoable transaction; the same arguments give the same layout. Returns the spawned actor paths and the tag and outliner folder that group them, both unique to the call. physics_props makes the props physics-ready: Movable, PhysicsActor collision, simulating, so they fall and can be pushed once the simulation starts.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2620,6 +2899,11 @@
       "default": "",
       "description": "Maximum corner as comma-separated x,y,z in cm; empty is 1000,1000,500.",
       "type": "string"
+     },
+     "physics_props": {
+      "default": false,
+      "description": "Make the props physics-ready: Movable, PhysicsActor collision and simulating physics. False leaves them Movable with BlockAll collision, not simulating.",
+      "type": "boolean"
      }
     },
     "required": [
@@ -2656,7 +2940,7 @@
      },
      "match_mode": {
       "default": "exact",
-      "description": "exact (a tag equals label), contains (a tag contains label) or regex (label is a Python regular expression searched for in each tag; a repeated group that holds a quantifier or alternatives, as in (\\w+)+, is refused because it can run for hours); every mode ignores case.",
+      "description": "exact (a tag equals label), contains (a tag contains label) or regex (label is a Python regular expression searched for in each tag, ignoring case; a pattern whose failing search can run for long on a 1023-character tag is refused, such as a repeated group that holds a quantifier or alternatives, as in (\\w+)+, or two quantifiers that can divide the same characters between them, as in .*.*x or A*a*x); every mode ignores case.",
       "enum": [
        "exact",
        "contains",
@@ -3591,6 +3875,9 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
+   "get_unreal_physics_state",
+   "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
    "convert_to_simready",
@@ -3657,6 +3944,9 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
+   "get_unreal_physics_state",
+   "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
    "convert_to_simready",
@@ -3721,6 +4011,9 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
+   "get_unreal_physics_state",
+   "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
    "convert_to_simready",
@@ -3784,6 +4077,9 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
+   "get_unreal_physics_state",
+   "list_unreal_simulation_actors",
    "import_unreal_usd",
    "export_unreal_usd",
    "convert_to_simready",

@@ -539,7 +539,7 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 | Assets | `search_unreal_assets`, `import_unreal_asset`, `save_unreal_assets` |
 | Camera, lights, rendering | `capture_unreal_camera`, `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
 | Materials | `get_unreal_material_info`, `assign_unreal_material`, `create_unreal_material_instance`, `set_unreal_material_params` |
-| Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `apply_unreal_force`, `control_unreal_simulation`, `get_unreal_simulation_status` |
+| Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `setup_unreal_physics_bulk`, `apply_unreal_force`, `get_unreal_physics_state`, `list_unreal_simulation_actors`, `control_unreal_simulation`, `get_unreal_simulation_status` |
 | Mesh operations | `generate_unreal_mesh_primitive`, `generate_unreal_procedural_scene`, `validate_unreal_mesh`, `simplify_unreal_mesh`, `remesh_unreal_mesh`, `subdivide_unreal_mesh`, `edit_unreal_mesh_topology`, `apply_unreal_mesh_boolean`, `cut_unreal_mesh_plane`, `compute_unreal_convex_hull`, `decompose_unreal_convex_hull`, `compute_unreal_mesh_uv`, `convert_unreal_mesh_format` |
 | USD interchange | `get_unreal_interchange_info`, `import_unreal_usd`, `export_unreal_usd` |
 | SimReady | `validate_simready_asset`, `convert_to_simready` |
@@ -739,10 +739,76 @@ Behaviour worth knowing:
   `ValidationError` and the camera does not move. The reply is the camera
   read back, location and rotation, also for a group left unchanged; a camera
   that reads back other than what was set is a `CameraNotApplied`.
-- Actor inspection, physics, materials and PIE start/stop/pause/resume use
-  editor Python APIs. Single-frame stepping is not supported by the editor and
-  returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
-  engine cannot report a simulation-specific count.
+- Actor inspection, physics, materials and simulation start/stop/pause/resume
+  use editor Python APIs. `control_unreal_simulation` `start` begins Simulate
+  In Editor by default (`mode: "simulate"`: the level runs and its physics
+  steps with no player, and the level viewport keeps the editor camera) or,
+  with `mode: "play"`, a Play session in the level viewport, where the game
+  mode spawns and possesses the player's pawn. Both are Play In Editor
+  sessions, and everything below about PIE holds for either. Starting while a
+  session runs resumes it if paused and otherwise leaves it as it is, whichever
+  mode it runs in (the reply's `mode` is then `null`); `pause` and `resume`
+  with no session running return `SimulationNotRunning`. Single-frame stepping
+  is not supported by the editor and returns `UnsupportedOperation`;
+  simulation `frame_count` is `null` when the engine cannot report a
+  simulation-specific count.
+- The physics, simulation and light tools refuse an argument out of range
+  before anything is sent, as a `ValidationError`. A range or choice the input
+  schema states (a force's `duration`, a page's `max_results` and `offset`) is
+  refused by the MCP layer, the field named in `details.errors`; a rule it
+  cannot state is refused by the tool, with `details.code` naming the problem
+  (`OUT_OF_RANGE`, `NOT_FINITE`, `UNKNOWN_UNITS`, `PARTIAL_LOCATION`,
+  `DURATION_WITH_IMPULSE` and the like) and the `parameter`, `value` and
+  range in `details`. The CLI, which calls the tools directly, gets the
+  tool's codes for every case.
+- The running simulation is a copy of the editor world, `UEDPIE_<n>_<map>`, in
+  which Unreal duplicates each actor at the same path, label and ActorGuid.
+  Only that copy steps: the editor world's bodies read as simulating but never
+  move. A copy destroyed during the simulation counts as none, though Unreal
+  keeps it findable until garbage collection.
+  - `apply_unreal_force` acts on the actor's copy in the running simulation,
+    given its editor path or its simulation path, and replies with
+    `simulation_actor_path`, `world: "simulation"`, the body's `mass_kg` and
+    `expected_delta_v`. With no simulation running it returns
+    `error_type: "SimulationNotRunning"`; an actor without a live copy
+    (spawned after the simulation started, not loaded in it, or destroyed in
+    it) returns `NotInSimulation`, and a copy that does not simulate physics
+    returns `IncompatibleBody`.
+  - Its units are Unreal's: a force in kg·cm/s² and an impulse in kg·cm/s
+    (1 N or 1 N·s is 100), or newtons and newton-seconds with `units: "si"`.
+    The application point is a world location in cm, fixed in the world for
+    the whole duration as the body moves; without one the force pushes the
+    center of mass. An impulse changes the velocity at once by impulse / mass.
+    A force with `duration` 0 acts for one physics step only, since Unreal
+    clears a force after each step (the reply says so).
+  - A positive `duration`, up to 600 s, keeps a force on for that much
+    physics time. Unreal's physics, gravity included, steps at most
+    `physics_step_limit_s` a frame (MaxPhysicsDeltaTime, 1/30 s by default;
+    with substepping, MaxSubsteps × MaxSubstepDeltaTime) however long the
+    frame, so every frame the body gets, as an impulse, the force's momentum
+    over the physics time that frame simulated. The force then keeps pace
+    with gravity at any frame rate: a body held up by exactly its weight keeps
+    its speed, give or take the one step the impulse lands behind. Frames
+    slower than the limit stretch the force in game time, as they slow the
+    physics, so `ends_at_sim_time` holds only while no frame is slower. Paused
+    time adds nothing, the force stops with the simulation, and forces add
+    up.
+  - `get_unreal_physics_state` reads bodies (by path, or every actor with a
+    tag) in the running simulation while one runs and in the editor world
+    otherwise (`world` picks one): location, rotation, linear velocity (cm/s),
+    angular velocity (degrees/s), whether the body is awake, mass, center of
+    mass, gravity and the physics mode. Each body lists both its
+    `editor_path` and `simulation_path`, and a body given by both is read
+    once; a path with no live actor, or no live copy in the world read, is in
+    `not_found`. Unreal reports contacts only to hit-event handlers, so none
+    are listed.
+  - `list_unreal_simulation_actors` lists the running simulation's actors
+    with their simulation and editor paths; an actor the simulation spawned,
+    such as the player's pawn, has a `null` editor path.
+  - Both reads are paged like the scene reads: `max_results` at most from
+    `offset`, a page stops before 30,000 characters of entries, `total`
+    counts every match and `next_offset` (null on the last page) starts the
+    next, which `hint` names.
 - `set_unreal_material_params` writes a Material Instance Constant through
   Unreal's MaterialEditingLibrary in one undoable transaction, in or out of
   Play In Editor, and reads every value back, so `success` alone tells
@@ -790,9 +856,10 @@ Behaviour worth knowing:
     detached in the same transaction, so Undo reattaches it, and the reply
     names the parent in `detached_from`.
   - `set_unreal_physics_params` takes a mass from 0.001 kg (Unreal's least)
-    to 1e9 kg and damping from 0 to 1e6, and reads every value back
-    (`applied`, `params_set`; `PhysicsParamsNotApplied` names one that reads
-    back different). A Static body keeps the values but has no mass
+    to 1e9 kg and damping from 0 to 1e6 (else a `ValidationError` with
+    `details.code: OUT_OF_RANGE`), and reads every value back (`applied`,
+    `params_set`; `PhysicsParamsNotApplied` names one that reads back
+    different, with `details.expected` and `details.actual`). A Static body keeps the values but has no mass
     (`mass_kg` 0) and never simulates until it is Movable; the `warning`
     says so. With no parameter it only reads the body.
   - `set_unreal_collision` checks a preset before writing (an unknown one
@@ -802,6 +869,31 @@ Behaviour worth knowing:
     simulation and after the map reloaded.
   - A path in a running simulation's world (`UEDPIE_<n>_<map>`) edits that
     play copy, which is neither undoable nor saved (`world: "simulation"`).
+  - `setup_unreal_physics_bulk` does the same for many editor actors in one
+    call and one undoable transaction: the `actor_paths`, plus every actor
+    with `tag`, in the outliner `folder` (or one under it) and whose label or
+    path contains `actor_filter`, each that is given, at most 1000. Each actor
+    is made simulated, kinematic or not physical as `enable_unreal_physics`
+    makes it, after an optional `collision_preset` (PhysicsActor makes props
+    physics-ready) and with optional mass, damping and gravity. Every actor
+    is checked first, the preset's collision standing in for its own: one
+    that cannot be set up refuses the call with nothing changed
+    (`IncompatibleBody`, the actors and reasons in `details.failed`), unless
+    `skip_failures` sets up the rest. An actor can still not take the setup
+    once it is written (it reads back not simulating); the call then puts
+    every actor it wrote back as it was, mobility, preset, collision and body
+    values included, cancels the transaction and fails with
+    `PhysicsNotApplied` (`details.expected` the setup asked for,
+    `details.actual` what each such actor read back). With `skip_failures`
+    only that actor is put back. A call that sets up no actor fails
+    (`IncompatibleBody`, `details.code: NOTHING_SET_UP`), as do one that
+    matches none (`NO_MATCH`), more than 1000 (`TOO_MANY_ACTORS`) and an
+    unknown preset (`UNKNOWN_PRESET`, as from `set_unreal_collision`). The
+    reply counts the actors matched, set up and failed and lists the first 50
+    of each. A procedural scene's
+    tag also selects its floor and walls; add `actor_filter: "_Box_"` for its
+    props. Setting up props one call at a time ran into the rate limit (126
+    bodies took 116 s); one call set up 200 in under 2 s.
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
   `get_unreal_interchange_info` reports whether the plugin is available.
@@ -1028,14 +1120,51 @@ Behaviour worth knowing:
 - SimReady conversion and validation are not implemented for Unreal. Those
   tools return `UnsupportedOperation` without changing files.
 - `analyze_unreal_scene_for_robotics` classifies the actors loaded in the
-  editor world by the bounding box of their collision-enabled components:
-  traversable floor-like surfaces (physics collision, at least 1 m² in plan, no
-  thicker than a quarter of the shorter side, tilted at most 15°), graspable
-  objects (Movable, physics collision, fitting in a 60 cm cube) and the
+  editor world by the oriented box of their physics-collision components: a
+  single component's box rotated and scaled with it (a static mesh's bounds,
+  a box, sphere or capsule's extent), several components' boxes in the
+  actor's frame, and a component of another kind, such as a landscape
+  heightfield, by its world-axis bounds. It finds traversable floor-like
+  surfaces (physics collision, a top face of at least 1 m², no thicker than a
+  quarter of its shorter side, tilted at most 15°), graspable objects
+  (Movable, physics collision, a box fitting in a 60 cm cube) and the
   collision setup of their static meshes (simple shapes, convex hulls, render
   triangles used as simple collision, physics collision without any simple
-  shape). A landscape section counts whole, hills included. The thresholds
-  come back as `criteria`.
+  shape). A surface's top face is the box face across its thinnest side,
+  facing up, so `tilt_degrees` is that face's tilt, `area_m2` its area and
+  `normal` its upward normal: a plank yawed 45° keeps its own 2000 × 50 cm, a
+  slab pitched 14° is a floor, and one turned upside down is still one. A
+  landscape section counts whole, hills included. Sizes are along each box's
+  own axes. The thresholds come back as `criteria`.
+  - An instanced static mesh component (ISM, HISM, a foliage type) is
+    measured one instance at a time, each by its mesh's box in that
+    instance's transform, so a floor of instanced tiles is one surface a
+    tile and each instanced box on a shelf a graspable object; such an entry
+    adds `component_path` and `instance_index`, and `mass_kg` is null, since
+    instances share their component's body. A component with more than 1000
+    instances is one entry by its world-axis bounds, with the count in
+    `instances`. Such a component used to be measured as one mesh at the
+    component's own transform, where no instance need be drawn, so a floor
+    of instanced tiles read as a single tile.
+  - The two lists are paged together: surfaces largest first, graspable
+    objects by path, each cut to `max_results` (default 50, at most 500) from
+    `offset`. `totals` counts every match, `returned` this page's, and
+    `next_offset` (null on the last page) starts the next page, which `hint`
+    names. A page that would exceed 32 KB holds fewer per category, the same
+    number for both, so it stays within the response budget. A 5,000-actor
+    level used to return 494,853 bytes, which the server cut to no surfaces
+    and every graspable object; its first page is now 22 KB.
+  - The first page (`offset` 0) scans the level, and the pages after it read
+    that scan, so paging through a large level measures it once instead of
+    once a page; the scan is kept up to 10 minutes, and the reply gives
+    `scanned_at` (Unix time on the editor host) and `snapshot_age_s`. A
+    later page whose scan has expired, or that was never made, scans again.
+    Ask for `offset` 0 to see changes made since.
+  - An `offset` or `max_results` out of range is refused by the input schema
+    (`ValidationError`, the field in `details.errors`), and `analysis_types`
+    names other than `traversability`, `graspability` and
+    `collision_complexity` by the tool (`ValidationError`, `details.code:
+    UNKNOWN_ANALYSIS`).
 - `generate_unreal_procedural_scene` builds a room, corridor, warehouse or
   outdoor scene from Engine basic shapes inside the bounds. The layout is
   planned before anything is spawned, so one that does not fit fails without
@@ -1052,7 +1181,38 @@ Behaviour worth knowing:
   transaction is cancelled. The actors are filed in their folder only once all
   have spawned, because Unreal keeps an outliner folder, empty, after its
   actors go and its Python API cannot delete one; a failed call therefore
-  leaves no folder behind. Props are Movable boxes; everything else is Static.
+  leaves no folder behind. Props are Movable boxes with the mesh's BlockAll
+  collision, not simulating; with `physics_props` they are made physics-ready
+  (PhysicsActor collision, simulating), so they fall and take forces once the
+  simulation starts, and the reply counts them in `physics_props`.
+  Everything else is Static. `parameters` must be a JSON object; anything
+  else is a `ValidationError` on `parameters` (`details.errors`).
+- `set_unreal_light_params` writes a point, spot, rect or directional light,
+  or a SkyLight's intensity, color and shadows, in one undoable transaction,
+  and reads every value back into `applied` and `current`; with no parameter
+  it only reads the light, and an actor that is not there is a
+  `NotFoundError`. Values are checked before anything is written, each a
+  `ValidationError`: intensity from 0 to 1e9 (1e30 lux was stored, and 1e39
+  overflowed Unreal's 32-bit float) and temperature 1000 to 15000 K (the
+  range Unreal's blackbody color covers; it clamps others) in the input
+  schema, the field named in `details.errors`; and, by the tool with a
+  `details.code`, attenuation radius above 0 (`OUT_OF_RANGE`), a color that
+  is not three channels between 0 and 1 (`NOT_A_COLOR`, `OUT_OF_RANGE`), a
+  value the light's class lacks (a directional light's attenuation radius,
+  a SkyLight's temperature;
+  `PROPERTY_NOT_ON_LIGHT`), and an actor with no light component, or
+  several and none at its root (`NOT_A_LIGHT`; it used to fail with a
+  Python traceback). A value Unreal still stores differently fails the call
+  (`LightParamsNotApplied`, `details.expected` and `details.actual`) and
+  puts every value of the call back, the ones it took too, and cancels the
+  transaction, so a failed call changes nothing (`applied` empty,
+  `params_set` 0). Intensity is in the light's unit, returned as
+  `intensity_unit`: `lux` for a directional light, the light's Intensity
+  Units for a point, spot or rect light (`candelas` by default, or
+  `lumens`, `ev`, `nits`, `unitless`), and `scale` (a multiplier) for a
+  SkyLight. `color` is sRGB, each channel 0 to 1 as the
+  color picker shows it, stored as the 8-bit color Unreal keeps
+  (channel × 255, rounded).
 - `get_unreal_material_info` reads a Material or Material Instance through
   editor scripting, in or out of Play In Editor: each scalar, vector and
   texture parameter with its value (a Material's default; for an instance,
@@ -1138,7 +1298,9 @@ Behaviour worth knowing:
     level's builder brush and engine helper actors the Outliner hides; the
     robotics analysis reports its static mesh collision counts, and the list
     of actors missing simple collision, as `null`, since Unreal does not
-    report mesh collision during PIE.
+    report mesh collision during PIE. To read the running game, use
+    `get_unreal_physics_state` and `list_unreal_simulation_actors` (above).
+  - `apply_unreal_force` acts on the running game's copy of the actor.
   - Editing actors already in the level by path (transform, lights, collision,
     physics settings, visibility, materials, parenting, components) keeps
     working and changes the editor world, which the running simulation does
@@ -1146,9 +1308,11 @@ Behaviour worth knowing:
     physics or collision edit says so in its `warning`. A physics or collision
     edit given the actor's path in the simulation's world (`UEDPIE_<n>_<map>`)
     changes the running copy instead, which is neither undoable nor saved;
-    every other actor tool finds no actor at such a path, and its error names
-    the editor's path. `set_unreal_actor_visibility` with `persistent` is
-    refused with `PIEActive`, as the editor selects nothing then.
+    `apply_unreal_force` and `get_unreal_physics_state` take such a path too
+    (and map an editor path to it); every other actor tool finds no actor
+    at such a path, and its error names the editor's path.
+    `set_unreal_actor_visibility` with `persistent` is refused with
+    `PIEActive`, as the editor selects nothing then.
   - `set_unreal_material_params` edits the material instance asset, which the
     running game uses too: an edit made during PIE shows in the game and stays
     after PIE stops.
@@ -1156,9 +1320,9 @@ Behaviour worth knowing:
     nothing, since Unreal reads back no selection during PIE and clears it
     when PIE stops: the reply has `selected: false`, `pie_active: true` and a
     `warning`. After Simulate In Editor (what `control_unreal_simulation`
-    starts) the camera stays where it was put; when a Play session in the
-    level viewport stops, Unreal replaces the editor camera, by default with
-    the game camera's last view.
+    starts by default) the camera stays where it was put; when a Play session
+    in the level viewport stops (`mode: "play"`), Unreal replaces the editor
+    camera, by default with the game camera's last view.
 - `capture_unreal_viewport` writes the image into the editor's
   `Saved/Screenshots` and returns its path on the editor host; `inline` also
   sends it as an image block, up to 256 KB. `format: "jpeg"` converts the PNG
@@ -1170,8 +1334,9 @@ Behaviour worth knowing:
   viewport, whose camera `set_unreal_camera_view` moves; `game` is the
   player's view during a Play In Editor session (HighResShot run in the game
   world goes to its game viewport); `auto` (the default) takes the game view
-  when the game viewport draws it within 2 s. During Simulate In Editor (what
-  `control_unreal_simulation` starts) the game world's shot goes to the level
+  when the game viewport draws it within 2 s (`control_unreal_simulation`
+  with `mode: "play"` starts such a session). During Simulate In Editor (what
+  `control_unreal_simulation` starts by default) the game world's shot goes to the level
   viewport showing the simulation, which writes it late or not at all, and
   Unreal's Python cannot tell Simulate from Play: `auto` then captures the
   level viewport, with a warning, and `game` fails with `InvalidState`.
@@ -1511,6 +1676,15 @@ Behaviour worth knowing:
   captures, saves, exports, playback and editor-only `control_blender_ui`
   actions record no step. Details:
   [blender-attachment.md](blender-attachment.md#undo-and-unsaved-changes).
+- In attached mode calls sent together wait their turn on Blender's main thread
+  instead of failing. When one gets no answer, its error (`TimeoutError` or
+  `ConnectionError`) says in `details.executed` whether it ran: `false` is safe
+  to retry. A bridge holding 64 MiB of requests refuses another with
+  `InstanceBusy` (`details.code: "bridge_busy"`) before reading it, and Simul
+  retries that while its timeout allows. A script past its own timeout reports `timed_out: true`, as in
+  embedded mode. Requests up to 32 MiB of JSON are read however long they take
+  to arrive. Details:
+  [blender-attachment.md](blender-attachment.md#concurrent-calls-timeouts-and-large-requests).
 - `open_blender_file` refuses with `UnsavedChangesError` while the open file has
   unsaved changes; save them with `save_blender_file`, or pass
   `discard_unsaved: true`. Headless (embedded) Blender does not track unsaved
@@ -2341,11 +2515,29 @@ Behaviour worth knowing:
   the pose is the simulation's result for the frame, and `warning` explains
   when it is not. An add-on built before this report answers without these
   fields, and the server returns them as `null`.
-- `search_blender_objects` refuses a `name_pattern` that repeats a group holding
-  a quantifier or alternatives, such as `(\w+)+`: Python's regex search
-  backtracks, and on a long object name such a pattern runs for hours on
-  Blender's main thread. `get_unreal_actor_by_semantic_label` refuses the same
-  patterns in regex mode.
+- `search_blender_objects` searches a `name_pattern` that Python's `re`
+  could backtrack on for long, such as `(\w+)+`, `.*.*.*x` or
+  `.*left.*front.*wheel.*joint`, with a Thompson-NFA simulation instead, whose
+  time grows linearly with the name, so Blender's main thread cannot freeze on
+  it. Which patterns `re` may search is bounded in `simul.utils.regex_guard`:
+  every quantifier, optional element and alternative is a choice, quantifiers
+  that can divide the same characters between them multiply each other's
+  choices (through quantifiers that can match nothing and optional groups too),
+  and an unanchored search adds one for where it starts. What a lookaround
+  holds is counted where the search reaches it, as if the pattern went on into
+  it there, since `re` matches it again on every arrival. The steps are counted
+  for a 255-character name, Blender 5's limit. A pattern that also needs a
+  back-reference, an atomic group, a possessive quantifier, a conditional or a
+  lookaround that itself backtracks for long (`(?=.*.*.*\d)`), which the
+  linear-time search lacks, is refused with `error_type: "ValidationError"`
+  and `details.code: "regex_backtracking"`. A pattern with more than 32
+  quantifiers in a row goes to the linear-time search without being bounded,
+  and one over 512 characters is refused with `details.code:
+  "pattern_too_long"`.
+  `get_unreal_actor_by_semantic_label` searches tags in the editor with `re`
+  and `re.IGNORECASE`, so in regex mode it refuses the patterns that bound does
+  not allow for a 1023-character tag under IGNORECASE (`.*.*x`, `A*a*x`,
+  `\w*(?=\w*\d)`), with the same error; contains mode takes any label.
 - `execute_blender_script` returns the first `max_output_chars` characters of
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a
@@ -2408,7 +2600,7 @@ script the bridge stopped at its timeout (`TimeoutError`).
 | `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
 | `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
 | `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a non-domain exception, a reply that does not parse or does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
-| `InstanceBusy` | The Isaac instance is serving another call | Retry shortly |
+| `InstanceBusy` | The Isaac instance is serving another call; a Blender instance is busy (`attach_blender_window`) or its bridge holds as many waiting requests as it takes (`bridge_busy`) | Retry shortly |
 | `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
 
 Domain types of the server:

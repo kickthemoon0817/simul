@@ -33,6 +33,7 @@ from ..utils.asset_references import (
     interchange_outside_references,
 )
 from ..utils.paths import PathPolicy, SandboxDenied
+from ..utils.regex_guard import UNREAL_TAG_LENGTH, RegexRefused
 from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
@@ -98,9 +99,11 @@ from ._unreal_scripts import (
     ACTOR_HELPERS,
     ACTOR_INFO,
     ADD_COMPONENT,
+    APPLY_FORCE,
     ASSET_IMPORT,
     ASSET_SEARCH,
     ASSIGN_MATERIAL,
+    BULK_PHYSICS,
     CAMERA_CAPTURE,
     CAPTURE_LOCK_HELPERS,
     CREATE_MATERIAL_INSTANCE,
@@ -118,6 +121,8 @@ from ._unreal_scripts import (
     LISTED_CHILDREN,
     LOADED_MAP,
     MATERIAL_INFO,
+    NOT_IN_SIMULATION,
+    PHYSICS_STATE,
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
@@ -131,6 +136,9 @@ from ._unreal_scripts import (
     SET_LIGHT_PARAMS,
     SET_MATERIAL_PARAMS,
     SET_PHYSICS_PARAMS,
+    SIMULATION_ACTORS,
+    SIMULATION_NOT_RUNNING,
+    SIMULATION_START_HINT,
     SIMULATION_STATUS,
     SPAWN_ACTOR,
     USD_EXPORT,
@@ -165,6 +173,24 @@ ROBOTICS_CRITERIA: Dict[str, float] = {
 
 #: Most actor paths the collision summary lists; its counts cover every actor.
 ROBOTICS_LISTED_LIMIT = 50
+
+#: ``analyze_scene_for_robotics`` entries per category: the default and most per page.
+ROBOTICS_DEFAULT_RESULTS = 50
+ROBOTICS_MAX_RESULTS = 500
+
+#: Most bytes of JSON an analysis page holds. Under the server's 40 KB result
+#: budget, which would otherwise cut the largest list alone (a 5,000-actor level
+#: gave 494,853 bytes and lost every surface), with room for the envelope.
+ROBOTICS_PAGE_BYTES = 32_000
+
+#: Most instances of one instanced static mesh component the robotics analysis
+#: measures one by one; a component with more counts whole, by its world bounds.
+ROBOTICS_MAX_INSTANCES = 1000
+
+#: Seconds the robotics analysis keeps a scan for the pages after the first;
+#: offset 0 always scans. A 5,011-actor level took 13 to 99 s a page on a loaded
+#: machine when every page scanned the level again.
+ROBOTICS_SNAPSHOT_SECONDS = 600.0
 
 #: ``set_physics_params`` mass range, in kg. Unreal clamps a lighter override
 #: to 0.001 kg (FBodyInstance::MassInKgOverride's ClampMin); a body heavier than
@@ -249,10 +275,166 @@ USD_IMPORT_OPTIONS: Tuple[str, ...] = USD_IMPORT_BOOLEAN_OPTIONS + (
 # UE 5.7); an object name's are _INVALID_OBJECT_NAME_CHARACTERS, below.
 _INVALID_FOLDER_CHARACTERS = frozenset("\\:*?\"<>|' ,.&!~\n\r\t@#")
 
+#: Most actors ``setup_physics_bulk`` sets up in one call, and how many of the
+#: configured and failed actors its reply lists (it counts them all).
+PHYSICS_BULK_MAX_ACTORS = 1000
+PHYSICS_BULK_LISTED = 50
+
+#: ``set_light_params`` color temperature range, in Kelvin: what Unreal's
+#: blackbody color covers (FLinearColor::MakeFromColorTemperature clamps to it),
+#: so 100 K and 1e9 K, which it stored, rendered as these ends.
+LIGHT_MIN_TEMPERATURE_K = 1000.0
+LIGHT_MAX_TEMPERATURE_K = 15000.0
+
+#: Most light intensity ``set_light_params`` takes, in the light's unit. The
+#: sun is about 120,000 lux and a stadium floodlight about 1e6 lumens; 1e30 lux
+#: was stored, and 1e39 overflowed Unreal's 32-bit float.
+LIGHT_MAX_INTENSITY = 1e9
+
+#: ``control_simulation`` actions and start modes, as the tool's enums list them.
+SIMULATION_ACTIONS: Tuple[str, ...] = ("start", "stop", "pause", "resume", "step")
+SIMULATION_MODES: Tuple[str, ...] = ("simulate", "play")
+
+#: ``apply_force`` units and how many Unreal units (kg cm/s^2 for a force,
+#: kg cm/s for an impulse) one of each is.
+FORCE_UNITS: Tuple[str, ...] = ("unreal", "si")
+FORCE_UNIT_SCALE: Dict[str, float] = {"unreal": 1.0, "si": 100.0}
+
+#: Longest ``apply_force`` duration, in seconds of simulation time.
+FORCE_MAX_DURATION_S = 600.0
+
+#: ``get_physics_state`` worlds and its most bodies per call.
+PHYSICS_STATE_WORLDS: Tuple[str, ...] = ("auto", "simulation", "editor")
+PHYSICS_STATE_MAX_RESULTS = 1000
+
+#: Most actors ``list_simulation_actors`` returns per call.
+SIMULATION_ACTORS_MAX_RESULTS = 5000
+
+
+class ArgumentError(UnrealError, ValueError):
+    """A physics, simulation or light tool argument out of range, refused before anything is sent.
+
+    The envelope reports it as a ``ValidationError`` whose ``details.code``
+    names the problem, with the parameter, the value and the range in
+    ``details``; it is still a ``ValueError`` to ``except`` clauses.
+    """
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message, VALIDATION_ERROR, details={"code": code, **details})
+
+
+def _check_page_args(offset: int, max_results: int, most: int) -> None:
+    """Refuse a page size or offset out of range with an ArgumentError."""
+    if not 1 <= max_results <= most:
+        raise ArgumentError(
+            f"max_results must be from 1 to {most}, got {max_results}",
+            "OUT_OF_RANGE",
+            parameter="max_results",
+            value=max_results,
+            minimum=1,
+            maximum=most,
+        )
+    if offset < 0:
+        raise ArgumentError(
+            f"offset must be 0 or more, got {offset}", "OUT_OF_RANGE", parameter="offset", value=offset, minimum=0
+        )
+
+
+def _check_range(name: str, value: float, low: float, high: float, unit: str = "") -> float:
+    """``value`` as a float when it is finite and within [low, high], else an ArgumentError."""
+    if not (math.isfinite(value) and low <= value <= high):
+        raise ArgumentError(
+            f"{name} must be from {low:g} to {high:g}{unit}, got {value!r}",
+            "OUT_OF_RANGE",
+            parameter=name,
+            value=value if math.isfinite(value) else str(value),
+            minimum=low,
+            maximum=high,
+        )
+    return float(value)
+
+
 # UE's FMD5 hex output is lowercase. Accept either case from configured
 # input and normalize. Anything that isn't a clean 32-char hex digest is
 # treated as plaintext and MD5-hashed (UE's FMD5::HashAnsiString).
 _HEX32_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+#: The categories ``analyze_scene_for_robotics`` lists, paged together.
+ROBOTICS_LISTS: Tuple[str, ...] = ("traversable_surfaces", "graspable_objects")
+
+
+def _robotics_page(result: Dict[str, Any], offset: int, max_results: int) -> Dict[str, Any]:
+    """Fit an analysis page within ROBOTICS_PAGE_BYTES and say where the next starts.
+
+    Both lists keep the same number of entries, the most that fits (at least
+    one, so paging always moves on), so the next page at ``offset`` plus that
+    number continues both. A page over the budget used to be cut by the server
+    at its largest list alone, with a hint naming parameters this tool lacks.
+
+    Args:
+        result: The editor script's payload: each list cut to ``max_results``
+            from ``offset``, and ``totals``.
+        offset: The page's offset.
+        max_results: The most entries per category asked for.
+
+    Returns:
+        The payload with the lists cut to fit, ``returned``, ``offset``,
+        ``max_results``, ``next_offset`` and ``hint``.
+    """
+    counted = result.get("totals") or {}
+    totals = {name: int(counted.get(name, len(result.get(name) or []))) for name in ROBOTICS_LISTS}
+    lists = {name: list(result.get(name) or []) for name in ROBOTICS_LISTS}
+
+    def page(keep: int) -> Dict[str, Any]:
+        return {**result, **{name: items[:keep] for name, items in lists.items()}, "totals": totals}
+
+    keep = max(len(items) for items in lists.values())
+    while keep > 1 and len(json.dumps(page(keep))) > ROBOTICS_PAGE_BYTES:
+        keep = keep * 3 // 4 if keep > 4 else keep - 1
+    payload = page(keep)
+    end = offset + keep
+    more = any(totals[name] > end for name in ROBOTICS_LISTS)
+    hint = None
+    if more:
+        hint = (
+            f"Both lists are paged together, {keep} per category from offset {offset}; totals counts "
+            f"every match. Pass offset {end} for the next page, or narrow the query with actor_filter "
+            "or analysis_types."
+        )
+        if keep < max_results:
+            hint += f" This page holds {keep} rather than max_results {max_results} to fit the response budget."
+    payload.update(
+        returned={name: len(payload[name]) for name in ROBOTICS_LISTS},
+        offset=offset,
+        max_results=max_results,
+        next_offset=end if more else None,
+        hint=hint,
+    )
+    return payload
+
+
+def _physics_values(
+    mass: Optional[float],
+    linear_damping: Optional[float],
+    angular_damping: Optional[float],
+    enable_gravity: Optional[bool],
+) -> Dict[str, Any]:
+    """The body parameters given, checked against Unreal's ranges.
+
+    Raises:
+        ArgumentError: A value is not finite or out of its range (a
+            ValidationError with ``details.code`` OUT_OF_RANGE).
+    """
+    values: Dict[str, Any] = {}
+    if mass is not None:
+        values["mass"] = _check_range("mass", mass, PHYSICS_MIN_MASS_KG, PHYSICS_MAX_MASS_KG, " kg")
+    for name, value in (("linear_damping", linear_damping), ("angular_damping", angular_damping)):
+        if value is not None:
+            values[name] = _check_range(name, value, 0.0, PHYSICS_MAX_DAMPING)
+    if enable_gravity is not None:
+        values["enable_gravity"] = bool(enable_gravity)
+    return values
 
 
 def _passphrase_to_md5(value: Optional[str]) -> Optional[str]:
@@ -335,9 +517,9 @@ CAPTURE_VIEWS: Tuple[str, ...] = ("auto", "editor", "game")
 
 #: ``capture_viewport``'s error for view "game" without a Play session.
 GAME_VIEW_UNAVAILABLE = (
-    "view 'game' needs a Play In Editor session with a player, and none runs. control_unreal_simulation "
-    "starts Simulate In Editor, which renders in the level editor viewport: capture that with view 'editor' "
-    "or 'auto'."
+    "view 'game' needs a Play In Editor session with a player, and none runs: control_unreal_simulation, "
+    "action 'start', mode 'play' starts one. Simulate In Editor (its default mode) renders in the level editor "
+    "viewport: capture that with view 'editor' or 'auto'."
 )
 
 #: Seconds the game view's screenshot may take before the game viewport counts
@@ -351,8 +533,9 @@ _GAME_VIEW_WAIT_SECONDS = 2.0
 #: ``capture_viewport``'s error for view "game" when the game viewport drew nothing.
 GAME_VIEW_DID_NOT_DRAW = (
     "Play In Editor runs, but its game viewport drew no screenshot within 2 s. During Simulate In Editor (what "
-    "control_unreal_simulation starts) the level editor viewport shows the simulation: capture it with view "
-    "'editor' or 'auto'. Unreal cannot cancel the shot, so it may still write it to details.pending_path."
+    "control_unreal_simulation starts by default) the level editor viewport shows the simulation: capture it "
+    "with view 'editor' or 'auto'. Unreal cannot cancel the shot, so it may still write it to "
+    "details.pending_path."
 )
 
 #: ``capture_viewport``'s warning when view "auto" fell back to the editor view.
@@ -2378,7 +2561,15 @@ class UnrealRuntimeSession(LoggerMixin):
     # Phase 1 session methods — Scene Read Operations
     # ------------------------------------------------------------------
 
-    async def _paged_read(self, script: str, args: Dict[str, Any], noun: str, total_key: str) -> Dict[str, Any]:
+    async def _paged_read(
+        self,
+        script: str,
+        args: Dict[str, Any],
+        noun: str,
+        total_key: str,
+        *,
+        expected_errors: Sequence[str] = (),
+    ) -> Dict[str, Any]:
         """Run a paged scene read and say how to get the rest.
 
         The editor script renders one page (``_unreal_scripts.page``) and
@@ -2390,12 +2581,14 @@ class UnrealRuntimeSession(LoggerMixin):
             args: The script's arguments; ``budget`` is set here.
             noun: What the page lists, plural, for the hint.
             total_key: The result's key for every match.
+            expected_errors: ``error_type`` values the script reports for a
+                request it refused as asked (``_execute_json_script``).
 
         Returns:
             The script's result with ``truncated`` and ``hint``, or its error.
         """
         args = {**args, "budget": PAGE_BUDGET_BYTES}
-        result = await self._execute_json_script(f"args = {args!r}\n" + script)
+        result = await self._execute_json_script(f"args = {args!r}\n" + script, expected_errors=expected_errors)
         if result.get("error"):
             return result
         ended = result.pop("page_ended_by", None)
@@ -4497,56 +4690,98 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         cast_shadows: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Set light component parameters on a light actor.
+        Set a light's parameters and read them back.
 
-        Writes the actor's light component in one editor transaction and
-        reads every value back. A parameter left as None keeps its current
-        value.
+        Writes the actor's light component (a point, spot, rect or
+        directional light, or a SkyLight's intensity, color and shadows) in
+        one undoable editor transaction and reads every value back. Values are
+        checked before anything is written; a value Unreal still stores
+        differently is put back and reported. A parameter left as None keeps
+        its current value; with none given the light is only read.
+
+        Intensity is in the light's own unit, returned as ``intensity_unit``:
+        lux for a directional light, the light's Intensity Units for a point,
+        spot or rect light (candelas by default, or lumens, EV, nits or
+        unitless), and a plain multiplier for a SkyLight. When Unreal stores a
+        value differently, every value is put back, so a failed call changes
+        nothing. The color is sRGB: each channel
+        0-1, gamma-encoded as the color picker shows it, stored as the 8-bit
+        FColor Unreal keeps (channel x 255, rounded).
 
         Args:
             actor_path: Light actor path.
-            intensity: Light intensity.
-            color: Light color as [r, g, b], each channel 0-1; None keeps the
-                current color.
-            temperature: Color temperature in Kelvin.
+            intensity: Light intensity, 0 to 1e9, in the light's unit.
+            color: Light color as sRGB [r, g, b], each channel 0-1; None keeps
+                the current color.
+            temperature: Color temperature in Kelvin, 1000 to 15000, the
+                range Unreal's blackbody color covers (it clamps others);
+                applies with use_temperature.
             use_temperature: Use color temperature instead of direct color.
-            attenuation_radius: Light attenuation radius in cm (point and
-                spot lights only).
+            attenuation_radius: Light attenuation radius in cm, more than 0
+                (point, spot and rect lights only).
             cast_shadows: Enable shadow casting.
 
         Returns:
-            Dictionary with actor_path, component_path, params_set and the
-            read-back ``applied`` values, or a ``ScriptError`` envelope when
-            the actor has no light component, a property does not exist on
-            it, or Unreal did not apply a value.
+            Dictionary with actor_path, component_path, light_class,
+            intensity_unit, params_set, ``applied`` (the values given, read
+            back), ``current`` (every light value read back) and warning; or
+            a ValidationError envelope for an actor without a light
+            (details.code NOT_A_LIGHT) or a value the light class lacks
+            (PROPERTY_NOT_ON_LIGHT: a directional light's attenuation radius,
+            a SkyLight's temperature; nothing written), a
+            LightParamsNotApplied envelope for a value Unreal stored
+            differently (details.expected and details.actual; every value put
+            back), or a NotFoundError envelope when no actor is at the path.
 
         Raises:
-            ValueError: ``color`` is not three numbers between 0 and 1.
+            ArgumentError: ``color`` is not three numbers between 0 and 1, or
+                another value is not finite or out of its range (a
+                ValidationError with ``details.code``).
         """
-        # Python editor-property names on ULightComponent and subclasses.
+        # Python editor-property names on ULightComponentBase and subclasses.
         values: Dict[str, Any] = {}
         if intensity is not None:
-            values["intensity"] = intensity
+            values["intensity"] = _check_range("intensity", intensity, 0.0, LIGHT_MAX_INTENSITY)
         if color is not None:
-            rgb = _vector3("color", color, "r, g, b")
+            try:
+                rgb = _vector3("color", color, "r, g, b")
+            except ValueError as exc:
+                raise ArgumentError(str(exc), "NOT_A_COLOR", parameter="color", value=str(list(color))) from None
             if not all(0.0 <= channel <= 1.0 for channel in rgb):
-                raise ValueError(f"color channels must be between 0 and 1, got {list(color)!r}")
+                raise ArgumentError(
+                    f"color channels must be between 0 and 1, got {list(color)!r}",
+                    "OUT_OF_RANGE",
+                    parameter="color",
+                    value=list(rgb),
+                    minimum=0.0,
+                    maximum=1.0,
+                )
             # LightColor is an FColor: 0-255 channels.
             values["light_color"] = [round(channel * 255) for channel in rgb] + [255]
         if temperature is not None:
-            values["temperature"] = temperature
+            values["temperature"] = _check_range(
+                "temperature", temperature, LIGHT_MIN_TEMPERATURE_K, LIGHT_MAX_TEMPERATURE_K, " K"
+            )
         if use_temperature is not None:
             values["use_temperature"] = use_temperature
         if attenuation_radius is not None:
-            values["attenuation_radius"] = attenuation_radius
+            if not (math.isfinite(attenuation_radius) and attenuation_radius > 0):
+                raise ArgumentError(
+                    f"attenuation_radius must be a finite number above 0, got {attenuation_radius!r}",
+                    "OUT_OF_RANGE",
+                    parameter="attenuation_radius",
+                    value=attenuation_radius if math.isfinite(attenuation_radius) else str(attenuation_radius),
+                    minimum=0.0,
+                )
+            values["attenuation_radius"] = float(attenuation_radius)
         if cast_shadows is not None:
             values["cast_shadows"] = cast_shadows
 
-        if not values:
-            return {"actor_path": actor_path, "params_set": 0}
-
         args = {"actor_path": actor_path, "values": values}
-        result = await self._execute_json_script(f"args = {args!r}\n" + SET_LIGHT_PARAMS)
+        result = await self._execute_json_script(
+            f"args = {args!r}\n" + SET_LIGHT_PARAMS,
+            expected_errors=("ValidationError", "LightParamsNotApplied", "NotFoundError"),
+        )
         return {"actor_path": actor_path, **result}
 
     async def set_render_settings(
@@ -4621,23 +4856,57 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
     # Phase 5: Physics & Simulation Control
     # ------------------------------------------------------------------
 
-    async def control_simulation(self, action: str) -> Dict[str, Any]:
+    async def control_simulation(self, action: str, mode: str = "simulate") -> Dict[str, Any]:
         """
-        Control a Play-In-Editor (PIE) session.
+        Start, stop, pause or resume the editor's simulation (Play In Editor).
 
-        Starting an already paused session resumes it. Commands targeting the
-        current state leave the session unchanged.
+        ``start`` begins Simulate In Editor by default: the level runs and its
+        physics steps with no player, the level viewport keeps the editor
+        camera. ``mode`` "play" begins a Play session instead, in the level
+        viewport: the game mode spawns and possesses the player's pawn, and
+        when it stops Unreal puts the game camera's last view in the viewport.
+        Starting a session that runs resumes it if paused and otherwise leaves
+        it as it is, whichever mode it runs in; the other actions leave a
+        session already in their state unchanged. While either mode runs the
+        editor world refuses spawns and deletes (PIEActive);
+        ``apply_force``, ``get_physics_state`` and ``list_simulation_actors``
+        act on and read the simulation's copies of the actors, while the
+        physics and collision edits given an editor path change the editor
+        world, which the running simulation does not see.
 
         Args:
-            action: One of start, stop, pause, resume, step.
+            action: start, stop, pause, resume or step (step is refused:
+                editor Python cannot advance one frame).
+            mode: For start: "simulate" (Simulate In Editor) or "play".
 
         Returns:
-            Dict with action executed and resulting state.
+            Dict with action, the resulting state (playing, paused or
+            stopped) and, for start, the mode it began in (null when a
+            session already ran); or a SimulationNotRunning envelope for
+            pause or resume with no session running.
+
+        Raises:
+            ArgumentError: An unknown action or mode (a ValidationError).
         """
 
         action = action.lower().strip()
-        if action not in {"start", "stop", "pause", "resume", "step"}:
-            raise ValueError(f"Invalid PIE action: {action}")
+        if action not in SIMULATION_ACTIONS:
+            raise ArgumentError(
+                f"Invalid PIE action: {action}; use {', '.join(SIMULATION_ACTIONS)}",
+                "UNKNOWN_ACTION",
+                parameter="action",
+                value=action,
+                allowed=list(SIMULATION_ACTIONS),
+            )
+        mode = mode.lower().strip()
+        if mode not in SIMULATION_MODES:
+            raise ArgumentError(
+                f"Invalid simulation mode: {mode}; use {', '.join(SIMULATION_MODES)}",
+                "UNKNOWN_MODE",
+                parameter="mode",
+                value=mode,
+                allowed=list(SIMULATION_MODES),
+            )
         if action == "step":
             return {
                 "success": False,
@@ -4650,11 +4919,15 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         if action in {"pause", "resume"} and not status["is_playing"]:
             return {
                 "success": False,
-                "error_type": "InvalidState",
-                "error": "PIE is not running",
+                "error_type": SIMULATION_NOT_RUNNING,
+                "error": f"No simulation is running, so there is nothing to {action}",
+                "details": {"code": "SIMULATION_NOT_RUNNING", "hint": SIMULATION_START_HINT},
             }
-        if action == "start" and not status["is_playing"]:
-            command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_play_simulate()"
+        started = action == "start" and not status["is_playing"]
+        if started:
+            command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)." + (
+                "editor_play_simulate()" if mode == "simulate" else "editor_request_begin_play()"
+            )
         elif action == "stop" and status["is_playing"]:
             command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_end_play()"
         elif action in {"start", "pause", "resume"} and status["is_paused"] != (
@@ -4692,7 +4965,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "resume": "playing",
             }[action]
             if state == target:
-                return {"action": action, "state": state}
+                result: Dict[str, Any] = {"action": action, "state": state}
+                if action == "start":
+                    result["mode"] = mode if started else None
+                return result
             if asyncio.get_running_loop().time() >= deadline:
                 return {
                     "success": False,
@@ -4842,51 +5118,126 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         location_x: Optional[float] = None,
         location_y: Optional[float] = None,
         location_z: Optional[float] = None,
+        duration: float = 0.0,
+        units: str = "unreal",
     ) -> Dict[str, Any]:
         """
-        Apply a force or impulse to an actor's physics body.
+        Apply a force or impulse to an actor's body in the running simulation.
+
+        Only the simulation's bodies step: the editor world's read as
+        simulating but never move, so an impulse on them was lost. The actor
+        (an editor or a simulation path) is mapped to its copy in the running
+        simulation and the force acts there; with no simulation running the
+        call is refused (``SimulationNotRunning``). The copy must simulate
+        physics (``enable_physics`` on the editor actor before the simulation
+        starts).
+
+        Units are Unreal's by default: a force in kg cm/s^2 (1 N is 100) and an
+        impulse in kg cm/s (1 N s is 100); ``units`` "si" takes newtons and
+        newton-seconds. The application point is a world location in cm, fixed
+        in the world for the whole duration as the body moves; without one the
+        force pushes the center of mass. An impulse changes the velocity at
+        once by impulse / mass. A force with ``duration`` 0 acts for one
+        physics step only, as Unreal clears a force after each step. A positive
+        ``duration`` keeps it on for that many seconds of physics time: every
+        frame the body gets, as an impulse, the force's momentum over the
+        physics time that frame simulated, the frame's game time capped at the
+        physics step limit (``physics_step_limit_s``, Unreal's
+        MaxPhysicsDeltaTime, 1/30 s by default). So the force keeps pace with
+        gravity at any frame rate, and frames slower than the limit stretch it
+        in game time as they slow Unreal's physics. Paused time adds nothing,
+        and the force ends early when the simulation stops. Forces add up, so a
+        second call acts with the first.
 
         Args:
-            actor_path: Full actor object path.
-            force_x: Force X component.
-            force_y: Force Y component.
-            force_z: Force Z component.
-            is_impulse: True for impulse, False for continuous force.
-            location_x: Application point X (None = center of mass).
+            actor_path: Full actor object path, in the editor or the
+                simulation's world.
+            force_x: Force or impulse X component.
+            force_y: Force or impulse Y component.
+            force_z: Force or impulse Z component.
+            is_impulse: True for an impulse (instant change of momentum),
+                False for a force.
+            location_x: Application point X in world cm (None = center of
+                mass), fixed in the world for the whole duration.
             location_y: Application point Y.
             location_z: Application point Z.
+            duration: Seconds of physics time a force keeps acting, 0 to 600;
+                0 acts for one physics step. Not for an impulse.
+            units: "unreal" (kg cm/s^2, kg cm/s) or "si" (N, N s).
 
         Returns:
-            Dict with actor_path, force_applied, force_vector, is_impulse.
+            Dict with actor_path, simulation_actor_path (the copy acted on),
+            component_path, world ("simulation"), force_applied,
+            force_vector (as given, in ``units``), units, force_vector_unreal
+            (as applied), is_impulse, application ("impulse", "one_frame" or
+            "continuous"), duration_s, mass_kg, expected_delta_v (cm/s: the
+            change of linear velocity the impulse, or the force over its
+            duration, gives the body alone; null for one step),
+            physics_step_limit_s, sim_time, ends_at_sim_time (when a continuous
+            force ends if no frame is slower than the step limit), paused and
+            warning; or a SimulationNotRunning, NotFoundError, NotInSimulation
+            or IncompatibleBody envelope.
+
+        Raises:
+            ArgumentError: Partial application coordinates, a value that is not
+                finite, an unknown unit, or a duration out of range or given
+                with an impulse (a ValidationError with ``details.code``).
         """
 
         location = (location_x, location_y, location_z)
-        if any(v is not None for v in location) and not all(
-            v is not None for v in location
-        ):
-            raise ValueError("Provide all three force application coordinates or none")
-        name = "add_impulse" if is_impulse else "add_force"
-        args = (
-            f"unreal.Vector({float(force_x)!r}, {float(force_y)!r}, {float(force_z)!r})"
+        if any(v is not None for v in location) and not all(v is not None for v in location):
+            raise ArgumentError(
+                "Provide all three force application coordinates or none",
+                "PARTIAL_LOCATION",
+                parameter="location",
+                value=[v for v in location],
+            )
+        if units not in FORCE_UNITS:
+            raise ArgumentError(
+                f"units must be one of {', '.join(FORCE_UNITS)}, got {units!r}",
+                "UNKNOWN_UNITS",
+                parameter="units",
+                value=units,
+                allowed=list(FORCE_UNITS),
+            )
+        given = (float(force_x), float(force_y), float(force_z))
+        for name, value in zip(("force_x", "force_y", "force_z", "location_x", "location_y", "location_z"),
+                               given + location):
+            if value is not None and not math.isfinite(value):
+                raise ArgumentError(
+                    f"{name} must be a finite number, got {value!r}", "NOT_FINITE", parameter=name, value=str(value)
+                )
+        duration = _check_range("duration", duration, 0.0, FORCE_MAX_DURATION_S, " s")
+        if is_impulse and duration:
+            raise ArgumentError(
+                "duration applies to a force; an impulse acts at once",
+                "DURATION_WITH_IMPULSE",
+                parameter="duration",
+                value=duration,
+            )
+        scale = FORCE_UNIT_SCALE[units]
+        applied = [v * scale for v in given]
+        args = {
+            "actor_path": actor_path,
+            "vector": applied,
+            "location": None if location_x is None else [float(v) for v in location],  # type: ignore[arg-type]
+            "impulse": bool(is_impulse),
+            "duration": duration,
+        }
+        result = await self._execute_json_script(
+            f"args = {args!r}\n" + APPLY_FORCE,
+            expected_errors=(SIMULATION_NOT_RUNNING, NOT_IN_SIMULATION, INCOMPATIBLE_BODY),
         )
-        if location_x is not None and location_y is not None and location_z is not None:
-            name += "_at_location"
-            args += f", unreal.Vector({float(location_x)!r}, {float(location_y)!r}, {float(location_z)!r})"
-        code = (
-            "if not component.is_simulating_physics():\n"
-            "    raise RuntimeError('Component is not simulating physics')\n"
-            f"component.{name}({args})\n"
-        )
-        return await self._component_operation(
-            actor_path,
-            code,
-            {
-                "actor_path": actor_path,
-                "force_applied": True,
-                "force_vector": (force_x, force_y, force_z),
-                "is_impulse": is_impulse,
-            },
-        )
+        if result.get("error"):
+            return result
+        return {
+            **result,
+            "force_vector": list(given),
+            "units": units,
+            "force_vector_unreal": applied,
+            "is_impulse": bool(is_impulse),
+            "duration_s": duration,
+        }
 
     async def set_physics_params(
         self,
@@ -4924,25 +5275,214 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             written).
 
         Raises:
-            ValueError: A value is not finite or out of its range.
+            ArgumentError: A value is not finite or out of its range (a
+                ValidationError with ``details.code`` OUT_OF_RANGE).
         """
-        values: Dict[str, Any] = {}
-        if mass is not None:
-            if not (math.isfinite(mass) and PHYSICS_MIN_MASS_KG <= mass <= PHYSICS_MAX_MASS_KG):
-                raise ValueError(
-                    f"mass must be from {PHYSICS_MIN_MASS_KG:g} to {PHYSICS_MAX_MASS_KG:g} kg, got {mass!r}"
-                )
-            values["mass"] = float(mass)
-        for name, value in (("linear_damping", linear_damping), ("angular_damping", angular_damping)):
-            if value is not None:
-                if not (math.isfinite(value) and 0.0 <= value <= PHYSICS_MAX_DAMPING):
-                    raise ValueError(f"{name} must be from 0 to {PHYSICS_MAX_DAMPING:g}, got {value!r}")
-                values[name] = float(value)
-        if enable_gravity is not None:
-            values["enable_gravity"] = bool(enable_gravity)
+        values = _physics_values(mass, linear_damping, angular_damping, enable_gravity)
         args = {"actor_path": actor_path, "values": values, "transaction": "simul: set physics params"}
         return await self._execute_json_script(
             f"args = {args!r}\n" + SET_PHYSICS_PARAMS, expected_errors=("PhysicsParamsNotApplied",)
+        )
+
+    async def setup_physics_bulk(
+        self,
+        actor_paths: Optional[List[str]] = None,
+        tag: Optional[str] = None,
+        folder: Optional[str] = None,
+        actor_filter: Optional[str] = None,
+        enable: bool = True,
+        kinematic: bool = False,
+        make_movable: bool = True,
+        allow_detach: bool = False,
+        collision_preset: Optional[str] = None,
+        mass: Optional[float] = None,
+        linear_damping: Optional[float] = None,
+        angular_damping: Optional[float] = None,
+        enable_gravity: Optional[bool] = None,
+        skip_failures: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Set up physics on many editor actors in one call and one undoable transaction.
+
+        The actors are those at ``actor_paths`` plus every editor actor with
+        ``tag``, in the outliner ``folder`` (or a folder under it) and whose
+        label or path contains ``actor_filter``, each that is given (a
+        procedural scene's tag with actor_filter "_Box_" picks its props and
+        leaves its floor and walls), at most PHYSICS_BULK_MAX_ACTORS. Each
+        is set up as ``enable_physics``, ``set_collision`` (a preset only) and
+        ``set_physics_params`` would set it, checked first in the same way
+        with the preset's collision standing in for its own; unless
+        ``skip_failures``, one actor that cannot be set up refuses the whole
+        call with nothing changed. One Undo reverts the call. Setting up
+        props one call at a time ran into the rate limit (126 bodies took
+        116 s).
+
+        Args:
+            actor_paths: Editor actor paths.
+            tag: Also every editor actor with this actor tag.
+            folder: Also every editor actor in this outliner folder or one
+                under it (with ``tag``, only actors that have both).
+            actor_filter: Also every editor actor whose label or object path
+                contains this text, ignoring case (with ``tag`` or ``folder``,
+                only actors that match those too).
+            enable: As ``enable_physics``: False stops the bodies simulating.
+            kinematic: As ``enable_physics``: kinematic instead of simulated.
+            make_movable: As ``enable_physics``.
+            allow_detach: As ``enable_physics``.
+            collision_preset: A collision preset to set first, such as
+                PhysicsActor; empty keeps each actor's collision.
+            mass: Mass override in kg, as ``set_physics_params``.
+            linear_damping: As ``set_physics_params``.
+            angular_damping: As ``set_physics_params``.
+            enable_gravity: As ``set_physics_params``.
+            skip_failures: Set up the actors that can be and report the rest,
+                instead of refusing the call.
+
+        Returns:
+            Dict with world ("editor"), mode, matched, configured_count,
+            failed_count, configured (the first PHYSICS_BULK_LISTED: actor_path,
+            physics_mode, mobility_changed_from, detached_from, mass_kg),
+            failed (the first PHYSICS_BULK_LISTED: actor_path, error and, for a
+            body that cannot take the mode, its problem codes) and warning; or
+            an IncompatibleBody envelope listing the actors that cannot be set
+            up (nothing changed), or a ValidationError envelope for an unknown
+            preset, no match or too many.
+
+        Raises:
+            ValueError: No selection, or a parameter out of range.
+        """
+        paths = [path for path in (actor_paths or []) if path]
+        if not paths and not tag and not folder and not actor_filter:
+            raise ValueError("Give actor_paths, tag, folder or actor_filter to select the actors")
+        mode = "off" if not enable else ("kinematic" if kinematic else "simulate")
+        args = {
+            "paths": paths,
+            "tag": tag or None,
+            "folder": (folder or "").strip("/") or None,
+            "actor_filter": actor_filter or None,
+            "mode": mode,
+            "make_movable": bool(make_movable),
+            "allow_detach": bool(allow_detach),
+            "preset": collision_preset or None,
+            "values": _physics_values(mass, linear_damping, angular_damping, enable_gravity),
+            "skip_failures": bool(skip_failures),
+            "limit": PHYSICS_BULK_MAX_ACTORS,
+            "listed": PHYSICS_BULK_LISTED,
+            "transaction": "simul: set up physics",
+        }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + BULK_PHYSICS,
+            expected_errors=(INCOMPATIBLE_BODY, "ValidationError", "PhysicsNotApplied"),
+        )
+
+    async def get_physics_state(
+        self,
+        actor_paths: Optional[List[str]] = None,
+        tag_filter: Optional[str] = None,
+        world: str = "auto",
+        max_results: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Read bodies' live physics state, in the running simulation or the editor world.
+
+        While a simulation runs, the editor world's actors stand where they
+        were placed (a body resting at z 49.5 read z 300 there), so by
+        default (``world`` "auto") each actor is read in the running
+        simulation, through its copy there, and in the editor world
+        otherwise. Editor and simulation paths are both accepted, and a body
+        given by both is read once. The bodies are paged: the actors at
+        ``actor_paths`` first, then those with the tag, ``max_results`` at most
+        from ``offset``, and a page stops before 30,000 characters of bodies.
+
+        Args:
+            actor_paths: Actor paths, editor or simulation.
+            tag_filter: Also read every actor with this actor tag in the
+                world read.
+            world: "auto", "simulation" (refused when none runs) or "editor".
+            max_results: Most bodies on this page, 1 to 1000.
+            offset: Bodies to skip: the previous page's next_offset.
+
+        Returns:
+            Dict with world, pie_active, sim_time and paused (null for the
+            editor world), bodies, count (on this page), total (every body
+            matched), offset, next_offset (null on the last page), truncated,
+            hint and not_found (the paths with no live actor, or no live copy
+            in the world read). Each body has name, class_name, editor_path,
+            simulation_path, location (cm), rotation (pitch, yaw, roll,
+            degrees) and, for an actor with a root or single primitive
+            component, component_path, physics_mode, linear_velocity (cm/s),
+            angular_velocity (degrees/s), speed, awake (null unless it
+            simulates), mass_kg, center_of_mass (world cm), gravity_enabled
+            and simulate_physics. Unreal reports contacts only to hit-event
+            handlers, so none are listed.
+
+        Raises:
+            ArgumentError: Neither paths nor a tag, an unknown world, or
+                max_results or offset out of range (a ValidationError).
+        """
+        paths = [path for path in (actor_paths or []) if path]
+        if not paths and not tag_filter:
+            raise ArgumentError("Give actor_paths, tag_filter or both", "NO_SELECTION", parameter="actor_paths")
+        if world not in PHYSICS_STATE_WORLDS:
+            raise ArgumentError(
+                f"world must be one of {', '.join(PHYSICS_STATE_WORLDS)}, got {world!r}",
+                "UNKNOWN_WORLD",
+                parameter="world",
+                value=world,
+                allowed=list(PHYSICS_STATE_WORLDS),
+            )
+        _check_page_args(offset, max_results, PHYSICS_STATE_MAX_RESULTS)
+        args = {
+            "paths": paths,
+            "tag": tag_filter or None,
+            "world": world,
+            "offset": offset,
+            "max_results": max_results,
+        }
+        return await self._paged_read(
+            PHYSICS_STATE, args, "bodies", "total", expected_errors=(SIMULATION_NOT_RUNNING,)
+        )
+
+    async def list_simulation_actors(
+        self,
+        class_filter: Optional[str] = None,
+        tag_filter: Optional[str] = None,
+        simulating_only: bool = False,
+        max_results: int = 200,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        List the running simulation's actors with their editor counterparts, a page at a time.
+
+        Args:
+            class_filter: Only actors of this class (name or path).
+            tag_filter: Only actors with this actor tag.
+            simulating_only: Only actors with a body that simulates physics.
+            max_results: Most actors on this page, 1 to 5000; a page also
+                stops before 30,000 characters of entries.
+            offset: Actors to skip: the previous page's next_offset.
+
+        Returns:
+            Dict with world (the simulation's world), actors (name,
+            class_name, simulation_path, editor_path, null for an actor the
+            simulation spawned such as its player controller and pawn, and
+            simulating), count, total, offset, next_offset, truncated, hint and
+            sim_time; or a SimulationNotRunning envelope.
+
+        Raises:
+            ArgumentError: max_results or offset out of range (a ValidationError).
+        """
+        _check_page_args(offset, max_results, SIMULATION_ACTORS_MAX_RESULTS)
+        args = {
+            "class_filter": class_filter or None,
+            "tag_filter": tag_filter or None,
+            "simulating_only": bool(simulating_only),
+            "offset": offset,
+            "max_results": max_results,
+        }
+        return await self._paged_read(
+            SIMULATION_ACTORS, args, "simulation actors", "total", expected_errors=(SIMULATION_NOT_RUNNING,)
         )
 
     # ------------------------------------------------------------------
@@ -5750,22 +6290,33 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         self,
         analysis_types: Optional[List[str]] = None,
         actor_filter: Optional[str] = None,
+        max_results: int = ROBOTICS_DEFAULT_RESULTS,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
         Classify level actors for robotics from their collision setup.
 
         One editor script reads every actor loaded in the editor world. Only
-        primitive components with collision enabled count, an actor's size is
-        the bounding box of those components, and the thresholds are
+        primitive components with collision enabled count, and an actor is
+        measured by the oriented box of its physics-collision components (a
+        single component's box rotated and scaled with it; several components'
+        boxes in the actor's frame), so a rotated plank or slab keeps its real
+        size. An instanced static mesh component (ISM, HISM, foliage) draws its
+        mesh once per instance, so each instance is measured and classified by
+        itself, with its ``instance_index`` and ``component_path``, up to 1000
+        instances per component; a component with more counts whole by its
+        world bounds (``instances``). The thresholds are
         ``ROBOTICS_CRITERIA``, returned as ``criteria``:
 
         * traversability: floor-like surfaces a robot can stand on. Physics
-          collision, at least 1 m^2 in plan, no thicker than a quarter of the
-          shorter side and tilted at most 15 degrees. The bounding box decides,
-          so a landscape section counts whole, hills included.
-        * graspability: Movable actors with physics collision that fit in a
-          60 cm cube, with whether they simulate physics and their mass (null
-          while Unreal reports none).
+          collision, at least 1 m^2 of top face, no thicker than a quarter of
+          its shorter side and tilted at most 15 degrees; the top face is the
+          box face across its thinnest side, facing up, so a slab turned upside
+          down is still a floor. A landscape section counts whole, hills
+          included.
+        * graspability: Movable actors with physics collision whose box fits
+          in a 60 cm cube, with whether they simulate physics and their mass
+          (null while Unreal reports none).
         * collision_complexity: actors with collision and with physics
           collision, collision-enabled components by profile, landscape
           heightfields, and for static meshes the simple shapes and convex
@@ -5775,47 +6326,84 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
           bodies pass through them). The first 50 actors with that last
           problem are listed.
 
+        The two lists are paged together: surfaces largest first, graspable
+        objects by path, each cut to ``max_results`` from ``offset``, and
+        ``totals`` counts every match. A page whose JSON would exceed 32,000
+        characters holds fewer per category, the same number for both, so it
+        fits the response budget; ``next_offset`` is where the next page
+        starts, and ``hint`` says how to get it. Offset 0 scans the level and
+        keeps the scan in the editor for ten minutes: a later offset with the
+        same filter and analyses reads it instead of scanning again
+        (``snapshot_age_s``), so every page of a large level comes from one
+        snapshot and costs no scan.
+
         Args:
             analysis_types: Any of traversability, graspability and
                 collision_complexity; None or empty runs all three.
             actor_filter: Only analyze actors whose label or object path
                 contains this text, ignoring case; None or empty analyzes
                 every actor.
+            max_results: Most entries per category on this page, 1 to 500.
+            offset: Entries of each category to skip (the previous page's
+                next_offset).
 
         Returns:
             Dict with traversable_surfaces and graspable_objects (each entry
-            name, path, class_name and size [x, y, z] in cm; surfaces add
-            top_z, area_m2 and tilt_degrees), collision_summary (empty unless
-            collision_complexity ran), total_actors_analyzed, analysis_types
-            (those that ran), criteria and pie_active (while Play In Editor
-            runs, the editor world is read, as in ``list_actors``, and the
-            static mesh collision counts simple_shapes, convex_hulls,
-            complex_collision and missing_simple_collision are null, as is
+            name, path, class_name and size [x, y, z] in cm along its box's
+            own axes, plus component_path and instance_index for an instance
+            of an instanced mesh, or component_path and instances for one
+            counted whole; surfaces add top_z, area_m2, tilt_degrees and
+            normal, the top face's upward unit normal), totals (matches per
+            category), returned (entries per category on this page), offset,
+            max_results, next_offset (null on the last page), hint,
+            scanned_at and snapshot_age_s (the scan this page was cut from),
+            collision_summary
+            (empty unless collision_complexity ran), total_actors_analyzed,
+            analysis_types (those that ran), criteria and pie_active (while
+            Play In Editor runs, the editor world is read, as in
+            ``list_actors``, and the static mesh collision counts
+            simple_shapes, convex_hulls, complex_collision and
+            missing_simple_collision are null, as is
             missing_simple_collision_actors: Unreal's StaticMeshEditorSubsystem
             reports none then); or a ScriptError envelope when the editor
             script failed.
 
         Raises:
-            ValueError: An analysis type is not one of the three.
+            ArgumentError: An analysis type is not one of the three, or
+                max_results or offset is out of range (a ValidationError with
+                ``details.code``).
         """
         requested = [name.strip().lower() for name in analysis_types or [] if name.strip()]
         unknown = [name for name in requested if name not in ROBOTICS_ANALYSES]
         if unknown:
-            raise ValueError(
+            raise ArgumentError(
                 f"analysis_types: unknown {', '.join(map(repr, unknown))}; use "
-                f"{', '.join(ROBOTICS_ANALYSES)}"
+                f"{', '.join(ROBOTICS_ANALYSES)}",
+                "UNKNOWN_ANALYSIS",
+                parameter="analysis_types",
+                value=unknown,
+                allowed=list(ROBOTICS_ANALYSES),
             )
+        _check_page_args(offset, max_results, ROBOTICS_MAX_RESULTS)
         analyses = [name for name in ROBOTICS_ANALYSES if name in requested or not requested]
         args = {
             "analyses": analyses,
             "actor_filter": actor_filter or None,
             "criteria": ROBOTICS_CRITERIA,
             "listed_limit": ROBOTICS_LISTED_LIMIT,
+            "offset": offset,
+            "max_results": max_results,
+            "max_instances": ROBOTICS_MAX_INSTANCES,
+            "snapshot_seconds": ROBOTICS_SNAPSHOT_SECONDS,
         }
         result = await self._execute_json_script(f"args = {args!r}\n" + ROBOTICS_SCENE_ANALYSIS)
         if result.get("error"):
             return result
-        return {**result, "analysis_types": analyses, "criteria": dict(ROBOTICS_CRITERIA)}
+        return _robotics_page(
+            {**result, "analysis_types": analyses, "criteria": dict(ROBOTICS_CRITERIA)},
+            offset,
+            max_results,
+        )
 
     async def generate_procedural_scene(
         self,
@@ -5823,6 +6411,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         parameters: Optional[Dict[str, Any]] = None,
         bounds_min: Optional[List[float]] = None,
         bounds_max: Optional[List[float]] = None,
+        physics_props: bool = False,
     ) -> Dict[str, Any]:
         """
         Build a test scene from Engine basic shapes inside an axis-aligned box.
@@ -5849,11 +6438,17 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             bounds_min: Minimum corner [x, y, z] in cm; default [0, 0, 0].
             bounds_max: Maximum corner [x, y, z] in cm; default
                 [1000, 1000, 500].
+            physics_props: Make the props physics-ready: Movable,
+                PhysicsActor collision and simulating physics, so they fall
+                and take forces once the simulation starts. False leaves
+                them Movable with the mesh's BlockAll collision, not
+                simulating.
 
         Returns:
             Dict with actors_spawned (actor paths in spawn order),
-            total_spawned, scene_type, seed, tag (this call's own tag) and
-            folder; a SpawnError envelope, with nothing left in the level, when
+            total_spawned, scene_type, seed, tag (this call's own tag),
+            folder and physics_props (how many props were made
+            physics-ready); a SpawnError envelope, with nothing left in the level, when
             a spawn failed (``details.actors_left`` lists any actor rollback
             could not remove); or a PIEActive envelope while Play In Editor
             runs, when Unreal's editor spawns nothing.
@@ -5865,8 +6460,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         plan = plan_scene(scene_type, parameters, bounds_min, bounds_max)
         generation = new_generation()
         tag, folder = plan.tag(generation), plan.folder(generation)
+        pieces = [dict(piece.spawn_args(), physics=bool(physics_props and piece.movable)) for piece in plan.pieces]
         args = {
-            "pieces": [piece.spawn_args() for piece in plan.pieces],
+            "pieces": pieces,
             "folder": folder,
             "tags": ["simul_procedural", tag],
             "transaction": f"simul: generate {plan.scene_type} scene",
@@ -5886,6 +6482,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "seed": plan.seed,
             "tag": tag,
             "folder": folder,
+            "physics_props": sum(1 for piece in pieces if piece["physics"]),
         }
 
     async def get_actor_by_semantic_label(
@@ -5908,9 +6505,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             label: Semantic label (actor tag) to search for.
             match_mode: exact (a tag equals label), contains (a tag contains
                 label) or regex (label is a Python regular expression searched
-                for in each tag; a repeated group that holds a quantifier or
-                alternatives, as in (\\w+)+, is refused because it can run for
-                hours); every mode ignores case.
+                for in each tag, ignoring case; a pattern whose failing search can
+                run for long on a 1023-character tag is refused, such as a repeated
+                group that holds a quantifier or alternatives, as in (\\w+)+, or two
+                quantifiers that can divide the same characters between them, as in
+                .*.*x or A*a*x); every mode ignores case.
             max_results: Most actors in the page, 1 to 5000.
             offset: Matching actors to skip before the page starts.
 
@@ -5925,10 +6524,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         Raises:
             ValueError: match_mode is not exact, contains or regex; in regex
-                mode, label is not a valid regular expression or repeats a
-                group that holds a quantifier or alternatives (see
-                ``simul.utils.regex_guard``); or max_results or offset is out
-                of range.
+                mode, label is not a valid regular expression; or max_results
+                or offset is out of range.
+            RegexRefused: In regex mode, the label's search can backtrack for
+                long (``error_type`` ValidationError; see
+                ``simul.utils.regex_guard``).
         """
         modes = ("exact", "contains", "regex")
         if match_mode not in modes:
@@ -5943,13 +6543,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 raise ValueError(
                     f"label is not a valid regular expression: {exc}"
                 ) from exc
-            construct = _exponential_regex_construct(label)
+            # The editor script compiles the label with re.IGNORECASE and
+            # searches every tag on the game thread, where nothing can stop it.
+            construct = _exponential_regex_construct(label, re.IGNORECASE, UNREAL_TAG_LENGTH)
             if construct is not None:
-                raise ValueError(
-                    f"label has {construct}: a failing search for it can freeze "
-                    "the editor for hours, since every way of splitting a tag "
-                    "between the repetitions is tried. Repeat a plain character "
-                    "class instead (\\w+ rather than (\\w+)+), or use contains mode"
+                raise RegexRefused(
+                    f"label has {construct}. The editor searches each tag with Python's "
+                    "re on its game thread, where nothing can stop a search. Use one "
+                    "plain quantifier per stretch of the tag (\\w+ rather than (\\w+)+, "
+                    ".* rather than .*.*), anchor the pattern with ^, or use contains mode",
+                    construct,
                 )
         args = {
             "label": label,

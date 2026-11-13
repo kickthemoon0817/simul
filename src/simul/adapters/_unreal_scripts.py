@@ -102,6 +102,111 @@ def level_actors():
 """
 )
 
+#: ``error_type`` of a call that acts on or reads the running simulation while
+#: none runs.
+SIMULATION_NOT_RUNNING = "SimulationNotRunning"
+
+#: ``error_type`` of an actor with no copy in the running simulation.
+NOT_IN_SIMULATION = "NotInSimulation"
+
+#: The hint of a SimulationNotRunning refusal.
+SIMULATION_START_HINT = (
+    "Start the simulation with control_unreal_simulation, action 'start' (CLI: simul unreal sim start), "
+    "then retry."
+)
+
+# The running simulation and an actor's copy in it, on top of EDITOR_WORLD:
+# simulation_world(), in_simulation(actor), simulation_counterpart(actor) and
+# editor_counterpart(actor). While Play In Editor (or Simulate In Editor) runs,
+# Unreal duplicates the editor world into a play world whose package is the
+# map's with UEDPIE_<n>_ before its name (/Game/Maps/UEDPIE_0_Lab), and each
+# actor into it at the same path in that package, keeping its name, label and
+# ActorGuid (observed on UE 5.7.4). The editor world's bodies read as
+# simulating but never step: an impulse on the editor actor returned success
+# while its copy stayed put, and reads gave the editor's z = 300 for a body
+# resting at 49.5. So whatever acts on or reads the running simulation maps the
+# actor to its copy first. An actor at a play-world path is its own copy, so
+# simulation paths are accepted as they always were. When the path does not
+# map (World Partition streams actors into cell levels), the copy is the play
+# world's actor of the same class and ActorGuid. Lookups use find_object,
+# which loads nothing. A copy destroyed during the simulation stays findable,
+# invalid, until garbage collection (about a minute), so every counterpart is
+# checked with SystemLibrary.is_valid: a destroyed one is no counterpart.
+SIMULATION_WORLD = (
+    EDITOR_WORLD
+    + f"_SIMULATION_NOT_RUNNING, _NOT_IN_SIMULATION, _SIMULATION_START_HINT = "
+    f"{SIMULATION_NOT_RUNNING!r}, {NOT_IN_SIMULATION!r}, {SIMULATION_START_HINT!r}\n"
+    + """
+def simulation_world():
+    return unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+
+def play_prefix(package_name):
+    match = re.match("UEDPIE_[0-9]+_", package_name)
+    return match.group(0) if match else None
+
+def in_simulation(actor):
+    world = actor.get_world()
+    return world is not None and play_prefix(world.get_outermost().get_name().rpartition("/")[2]) is not None
+
+def guid_of(actor):
+    guid = actor.get_editor_property("actor_guid")
+    return guid if unreal.GuidLibrary.is_valid_guid(guid) else None
+
+def same_actor(candidate, actor, guid):
+    return (candidate.get_class() == actor.get_class() and guid is not None
+            and unreal.GuidLibrary.equal_equal_guid_guid(candidate.get_editor_property("actor_guid"), guid))
+
+def live(actor):
+    return isinstance(actor, unreal.Actor) and unreal.SystemLibrary.is_valid(actor)
+
+def at_package(actor, rename):
+    package, dot, rest = actor.get_path_name().partition(".")
+    folder, slash, name = package.rpartition("/")
+    renamed = rename(name)
+    return None if renamed is None else unreal.find_object(None, folder + slash + renamed + dot + rest)
+
+def simulation_counterpart(actor):
+    world = simulation_world()
+    if world is None or not live(actor):
+        return None
+    if in_simulation(actor):
+        return actor
+    prefix = play_prefix(world.get_outermost().get_name().rpartition("/")[2]) or ""
+    copy = at_package(actor, lambda name: prefix + name)
+    if live(copy) and copy.get_class() == actor.get_class():
+        return copy
+    guid = guid_of(actor)
+    for candidate in unreal.GameplayStatics.get_all_actors_of_class(world, actor.get_class()):
+        if live(candidate) and same_actor(candidate, actor, guid):
+            return candidate
+    return None
+
+def editor_counterpart(actor):
+    if not live(actor):
+        return None
+    if not in_simulation(actor):
+        return actor
+    original = at_package(actor, lambda name: name[len(play_prefix(name)):] if play_prefix(name) else None)
+    if live(original) and not in_simulation(original):
+        return original
+    world = editor_world()
+    guid = guid_of(actor)
+    if world is None or guid is None:
+        return None
+    for candidate in unreal.GameplayStatics.get_all_actors_of_class(world, actor.get_class()):
+        if live(candidate) and same_actor(candidate, actor, guid):
+            return candidate
+    return None
+
+def simulation_refusal(what, why=None):
+    error = "No simulation is running, and " + what + " needs the running simulation"
+    if why:
+        error += ": " + why
+    return {"success": False, "error_type": _SIMULATION_NOT_RUNNING, "error": error,
+            "details": {"code": "SIMULATION_NOT_RUNNING", "hint": _SIMULATION_START_HINT}}
+"""
+)
+
 #: Message of the ``SimulNotFound`` an editor script raises for an actor path
 #: that names no live actor of the editor world; ``{path}`` is the path.
 ACTOR_NOT_FOUND = "Actor not found: {path}"
@@ -2192,40 +2297,110 @@ print(json.dumps(info(**args)))
 """
 
 # Expects ``args`` = {"actor_path", "values": {editor_property: value}}, with
-# ``light_color`` as [r, g, b, a] bytes. Writes through set_editor_property
-# (the edit path the Details panel uses): Remote Control property writes and
-# the Set* functions silently no-op on a Stationary light's attenuation radius.
-# Reads every value back so a write the engine refused is reported.
+# ``light_color`` as [r, g, b, a] bytes, the ranges already checked by the
+# session. The light is the actor's LightComponentBase, so a SkyLight's
+# intensity, color and shadows are set too; an actor without one, and a value
+# its class lacks (a directional light's attenuation radius, a SkyLight's
+# temperature), refuse the whole request before anything is written
+# (ValidationError with details.code NOT_A_LIGHT or PROPERTY_NOT_ON_LIGHT).
+# Writes through set_editor_property (the edit path the Details panel uses), in
+# one undoable transaction: Remote Control property writes and the Set*
+# functions silently no-op on a Stationary light's attenuation radius. Reads
+# every value back; when Unreal stored one differently (it turned an intensity
+# of -5 into 0 while the reply said it was not applied), every value is put
+# back and the transaction cancelled, so a failed call changes nothing
+# (LightParamsNotApplied, details.expected and details.actual). With no values
+# it only reads the light.
 SET_LIGHT_PARAMS = ACTOR_HELPERS + """
-component = actor_component(actor_at(args["actor_path"]), unreal.LightComponent)
+READ_BACK = ("intensity", "light_color", "temperature", "use_temperature", "attenuation_radius", "cast_shadows")
 
-def read(name):
+def read(component, name):
     value = component.get_editor_property(name)
     if isinstance(value, unreal.Color):
         return [value.r, value.g, value.b, value.a]
     return value
 
-# Fail on a property this light type lacks before anything is written.
-for name in args["values"]:
-    read(name)
+def has(component, name):
+    try:
+        component.get_editor_property(name)
+    except Exception:
+        return False
+    return True
 
-with unreal.ScopedEditorTransaction("simul: set light params"):
-    for name, value in args["values"].items():
-        if name == "light_color":
-            value = unreal.Color(r=value[0], g=value[1], b=value[2], a=value[3])
-        component.set_editor_property(name, value)
+def write(component, name, value):
+    if name == "light_color":
+        value = unreal.Color(r=value[0], g=value[1], b=value[2], a=value[3])
+    component.set_editor_property(name, value)
 
-applied = {name: read(name) for name in args["values"]}
-rejected = sorted(
-    name for name, wanted in args["values"].items()
-    if (abs(applied[name] - wanted) > 1e-3 * max(1.0, abs(wanted))
-        if isinstance(wanted, float) else applied[name] != wanted)
-)
-result = {"component_path": component.get_path_name(), "applied": applied,
-          "params_set": len(args["values"]) - len(rejected)}
-if rejected:
-    result.update(success=False, error="Unreal did not apply: " + ", ".join(rejected))
-print(json.dumps(result))
+def differs(name, wanted, value):
+    if isinstance(wanted, float):
+        return abs(value - wanted) > 1e-3 * max(1.0, abs(wanted))
+    return value != wanted
+
+def unit_of(component):
+    if isinstance(component, unreal.DirectionalLightComponent):
+        return "lux"
+    if isinstance(component, unreal.SkyLightComponent):
+        return "scale"
+    if has(component, "intensity_units"):
+        return component.get_editor_property("intensity_units").name.lower()
+    return None
+
+def set_light():
+    actor = actor_at(args["actor_path"])
+    lights = actor.get_components_by_class(unreal.LightComponentBase)
+    root = actor.root_component
+    if isinstance(root, unreal.LightComponentBase):
+        component = root
+    elif len(lights) == 1:
+        component = lights[0]
+    else:
+        return {"success": False, "error_type": "ValidationError",
+                "error": actor.get_actor_label() + " (" + actor.get_class().get_name() + ") has "
+                         + ("no light component" if not lights else str(len(lights)) + " light components and none "
+                            "at its root") + "; pass a light actor (PointLight, SpotLight, RectLight, "
+                         "DirectionalLight or SkyLight)",
+                "details": {"code": "NOT_A_LIGHT", "actor_path": args["actor_path"], "light_components": len(lights)}}
+    values = args["values"]
+    lacking = [name for name in values if not has(component, name)]
+    if lacking:
+        return {"success": False, "error_type": "ValidationError",
+                "error": component.get_class().get_name() + " has no " + ", ".join(lacking)
+                         + "; nothing was changed",
+                "details": {"code": "PROPERTY_NOT_ON_LIGHT", "parameters": lacking,
+                            "light_class": component.get_class().get_name()}}
+    rejected = {}
+    if values:
+        before = {name: read(component, name) for name in values}
+        with unreal.ScopedEditorTransaction("simul: set light params") as transaction:
+            for name, value in values.items():
+                write(component, name, value)
+            for name, wanted in values.items():
+                stored = read(component, name)
+                if differs(name, wanted, stored):
+                    rejected[name] = stored
+            if rejected:
+                for name in values:
+                    write(component, name, before[name])
+                transaction.cancel()
+    current = {name: read(component, name) for name in READ_BACK if has(component, name)}
+    result = {"component_path": component.get_path_name(), "light_class": component.get_class().get_name(),
+              "intensity_unit": unit_of(component),
+              "applied": {} if rejected else {name: current[name] for name in values},
+              "current": current, "params_set": 0 if rejected else len(values), "warning": None}
+    if values and pie_active():
+        result["warning"] = ("Play In Editor is running: this changed the editor world's light, which the "
+                             "running simulation does not see; it shows the next time the simulation starts.")
+    if rejected:
+        result.update(success=False, error_type="LightParamsNotApplied",
+                      error="Unreal did not take " + ", ".join(
+                          name + " (it stored " + repr(stored) + ")" for name, stored in sorted(rejected.items()))
+                      + "; every value was put back as it was, so nothing was changed",
+                      details={"code": "NOT_APPLIED", "expected": {name: values[name] for name in rejected},
+                               "actual": rejected})
+    return result
+
+print(json.dumps(set_light()))
 """
 
 #: ``error_type`` of a physics edit refused because the body cannot take it:
@@ -2258,15 +2433,8 @@ INCOMPATIBLE_BODY = "IncompatibleBody"
 # collision (CTF_USE_COMPLEX_AS_SIMPLE) cannot simulate at all, though it can
 # be a kinematic collider. StaticMeshEditorSubsystem reports -1 for every mesh
 # while Play In Editor runs, so the mesh checks are skipped then.
-PHYSICS_HELPERS = ACTOR_HELPERS + f"_INCOMPATIBLE_BODY = {INCOMPATIBLE_BODY!r}\n" + """
-import re
-
+PHYSICS_HELPERS = ACTOR_HELPERS + SIMULATION_WORLD + f"_INCOMPATIBLE_BODY = {INCOMPATIBLE_BODY!r}\n" + """
 PHYSICS_COLLISION = ("QUERY_AND_PHYSICS", "PHYSICS_ONLY")
-
-def in_simulation(actor):
-    world = actor.get_world()
-    package = world.get_outermost().get_name().rpartition("/")[2] if world is not None else ""
-    return re.match("UEDPIE_[0-9]+_", package) is not None
 
 def physics_component(actor):
     return actor_component(actor, unreal.PrimitiveComponent)
@@ -2308,7 +2476,8 @@ def mesh_collision(mesh):
         return None
     return simple, convex, tools.get_collision_complexity(mesh).name
 
-def physics_problems(component, simulate, make_movable, allow_detach):
+def physics_problems(component, simulate, make_movable, allow_detach, collision=None):
+    # collision: the mode a preset applied in the same call will set; None reads the component's.
     problems = []
     body = "a simulated" if simulate else "a kinematic"
     mobility = component.mobility.name
@@ -2316,7 +2485,7 @@ def physics_problems(component, simulate, make_movable, allow_detach):
         problems.append({"code": "NOT_MOVABLE", "message": (
             "its mobility is " + mobility.title() + ", and Unreal moves and simulates only Movable "
             "bodies: pass make_movable true (the default) to make it Movable")})
-    collision = component.get_collision_enabled().name
+    collision = collision or component.get_collision_enabled().name
     if collision not in PHYSICS_COLLISION:
         problems.append({"code": "NO_PHYSICS_COLLISION", "message": (
             "its collision is " + collision + " (preset " + str(component.get_collision_profile_name())
@@ -2352,36 +2521,6 @@ def physics_problems(component, simulate, make_movable, allow_detach):
             "detach it in the same undoable step")})
     return problems
 
-def refusal(actor, what, problems, component):
-    return {"success": False, "error_type": _INCOMPATIBLE_BODY,
-            "error": "Cannot " + what + " " + actor.get_actor_label() + ": "
-                     + "; ".join(problem["message"] for problem in problems),
-            "details": {"problems": problems, "component_path": component.get_path_name()}}
-
-def pie_running():
-    return bool(unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).is_in_play_in_editor())
-
-def edit_note(simulation):
-    if simulation:
-        return ("This changed the running simulation's copy of the actor only: Unreal records no undo "
-                "for it and it is gone when the simulation stops.")
-    if pie_running():
-        return ("Play In Editor is running: this changed the editor world, which the running "
-                "simulation does not see; it takes effect the next time the simulation starts.")
-    return None
-"""
-
-# Expects ``args`` = {"actor_path", "mode" ("simulate", "kinematic" or "off"),
-# "make_movable", "allow_detach", "transaction"}. "simulate" makes the body
-# simulate physics, "kinematic" keeps its physics collision without simulating
-# (simulated bodies hit it; it moves only when its transform is set) and "off"
-# stops it simulating, collision and mobility kept. A body that cannot take
-# the mode is refused with nothing written (IncompatibleBody). A Static or
-# Stationary body is made Movable when make_movable is true, and a simulated
-# body attached to a parent is detached, as Unreal does, only with
-# allow_detach. If the body still does not read back as asked, every value is
-# restored and the transaction cancelled.
-ENABLE_PHYSICS = PHYSICS_HELPERS + """
 def apply(component, mode):
     if mode != "off" and component.mobility.name != "MOVABLE":
         component.set_mobility(unreal.ComponentMobility.MOVABLE)
@@ -2401,6 +2540,11 @@ def unmet(component, mode):
         return "Unreal gives the body no mass"
     return None
 
+def body_before(component):
+    return {"simulate": bool(component.get_editor_property("body_instance").get_editor_property("simulate_physics")),
+            "mobility": component.mobility, "parent": component.get_attach_parent(),
+            "socket": component.get_attach_socket_name()}
+
 def restore(component, before):
     component.set_simulate_physics(before["simulate"])
     if component.mobility != before["mobility"]:
@@ -2410,6 +2554,75 @@ def restore(component, before):
         rule = unreal.AttachmentRule.KEEP_WORLD
         component.attach_to_component(parent, before["socket"], rule, rule, rule, False)
 
+def write_params(component, values):
+    if "mass" in values:
+        component.set_mass_override_in_kg("None", values["mass"], True)
+    if "linear_damping" in values:
+        component.set_linear_damping(values["linear_damping"])
+    if "angular_damping" in values:
+        component.set_angular_damping(values["angular_damping"])
+    if "enable_gravity" in values:
+        component.set_enable_gravity(values["enable_gravity"])
+
+def preset_collision(name):
+    # The collision mode a preset sets, read off a transient component, or None
+    # for a name Unreal does not know (it renames that to Custom).
+    probe = unreal.new_object(unreal.StaticMeshComponent)
+    probe.set_collision_profile_name(name)
+    if str(probe.get_collision_profile_name()).lower() != name.lower():
+        return None
+    return probe.get_collision_enabled().name
+
+def snapshot(component):
+    # Everything a physics setup writes, to put back: the body instance (a copy of
+    # the struct: collision preset, responses and mode, mass, damping, gravity and
+    # the simulate flag), mobility, attachment and Use Default Collision. The
+    # struct get_editor_property returns refers to the component's own, so later
+    # writes showed through it and putting it back changed nothing (UE 5.7.4);
+    # copy() takes it as it is now.
+    snap = body_before(component)
+    snap["body"] = component.get_editor_property("body_instance").copy()
+    snap["default_collision"] = (bool(component.get_editor_property("use_default_collision"))
+                                 if isinstance(component, unreal.StaticMeshComponent) else None)
+    return snap
+
+def put_back(component, snap):
+    restore(component, snap)
+    component.set_editor_property("body_instance", snap["body"])
+    if snap["default_collision"] is not None:
+        component.set_editor_property("use_default_collision", snap["default_collision"])
+
+def expected_mode(mode):
+    return {"simulate": "simulated", "kinematic": "kinematic"}.get(mode, "not simulating")
+
+def refusal(actor, what, problems, component):
+    return {"success": False, "error_type": _INCOMPATIBLE_BODY,
+            "error": "Cannot " + what + " " + actor.get_actor_label() + ": "
+                     + "; ".join(problem["message"] for problem in problems),
+            "details": {"code": "INCOMPATIBLE_BODY", "problems": problems,
+                        "component_path": component.get_path_name()}}
+
+def edit_note(simulation):
+    if simulation:
+        return ("This changed the running simulation's copy of the actor only: Unreal records no undo "
+                "for it and it is gone when the simulation stops.")
+    if pie_active():
+        return ("Play In Editor is running: this changed the editor world, which the running "
+                "simulation does not see; it takes effect the next time the simulation starts.")
+    return None
+"""
+
+# Expects ``args`` = {"actor_path", "mode" ("simulate", "kinematic" or "off"),
+# "make_movable", "allow_detach", "transaction"}. "simulate" makes the body
+# simulate physics, "kinematic" keeps its physics collision without simulating
+# (simulated bodies hit it; it moves only when its transform is set) and "off"
+# stops it simulating, collision and mobility kept. A body that cannot take
+# the mode is refused with nothing written (IncompatibleBody). A Static or
+# Stationary body is made Movable when make_movable is true, and a simulated
+# body attached to a parent is detached, as Unreal does, only with
+# allow_detach. If the body still does not read back as asked, every value is
+# restored and the transaction cancelled.
+ENABLE_PHYSICS = PHYSICS_HELPERS + """
 def enable():
     actor = actor_at(args["actor_path"], play_world=True)
     component = physics_component(actor)
@@ -2419,9 +2632,7 @@ def enable():
         if problems:
             what = "simulate physics on" if mode == "simulate" else "make kinematic"
             return refusal(actor, what, problems, component)
-    before = {"simulate": bool(component.get_editor_property("body_instance").get_editor_property("simulate_physics")),
-              "mobility": component.mobility, "parent": component.get_attach_parent(),
-              "socket": component.get_attach_socket_name()}
+    before = body_before(component)
     simulation = in_simulation(actor)
     failure = None
     if simulation:
@@ -2443,8 +2654,12 @@ def enable():
                 restore(component, before)
                 transaction.cancel()
     if failure is not None:
+        report = physics_report(component)
         return {"success": False, "error_type": "PhysicsNotApplied",
-                "error": failure + "; nothing was changed", "details": physics_report(component)}
+                "error": failure + "; nothing was changed",
+                "details": dict(report, code="NOT_APPLIED", expected={"physics_mode": expected_mode(mode)},
+                                actual={"physics_mode": report["physics_mode"],
+                                        "simulate_physics": report["simulate_physics"]})}
     result = physics_report(component)
     result.update(actor_path=actor.get_path_name(), world="simulation" if simulation else "editor",
                   physics_enabled=result["physics_mode"] == "simulated",
@@ -2480,16 +2695,6 @@ import struct
 def stored(value):
     return struct.unpack("f", struct.pack("f", value))[0]
 
-def write(component, values):
-    if "mass" in values:
-        component.set_mass_override_in_kg("None", values["mass"], True)
-    if "linear_damping" in values:
-        component.set_linear_damping(values["linear_damping"])
-    if "angular_damping" in values:
-        component.set_angular_damping(values["angular_damping"])
-    if "enable_gravity" in values:
-        component.set_enable_gravity(values["enable_gravity"])
-
 def set_params():
     actor = actor_at(args["actor_path"], play_world=True)
     component = physics_component(actor)
@@ -2497,11 +2702,11 @@ def set_params():
     simulation = in_simulation(actor)
     if values:
         if simulation:
-            write(component, values)
+            write_params(component, values)
         else:
             with unreal.ScopedEditorTransaction(args["transaction"]):
                 component.modify()
-                write(component, values)
+                write_params(component, values)
     result = physics_report(component)
     read = {"mass": result["mass_override_kg"], "linear_damping": result["linear_damping"],
             "angular_damping": result["angular_damping"], "enable_gravity": result["gravity_enabled"]}
@@ -2525,7 +2730,9 @@ def set_params():
     result["warning"] = " ".join(warnings) or None
     if rejected:
         result.update(success=False, error_type="PhysicsParamsNotApplied",
-                      error="Unreal did not apply: " + ", ".join(rejected))
+                      error="Unreal did not apply: " + ", ".join(rejected),
+                      details={"code": "NOT_APPLIED", "expected": {name: values[name] for name in rejected},
+                               "actual": {name: read[name] for name in rejected}})
     return result
 
 print(json.dumps(set_params()))
@@ -2541,11 +2748,6 @@ print(json.dumps(set_params()))
 # registered again, in the play copy when the simulation starts and after the
 # map reloads, so a collision turned off came back as BlockAll (UE 5.7.4).
 SET_COLLISION = PHYSICS_HELPERS + """
-def known_preset(name):
-    probe = unreal.new_object(unreal.StaticMeshComponent)
-    probe.set_collision_profile_name(name)
-    return str(probe.get_collision_profile_name()).lower() == name.lower()
-
 def write(component, preset, enabled):
     if preset:
         component.set_collision_profile_name(preset)
@@ -2560,10 +2762,11 @@ def set_collision():
     actor = actor_at(args["actor_path"], play_world=True)
     component = physics_component(actor)
     preset, enabled = args["preset"], args["enabled"]
-    if preset and not known_preset(preset):
+    if preset and preset_collision(preset) is None:
         return {"success": False, "error_type": "ValidationError",
                 "error": "Unknown collision preset: " + preset + "; nothing was changed. Presets include "
-                         "BlockAll, BlockAllDynamic, PhysicsActor, OverlapAll, NoCollision and Custom"}
+                         "BlockAll, BlockAllDynamic, PhysicsActor, OverlapAll, NoCollision and Custom",
+                "details": {"code": "UNKNOWN_PRESET", "parameter": "collision_preset", "value": preset}}
     simulation = in_simulation(actor)
     if preset or enabled is not None:
         if simulation:
@@ -2591,6 +2794,485 @@ def set_collision():
     return result
 
 print(json.dumps(set_collision()))
+"""
+
+# Expects ``args`` = {"paths", "tag", "folder", "actor_filter" (each or None), "mode"
+# ("simulate", "kinematic" or "off"), "make_movable", "allow_detach", "preset"
+# (or None), "values" (set_physics_params' checked values), "skip_failures",
+# "limit", "listed", "transaction"}. Sets up physics on many actors in one
+# call and one undoable transaction: the actors at paths, plus every editor
+# actor with the tag, in the outliner folder (or one under it) and whose label
+# or path contains actor_filter (ignoring case), each that is given. Each actor
+# is checked as enable_physics checks one, the preset's collision standing in
+# for its own when a preset is given, before anything is written; unless
+# skip_failures, one that cannot be set up refuses the whole call. Each actor is
+# snapshot before it is written (snapshot: the body instance struct with its
+# preset, responses, mass, damping, gravity and simulate flag, plus mobility,
+# attachment and Use Default Collision). One that still does not read back as
+# asked is put back whole; without skip_failures every actor already written is
+# put back too and the transaction cancelled, so the call changes nothing
+# (cancelling alone only drops the undo record). A call that sets up no actor
+# fails. Paths in the running simulation's world are refused: this edits the
+# editor world.
+BULK_PHYSICS = PHYSICS_HELPERS + """
+def in_folder(actor, folder):
+    path = str(actor.get_folder_path())
+    return path == folder or path.startswith(folder + "/")
+
+def select():
+    chosen, failed, seen = [], [], set()
+    for path in args["paths"]:
+        try:
+            actor = actor_at(path, play_world=True)
+        except SimulNotFound as exc:
+            failed.append({"actor_path": path, "error": str(exc)})
+            continue
+        if in_simulation(actor):
+            failed.append({"actor_path": path, "error": "is in the running simulation's world; bulk setup edits "
+                                                        "the editor world, so pass the editor path"})
+        elif actor.get_path_name() not in seen:
+            chosen.append(actor)
+            seen.add(actor.get_path_name())
+    needle = (args["actor_filter"] or "").lower()
+    if args["tag"] or args["folder"] or needle:
+        for actor in level_actors():
+            if args["tag"] and not actor.actor_has_tag(args["tag"]):
+                continue
+            if args["folder"] and not in_folder(actor, args["folder"]):
+                continue
+            if (needle and needle not in actor.get_actor_label().lower()
+                    and needle not in actor.get_path_name().lower()):
+                continue
+            if actor.get_path_name() not in seen:
+                chosen.append(actor)
+                seen.add(actor.get_path_name())
+    return chosen, failed
+
+def setup():
+    mode, preset = args["mode"], args["preset"]
+    preset_mode = None
+    if preset:
+        preset_mode = preset_collision(preset)
+        if preset_mode is None:
+            return {"success": False, "error_type": "ValidationError",
+                    "error": "Unknown collision preset: " + preset + "; nothing was changed",
+                    "details": {"code": "UNKNOWN_PRESET", "parameter": "collision_preset", "value": preset}}
+    actors, failed = select()
+    # The paths that found no actor of the editor world count as matched, and failed.
+    matched = len(actors) + len(failed)
+    if len(actors) > args["limit"]:
+        return {"success": False, "error_type": "ValidationError",
+                "error": str(len(actors)) + " actors matched, more than the " + str(args["limit"])
+                         + " one call sets up; narrow the selection by tag, folder or paths",
+                "details": {"code": "TOO_MANY_ACTORS", "matched": len(actors), "maximum": args["limit"]}}
+    plan = []
+    for actor in actors:
+        try:
+            component = physics_component(actor)
+        except Exception as exc:
+            failed.append({"actor_path": actor.get_path_name(), "error": str(exc)})
+            continue
+        problems = [] if mode == "off" else physics_problems(
+            component, mode == "simulate", args["make_movable"], args["allow_detach"], preset_mode)
+        if problems:
+            failed.append({"actor_path": actor.get_path_name(), "problems": [p["code"] for p in problems],
+                           "error": "; ".join(p["message"] for p in problems)})
+            continue
+        plan.append((actor, component))
+    if failed and not args["skip_failures"]:
+        return {"success": False, "error_type": _INCOMPATIBLE_BODY,
+                "error": str(len(failed)) + " of the " + str(matched) + " actors cannot be set up, so none was "
+                         "changed (pass skip_failures true to set up the rest). First: " + failed[0]["actor_path"]
+                         + ": " + failed[0]["error"],
+                "details": {"code": "INCOMPATIBLE_BODY", "failed": failed[:args["listed"]],
+                            "failed_count": len(failed), "matched": matched}}
+    if not plan and not failed:
+        return {"success": False, "error_type": "ValidationError",
+                "error": "No actor matched the paths, tag, folder and actor_filter given; nothing was changed",
+                "details": {"code": "NO_MATCH"}}
+    configured, detached, written, not_applied = [], 0, [], {}
+    expected = {"physics_mode": expected_mode(mode)}
+    if preset:
+        expected["collision_preset"] = preset
+    expected.update(args["values"])
+    if plan:
+        with unreal.ScopedEditorTransaction(args["transaction"]) as transaction:
+            for actor, component in plan:
+                before = snapshot(component)
+                component.modify()
+                if before["parent"] is not None:
+                    before["parent"].modify()
+                if preset:
+                    component.set_collision_profile_name(preset)
+                apply(component, mode)
+                write_params(component, args["values"])
+                problem = unmet(component, mode)
+                if problem is not None:
+                    report = physics_report(component)
+                    not_applied[actor.get_path_name()] = {"physics_mode": report["physics_mode"],
+                                                          "simulate_physics": report["simulate_physics"],
+                                                          "mobility": report["mobility"]}
+                    put_back(component, before)
+                    failed.append({"actor_path": actor.get_path_name(),
+                                   "error": problem + "; it was put back as it was"})
+                    if not args["skip_failures"]:
+                        for done_component, done_before in reversed(written):
+                            put_back(done_component, done_before)
+                        transaction.cancel()
+                        return {"success": False, "error_type": "PhysicsNotApplied",
+                                "error": actor.get_actor_label() + ": " + problem + "; every actor was put back "
+                                         "as it was, so nothing was changed (pass skip_failures true to keep the "
+                                         "actors that do take it)",
+                                "details": {"code": "NOT_APPLIED", "expected": expected, "actual": not_applied,
+                                            "failed": failed[:args["listed"]], "failed_count": len(failed),
+                                            "matched": matched}}
+                    continue
+                written.append((component, before))
+                report = physics_report(component)
+                detached_from = (before["parent"].get_path_name()
+                                 if before["parent"] is not None and component.get_attach_parent() is None else None)
+                detached += detached_from is not None
+                configured.append({"actor_path": actor.get_path_name(), "physics_mode": report["physics_mode"],
+                                   "mobility_changed_from": None if component.mobility == before["mobility"]
+                                   else before["mobility"].name.title(),
+                                   "detached_from": detached_from, "mass_kg": report["mass_kg"]})
+    warnings = []
+    if detached:
+        warnings.append("Detached " + str(detached) + " actor(s) from their parents, as Unreal does when a body "
+                        "starts simulating; Undo reattaches them.")
+    if pie_active():
+        warnings.append("Play In Editor is running: this changed the editor world, which the running simulation "
+                        "does not see; it takes effect the next time the simulation starts.")
+    result = {"world": "editor", "mode": mode, "matched": matched, "configured_count": len(configured),
+              "failed_count": len(failed), "configured": configured[:args["listed"]],
+              "failed": failed[:args["listed"]], "warning": " ".join(warnings) or None}
+    if not configured:
+        result.update(success=False, error_type=_INCOMPATIBLE_BODY,
+                      error="None of the " + str(matched) + " actors could be set up; nothing was changed",
+                      details={"code": "NOTHING_SET_UP", "expected": expected, "actual": not_applied,
+                               "failed": failed[:args["listed"]], "failed_count": len(failed)})
+    return result
+
+print(json.dumps(setup()))
+"""
+
+#: Name of the editor-side module that keeps continuous forces going. Versioned
+#: so a newer simul never runs an older editor session's tick function.
+FORCE_MODULE = "_simul_unreal_forces_v2"
+
+# The longest physics step Unreal takes in one frame, as UWorld::SetupPhysicsTickFunctions
+# hands it to FChaosScene::SetUpForFrame (UE 5.7): min(frame time, MaxPhysicsDeltaTime),
+# 1/30 s by default, or with substepping min(frame time, MaxSubsteps x
+# MaxSubstepDeltaTime). A frame longer than that advances game time by the whole
+# frame (up to 0.4 s, MaxDeltaTime) but physics, gravity included, by the limit
+# only. None means no limit. PhysicsSettings is read through its default
+# object; where Python cannot read it the engine default, 1/30 s, stands.
+PHYSICS_STEP_LIMIT = """
+def physics_step_limit():
+    try:
+        settings = unreal.PhysicsSettings.get_default_object()
+        if settings.get_editor_property("substepping"):
+            step = settings.get_editor_property("max_substep_delta_time")
+            return step * settings.get_editor_property("max_substeps") if step > 0 else None
+        limit = settings.get_editor_property("max_physics_delta_time")
+        return limit if limit > 0 else None
+    except Exception:
+        return 1.0 / 30.0
+"""
+
+# The source of FORCE_MODULE. A force added once acts for one physics step:
+# Unreal applies AddForce to the next step and then clears it, so one call at
+# twice the body's weight gave a 19 cm/s blip (UE 5.7.4). A continuous force is a
+# job that a ticker (unreal.register_ticker_callback, called once every editor
+# frame, after the world has ticked, headless too) serves each frame: it adds,
+# as an impulse, the momentum the force carries over the physics time that frame
+# simulated, the frame's game time capped at the physics step limit
+# (PHYSICS_STEP_LIMIT), and counts the duration in that physics time. So the
+# force keeps pace with gravity: counting game time instead gave a body held up
+# by exactly its weight +1216 cm/s at 10 fps, as each 0.1 s frame added 0.1 s of
+# force but only 1/30 s of gravity. Remote Control runs the request, and the
+# ticker runs, after the frame's world tick, so an impulse lands in the next
+# frame's step: APPLY_FORCE delivers the first step's share in the request
+# itself (sized by the frame just simulated), and each ticker call delivers the
+# next one, sized by the step that frame took. So no step goes uncompensated,
+# and a frame whose length changes shifts the push by at most that change.
+# Paused time adds nothing. The job names the component by path and
+# finds it each frame, so it holds no reference to the play world; it ends when
+# the simulation stops or restarts (its game time runs behind the job's) or the
+# body is destroyed, and the ticker removes itself when no job is left
+# (returning False removes a ticker callback).
+_FORCE_MODULE_SOURCE = """
+import unreal
+
+jobs = []
+handle = None
+
+def serve(job, world):
+    component = unreal.find_object(None, job["component"])
+    if component is None or not unreal.SystemLibrary.is_valid(component):
+        return False
+    now = unreal.GameplayStatics.get_time_seconds(world)
+    if now < job["last"]:
+        return False
+    elapsed = now - job["last"]
+    job["last"] = now
+    step = elapsed if job["limit"] is None else min(elapsed, job["limit"])
+    step = min(step, job["duration"] - job["served"])
+    if step > 0:
+        impulse = unreal.Vector(*[value * step for value in job["force"]])
+        if job["location"] is None:
+            component.add_impulse(impulse)
+        else:
+            component.add_impulse_at_location(impulse, unreal.Vector(*job["location"]))
+        job["served"] += step
+        job["frames"] += 1
+    return job["served"] < job["duration"] - 1e-9
+
+def tick(delta_seconds):
+    global handle
+    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+    jobs[:] = [job for job in jobs
+               if world is not None and world.get_path_name() == job["world"] and serve(job, world)]
+    if jobs:
+        return True
+    if handle is not None:
+        try:
+            unreal.unregister_ticker_callback(handle)
+        except Exception:
+            pass
+    handle = None
+    return False
+
+def start(job):
+    global handle
+    jobs.append(job)
+    if handle is None:
+        handle = unreal.register_ticker_callback(tick)
+"""
+
+# Expects ``args`` = {"actor_path", "vector" [x, y, z] in Unreal units (kg cm/s^2
+# for a force, kg cm/s for an impulse), "location" (world cm) or None,
+# "impulse", "duration" (s of physics time; 0 is one physics step)}. Acts on the
+# actor's copy in the running simulation (SIMULATION_WORLD), the only world
+# whose bodies step; with no simulation running it refuses (SimulationNotRunning).
+APPLY_FORCE = (
+    PHYSICS_HELPERS
+    + PHYSICS_STEP_LIMIT
+    + f"_FORCE_MODULE, _FORCE_MODULE_SOURCE = {FORCE_MODULE!r}, {_FORCE_MODULE_SOURCE!r}\n"
+    + """
+import sys, types
+
+def force_module():
+    module = sys.modules.get(_FORCE_MODULE)
+    if module is None:
+        module = types.ModuleType(_FORCE_MODULE)
+        exec(_FORCE_MODULE_SOURCE, module.__dict__)
+        sys.modules[_FORCE_MODULE] = module
+    return module
+
+def push(component, vector, location, impulse):
+    if impulse:
+        if location is None:
+            component.add_impulse(unreal.Vector(*vector))
+        else:
+            component.add_impulse_at_location(unreal.Vector(*vector), unreal.Vector(*location))
+    elif location is None:
+        component.add_force(unreal.Vector(*vector))
+    else:
+        component.add_force_at_location(unreal.Vector(*vector), unreal.Vector(*location))
+
+def apply():
+    actor = actor_at(args["actor_path"], play_world=True)
+    world = simulation_world()
+    if world is None:
+        return simulation_refusal("apply_unreal_force", "the editor world's bodies never step, so a force "
+                                  "applied there would be lost")
+    copy = simulation_counterpart(actor)
+    if copy is None:
+        return {"success": False, "error_type": _NOT_IN_SIMULATION,
+                "error": actor.get_actor_label() + " has no live copy in the running simulation ("
+                         + world.get_path_name() + "): an actor spawned after the simulation started, not "
+                         "loaded in it, or destroyed in it has none; list_unreal_simulation_actors lists the "
+                         "simulation's actors",
+                "details": {"code": "NOT_IN_SIMULATION", "actor_path": args["actor_path"]}}
+    component = physics_component(copy)
+    mode = physics_mode(component)
+    if mode != "simulated":
+        return {"success": False, "error_type": _INCOMPATIBLE_BODY,
+                "error": copy.get_actor_label() + " does not simulate physics in the running simulation "
+                         "(physics_mode " + mode + "), so a force moves nothing: enable_unreal_physics on the "
+                         "editor actor and restart the simulation, or on the simulation path for this run",
+                "details": dict(physics_report(component), code="NOT_SIMULATING")}
+    vector, location = args["vector"], args["location"]
+    paused = bool(unreal.GameplayStatics.is_game_paused(world))
+    now = unreal.GameplayStatics.get_time_seconds(world)
+    limit = physics_step_limit()
+    if args["impulse"]:
+        push(component, vector, location, True)
+        application = "impulse"
+    elif args["duration"] > 0:
+        # The first step's share now, so it lands with the next step's gravity (see _FORCE_MODULE_SOURCE).
+        frame = unreal.GameplayStatics.get_world_delta_seconds(world)
+        first = 0.0 if paused else min(frame if limit is None else min(frame, limit), args["duration"])
+        if first > 0:
+            push(component, [value * first for value in vector], location, True)
+        if first < args["duration"] - 1e-9:
+            force_module().start({"world": world.get_path_name(), "component": component.get_path_name(),
+                                  "force": list(vector), "location": location, "last": now, "limit": limit,
+                                  "duration": args["duration"], "served": first, "frames": 1 if first else 0})
+        application = "continuous"
+    else:
+        push(component, vector, location, False)
+        application = "one_frame"
+    mass = component.get_mass()
+    seconds = None if application == "one_frame" else (1.0 if application == "impulse" else args["duration"])
+    expected = [value * seconds / mass for value in vector] if seconds is not None and mass > 0 else None
+    warnings = []
+    if application == "one_frame":
+        frame = unreal.GameplayStatics.get_world_delta_seconds(world)
+        step = frame if limit is None else min(frame, limit)
+        warnings.append("A force with duration 0 acts for one physics step (the frame time, at most the "
+                        "physics step limit; about " + format(step, ".4f") + " s now), changing the velocity "
+                        "by about force x step / mass; pass duration for a sustained force, or is_impulse for "
+                        "an instant change.")
+    if paused:
+        warnings.append("The simulation is paused: the force acts once it resumes.")
+    return {"actor_path": args["actor_path"], "simulation_actor_path": copy.get_path_name(),
+            "component_path": component.get_path_name(), "world": "simulation", "force_applied": True,
+            "application": application, "mass_kg": mass, "expected_delta_v": expected,
+            "physics_step_limit_s": limit, "sim_time": now,
+            "ends_at_sim_time": now + args["duration"] if application == "continuous" else None,
+            "paused": paused, "warning": " ".join(warnings) or None}
+
+print(json.dumps(apply()))
+"""
+)
+
+# Expects ``args`` = {"paths", "tag" (or None), "world" ("auto", "simulation"
+# or "editor"), "offset", "max_results", "budget"}. Reads each actor's body: in
+# the running simulation (its copy, SIMULATION_WORLD) or in the editor world.
+# The actors at paths come first, then the actors with the tag, each once (an
+# editor path and the simulation path of the same body are one body); one page
+# of them, from offset, is rendered (SCENE_READ_HELPERS.page). A body's state is
+# its actor's root primitive component, else its only one; an actor without one
+# reports its transform alone. A path with no live actor, or no live copy in the
+# world read, is listed in not_found.
+PHYSICS_STATE = PHYSICS_HELPERS + SCENE_READ_HELPERS + """
+import math
+
+def vector(value):
+    return [value.x, value.y, value.z]
+
+def body_of(actor):
+    root = actor.root_component
+    if isinstance(root, unreal.PrimitiveComponent):
+        return root
+    components = actor.get_components_by_class(unreal.PrimitiveComponent)
+    return components[0] if len(components) == 1 else None
+
+def state(actor, simulation):
+    location, rotation = actor.get_actor_location(), actor.get_actor_rotation()
+    editor = editor_counterpart(actor) if simulation else actor
+    entry = {"name": actor.get_actor_label(), "class_name": actor.get_class().get_name(),
+             "editor_path": editor.get_path_name() if editor is not None else None,
+             "simulation_path": actor.get_path_name() if simulation else None,
+             "location": vector(location), "rotation": [rotation.pitch, rotation.yaw, rotation.roll]}
+    component = body_of(actor)
+    if component is None:
+        entry.update(component_path=None, physics_mode=None)
+        return entry
+    linear = component.get_physics_linear_velocity()
+    report = physics_report(component)
+    entry.update(component_path=component.get_path_name(), physics_mode=report["physics_mode"],
+                 linear_velocity=vector(linear),
+                 angular_velocity=vector(component.get_physics_angular_velocity_in_degrees()),
+                 speed=math.sqrt(linear.x * linear.x + linear.y * linear.y + linear.z * linear.z),
+                 awake=bool(component.is_any_rigid_body_awake()) if report["physics_mode"] == "simulated" else None,
+                 mass_kg=report["mass_kg"], center_of_mass=vector(component.get_center_of_mass()),
+                 gravity_enabled=report["gravity_enabled"], simulate_physics=report["simulate_physics"])
+    return entry
+
+def read():
+    world = simulation_world()
+    if args["world"] == "simulation" and world is None:
+        return simulation_refusal("get_unreal_physics_state with world 'simulation'")
+    simulation = world is not None and args["world"] != "editor"
+    actors, missing, seen = [], [], set()
+
+    def add(actor):
+        key = actor.get_path_name()
+        if key not in seen:
+            seen.add(key)
+            actors.append(actor)
+
+    for path in args["paths"]:
+        try:
+            found = actor_at(path, play_world=True)
+        except SimulNotFound:
+            missing.append(path)
+            continue
+        target = simulation_counterpart(found) if simulation else editor_counterpart(found)
+        if target is None:
+            missing.append(path)
+        else:
+            add(target)
+    if args["tag"]:
+        pool = (unreal.GameplayStatics.get_all_actors_of_class(world, unreal.Actor) if simulation
+                else level_actors())
+        for actor in pool:
+            if live(actor) and actor.actor_has_tag(args["tag"]):
+                add(actor)
+    entries, next_offset, ended = page(actors, args["offset"], args["max_results"], args["budget"],
+                                       lambda actor: state(actor, simulation))
+    return {"world": "simulation" if simulation else "editor", "pie_active": pie_active(),
+            "sim_time": unreal.GameplayStatics.get_time_seconds(world) if simulation else None,
+            "paused": bool(unreal.GameplayStatics.is_game_paused(world)) if simulation else None,
+            "bodies": entries, "count": len(entries), "total": len(actors), "offset": args["offset"],
+            "next_offset": next_offset, "page_ended_by": ended, "not_found": missing}
+
+print(json.dumps(read()))
+"""
+
+# Expects ``args`` = {"class_filter", "tag_filter", "simulating_only",
+# "offset", "max_results", "budget"}. Lists the running simulation's live actors
+# with their editor counterparts (null for one the simulation spawned, such as
+# its player controller and pawn), one page from offset
+# (SCENE_READ_HELPERS.page); total counts every match.
+SIMULATION_ACTORS = PHYSICS_HELPERS + SCENE_READ_HELPERS + """
+def simulating(actor):
+    return any(physics_mode(component) == "simulated"
+               for component in actor.get_components_by_class(unreal.PrimitiveComponent))
+
+def entry(match):
+    actor, moving = match
+    editor = editor_counterpart(actor)
+    return {"name": actor.get_actor_label(), "class_name": actor.get_class().get_name(),
+            "simulation_path": actor.get_path_name(),
+            "editor_path": editor.get_path_name() if editor is not None else None, "simulating": moving}
+
+def listing():
+    world = simulation_world()
+    if world is None:
+        return simulation_refusal("list_unreal_simulation_actors")
+    found = []
+    for actor in unreal.GameplayStatics.get_all_actors_of_class(world, unreal.Actor):
+        if not live(actor):
+            continue
+        cls = actor.get_class()
+        if args["class_filter"] and args["class_filter"] not in (cls.get_name(), cls.get_path_name()):
+            continue
+        if args["tag_filter"] and not actor.actor_has_tag(args["tag_filter"]):
+            continue
+        moving = simulating(actor)
+        if args["simulating_only"] and not moving:
+            continue
+        found.append((actor, moving))
+    entries, next_offset, ended = page(found, args["offset"], args["max_results"], args["budget"], entry)
+    return {"world": world.get_path_name(), "actors": entries, "count": len(entries), "total": len(found),
+            "offset": args["offset"], "next_offset": next_offset, "page_ended_by": ended,
+            "sim_time": unreal.GameplayStatics.get_time_seconds(world)}
+
+print(json.dumps(listing()))
 """
 
 # Expects ``args`` = {"path", "values"}, where ``values`` maps "scalar",
@@ -2749,7 +3431,9 @@ print(json.dumps(set_params(**args)))
 """
 
 # Expects ``args`` = {"pieces": [{"label", "mesh", "location", "scale",
-# "movable"}], "folder", "tags", "transaction"}. Spawns one StaticMeshActor per
+# "movable", "physics"}], "folder", "tags", "transaction"}. A "physics" piece
+# (a prop made physics-ready) gets the PhysicsActor preset and simulates
+# physics; it is Movable already. Spawns one StaticMeshActor per
 # piece, in order, inside one undoable transaction, and files them all in the
 # outliner folder only once every piece has spawned: Unreal creates a folder
 # the first time an actor is filed in it and keeps it, empty, when the actors
@@ -2798,6 +3482,9 @@ def place():
                 component.set_mobility(unreal.ComponentMobility.MOVABLE if piece["movable"]
                                        else unreal.ComponentMobility.STATIC)
                 component.set_static_mesh(mesh)
+                if piece.get("physics"):
+                    component.set_collision_profile_name("PhysicsActor")
+                    component.set_simulate_physics(True)
                 actor.set_actor_scale3d(unreal.Vector(*piece["scale"]))
                 actor.set_actor_label(piece["label"])
                 actor.set_editor_property("tags", [unreal.Name(tag) for tag in args["tags"]])
@@ -2832,112 +3519,297 @@ def place():
 print(json.dumps(place()))
 """
 
-# Expects ``args`` = {"analyses", "actor_filter", "criteria", "listed_limit"}.
-# Reads every actor loaded in the editor world whose label or object path
-# contains actor_filter, ignoring case. Only primitive components with
-# collision enabled count, and an actor's size is the bounding box of those
-# components. Static mesh collision comes from the mesh asset
-# (StaticMeshEditorSubsystem): simple shapes, convex hulls and whether the
-# render triangles stand in for simple collision (CTF_USE_COMPLEX_AS_SIMPLE).
-# See UnrealRuntimeSession.analyze_scene_for_robotics for the classification.
-# While PIE runs the editor world is read (level_actors) and pie_active says so;
-# StaticMeshEditorSubsystem then answers -1 and the default complexity for
-# every mesh (observed on UE 5.7.4), so the mesh collision counts are null, and
-# so is the list of actors missing simple collision, which those answers decide.
-ROBOTICS_SCENE_ANALYSIS = EDITOR_WORLD + """
-import math
-analyses = set(args["analyses"])
-criteria = args["criteria"]
-needle = (args["actor_filter"] or "").lower()
-mesh_tools = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
-mesh_collision = {}
-pie = pie_active()
+#: Name of the editor-side module that keeps the last robotics scans, so the
+#: pages after the first read the scan the first took instead of the level
+#: again. Versioned like FORCE_MODULE.
+ROBOTICS_SCAN_MODULE = "_simul_unreal_robotics_scans_v1"
 
-def collision_of(mesh):
-    key = mesh.get_path_name()
-    if key not in mesh_collision:
-        mesh_collision[key] = (mesh_tools.get_simple_collision_count(mesh),
-                               mesh_tools.get_convex_collision_count(mesh),
-                               mesh_tools.get_collision_complexity(mesh).name)
-    return mesh_collision[key]
+# Expects ``args`` = {"analyses", "actor_filter", "criteria", "listed_limit",
+# "offset", "max_results", "max_instances", "snapshot_seconds"}. Reads every
+# actor loaded in the editor world whose label or object path contains
+# actor_filter, ignoring case. Only primitive components with collision enabled
+# count. An actor is measured by the oriented box of its physics-collision
+# components: a single component's box in its own frame (a static mesh's
+# bounds, a box, sphere or capsule's extent, scaled and rotated with the
+# component), several components' boxes in the actor's frame; a component of
+# another kind (a landscape heightfield) counts with its world-axis bounds. An
+# instanced static mesh component (ISM, HISM, foliage) draws its mesh once per
+# instance, not at the component, so it is no box of its own: each instance is
+# measured and classified by itself (instance_index), up to max_instances per
+# component, and a component with more counts whole by its world-axis bounds
+# (instances). The world-axis bounding box this used read a 20 m x 0.5 m plank
+# yawed 45 degrees as 1449 x 1449 cm (210 m2 for its 10 m2), rejected a slab
+# pitched 14 degrees as too thick and one rolled 180 degrees as tilted 180
+# degrees (UE 5.7.4). A surface's normal is its box's thinnest axis, turned
+# upward, so tilt is the angle between it and world up, area the box's other
+# two sides and thickness the thin one. Static mesh collision comes from the
+# mesh asset (StaticMeshEditorSubsystem): simple shapes, convex hulls and
+# whether the render triangles stand in for simple collision
+# (CTF_USE_COMPLEX_AS_SIMPLE). See UnrealRuntimeSession.analyze_scene_for_robotics
+# for the classification. Surfaces are listed largest first, graspable objects
+# by path, and each list is cut to max_results from offset; totals counts all.
+# A scan is kept in ROBOTICS_SCAN_MODULE (plain values only, never Unreal
+# objects, which would hold the level past a map change): offset 0 scans, and a
+# later offset with the same world, analyses and filter reads that scan while
+# it is under snapshot_seconds old, so paging a large level scans it once and
+# every page comes from one consistent snapshot. While PIE runs the editor
+# world is read (level_actors) and pie_active says so; StaticMeshEditorSubsystem
+# then answers -1 and the default complexity for every mesh (observed on UE
+# 5.7.4), so the mesh collision counts are null, and so is the list of actors
+# missing simple collision, which those answers decide. Everything runs inside
+# functions, so the script leaves no Unreal object in the console's namespace.
+ROBOTICS_SCENE_ANALYSIS = EDITOR_WORLD + f"_ROBOTICS_SCAN_MODULE = {ROBOTICS_SCAN_MODULE!r}\n" + """
+import math, sys, time, types
 
-def entry(actor, size, **extra):
-    return dict({"name": actor.get_actor_label(), "path": actor.get_path_name(),
-                 "class_name": actor.get_class().get_name(),
-                 "size": [round(value, 2) for value in size]}, **extra)
+WORLD_AXES = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
-traversable, graspable = [], []
-summary = {"total_actors": 0, "with_collision": 0, "physics_collision": 0,
-           "static_mesh_components": 0, "simple_shapes": 0, "convex_hulls": 0,
-           "complex_collision": 0, "missing_simple_collision": 0, "heightfields": 0,
-           "by_profile": {}, "missing_simple_collision_actors": []}
-for actor in level_actors():
-    if needle and needle not in actor.get_actor_label().lower() and needle not in actor.get_path_name().lower():
-        continue
-    summary["total_actors"] += 1
-    colliding = []
-    for component in actor.get_components_by_class(unreal.PrimitiveComponent):
-        state = component.get_collision_enabled().name
-        if state != "NO_COLLISION":
-            colliding.append((component, state in ("PHYSICS_ONLY", "QUERY_AND_PHYSICS")))
-    if not colliding:
-        continue
-    physical = [component for component, physics in colliding if physics]
-    summary["with_collision"] += 1
-    if physical:
-        summary["physics_collision"] += 1
-    missing = False
-    for component, physics in colliding:
-        if "collision_complexity" not in analyses:
-            break
-        profile = str(component.get_collision_profile_name())
-        summary["by_profile"][profile] = summary["by_profile"].get(profile, 0) + 1
-        if component.get_class().get_name() == "LandscapeHeightfieldCollisionComponent":
-            summary["heightfields"] += 1
-        elif isinstance(component, unreal.StaticMeshComponent):
+def vec(value):
+    return (value.x, value.y, value.z)
+
+def along(point, axis, distance):
+    return tuple(p + a * distance for p, a in zip(point, axis))
+
+def dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+def quat_axes(q):
+    x, y, z, w = q.x, q.y, q.z, q.w
+    return ((1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)),
+            (2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)),
+            (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)))
+
+class Scan:
+    def __init__(self):
+        self.mesh_tools = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+        self.mesh_collision, self.mesh_boxes = {}, {}
+
+    def collision_of(self, mesh):
+        key = mesh.get_path_name()
+        if key not in self.mesh_collision:
+            tools = self.mesh_tools
+            self.mesh_collision[key] = (tools.get_simple_collision_count(mesh), tools.get_convex_collision_count(mesh),
+                                        tools.get_collision_complexity(mesh).name)
+        return self.mesh_collision[key]
+
+    def mesh_box(self, mesh):
+        key = mesh.get_path_name()
+        if key not in self.mesh_boxes:
+            box = mesh.get_bounding_box()
+            low, high = vec(box.min), vec(box.max)
+            self.mesh_boxes[key] = (tuple((l + h) / 2 for l, h in zip(low, high)),
+                                    tuple((h - l) / 2 for l, h in zip(low, high)))
+        return self.mesh_boxes[key]
+
+    def local_box(self, component):
+        # The component's box in its own unscaled frame, as (center, half sizes), or None.
+        if isinstance(component, unreal.StaticMeshComponent):
             mesh = component.get_editor_property("static_mesh")
-            if mesh is None:
+            return None if mesh is None else self.mesh_box(mesh)
+        if isinstance(component, unreal.BoxComponent):
+            return (0.0, 0.0, 0.0), vec(component.get_unscaled_box_extent())
+        if isinstance(component, unreal.SphereComponent):
+            radius = component.get_unscaled_sphere_radius()
+            return (0.0, 0.0, 0.0), (radius, radius, radius)
+        if isinstance(component, unreal.CapsuleComponent):
+            radius = component.get_unscaled_capsule_radius()
+            return (0.0, 0.0, 0.0), (radius, radius, component.get_unscaled_capsule_half_height())
+        return None
+
+    def oriented(self, local, center, axes, scale):
+        for axis, offset, factor in zip(axes, local[0], scale):
+            center = along(center, axis, offset * factor)
+        return center, axes, tuple(abs(half * factor) for half, factor in zip(local[1], scale))
+
+    def world_bounds(self, component):
+        origin, extent, radius = unreal.SystemLibrary.get_component_bounds(component)
+        return vec(origin), WORLD_AXES, vec(extent)
+
+    def component_box(self, component):
+        # The component's oriented box in world space: (center, unit axes, half sizes).
+        local = self.local_box(component)
+        if local is None:
+            return self.world_bounds(component)
+        axes = (vec(component.get_forward_vector()), vec(component.get_right_vector()),
+                vec(component.get_up_vector()))
+        return self.oriented(local, vec(component.get_world_location()), axes, vec(component.get_world_scale()))
+
+    def instance_boxes(self, component, limit):
+        # [(box, instance index)] for each instance, or None when there are more than limit.
+        count = component.get_instance_count()
+        if count > limit:
+            return None
+        mesh = component.get_editor_property("static_mesh")
+        if mesh is None:
+            return []
+        local, boxes = self.mesh_box(mesh), []
+        for index in range(count):
+            transform = component.get_instance_transform(index, True)
+            if transform is None:
                 continue
-            summary["static_mesh_components"] += 1
-            if pie:
+            boxes.append((self.oriented(local, vec(transform.translation), quat_axes(transform.rotation),
+                                        vec(transform.scale3d)), index))
+        return boxes
+
+    def actor_box(self, actor, components):
+        boxes = [self.component_box(component) for component in components]
+        if len(boxes) == 1:
+            return boxes[0]
+        origin = vec(actor.get_actor_location())
+        axes = (vec(actor.get_actor_forward_vector()), vec(actor.get_actor_right_vector()),
+                vec(actor.get_actor_up_vector()))
+        low, high = [math.inf] * 3, [-math.inf] * 3
+        for center, box_axes, half in boxes:
+            for signs in ((x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)):
+                corner = center
+                for axis, extent, sign in zip(box_axes, half, signs):
+                    corner = along(corner, axis, sign * extent)
+                relative = tuple(c - o for c, o in zip(corner, origin))
+                for i, axis in enumerate(axes):
+                    low[i], high[i] = min(low[i], dot(relative, axis)), max(high[i], dot(relative, axis))
+        center = origin
+        for axis, lo, hi in zip(axes, low, high):
+            center = along(center, axis, (lo + hi) / 2)
+        return center, axes, tuple((hi - lo) / 2 for lo, hi in zip(low, high))
+
+    def candidates(self, actor, physical, limit):
+        # [(box, extra entry fields, components)] the actor is classified by.
+        plain = [c for c in physical if not isinstance(c, unreal.InstancedStaticMeshComponent)]
+        found = [(self.actor_box(actor, plain), {}, plain)] if plain else []
+        for component in physical:
+            if not isinstance(component, unreal.InstancedStaticMeshComponent):
                 continue
-            simple, convex, complexity = collision_of(mesh)
-            summary["simple_shapes"] += simple
-            summary["convex_hulls"] += convex
-            if complexity == "CTF_USE_COMPLEX_AS_SIMPLE":
-                summary["complex_collision"] += 1
-            elif physics and simple + convex == 0:
-                summary["missing_simple_collision"] += 1
-                missing = True
-    if missing and len(summary["missing_simple_collision_actors"]) < args["listed_limit"]:
-        summary["missing_simple_collision_actors"].append(actor.get_path_name())
-    if not physical:
-        continue
-    origin, extent = actor.get_actor_bounds(True)
-    size = [2 * extent.x, 2 * extent.y, 2 * extent.z]
-    if "traversability" in analyses:
-        tilt = math.degrees(math.acos(max(-1.0, min(1.0, actor.get_actor_up_vector().z))))
-        area = size[0] * size[1] / 10000.0
-        if (area >= criteria["surface_min_area_m2"]
-                and size[2] <= criteria["surface_max_thickness_ratio"] * min(size[0], size[1])
-                and tilt <= criteria["surface_max_tilt_degrees"]):
-            traversable.append(entry(actor, size, top_z=round(origin.z + extent.z, 2),
-                                     area_m2=round(area, 3), tilt_degrees=round(tilt, 2)))
-    root = actor.root_component
-    if ("graspability" in analyses and root is not None and root.mobility.name == "MOVABLE"
-            and 0 < max(size) <= criteria["grasp_max_size_cm"]):
-        mass = sum(component.get_mass() for component in physical)
-        simulated = any(component.get_editor_property("body_instance").get_editor_property("simulate_physics")
-                        for component in physical)
-        graspable.append(entry(actor, size, simulate_physics=bool(simulated),
-                               mass_kg=round(mass, 3) if mass > 0 else None))
-if pie:
-    for key in ("simple_shapes", "convex_hulls", "complex_collision", "missing_simple_collision",
-                "missing_simple_collision_actors"):
-        summary[key] = None
-print(json.dumps({"traversable_surfaces": traversable, "graspable_objects": graspable,
-                  "collision_summary": summary if "collision_complexity" in analyses else {},
-                  "total_actors_analyzed": summary["total_actors"], "pie_active": pie}))
+            boxes = self.instance_boxes(component, limit)
+            if boxes is None:
+                found.append((self.world_bounds(component),
+                              {"component_path": component.get_path_name(),
+                               "instances": component.get_instance_count()}, [component]))
+            else:
+                found += [(box, {"component_path": component.get_path_name(), "instance_index": index}, None)
+                          for box, index in boxes]
+        return found
+
+def entry(actor, half, extra, **fields):
+    result = {"name": actor.get_actor_label(), "path": actor.get_path_name(),
+              "class_name": actor.get_class().get_name(),
+              "size": [round(2 * value, 2) for value in half]}
+    result.update(extra)
+    result.update(fields)
+    return result
+
+def analyze():
+    analyses = set(args["analyses"])
+    criteria = args["criteria"]
+    needle = (args["actor_filter"] or "").lower()
+    pie = pie_active()
+    scan = Scan()
+    traversable, graspable = [], []
+    summary = {"total_actors": 0, "with_collision": 0, "physics_collision": 0,
+               "static_mesh_components": 0, "simple_shapes": 0, "convex_hulls": 0,
+               "complex_collision": 0, "missing_simple_collision": 0, "heightfields": 0,
+               "by_profile": {}, "missing_simple_collision_actors": []}
+    for actor in level_actors():
+        if needle and needle not in actor.get_actor_label().lower() and needle not in actor.get_path_name().lower():
+            continue
+        summary["total_actors"] += 1
+        colliding = []
+        for component in actor.get_components_by_class(unreal.PrimitiveComponent):
+            state = component.get_collision_enabled().name
+            if state != "NO_COLLISION":
+                colliding.append((component, state in ("PHYSICS_ONLY", "QUERY_AND_PHYSICS")))
+        if not colliding:
+            continue
+        physical = [component for component, physics in colliding if physics]
+        summary["with_collision"] += 1
+        if physical:
+            summary["physics_collision"] += 1
+        missing = False
+        for component, physics in colliding:
+            if "collision_complexity" not in analyses:
+                break
+            profile = str(component.get_collision_profile_name())
+            summary["by_profile"][profile] = summary["by_profile"].get(profile, 0) + 1
+            if component.get_class().get_name() == "LandscapeHeightfieldCollisionComponent":
+                summary["heightfields"] += 1
+            elif isinstance(component, unreal.StaticMeshComponent):
+                mesh = component.get_editor_property("static_mesh")
+                if mesh is None:
+                    continue
+                summary["static_mesh_components"] += 1
+                if pie:
+                    continue
+                simple, convex, complexity = scan.collision_of(mesh)
+                summary["simple_shapes"] += simple
+                summary["convex_hulls"] += convex
+                if complexity == "CTF_USE_COMPLEX_AS_SIMPLE":
+                    summary["complex_collision"] += 1
+                elif physics and simple + convex == 0:
+                    summary["missing_simple_collision"] += 1
+                    missing = True
+        if missing and len(summary["missing_simple_collision_actors"]) < args["listed_limit"]:
+            summary["missing_simple_collision_actors"].append(actor.get_path_name())
+        if not physical or not ({"traversability", "graspability"} & analyses):
+            continue
+        root = actor.root_component
+        movable = root is not None and root.mobility.name == "MOVABLE"
+        for (center, axes, half), extra, components in scan.candidates(actor, physical, args["max_instances"]):
+            if "traversability" in analyses:
+                thin = min(range(3), key=lambda i: half[i])
+                sides = [half[i] for i in range(3) if i != thin]
+                normal = axes[thin] if axes[thin][2] >= 0 else tuple(-value for value in axes[thin])
+                tilt = math.degrees(math.acos(max(-1.0, min(1.0, normal[2]))))
+                area = 4 * sides[0] * sides[1] / 10000.0
+                if (area >= criteria["surface_min_area_m2"]
+                        and half[thin] <= criteria["surface_max_thickness_ratio"] * min(sides)
+                        and tilt <= criteria["surface_max_tilt_degrees"]):
+                    traversable.append(entry(actor, half, extra, top_z=round(center[2] + normal[2] * half[thin], 2),
+                                             area_m2=round(area, 3), tilt_degrees=round(tilt, 2),
+                                             normal=[round(value, 4) for value in normal]))
+            if "graspability" in analyses and movable and 0 < 2 * max(half) <= criteria["grasp_max_size_cm"]:
+                bodies = components if components is not None else []
+                mass = sum(component.get_mass() for component in bodies)
+                simulated = any(component.get_editor_property("body_instance").get_editor_property("simulate_physics")
+                                for component in (bodies or physical))
+                graspable.append(entry(actor, half, extra, simulate_physics=bool(simulated),
+                                       mass_kg=round(mass, 3) if mass > 0 else None))
+    if pie:
+        for key in ("simple_shapes", "convex_hulls", "complex_collision", "missing_simple_collision",
+                    "missing_simple_collision_actors"):
+            summary[key] = None
+    traversable.sort(key=lambda item: (-item["area_m2"], item["path"], item.get("instance_index") or 0))
+    graspable.sort(key=lambda item: (item["path"], item.get("instance_index") or 0))
+    return {"traversable_surfaces": traversable, "graspable_objects": graspable,
+            "collision_summary": summary if "collision_complexity" in analyses else {},
+            "total_actors_analyzed": summary["total_actors"], "pie_active": pie}
+
+def scans():
+    module = sys.modules.get(_ROBOTICS_SCAN_MODULE)
+    if module is None:
+        module = types.ModuleType(_ROBOTICS_SCAN_MODULE)
+        module.scans = {}
+        sys.modules[_ROBOTICS_SCAN_MODULE] = module
+    return module.scans
+
+def run():
+    world = editor_world()
+    key = json.dumps([world.get_path_name() if world is not None else None, sorted(args["analyses"]),
+                      (args["actor_filter"] or "").lower()])
+    kept = scans()
+    now = time.time()
+    cached = kept.get(key)
+    if args["offset"] == 0 or cached is None or now - cached["scanned_at"] > args["snapshot_seconds"]:
+        cached = {"scanned_at": now, "result": analyze()}
+        kept[key] = cached
+        for stale in sorted(kept, key=lambda name: kept[name]["scanned_at"])[:-4]:
+            del kept[stale]
+    full = cached["result"]
+    page = slice(args["offset"], args["offset"] + args["max_results"])
+    return dict(full, traversable_surfaces=full["traversable_surfaces"][page],
+                graspable_objects=full["graspable_objects"][page],
+                totals={"traversable_surfaces": len(full["traversable_surfaces"]),
+                        "graspable_objects": len(full["graspable_objects"])},
+                scanned_at=cached["scanned_at"], snapshot_age_s=round(now - cached["scanned_at"], 3))
+
+print(json.dumps(run()))
 """
 
 # The Play In Editor state get_viewport_info adds to the level viewport camera:

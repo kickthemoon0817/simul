@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import inspect
 import logging
+import socket
 import time
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
-from ..blender_bridge.protocol import BridgeFiles, BridgeRemoteError, BridgeWire
+from ..blender_bridge.protocol import BridgeFiles, BridgeRemoteError, BridgeWire, ProtocolMismatch
 from ..config import Settings
 from ..utils.discovery import DiscoveryDir
 from ..utils.errors import ScriptExecutionDisabled
@@ -52,6 +53,139 @@ class AttachmentTargetChanged(AttachmentError):
     """The attached process is alive but loaded another file or lost the window/scene."""
 
     error_type = "AttachmentTargetChanged"
+
+
+class InstanceNotFound(AttachmentError):
+    """No discovered Blender instance has the requested id."""
+
+    error_type = "NotFoundError"
+
+
+class InstanceBusy(AttachmentError):
+    """The Blender instance is running but did not answer in time: its main thread is busy."""
+
+    error_type = "InstanceBusy"
+
+
+class InstanceProtocolMismatch(AttachmentError):
+    """The Blender instance runs an add-on built for another bridge protocol."""
+
+    error_type = "BridgeProtocolError"
+
+
+class BlenderRequestTimeout(TimeoutError):
+    """Blender did not reply in time; ``details["executed"]`` says whether the request ran.
+
+    ``executed`` is False when the bridge provably did not run it, True when it
+    acknowledged starting it, and None for an add-on that does not report starts.
+    """
+
+    error_type = "TimeoutError"
+
+    def __init__(self, message: str, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
+
+
+class BlenderConnectionLost(ConnectionError):
+    """The connection to Blender ended before its reply; ``details`` as for a timeout."""
+
+    error_type = "ConnectionError"
+
+    def __init__(self, message: str, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
+
+
+_OLD_ADDON = (
+    "This add-on does not report when a request starts; rebuild it with "
+    "`simul blender install-bridge` to learn whether an unanswered request ran."
+)
+
+
+def _timed_out(method: str, timeout: float, executed: Optional[bool]) -> BlenderRequestTimeout:
+    """Say whether an unanswered request ran, and whether retrying is safe."""
+    if executed is False:
+        message = (
+            f"Blender did not start {method} within the {timeout:g}s timeout: its main "
+            "thread was busy with earlier requests, a long script or render, or a modal "
+            "dialog. The request was not executed, and Blender refuses it now that its "
+            "deadline has passed, so retrying is safe once Blender is free."
+        )
+    elif executed is True:
+        message = (
+            f"Blender started {method} but did not finish within the {timeout:g}s timeout. "
+            "It keeps running on Blender's main thread and cannot be stopped from Simul; "
+            "its outcome is unknown. No retry was sent: inspect Blender before retrying."
+        )
+    else:
+        message = (
+            f"Blender did not reply to {method} before the {timeout:g}s timeout. An operation "
+            "that already started may still be running; its outcome is unknown. No retry "
+            f"was sent. Inspect Blender before retrying. {_OLD_ADDON}"
+        )
+    return BlenderRequestTimeout(
+        message, {"executed": executed, "method": method, "timeout_seconds": timeout}
+    )
+
+
+def _connection_lost(
+    method: str, cause: BaseException, executed: Optional[bool], attempts: int = 1
+) -> BlenderConnectionLost:
+    """Say whether a request whose connection ended ran, and whether retrying is safe."""
+    if executed is False:
+        tries = "" if attempts <= 1 else f" on each of {attempts} attempts until the timeout"
+        message = (
+            f"The Blender bridge closed the connection before starting {method}{tries} "
+            f"({cause}). The request was not executed, so retrying is safe; the add-on may "
+            "be restarting or holding too many requests."
+        )
+    elif executed is True:
+        message = (
+            f"Blender started {method}, but the connection closed before it replied ({cause}); "
+            "the operation may have completed. No retry was sent: inspect Blender before retrying."
+        )
+    else:
+        message = (
+            f"The connection to Blender closed before it replied to {method} ({cause}), so it "
+            "may or may not have run. No retry was sent: inspect Blender before retrying. "
+            f"{_OLD_ADDON}"
+        )
+    return BlenderConnectionLost(
+        message, {"executed": executed, "method": method, "attempts": attempts}
+    )
+
+
+def _script_timed_out(
+    timeout: float, executed: Optional[bool], running: Optional[float] = None
+) -> dict[str, Any]:
+    """execute_script's own timeout result, as embedded mode reports it (``timed_out``).
+
+    ``duration_seconds`` is how long the script had been running when the wait
+    ended, counted from Blender's start acknowledgement; without one (an older
+    add-on), the whole wait, time queued behind other calls included.
+    """
+    if executed:
+        state = "It is still running on Blender's main thread, which stays busy until it returns."
+    else:
+        state = (
+            "Whether it started is unknown; if it did, it is still running on Blender's "
+            f"main thread. {_OLD_ADDON}"
+        )
+    return {
+        "output": None,
+        "output_truncated": False,
+        "output_total_chars": 0,
+        "return_value": None,
+        "duration_seconds": round(float(timeout if running is None else running), 4),
+        "timed_out": True,
+        "error": (
+            f"TimeoutError: script did not finish within {timeout:g}s. {state} It cannot be "
+            "stopped from Simul, and its output is discarded; inspect Blender before running "
+            "it again."
+        ),
+        "details": {"executed": executed},
+    }
 
 
 class NoBlenderBridge(AttachmentError):
@@ -123,6 +257,9 @@ class BlenderConnection:
                 # certainly did not run and naming the stale target is safe.
                 raise self._stale(attachment, "its bridge refused the connection") from exc
             except BridgeRemoteError as exc:
+                if exc.remote_type == "TimeoutError" and exc.details.get("executed") is False:
+                    # Its deadline passed while it waited behind other calls.
+                    raise _timed_out(method, timeout, False) from exc
                 if exc.remote_type == "SandboxDenied":
                     raise SandboxDenied(
                         exc.details.get("file_path", ""), exc.details
@@ -133,9 +270,14 @@ class BlenderConnection:
                     raise self._target_changed(attachment, exc) from exc
                 raise
             except TimeoutError as exc:
-                raise TimeoutError(
-                    "Blender did not reply before the timeout. An operation that already started may still be "
-                    "running; its outcome is unknown. No retry was sent. Inspect Blender before retrying."
+                executed = getattr(exc, "executed", None)
+                if method == "execute_script" and executed is not False:
+                    # The script exceeded its timeout, as the schema's timed_out says.
+                    return _script_timed_out(timeout, executed, getattr(exc, "running_seconds", None))
+                raise _timed_out(method, timeout, executed) from exc
+            except ConnectionError as exc:
+                raise _connection_lost(
+                    method, exc, getattr(exc, "executed", None), getattr(exc, "attempts", 1)
                 ) from exc
             if method == "execute_script" and result.get("error"):
                 # Also covers add-ons built before the session added the hint itself.
@@ -257,23 +399,50 @@ class BlenderAttachments:
                     {
                         "instance_id": path.stem.removeprefix("instance-"),
                         "reachable": False,
+                        # A bridge that took the connection but did not answer in
+                        # time is running with its main thread busy.
+                        "busy": isinstance(exc, TimeoutError),
+                        # Its add-on was built for another protocol, so it was not
+                        # asked; a record whose Blender has exited is merely stale.
+                        "protocol_mismatch": isinstance(exc, ProtocolMismatch)
+                        and self._listening(endpoint),
                         "error": str(exc),
                     }
                 )
         return results
 
+    @staticmethod
+    def _listening(endpoint: dict[str, Any]) -> bool:
+        """Whether something accepts connections on the record's port; nothing is sent."""
+        port = endpoint.get("port")
+        if endpoint.get("host") != "127.0.0.1" or type(port) is not int or not 1 <= port <= 65535:
+            return False
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            return False
+
     def attach(
         self, instance_id: str | None = None, window_id: str | None = None
     ) -> dict[str, Any]:
         """Verify a single explicit target, then atomically persist its identity."""
+        entries = self.instances()
         live = [
-            entry
-            for entry in self.instances()
-            if entry["reachable"] and not entry["background"]
+            entry for entry in entries if entry["reachable"] and not entry["background"]
         ]
         if instance_id is not None:
-            live = [entry for entry in live if entry["instance_id"] == instance_id]
+            chosen = [entry for entry in live if entry["instance_id"] == instance_id]
+            if not chosen:
+                raise self._no_instance(instance_id, entries)
+            live = chosen
         if not live:
+            busy = [entry for entry in entries if entry.get("busy")]
+            if busy:
+                raise self._busy(busy[0]["instance_id"], entries)
+            outdated = [entry for entry in entries if entry.get("protocol_mismatch")]
+            if outdated:
+                raise self._mismatch(outdated[0], entries)
             raise NoBlenderBridge(
                 "No matching GUI Blender bridge. Enable the Simul Blender Bridge add-on in the existing window."
             )
@@ -293,6 +462,56 @@ class BlenderAttachments:
             self.directory / f"instance-{info['instance_id']}.json"
         )
         return self._publish(endpoint, info, windows[0])
+
+    @staticmethod
+    def _known(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The instances as ``instances`` lists them, credentials already left out."""
+        return list(entries)
+
+    def _busy(self, instance_id: str, entries: list[dict[str, Any]]) -> InstanceBusy:
+        return InstanceBusy(
+            f"Blender instance {instance_id} is busy: it took the connection but did not "
+            "answer within 2 s, as when a long script, a render or a modal dialog holds its "
+            "main thread. It is running, not gone; attach again once it is free.",
+            {"instance_id": instance_id, "instances": self._known(entries)},
+        )
+
+    def _mismatch(self, entry: dict[str, Any], entries: list[dict[str, Any]]) -> InstanceProtocolMismatch:
+        instance_id = entry["instance_id"]
+        return InstanceProtocolMismatch(
+            f"Blender instance {instance_id} cannot be attached: {entry.get('error')}",
+            {"instance_id": instance_id, "instances": self._known(entries)},
+        )
+
+    def _no_instance(self, instance_id: str, entries: list[dict[str, Any]]) -> AttachmentError:
+        """Explain why ``instance_id`` cannot be attached, naming the instances there are."""
+        entry = next((e for e in entries if e["instance_id"] == instance_id), None)
+        if entry is not None and entry.get("busy"):
+            return self._busy(instance_id, entries)
+        if entry is not None and entry.get("protocol_mismatch"):
+            return self._mismatch(entry, entries)
+        details = {"instance_id": instance_id, "instances": self._known(entries)}
+        if entry is not None and not entry["reachable"]:
+            return AttachmentStale(
+                f"Blender instance {instance_id} does not answer ({entry.get('error')}); it "
+                "exited or its Simul Blender Bridge add-on was disabled.",
+                details,
+            )
+        if entry is not None:
+            return AttachmentError(
+                f"Blender instance {instance_id} runs in background mode, with no window to attach.",
+                details,
+            )
+        known = [
+            f"{e['instance_id']} (pid {e.get('pid')})" if e["reachable"] else f"{e['instance_id']} (not answering)"
+            for e in entries
+        ]
+        listed = "; known instances: " + ", ".join(known) if known else "; none is running"
+        return InstanceNotFound(
+            f"No Blender instance has the id {instance_id!r}{listed}. Run `simul blender "
+            "instances`, or call attach_blender_window without instance_id.",
+            details,
+        )
 
     def reattach(self, previous: dict[str, Any]) -> dict[str, Any]:
         """Re-pin the same process after its document changed.

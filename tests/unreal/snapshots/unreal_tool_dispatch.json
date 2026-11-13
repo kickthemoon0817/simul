@@ -2631,7 +2631,45 @@
     {
      "method": "control_simulation",
      "arguments": {
-      "action": "start"
+      "action": "start",
+      "mode": "simulate"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "control_simulation"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "control_unreal_simulation",
+   "case": "every argument",
+   "arguments": {
+    "action": "start",
+    "mode": "play"
+   },
+   "envelope": [
+    {
+     "tool": "control_unreal_simulation",
+     "label": "Unreal",
+     "response_model": "UnrealControlSimulationResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "control_simulation",
+     "arguments": {
+      "action": "start",
+      "mode": "play"
      }
     }
    ],
@@ -2862,7 +2900,9 @@
       "is_impulse": false,
       "location_x": null,
       "location_y": null,
-      "location_z": null
+      "location_z": null,
+      "duration": 0.0,
+      "units": "unreal"
      }
     }
    ],
@@ -2887,10 +2927,12 @@
     "force_x": 1.0,
     "force_y": 2.0,
     "force_z": 3.0,
-    "is_impulse": true,
+    "is_impulse": false,
     "location_x": 4.0,
     "location_y": 5.0,
-    "location_z": 6.0
+    "location_z": 6.0,
+    "duration": 2.5,
+    "units": "si"
    },
    "envelope": [
     {
@@ -2908,10 +2950,12 @@
       "force_x": 1.0,
       "force_y": 2.0,
       "force_z": 3.0,
-      "is_impulse": true,
+      "is_impulse": false,
       "location_x": 4.0,
       "location_y": 5.0,
-      "location_z": 6.0
+      "location_z": 6.0,
+      "duration": 2.5,
+      "units": "si"
      }
     }
    ],
@@ -3002,6 +3046,279 @@
     "payload": {
      "success": true,
      "method": "set_physics_params"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "setup_unreal_physics_bulk",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "setup_unreal_physics_bulk",
+     "label": "Unreal",
+     "response_model": "UnrealSetupPhysicsBulkResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "setup_physics_bulk",
+     "arguments": {
+      "actor_paths": null,
+      "tag": null,
+      "folder": null,
+      "actor_filter": null,
+      "enable": true,
+      "kinematic": false,
+      "make_movable": true,
+      "allow_detach": false,
+      "collision_preset": null,
+      "mass": null,
+      "linear_damping": null,
+      "angular_damping": null,
+      "enable_gravity": null,
+      "skip_failures": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "setup_physics_bulk"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "setup_unreal_physics_bulk",
+   "case": "every argument",
+   "arguments": {
+    "actor_paths": "/Game/Maps/Test.Test:PersistentLevel.Chair_0, /Game/Maps/Test.Test:PersistentLevel.Table_0",
+    "tag": "props",
+    "folder": "Simul/Room_5",
+    "actor_filter": "_Box_",
+    "enable": false,
+    "kinematic": true,
+    "make_movable": false,
+    "allow_detach": true,
+    "collision_preset": "PhysicsActor",
+    "mass": 3.5,
+    "linear_damping": 0.3,
+    "angular_damping": 0.4,
+    "enable_gravity": false,
+    "skip_failures": true
+   },
+   "envelope": [
+    {
+     "tool": "setup_unreal_physics_bulk",
+     "label": "Unreal",
+     "response_model": "UnrealSetupPhysicsBulkResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "setup_physics_bulk",
+     "arguments": {
+      "actor_paths": [
+       "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+      ],
+      "tag": "props",
+      "folder": "Simul/Room_5",
+      "actor_filter": "_Box_",
+      "enable": false,
+      "kinematic": true,
+      "make_movable": false,
+      "allow_detach": true,
+      "collision_preset": "PhysicsActor",
+      "mass": 3.5,
+      "linear_damping": 0.3,
+      "angular_damping": 0.4,
+      "enable_gravity": false,
+      "skip_failures": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "setup_physics_bulk"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_physics_state",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "get_unreal_physics_state",
+     "label": "Unreal",
+     "response_model": "UnrealPhysicsStateResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_physics_state",
+     "arguments": {
+      "actor_paths": null,
+      "tag_filter": null,
+      "world": "auto",
+      "max_results": 100,
+      "offset": 0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_physics_state"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_physics_state",
+   "case": "every argument",
+   "arguments": {
+    "actor_paths": "/Game/Maps/Test.Test:PersistentLevel.Chair_0, /Game/Maps/Test.Test:PersistentLevel.Table_0",
+    "tag_filter": "props",
+    "world": "simulation",
+    "max_results": 7,
+    "offset": 14
+   },
+   "envelope": [
+    {
+     "tool": "get_unreal_physics_state",
+     "label": "Unreal",
+     "response_model": "UnrealPhysicsStateResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_physics_state",
+     "arguments": {
+      "actor_paths": [
+       "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+      ],
+      "tag_filter": "props",
+      "world": "simulation",
+      "max_results": 7,
+      "offset": 14
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_physics_state"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_simulation_actors",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "list_unreal_simulation_actors",
+     "label": "Unreal",
+     "response_model": "UnrealListSimulationActorsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "list_simulation_actors",
+     "arguments": {
+      "class_filter": null,
+      "tag_filter": null,
+      "simulating_only": false,
+      "max_results": 200,
+      "offset": 0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "list_simulation_actors"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_simulation_actors",
+   "case": "every argument",
+   "arguments": {
+    "class_filter": "StaticMeshActor",
+    "tag_filter": "props",
+    "simulating_only": true,
+    "max_results": 9,
+    "offset": 18
+   },
+   "envelope": [
+    {
+     "tool": "list_unreal_simulation_actors",
+     "label": "Unreal",
+     "response_model": "UnrealListSimulationActorsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "list_simulation_actors",
+     "arguments": {
+      "class_filter": "StaticMeshActor",
+      "tag_filter": "props",
+      "simulating_only": true,
+      "max_results": 9,
+      "offset": 18
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "list_simulation_actors"
     }
    },
    "usage": [
@@ -3517,7 +3834,9 @@
      "method": "analyze_scene_for_robotics",
      "arguments": {
       "analysis_types": null,
-      "actor_filter": null
+      "actor_filter": null,
+      "max_results": 50,
+      "offset": 0
      }
     }
    ],
@@ -3539,7 +3858,9 @@
    "case": "every argument",
    "arguments": {
     "analysis_types": "traversability, ,graspability",
-    "actor_filter": "Prop"
+    "actor_filter": "Prop",
+    "max_results": 20,
+    "offset": 40
    },
    "envelope": [
     {
@@ -3557,7 +3878,9 @@
        "traversability",
        "graspability"
       ],
-      "actor_filter": "Prop"
+      "actor_filter": "Prop",
+      "max_results": 20,
+      "offset": 40
      }
     }
    ],
@@ -3595,7 +3918,8 @@
       "scene_type": "warehouse",
       "parameters": {},
       "bounds_min": null,
-      "bounds_max": null
+      "bounds_max": null,
+      "physics_props": false
      }
     }
    ],
@@ -3619,7 +3943,8 @@
     "scene_type": "warehouse",
     "parameters": "{\"rows\": 3}",
     "bounds_min": "-100,-100,0",
-    "bounds_max": "100, 100, 50"
+    "bounds_max": "100, 100, 50",
+    "physics_props": true
    },
    "envelope": [
     {
@@ -3646,7 +3971,8 @@
        100.0,
        100.0,
        50.0
-      ]
+      ],
+      "physics_props": true
      }
     }
    ],

@@ -81,8 +81,10 @@ from ..schemas.unreal import (
     UnrealListActorComponentsResponse,
     UnrealListActorsResponse,
     UnrealListInstancesResponse,
+    UnrealListSimulationActorsResponse,
     UnrealLoadedMapResponse,
     UnrealLoadWorldPartitionResponse,
+    UnrealPhysicsStateResponse,
     UnrealPingResponse,
     UnrealQuerySceneGraphResponse,
     UnrealRemeshMeshResponse,
@@ -99,6 +101,7 @@ from ..schemas.unreal import (
     UnrealSetMaterialParamsResponse,
     UnrealSetPhysicsParamsResponse,
     UnrealSetRenderSettingsResponse,
+    UnrealSetupPhysicsBulkResponse,
     UnrealSimplifyMeshResponse,
     UnrealSpawnActorResponse,
     UnrealSubdivideMeshResponse,
@@ -239,6 +242,26 @@ def _optional_floats(value: str) -> Optional[List[float]]:
 def _optional_json(value: str) -> Any:
     """JSON text; an empty string means none."""
     return json.loads(value) if value else None
+
+
+def _scene_parameters(value: str) -> Optional[Dict[str, Any]]:
+    """``generate_unreal_procedural_scene``'s parameters: a JSON object; an empty string means none.
+
+    Raises:
+        ValueError: The text is not JSON, or not an object; the call reports it
+            as a ValidationError on ``parameters`` that says a JSON object is
+            expected, which json's own error ("Expecting value: line 1 column 1")
+            did not.
+    """
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f'must be a JSON object such as {{"seed": 7}}; it is not JSON: {exc}') from None
+    if not isinstance(parsed, dict):
+        raise ValueError(f"must be a JSON object, got {type(parsed).__name__}")
+    return parsed
 
 
 def _three_numbers(value: Any) -> Optional[List[float]]:
@@ -1461,8 +1484,14 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="set_unreal_light_params",
         description=(
-            "Set light component parameters (intensity, color, temperature, shadows); "
-            "a parameter left out keeps its current value."
+            "Set a light's parameters (intensity, sRGB color, temperature, attenuation, shadows) in one "
+            "undoable editor transaction and read them back; a parameter left out keeps its current "
+            "value, and with none the light is only read. Works on point, spot, rect and directional "
+            "lights and a SkyLight's intensity, color and shadows. Intensity is in the light's unit, "
+            "returned as intensity_unit: lux for a directional light, the light's Intensity Units "
+            "(candelas by default, or lumens, ev, nits, unitless) for a point, spot or rect light, a "
+            "multiplier for a SkyLight. Values are range-checked before anything is written, and when "
+            "Unreal stores one differently every value is put back, so a failed call changes nothing."
         ),
         response=UnrealSetLightParamsResponse,
         read_only=False,
@@ -1504,18 +1533,40 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="control_unreal_simulation",
         description=(
-            "Control Play-In-Editor: start, stop, pause or resume. Exact frame stepping is unsupported. "
-            "While PIE runs, Unreal's editor spawns and deletes no actors, so those tools return "
-            "PIEActive until it stops; level reads keep working and report pie_active."
+            "Start, stop, pause or resume the editor's simulation. start begins Simulate In Editor (the "
+            "level runs and its physics steps, no player) or, with mode play, a Play session that spawns "
+            "the player's pawn. Exact frame stepping is unsupported (step is refused). While either "
+            "runs, Unreal's editor spawns and deletes no actors, so those tools return PIEActive until "
+            "it stops; level reads keep working and report pie_active. apply_unreal_force, "
+            "get_unreal_physics_state and list_unreal_simulation_actors act on and read the simulation's "
+            "copies of the actors; physics and collision edits given an editor path change the editor "
+            "world, which the running simulation does not see."
         ),
         response=UnrealControlSimulationResponse,
         read_only=False,
         method="control_simulation",
-        params=(ToolParam("action", str),),
+        params=(
+            ToolParam(
+                "action",
+                Literal["start", "stop", "pause", "resume", "step"],
+                description="start, stop, pause or resume; step is refused (UnsupportedOperation).",
+            ),
+            ToolParam(
+                "mode",
+                Literal["simulate", "play"],
+                "simulate",
+                description=(
+                    "For start: simulate (Simulate In Editor: physics runs, no player, the viewport keeps "
+                    "the editor camera) or play (a Play session in the level viewport: the game mode "
+                    "possesses a pawn, and when it stops Unreal puts the game camera's view in the "
+                    "viewport). Ignored by the other actions."
+                ),
+            ),
+        ),
     ),
     UnrealTool(
         name="get_unreal_simulation_status",
-        description="Get current Play-In-Editor simulation status (playing, paused, stopped).",
+        description="Get the editor's simulation status (Play or Simulate In Editor: playing, paused, stopped).",
         response=UnrealGetSimulationStatusResponse,
         read_only=True,
         idempotent=True,
@@ -1599,7 +1650,16 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="apply_unreal_force",
-        description="Apply a force or impulse to an actor's physics body.",
+        description=(
+            "Apply a force or impulse to an actor's body in the running simulation (start it with "
+            "control_unreal_simulation; the editor world's bodies never move, so the call is refused "
+            "without one). Editor and simulation paths are both accepted. Units are Unreal's: force in "
+            "kg cm/s^2 and impulse in kg cm/s (1 N or 1 N s is 100), or N and N s with units si; the "
+            "application point is a world location in cm, fixed in the world while the body moves. An "
+            "impulse changes the velocity at once by impulse / mass; a force acts for one physics step "
+            "unless duration keeps it on for that many seconds of physics time, in step with gravity. "
+            "Returns the copy acted on, its mass and the expected change of velocity."
+        ),
         response=UnrealApplyForceResponse,
         read_only=False,
         method="apply_force",
@@ -1612,6 +1672,23 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("location_x", Optional[float], None),
             ToolParam("location_y", Optional[float], None),
             ToolParam("location_z", Optional[float], None),
+            ToolParam(
+                "duration",
+                float,
+                0.0,
+                description=(
+                    "Seconds of physics time a force keeps acting, 0 to 600: every frame the body gets, as "
+                    "an impulse, the force's momentum over the physics time that frame simulated (the frame "
+                    "time, at most Unreal's physics step limit, 1/30 s by default), so it keeps pace with "
+                    "gravity; paused time adds nothing. 0 acts for one physics step. Not for an impulse."
+                ),
+            ),
+            ToolParam(
+                "units",
+                Literal["unreal", "si"],
+                "unreal",
+                description="unreal: kg cm/s^2 (force), kg cm/s (impulse); si: N, N s.",
+            ),
         ),
     ),
     UnrealTool(
@@ -1633,6 +1710,167 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("linear_damping", Optional[float], None),
             ToolParam("angular_damping", Optional[float], None),
             ToolParam("enable_gravity", Optional[bool], None),
+        ),
+    ),
+    UnrealTool(
+        name="setup_unreal_physics_bulk",
+        description=(
+            "Set up physics on many editor actors in one call and one undoable transaction: the "
+            "actor_paths plus every actor with tag, in the outliner folder and matching actor_filter (each "
+            "that is given), at most 1000. Each is "
+            "made simulated, kinematic or not physical as enable_unreal_physics does, after an optional "
+            "collision preset (PhysicsActor makes props physics-ready) and with optional mass, damping "
+            "and gravity. Every actor is checked first, and one that cannot be set up, or does not take "
+            "the setup once written, refuses the call with every actor put back as it was, unless "
+            "skip_failures sets up the rest (a call that sets up none fails). Use it instead of one "
+            "call per actor, which runs into the rate limit."
+        ),
+        response=UnrealSetupPhysicsBulkResponse,
+        read_only=False,
+        idempotent=True,
+        destructive=True,
+        method="setup_physics_bulk",
+        params=(
+            ToolParam(
+                "actor_paths",
+                str,
+                "",
+                description="Comma-separated editor actor paths (empty: none, select by tag or folder).",
+                convert=_name_list,
+            ),
+            ToolParam(
+                "tag",
+                str,
+                "",
+                description="Also every editor actor with this actor tag, such as a procedural scene's tag.",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "folder",
+                str,
+                "",
+                description=(
+                    "Also every editor actor in this outliner folder or one under it, such as "
+                    "Simul/Room_5_7ee55bcd; with tag, only actors with both."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "actor_filter",
+                str,
+                "",
+                description=(
+                    "Also every editor actor whose label or path contains this text, ignoring case; with tag or "
+                    "folder, only actors matching those too (a procedural scene's tag with _Box_ picks its "
+                    "props, not its floor and walls)."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam("enable", bool, True, description="As enable_unreal_physics: false turns physics off."),
+            ToolParam("kinematic", bool, False, description="As enable_unreal_physics: kinematic, not simulated."),
+            ToolParam("make_movable", bool, True, description="As enable_unreal_physics."),
+            ToolParam("allow_detach", bool, False, description="As enable_unreal_physics."),
+            ToolParam(
+                "collision_preset",
+                str,
+                "",
+                description="Collision preset set first, such as PhysicsActor; empty keeps each actor's collision.",
+                convert=_optional_text,
+            ),
+            ToolParam("mass", Optional[float], None, description="Mass override in kg, 0.001 to 1e9."),
+            ToolParam("linear_damping", Optional[float], None, description="Linear damping, 0 to 1e6."),
+            ToolParam("angular_damping", Optional[float], None, description="Angular damping, 0 to 1e6."),
+            ToolParam("enable_gravity", Optional[bool], None, description="Whether gravity affects the bodies."),
+            ToolParam(
+                "skip_failures",
+                bool,
+                False,
+                description="Set up the actors that can be and list the rest, instead of refusing the call.",
+            ),
+        ),
+    ),
+    UnrealTool(
+        name="get_unreal_physics_state",
+        description=(
+            "Read bodies' live physics state: location, rotation, linear and angular velocity, awake "
+            "or asleep, mass and center of mass. While a simulation runs each actor is read through "
+            "its copy there (the editor world's actors stay where they were placed), otherwise in the "
+            "editor world; world picks one. Editor and simulation paths are both accepted, and each "
+            "body lists both. Paged: total counts every body, next_offset starts the next page."
+        ),
+        response=UnrealPhysicsStateResponse,
+        read_only=True,
+        idempotent=True,
+        method="get_physics_state",
+        params=(
+            ToolParam(
+                "actor_paths",
+                str,
+                "",
+                description=(
+                    "Comma-separated actor paths (editor or simulation paths); empty when tag_filter is given."
+                ),
+                convert=_name_list,
+            ),
+            ToolParam(
+                "tag_filter",
+                str,
+                "",
+                description="Also read every actor with this actor tag in the world read (empty: none).",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "world",
+                Literal["auto", "simulation", "editor"],
+                "auto",
+                description=(
+                    "auto: the running simulation while one runs, else the editor world; simulation "
+                    "(refused when none runs); editor."
+                ),
+            ),
+            ToolParam(
+                "max_results",
+                int,
+                100,
+                description="Most bodies on this page, 1 to 1000; a page also stops before 30,000 characters.",
+            ),
+            ToolParam("offset", int, 0, description="Bodies to skip: the previous page's next_offset."),
+        ),
+    ),
+    UnrealTool(
+        name="list_unreal_simulation_actors",
+        description=(
+            "List the running simulation's actors with their simulation and editor paths (null editor "
+            "path for an actor the simulation spawned, such as the player's pawn) and whether they "
+            "simulate physics, a page at a time (total, next_offset). Refused when no simulation runs."
+        ),
+        response=UnrealListSimulationActorsResponse,
+        read_only=True,
+        idempotent=True,
+        method="list_simulation_actors",
+        params=(
+            ToolParam(
+                "class_filter",
+                str,
+                "",
+                description="Only actors of this class, by name or path (empty: any).",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "tag_filter",
+                str,
+                "",
+                description="Only actors with this actor tag (empty: any).",
+                convert=_optional_text,
+            ),
+            ToolParam("simulating_only", bool, False, description="Only actors with a body that simulates physics."),
+            ToolParam(
+                "max_results",
+                int,
+                200,
+                description="Most actors on this page, 1 to 5000; a page also stops before 30,000 characters.",
+            ),
+            ToolParam("offset", int, 0, description="Actors to skip: the previous page's next_offset."),
         ),
     ),
     # -- USD and SimReady ----------------------------------------------------------
@@ -1860,9 +2098,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Classify level actors for robotics from their collision setup: floor-like surfaces a "
             "robot can stand on, small Movable objects it can grasp, and collision counts and "
-            "problems (static meshes with physics collision but no simple shapes). Uses the "
-            "bounding box of each actor's collision-enabled components; the thresholds come "
-            "back as criteria."
+            "problems (static meshes with physics collision but no simple shapes). Measures each "
+            "actor by the oriented box of its physics-collision components, so rotated pieces keep "
+            "their size and tilt, and each instance of an instanced mesh (ISM, HISM, foliage) by "
+            "itself; the thresholds come back as criteria. Both lists are paged together (max_results "
+            "each from offset; totals counts every match, next_offset starts the next page), and the "
+            "pages after the first read the first page's scan, so a large level is scanned once."
         ),
         response=UnrealAnalyzeSceneForRoboticsResponse,
         read_only=True,
@@ -1888,6 +2129,21 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "empty or null analyzes every actor."
                 ),
             ),
+            ToolParam(
+                "max_results",
+                int,
+                50,
+                description=(
+                    "Most entries per category on this page, 1 to 500; a page is cut further, the same "
+                    "for both lists, to fit the response budget."
+                ),
+            ),
+            ToolParam(
+                "offset",
+                int,
+                0,
+                description="Entries of each category to skip: the previous page's next_offset.",
+            ),
         ),
     ),
     UnrealTool(
@@ -1896,7 +2152,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside "
             "the bounds, in one undoable transaction; the same arguments give the same layout. Returns "
             "the spawned actor paths and the tag and outliner folder that group them, both unique to "
-            "the call."
+            "the call. physics_props makes the props physics-ready: Movable, PhysicsActor collision, "
+            "simulating, so they fall and can be pushed once the simulation starts."
         ),
         response=UnrealGenerateProceduralSceneResponse,
         read_only=False,
@@ -1918,7 +2175,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "props (one per 16 m2 of free floor). outdoor: trees (one per 20 m2), rocks (one "
                     "per 10 m2). Props are Movable boxes; everything else is Static."
                 ),
-                convert=_optional_json,
+                convert=_scene_parameters,
             ),
             ToolParam(
                 "bounds_min",
@@ -1933,6 +2190,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 "",
                 description="Maximum corner as comma-separated x,y,z in cm; empty is 1000,1000,500.",
                 convert=_optional_floats,
+            ),
+            ToolParam(
+                "physics_props",
+                bool,
+                False,
+                description=(
+                    "Make the props physics-ready: Movable, PhysicsActor collision and simulating physics. "
+                    "False leaves them Movable with BlockAll collision, not simulating."
+                ),
             ),
         ),
     ),

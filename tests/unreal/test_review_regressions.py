@@ -219,7 +219,6 @@ class Vector:
 class PrimitiveComponent:
     def __init__(self):
         self.mobility = SimpleNamespace(name="MOVABLE")
-        self.physics = False
         self.events = []
 
     def get_name(self):
@@ -227,15 +226,6 @@ class PrimitiveComponent:
 
     def get_class(self):
         return SimpleNamespace(get_name=lambda: "StaticMeshComponent")
-
-    def set_simulate_physics(self, value):
-        self.physics = value
-
-    def is_simulating_physics(self):
-        return self.physics
-
-    def add_impulse_at_location(self, force, location):
-        self.events.append(("impulse", force.z, location.x))
 
 
 class MeshComponent(PrimitiveComponent):
@@ -412,16 +402,10 @@ async def test_missing_actor_is_error_and_cannot_focus_origin(script_session, mo
 
 @pytest.mark.asyncio
 async def test_component_operations_and_missing_component(script_session):
-    """The physics and collision tools themselves are covered against a fuller
-    fake editor in tests/unreal/test_physics_tools.py."""
+    """The physics, collision and force tools themselves are covered against a
+    fuller fake editor in tests/unreal/test_physics_tools.py and
+    tests/unreal/test_simulation_tools.py."""
     session, actor, _ = script_session
-    component = actor.root_component
-    component.physics = True
-    result = await session.apply_force(
-        actor.path, force_z=7, is_impulse=True, location_x=4, location_y=5, location_z=6
-    )
-    assert result["force_applied"] is True
-    assert ("impulse", 7, 4) in component.events
     # assign_material has its own fake editor: tests/unreal/test_asset_tools.py.
     actor.root_component = None
     for result in (
@@ -443,7 +427,7 @@ async def test_simulation_lifecycle_and_query_errors(script_session, monkeypatch
         ("stop", "stopped"),
     ]:
         assert (await session.control_simulation(action))["state"] == state
-    assert (await session.control_simulation("pause"))["error_type"] == "InvalidState"
+    assert (await session.control_simulation("pause"))["error_type"] == "SimulationNotRunning"
     assert (await session.control_simulation("step"))[
         "error_type"
     ] == "UnsupportedOperation"

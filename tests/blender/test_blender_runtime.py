@@ -13,6 +13,7 @@ import pytest
 
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
+from simul.utils.regex_guard import RegexRefused
 from tests.blender.mesh_fakes import FakeBpy, FakeRNAProp, FakeRNAProperties
 from tests.fakes import (
     FakeAction,
@@ -1124,24 +1125,27 @@ class TestObservationTools:
         assert result["truncated"] is True
 
     @pytest.mark.parametrize(
-        ("pattern", "refusal"),
+        ("pattern", "error", "refusal"),
         [
-            (r"^(\w+)+_x$", "a quantifier inside a repeated group"),
-            (r"(\w+_)*light", "a quantifier inside a repeated group"),
-            (r"(a|ab)*c", "alternatives inside a repeated group"),
-            ("Cube(", "not a valid regular expression"),
+            ("Cube(", ValueError, "not a valid regular expression"),
+            # re would backtrack on it, and the linear-time search has no atomic groups.
+            (r".*.*.*.*(?>a)x", RegexRefused, "an atomic group"),
+            (r"(.*).*.*.*\1x", RegexRefused, "a back-reference"),
         ],
     )
     def test_search_objects_refuses_a_pattern_before_searching_any_name(
-        self, monkeypatch: pytest.MonkeyPatch, pattern: str, refusal: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        pattern: str,
+        error: type,
+        refusal: str,
     ) -> None:
         """The search runs on Blender's main thread, where nothing interrupts it.
 
-        A failing search for a repeated group that can match the same text in
-        several ways tries every split of the name: ^(\\w+)+_x$ took hours on
-        a 40-character object name and froze the editor, and
-        search_blender_objects stays registered with scripting disabled. An
-        invalid pattern raised re.error, reported as error_type "error".
+        A pattern Python's re could backtrack on for long is searched in linear
+        time instead; one that also needs what that search lacks is refused,
+        before any name is read. An invalid pattern raised re.error, reported
+        as error_type "error".
         """
         searched: List[str] = []
 
@@ -1155,7 +1159,6 @@ class TestObservationTools:
             def name(self, value: str) -> None:
                 self._name = value
 
-        # Short enough that a search without the guard fails this test, not hangs it.
         objects = [Recorded(name="a" * 12, object_type="MESH", visible=True)]
         fake_bpy = self._make_fake_bpy_with_objects(objects)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -1163,9 +1166,49 @@ class TestObservationTools:
         searched.clear()  # the fake's own name index read them
 
         session = blender_runtime.BlenderRuntimeSession()
-        with pytest.raises(ValueError, match=refusal):
+        with pytest.raises(error, match=refusal) as refused:
             session.search_objects(name_pattern=pattern)
         assert searched == []
+        if error is RegexRefused:
+            assert refused.value.details["code"] == "regex_backtracking"
+            assert str(refused.value).startswith("name_pattern has ")
+
+    @pytest.mark.parametrize(
+        ("pattern", "names"),
+        [
+            # B1-17: froze Blender for 15.6 s over ten 63-character names.
+            (".*.*.*.*.*.*x", ["box"]),
+            (r"^(\w+)+_x$", ["long_x"]),
+            (r"(a|ab)*c", ["abc"]),
+            (r".*(.*)?(.*)?.*x", ["box"]),
+            (r"[a-z]*[0-9]*[a-z]*[0-9]*[a-z]*x", ["box"]),
+            (r".*left.*front.*wheel.*joint", ["left_front_wheel_joint"]),
+            (r"robot.*arm.*left.*joint.*2", ["robot_arm_left_joint_2"]),
+            (r"^[A-Z][a-z]+(_[A-Z][a-z]+)*$", ["Base_Link"]),
+        ],
+    )
+    def test_search_objects_searches_backtracking_patterns_in_linear_time(
+        self, monkeypatch: pytest.MonkeyPatch, pattern: str, names: List[str]
+    ) -> None:
+        """Review: refusing them refused realistic patterns, and missed others.
+
+        Searched without backtracking, every one of them takes time linear in
+        the name, so each of these 255-character names takes milliseconds.
+        """
+        filler = [
+            FakeObject(name=("left" * 64)[:255], object_type="MESH", visible=True),
+            FakeObject(name="a" * 255, object_type="MESH", visible=True),
+            FakeObject(name="aB" * 127, object_type="MESH", visible=True),
+        ]
+        wanted = [FakeObject(name=name, object_type="MESH", visible=True) for name in names]
+        fake_bpy = self._make_fake_bpy_with_objects(filler + wanted)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.search_objects(name_pattern=pattern)
+
+        assert [o["name"] for o in result["objects"]] == names
 
     @pytest.mark.parametrize(
         ("pattern", "names"),

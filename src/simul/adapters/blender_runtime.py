@@ -53,7 +53,7 @@ from ..utils.asset_references import (
     outside_references,
 )
 from ..utils.asset_references import resolve_ncase as _resolve_ncase  # noqa: F401 - re-exported for tests
-from ..utils.regex_guard import exponential_regex_construct
+from ..utils.regex_guard import name_searcher
 from .simready_usd import COLLIDER_TYPES as SIMREADY_COLLIDER_TYPES
 from .simready_usd import author_simready_layer, usd_identifier
 
@@ -2194,8 +2194,12 @@ class BlenderRuntimeSession:
 
         Args:
             name_pattern: Python regular expression searched for in each object
-                name; a repeated group that holds a quantifier or alternatives,
-                as in (\\w+)+, is refused because it can run for hours.
+                name. One that Python's re could search for long, such as (\\w+)+
+                or .*.*.*x, is searched in time linear in the name instead; it is
+                refused only if it also needs a back-reference, an atomic group, a
+                possessive quantifier, a conditional or a lookaround that itself
+                backtracks for long, which that search lacks, or if it is longer
+                than 512 characters.
             object_type: Blender object type filter (MESH, LIGHT, etc.), in any case.
             max_results: Maximum number of results.
             offset: How many matching objects to skip, as next_offset gives it.
@@ -2207,9 +2211,10 @@ class BlenderRuntimeSession:
 
         Raises:
             ValueError: name_pattern is not a valid regular expression, or
-                repeats a group that holds a quantifier or alternatives (see
-                ``simul.utils.regex_guard``); object_type is not one of the
-                running Blender's object types.
+                object_type is not one of the running Blender's object types.
+            RegexRefused: name_pattern can be searched neither by re nor in
+                linear time in bounded time (``error_type`` ValidationError; see
+                ``simul.utils.regex_guard``).
         """
         if max_results < 1:
             raise ValueError("max_results must be greater than zero")
@@ -2224,28 +2229,22 @@ class BlenderRuntimeSession:
                     f"Unknown object_type {object_type!r}; Blender's object types: "
                     + ", ".join(known)
                 )
-        compiled_pattern = None
+        search = None
         if name_pattern:
+            # The search runs on Blender's main thread, where nothing can stop
+            # it: a pattern Python's re could backtrack on for long is searched
+            # in linear time instead.
             try:
-                compiled_pattern = re.compile(name_pattern)
+                search = name_searcher(name_pattern, subject="name_pattern")
             except re.error as exc:
                 raise ValueError(
                     f"name_pattern is not a valid regular expression: {exc}"
                 ) from exc
-            # The search runs on Blender's main thread, where nothing can stop it.
-            construct = exponential_regex_construct(name_pattern)
-            if construct is not None:
-                raise ValueError(
-                    f"name_pattern has {construct}: a failing search for it can "
-                    "freeze Blender for hours, since every way of splitting an "
-                    "object name between the repetitions is tried. Repeat a plain "
-                    "character class instead (\\w+ rather than (\\w+)+)"
-                )
         all_objects = self._resolve_object_source(None)
         matching = [
             obj
             for obj in all_objects
-            if (compiled_pattern is None or compiled_pattern.search(obj.name))
+            if (search is None or search(obj.name))
             and (object_type is None or obj.type == object_type)
         ]
         # Visibility is read only for the objects the page can describe.
@@ -9273,7 +9272,11 @@ class BlenderRuntimeSession:
         Args:
             script: Python source code to execute.
             timeout: Maximum wall-clock seconds to wait for the script;
-                ``None`` waits for it to finish.
+                ``None`` waits for it to finish. In attached mode the wait, time
+                spent behind other calls included, is also capped by
+                BLENDER__CONNECTION_TIMEOUT. A script that started by then returns
+                timed_out=true and keeps running; one still waiting behind other
+                calls never runs and fails with TimeoutError (details.executed false).
             max_output_chars: Most characters of printed output to return, 1 to 100000
                 (default 32000). Longer output is cut to its first max_output_chars
                 characters with output_truncated=true and output_total_chars set.

@@ -596,17 +596,25 @@ def search(
 @app.command()
 def sim(
     action: str = typer.Argument(..., help="Simulation action: start, stop, pause, resume, step"),
+    mode: str = typer.Option(
+        "simulate",
+        "--mode",
+        help="For start: simulate (Simulate In Editor, no player) or play (a Play session with the player's pawn)",
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Control Play-In-Editor simulation: start, stop, pause, resume, step."""
-    valid = {"start", "stop", "pause", "resume", "step"}
-    if action not in valid:
-        msg = f"Invalid action '{action}'. Must be one of: {', '.join(sorted(valid))}"
-        fail(msg, "ValueError")
+    """Control the editor's simulation (Play In Editor): start, stop, pause, resume, step."""
+    from ..adapters.unreal_runtime import SIMULATION_ACTIONS, SIMULATION_MODES
+
+    if action not in SIMULATION_ACTIONS:
+        msg = f"Invalid action '{action}'. Must be one of: {', '.join(sorted(SIMULATION_ACTIONS))}"
+        fail(msg, "InvalidArgument", exit_code=2)
+    if mode not in SIMULATION_MODES:
+        fail(f"Invalid mode '{mode}'. Must be one of: {', '.join(SIMULATION_MODES)}", "InvalidArgument", exit_code=2)
 
     session = _session(host, port)
-    result = _run(session.control_simulation(action), session)
+    result = _run(session.control_simulation(action, mode=mode), session)
     if is_json_mode():
         emit(result)
         return
