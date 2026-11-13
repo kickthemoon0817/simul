@@ -399,6 +399,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 target,
                 server.settings.usd,
                 sandbox=CompositionSandbox(server._path_policy),
+                layer_is_current=getattr(session, "layer_is_current", None),
             )
             unsaved = getattr(session, "unsaved_stages_of", None)
             for stage_id, path in unsaved(report.files) if unsaved is not None else []:

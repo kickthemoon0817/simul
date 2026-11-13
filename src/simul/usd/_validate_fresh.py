@@ -3,7 +3,7 @@
 pxr keeps one in-memory copy of each layer per process, so a server process
 whose loaded stages hold a file's layers cannot read that file afresh.
 ``validate_usd_file`` then runs this module with ``python -m``: it reads the
-request (file path, ``usd`` settings, sandbox policy) pickled on stdin,
+request (file path, ``usd`` settings, sandbox options) pickled on stdin,
 validates with nothing in memory, and writes one line to stdout,
 ``RESULT_MARKER`` followed by JSON: ``report`` and ``files``, or
 ``sandbox_denied`` with the refusal.
@@ -27,11 +27,11 @@ def main() -> int:
     # wrote the request to (a PathPolicy has no JSON form); nothing else can
     # write to it.
     request = pickle.loads(sys.stdin.buffer.read())
-    policy = request.get("policy")
-    sandbox = CompositionSandbox(policy) if policy is not None else None
+    options = request.get("sandbox")
+    sandbox = CompositionSandbox(**options) if options is not None else None
     result: Dict[str, Any]
     try:
-        report, _ = _validate_here(request["file_path"], USDConfig(**request["usd"]), sandbox)
+        report = _validate_here(request["file_path"], USDConfig(**request["usd"]), sandbox)
         result = {"report": report.to_dict(), "files": report.files}
     except SandboxDenied as exc:
         result = {

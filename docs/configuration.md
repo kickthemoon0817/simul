@@ -138,6 +138,7 @@ variable, so Blender must see the same `SIMUL_HOME` as the server (or set
 | `VIEWPORT__MAX_SIZE` | `2048` | Largest capture dimension |
 | `USD__ALLOWED_EXTENSIONS` | `[".usd",".usda",".usdc",".usdz"]` | Extensions the headless USD tools and `simul usd` commands open; load and validate share the list |
 | `USD__MAX_FILE_SIZE_MB` | `500` | Largest file they open; a bigger one fails with `FileTooLarge` |
+| `USD__VALIDATION_TIMEOUT_SECONDS` | `300` | Longest `validate_usd_file` may take when it checks a file in a separate process (a loaded stage holds an older copy of a file it uses); past it the call fails with `TimeoutError` |
 | `SECURITY__RELATIVE_PATH_BASE` | unset | Directory a relative tool path resolves against; unset uses the server's working directory ([File sandbox](#file-sandbox)) |
 
 `simul logs paths` prints the log locations the current settings resolve

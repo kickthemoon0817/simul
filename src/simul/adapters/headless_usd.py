@@ -767,6 +767,22 @@ class HeadlessUSDSession(LoggerMixin):
         """
         return self._owned_stage(stage_id)[1].file_path
 
+    def layer_is_current(self, path: str) -> bool:
+        """
+        Whether the shared layer the session's stages hold for ``path`` matches the file on disk.
+
+        False for a file the session does not track (it cannot vouch for
+        it) and for one that changed since its layer was read, including a
+        change pxr could not parse.
+
+        Args:
+            path: Real path of a file
+        """
+        with self._registry:
+            if path not in self._shared_stamps:
+                return False
+            return self._shared_stamps[path] == stage_files.stamp(path)
+
     def unsaved_stages_of(self, paths: List[str]) -> List[Tuple[str, str]]:
         """
         The caller's stages with unsaved edits whose root file is one of ``paths``.

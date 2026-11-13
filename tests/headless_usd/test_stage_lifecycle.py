@@ -857,20 +857,96 @@ class TestValidationReadsTheDisk:
         assert [(issue.severity, issue.code) for issue in report.issues] == [("error", "OpenFailed")]
         assert "Segmentation fault" in report.issues[0].message
 
-    def test_a_child_that_times_out_is_reported_as_an_error(self, session, files, monkeypatch) -> None:
+    def test_a_child_that_times_out_raises_with_the_setting(self, session, files, monkeypatch) -> None:
         import subprocess
 
+        from simul.config import USDConfig
+
         session.load_stage(files["scene"])
+        seen: Dict[str, Any] = {}
 
         def too_slow(*args: Any, **kwargs: Any) -> Any:
+            seen["timeout"] = kwargs["timeout"]
             raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
 
         monkeypatch.setattr(validation.subprocess, "run", too_slow)
 
+        with pytest.raises(TimeoutError, match="usd.validation_timeout_seconds"):
+            validation.validate_usd_file(str(files["scene"]), USDConfig(validation_timeout_seconds=7))
+
+        assert seen["timeout"] == 7
+
+    @pytest.mark.parametrize("failure", ["exit", "start"])
+    def test_a_child_that_cannot_run_falls_back_with_a_warning(self, session, files, monkeypatch, failure) -> None:
+        """No pxr in the child, or no child at all, says nothing about the file."""
+        import subprocess
+
+        session.load_stage(files["scene"])
+
+        def broken(*args: Any, **kwargs: Any) -> Any:
+            if failure == "start":
+                raise FileNotFoundError("no python there")
+            return subprocess.CompletedProcess(args, 1, b"", b"ModuleNotFoundError: No module named 'pxr'\n")
+
+        monkeypatch.setattr(validation.subprocess, "run", broken)
+
         report = validation.validate_usd_file(str(files["scene"]), Settings().usd)
 
-        assert [issue.code for issue in report.issues] == ["ValidationTimedOut"]
-        assert not report.is_valid
+        assert report.can_read is True and report.is_valid is True
+        warning = [issue for issue in report.issues if issue.code == "ValidatedInMemoryCopy"]
+        assert len(warning) == 1 and warning[0].severity == "warning"
+        assert ("ModuleNotFoundError" if failure == "exit" else "could not start") in warning[0].message
+        assert str(files["sub"].resolve()) in warning[0].message
+
+    def test_held_layers_unchanged_since_read_are_validated_in_process(self, session, files, monkeypatch) -> None:
+        import subprocess
+
+        session.load_stage(files["scene"])  # holds sub.usda and robot.usda, unchanged
+        calls: List[Any] = []
+
+        def child(*args: Any, **kwargs: Any) -> Any:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, -11, b"", b"")
+
+        monkeypatch.setattr(validation.subprocess, "run", child)
+
+        report = validation.validate_usd_file(
+            str(files["scene"]), Settings().usd, layer_is_current=session.layer_is_current
+        )
+
+        assert calls == [] and report.is_valid is True
+
+        _edit_externally(files["sub"], "/World/AddedOutside")
+        stale = validation.validate_usd_file(
+            str(files["scene"]), Settings().usd, layer_is_current=session.layer_is_current
+        )
+
+        assert len(calls) == 1 and [issue.code for issue in stale.issues] == ["OpenFailed"]
+
+    def test_the_child_gets_the_sandbox_options(self, session, tmp_path, monkeypatch) -> None:
+        import pickle
+        import subprocess
+
+        (tmp_path / "sub.usda").write_text('#usda 1.0\ndef Xform "World"\n{\n}\n')
+        (tmp_path / "root.usda").write_text("#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\n")
+        session.load_stage(tmp_path / "root.usda")
+        _touch_later(tmp_path / "sub.usda")
+        policy = PathPolicy(enabled=True, allowed_paths=[str(tmp_path)])
+        sent: Dict[str, Any] = {}
+
+        def capture(*args: Any, **kwargs: Any) -> Any:
+            sent.update(pickle.loads(kwargs["input"]))
+            return subprocess.CompletedProcess(args, -11, b"", b"")
+
+        monkeypatch.setattr(validation.subprocess, "run", capture)
+
+        report = validation.validate_usd_file(
+            str(tmp_path / "root.usda"), Settings().usd, sandbox=CompositionSandbox(policy)
+        )
+
+        assert set(sent["sandbox"]) == set(CompositionSandbox(policy).options())
+        assert sent["sandbox"]["policy"].allowed_roots == policy.allowed_roots
+        assert [(issue.code, "signal 11" in issue.message) for issue in report.issues] == [("OpenFailed", True)]
 
 
 class TestDiscard:

@@ -19,8 +19,9 @@ loader does, so the two cannot disagree:
   upAxis, metersPerUnit), physics sanity checks and pxr's UsdValidation
   validators (the usdz package rules only for a package), as a
   ``ValidationReport`` whose issues carry a severity and a location. It
-  checks the files as they are on disk: when pxr already holds one of them
-  in memory for a loaded stage, the check runs again in a fresh process.
+  checks the files as they are on disk: when pxr holds one of them in
+  memory for a loaded stage and that copy may be older than the file, the
+  check runs in a fresh process instead.
 """
 
 from __future__ import annotations
@@ -30,13 +31,14 @@ import math
 import os
 import pickle
 import re
+import site
 import stat
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from pxr import Ar
 
@@ -52,8 +54,6 @@ WARNING = "warning"
 INFO = "info"
 _SEVERITY_RANK = {ERROR: 0, WARNING: 1, INFO: 2}
 
-# Seconds a validation rerun in a fresh process (to read files from disk) may take.
-FRESH_PROCESS_TIMEOUT = 300.0
 # Prefixes the fresh process's one line of JSON result on its stdout.
 RESULT_MARKER = "simul-validation-result:"
 
@@ -762,7 +762,9 @@ class ValidationReport:
 
     ``files`` (not part of the reported JSON) lists the real paths of the
     layers the validated stage composed, root first, for a caller that wants
-    to relate the report to stages it holds.
+    to relate the report to stages it holds. ``problem`` (not reported
+    either) is set on a report from a fresh validation process that could
+    not run, saying why.
     """
 
     file_path: str
@@ -776,6 +778,7 @@ class ValidationReport:
     issues: List[ValidationIssue] = field(default_factory=list)
     validators: List[str] = field(default_factory=list)
     files: List[str] = field(default_factory=list)
+    problem: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], files: Optional[List[str]] = None) -> "ValidationReport":
@@ -858,8 +861,20 @@ def _layers_in_memory() -> Set[str]:
     return identifiers
 
 
+class _ReadFromDisk(Exception):
+    """The check used an in-memory layer that may be older than its file."""
+
+    def __init__(self, paths: List[str]) -> None:
+        super().__init__(", ".join(paths))
+        self.paths = paths
+
+
 def validate_usd_file(
-    file_path: str, usd_config: "USDConfig", sandbox: Optional["CompositionSandbox"] = None
+    file_path: str,
+    usd_config: "USDConfig",
+    sandbox: Optional["CompositionSandbox"] = None,
+    *,
+    layer_is_current: Optional[Callable[[str], bool]] = None,
 ) -> ValidationReport:
     """Open a USD file the way the loader does and report every problem found, as it is on disk.
 
@@ -867,9 +882,12 @@ def validate_usd_file(
     that opens the file, so a check that reused the copy a loaded stage holds
     would validate what that stage read, not the file: a file fixed and
     saved since would still fail, and a sublayer broken since would pass.
-    Validation therefore runs here when it read every file afresh, and runs
-    again in a fresh process, which holds no layer, when it used a layer
-    that was already in memory (``_validate_in_fresh_process``).
+    Once the stage is composed, and before any check runs, each layer that
+    was already in memory is tested with ``layer_is_current``. When one is
+    not current (or is dirty, or nothing says), the whole check runs in a
+    fresh process instead, which holds no layer
+    (``_validate_in_fresh_process``). If that process cannot run, the check
+    runs here and says so in a ``ValidatedInMemoryCopy`` warning.
 
     Args:
         file_path: Absolute path of the file. The MCP tool passes the path the
@@ -878,6 +896,9 @@ def validate_usd_file(
         sandbox: Holds every layer and asset the stage draws on to the file
             sandbox, as the loader does; None (the CLI) checks nothing beyond
             the file.
+        layer_is_current: Says whether the in-memory layer of a file (by
+            real path) still matches the file on disk; the headless session
+            knows it for the layers its stages hold.
 
     Returns:
         The report. ``can_read`` says whether pxr opened the file (and so
@@ -886,23 +907,49 @@ def validate_usd_file(
 
     Raises:
         SandboxDenied: The file's composition reaches outside the sandbox.
+        TimeoutError: The fresh process took longer than
+            ``usd.validation_timeout_seconds``.
     """
     in_memory = _layers_in_memory()
+
+    def stale(layers: Iterable[Any]) -> List[str]:
+        return [
+            layer.realPath or layer.identifier
+            for layer in layers
+            if layer is not None
+            and layer.identifier in in_memory
+            and (layer.dirty or layer_is_current is None or not layer_is_current(layer.realPath))
+        ]
+
     try:
-        report, read = _validate_here(file_path, usd_config, sandbox)
+        return _validate_here(file_path, usd_config, sandbox, stale=stale)
     except SandboxDenied as exc:
-        named = {
-            entry.get("layer")
+        named = [
+            Sdf.Layer.Find(entry["layer"])
             for entry in exc.details.get("outside_sandbox", [])
-            if isinstance(entry, dict)
-        }
-        if named & in_memory:
-            # The refusal may come from a stale copy; the file decides.
-            return _validate_in_fresh_process(file_path, usd_config, sandbox)
-        raise
-    if read & in_memory:
-        return _validate_in_fresh_process(file_path, usd_config, sandbox)
-    return report
+            if isinstance(entry, dict) and entry.get("layer") in in_memory
+        ]
+        paths = stale(named)
+        if not paths:
+            raise
+        # The refusal came from an in-memory copy older than its file.
+    except _ReadFromDisk as exc:
+        paths = exc.paths
+    report = _validate_in_fresh_process(file_path, usd_config, sandbox)
+    if report.problem is None:
+        return report
+    fallback = _validate_here(file_path, usd_config, sandbox)
+    fallback.issues.append(
+        ValidationIssue(
+            WARNING,
+            "ValidatedInMemoryCopy",
+            f"Could not check {file_path} in a separate process ({report.problem}), so it was "
+            f"checked here, with the in-memory copies loaded stages hold of {', '.join(paths)}; "
+            "those may differ from the files on disk.",
+            layer=file_path,
+        )
+    )
+    return fallback
 
 
 def _validate_in_fresh_process(
@@ -911,48 +958,54 @@ def _validate_in_fresh_process(
     """Run the validation in a new Python process, where pxr reads every file from disk.
 
     The child (``simul.usd._validate_fresh``) gets the same settings and
-    sandbox policy and imports this same ``simul`` package. A child that
-    dies or times out is reported as an error issue, since that is how pxr
-    fared with the file.
+    sandbox options and imports this same ``simul`` package. A child killed
+    by a signal is pxr crashing on the file: an ``OpenFailed`` error issue.
+    A child that cannot start or exits without a result is not the file's
+    fault: the returned report has ``problem`` set, and the caller checks in
+    process instead.
 
     Raises:
         SandboxDenied: The file on disk reaches outside the sandbox.
-        OSError: The child process could not be started.
+        TimeoutError: The child ran longer than
+            ``usd.validation_timeout_seconds``.
     """
     request = pickle.dumps(
         {
             "file_path": file_path,
             "usd": usd_config.model_dump(mode="json"),
-            "policy": sandbox.policy if sandbox is not None else None,
+            "sandbox": sandbox.options() if sandbox is not None else None,
         }
     )
-    package_root = str(Path(__file__).resolve().parents[2])
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(path for path in (package_root, env.get("PYTHONPATH")) if path)
-    failed = ValidationReport(
+    package_root = os.path.realpath(Path(__file__).resolve().parents[2])
+    site_dirs = {os.path.realpath(path) for path in [*site.getsitepackages(), site.getusersitepackages()]}
+    if package_root not in site_dirs:
+        # A source checkout or an editable install: the child must import
+        # this same simul, not another one on its default path.
+        env["PYTHONPATH"] = os.pathsep.join(path for path in (package_root, env.get("PYTHONPATH")) if path)
+    report = ValidationReport(
         file_path=file_path,
         file_size=0 if url_scheme(file_path) is not None else _file_size(file_path),
         format=Path(file_path).suffix.lower().lstrip("."),
     )
+    timeout = usd_config.validation_timeout_seconds
     try:
         done = subprocess.run(
             [sys.executable, "-m", "simul.usd._validate_fresh"],
             input=request,
             capture_output=True,
-            timeout=FRESH_PROCESS_TIMEOUT,
+            timeout=timeout,
             env=env,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        failed.issues.append(
-            ValidationIssue(
-                ERROR,
-                "ValidationTimedOut",
-                f"Reading {file_path} from disk took longer than {FRESH_PROCESS_TIMEOUT:g} s.",
-                layer=file_path,
-            )
-        )
-        return failed
+        raise TimeoutError(
+            f"Validating {file_path} from disk in a separate process took longer than "
+            f"usd.validation_timeout_seconds ({timeout:g} s)."
+        ) from None
+    except OSError as exc:
+        report.problem = f"it could not start: {exc}"
+        return report
     result: Optional[Dict[str, Any]] = None
     for line in reversed(done.stdout.decode("utf-8", "replace").splitlines()):
         if line.startswith(RESULT_MARKER):
@@ -960,16 +1013,20 @@ def _validate_in_fresh_process(
             break
     if result is None:
         stderr = done.stderr.decode("utf-8", "replace").strip().splitlines()
-        reason = stderr[-1] if stderr else f"exit code {done.returncode}"
-        failed.issues.append(
-            ValidationIssue(
-                ERROR,
-                "OpenFailed",
-                f"pxr failed while reading {file_path} from disk: {reason}",
-                layer=file_path,
+        last = stderr[-1] if stderr else ""
+        if done.returncode < 0:
+            report.issues.append(
+                ValidationIssue(
+                    ERROR,
+                    "OpenFailed",
+                    f"pxr crashed (signal {-done.returncode}) while reading {file_path} from disk"
+                    + (f": {last}" if last else "."),
+                    layer=file_path,
+                )
             )
-        )
-        return failed
+            return report
+        report.problem = f"exit code {done.returncode}" + (f": {last}" if last else "")
+        return report
     denied = result.get("sandbox_denied")
     if denied is not None:
         raise SandboxDenied(denied["path"], denied["details"], error_message=denied["error_message"])
@@ -977,13 +1034,19 @@ def _validate_in_fresh_process(
 
 
 def _validate_here(
-    file_path: str, usd_config: "USDConfig", sandbox: Optional["CompositionSandbox"]
-) -> Tuple[ValidationReport, Set[str]]:
-    """Validate in this process, whatever pxr already holds in memory.
+    file_path: str,
+    usd_config: "USDConfig",
+    sandbox: Optional["CompositionSandbox"],
+    *,
+    stale: Optional[Callable[[Iterable[Any]], List[str]]] = None,
+) -> ValidationReport:
+    """Validate in this process.
 
-    Returns:
-        The report, and the identifiers of every layer it read (the root,
-        those the sandbox walked and those the stage composed).
+    Args:
+        stale: Given the layers the composed stage read, names those that
+            may be older than their files; when it names any, the check
+            stops with ``_ReadFromDisk`` before any validator runs. None:
+            validate whatever pxr holds (the fresh process holds nothing).
     """
     remote = url_scheme(file_path) is not None
     report = ValidationReport(
@@ -1000,33 +1063,26 @@ def _validate_here(
             root_layer = open_root_layer(file_path, facts.head)
     except USDLoadError as exc:
         report.issues.append(exc.to_issue())
-        return report, set()
+        return report
 
-    read = {root_layer.identifier}
     file_format = root_layer.GetFileFormat()
     report.layer_format = file_format.formatId
     walked = sandbox.check_layers(root_layer) if sandbox is not None else []
-    read.update(layer.identifier for layer in walked)
+    failure = "pxr could not compose the stage"
     try:
         stage = Usd.Stage.Open(root_layer, Usd.Stage.LoadAll)
     except Tf.ErrorException as exc:
-        report.issues.append(
-            ValidationIssue(
-                ERROR,
-                "StageOpenFailed",
-                "; ".join(tf_error_messages(exc)) or "pxr could not compose the stage",
-                layer=file_path,
-            )
-        )
-        return report, read
+        stage = None
+        failure = "; ".join(tf_error_messages(exc)) or failure
+    used = [layer for layer in stage.GetUsedLayers() if not layer.anonymous] if stage is not None else []
+    if stale is not None:
+        old = stale([root_layer, *walked, *used])
+        if old:
+            raise _ReadFromDisk(old)
     if stage is None:
-        report.issues.append(
-            ValidationIssue(ERROR, "StageOpenFailed", "pxr could not compose the stage", layer=file_path)
-        )
-        return report, read
+        report.issues.append(ValidationIssue(ERROR, "StageOpenFailed", failure, layer=file_path))
+        return report
 
-    used = [layer for layer in stage.GetUsedLayers() if not layer.anonymous]
-    read.update(layer.identifier for layer in used)
     report.files = [root_layer.realPath] + [
         layer.realPath for layer in used if layer != root_layer and layer.realPath
     ]
@@ -1050,7 +1106,7 @@ def _validate_here(
     )
     report.issues.extend(compliance)
     report.validators = names
-    return report, read
+    return report
 
 
 __all__ = [

@@ -165,6 +165,15 @@ class CompositionSandbox:
         """The path policy every location is judged by."""
         return self._policy
 
+    def options(self) -> Dict[str, Any]:
+        """The constructor arguments, to build the same sandbox in another process.
+
+        Validation rebuilds the sandbox from these in a fresh process
+        (``simul.usd._validate_fresh``); an option added to ``__init__`` must
+        be added here too, or that process would not honour it.
+        """
+        return {"policy": self._policy}
+
     def check_layers(self, root_layer: "Sdf.Layer") -> List["Sdf.Layer"]:
         """Walk the layers ``root_layer`` draws on before the stage is composed.
 

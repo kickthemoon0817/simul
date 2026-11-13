@@ -162,9 +162,19 @@ parse error). The checks, in order:
 
 The checks read the files as they are on disk. pxr keeps one in-memory copy
 of each file per process and gives it to every stage that opens the file,
-so when a loaded stage (any session's) holds the file or one it draws on,
-that copy may be older than the file. Validation then runs again in a fresh
-process, which adds a few hundred milliseconds. Unsaved edits are never part
+so a loaded stage (any session's) may hold a copy of the file, or of one it
+draws on, that is older than the file. Once the stage is composed, and
+before any check runs, each copy that was already in memory is compared
+with its file. When all of them match, the check runs in the server process
+as usual. When one changed since it was read, the whole check runs in a
+fresh process instead. That costs the time to start Python and pxr (a few
+tenths of a second) plus composing the file a second time, which for a
+large scene is most of the check. `usd.validation_timeout_seconds` (default
+300) caps that process; past it the call fails with `TimeoutError`. A
+process killed by a signal is pxr crashing on the file, reported as an
+`OpenFailed` error. If the process cannot start or ends without a result,
+the check runs in the server process anyway, with a `ValidatedInMemoryCopy`
+warning naming the files whose copies it used. Unsaved edits are never part
 of the check: an `info` issue `UnsavedEdits` names each stage of the calling
 session with unsaved edits to a checked file. Save or export them and
 validate the written file to check them.
