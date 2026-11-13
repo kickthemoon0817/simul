@@ -3726,7 +3726,7 @@
    "case": "required",
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
-    "operation": "extrude"
+    "operation": "extrude_faces"
    },
    "envelope": [
     {
@@ -3741,7 +3741,7 @@
      "method": "edit_mesh_topology",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "operation": "extrude",
+      "operation": "extrude_faces",
       "face_selection": null,
       "edge_selection": null,
       "distance": null,
@@ -3769,7 +3769,7 @@
    "case": "every argument",
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
-    "operation": "extrude",
+    "operation": "extrude_faces",
     "face_selection": "0,1",
     "edge_selection": "2",
     "distance": 5.0,
@@ -3790,7 +3790,7 @@
      "method": "edit_mesh_topology",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "operation": "extrude",
+      "operation": "extrude_faces",
       "face_selection": "0,1",
       "edge_selection": "2",
       "distance": 5.0,
@@ -4328,7 +4328,7 @@
      "method": "compute_mesh_uv",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "method": "auto_uv",
+      "method": "auto",
       "uv_channel": 0,
       "island_padding": 2.0
      }
@@ -5003,13 +5003,13 @@
     "is_error": true,
     "payload": {
      "success": false,
-     "error": "location: could not convert string to float: 'x'",
+     "error": "location: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not '1,x,3'",
      "error_type": "ValidationError",
      "details": {
       "errors": [
        {
         "field": "location",
-        "message": "could not convert string to float: 'x'",
+        "message": "expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not '1,x,3'",
         "type": "value_error"
        }
       ]
@@ -5019,7 +5019,7 @@
    "usage": [
     {
      "success": false,
-     "error": "location: could not convert string to float: 'x'"
+     "error": "location: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not '1,x,3'"
     }
    ]
   },
@@ -5044,13 +5044,13 @@
     "is_error": true,
     "payload": {
      "success": false,
-     "error": "plane_normal: could not convert string to float: 'up'",
+     "error": "plane_normal: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not 'up'",
      "error_type": "ValidationError",
      "details": {
       "errors": [
        {
         "field": "plane_normal",
-        "message": "could not convert string to float: 'up'",
+        "message": "expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not 'up'",
         "type": "value_error"
        }
       ]
@@ -5060,7 +5060,7 @@
    "usage": [
     {
      "success": false,
-     "error": "plane_normal: could not convert string to float: 'up'"
+     "error": "plane_normal: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not 'up'"
     }
    ]
   }

@@ -1099,12 +1099,10 @@ Behaviour worth knowing:
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:
   - `spawn_unreal_actor`, `delete_unreal_actor`,
-    `generate_unreal_procedural_scene`, the mesh tools that create an actor
-    (`generate_unreal_mesh_primitive`, `compute_unreal_convex_hull`,
-    `decompose_unreal_convex_hull`, `convert_unreal_mesh_format` to
-    `dynamic_mesh`), `import_unreal_usd`, `export_unreal_usd`,
-    `import_unreal_asset`, `save_unreal_assets` (the editor saves nothing
-    during PIE) and, in attached
+    `generate_unreal_procedural_scene`, every mesh tool except
+    `validate_unreal_mesh` (they create actors or replace meshes, see below),
+    `import_unreal_usd`, `export_unreal_usd`, `import_unreal_asset`,
+    `save_unreal_assets` (the editor saves nothing during PIE) and, in attached
     mode, every `control_unreal_ui` action except `inspect` and `clear_cursor`
     return `error_type: "PIEActive"`, with `details.hint` naming the way out:
     `control_unreal_simulation` with action `stop` (CLI: `simul unreal sim stop`).
@@ -1142,6 +1140,78 @@ Behaviour worth knowing:
     starts) the camera stays where it was put; when a Play session in the
     level viewport stops, Unreal replaces the editor camera, by default with
     the game camera's last view.
+- The mesh tools (`generate_unreal_mesh_primitive`, `validate_unreal_mesh`
+  and the other `*_unreal_mesh*` and `*_unreal_convex_hull` tools) run
+  GeometryScript in the editor:
+  - They need the GeometryScripting plugin, which `simul unreal setup` enables
+    (restart an editor that was already running). Without it every mesh tool
+    returns `error_type: "UnsupportedOperation"` with `details.code:
+    "GEOMETRY_SCRIPTING_DISABLED"` and a hint naming setup.
+  - They take the path of a DynamicMeshActor in the level open in the editor,
+    found without loading a map. A path that names nothing is `NotFoundError`.
+    A StaticMeshActor (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh
+    asset path (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose
+    `details.hint` names `convert_unreal_mesh_format`, which places an
+    editable DynamicMeshActor copy of a StaticMesh asset in the level; any
+    other actor is `"NO_DYNAMIC_MESH"`.
+  - Every GeometryScript call is checked after it returns. GeometryScript
+    reports most failures that way and otherwise leaves the mesh as it was
+    (Catmull-Clark on a mesh without quad polygroups returned with the
+    triangle count unchanged). An error fails the tool with `EngineError`,
+    `details.code: "GEOMETRY_SCRIPT_FAILED"` and GeometryScript's messages in
+    `details.messages`, and nothing is changed; warnings come back in
+    `warnings`.
+  - An edit runs on a copy of the mesh, and the copy replaces the component's
+    mesh in one transaction, so a failed edit changes nothing, one Undo
+    reverts one edit and the level is marked dirty for Save. A tool that
+    creates an actor spawns it, with its mesh, in one transaction too.
+  - Undo and Redo of a mesh edit restore which mesh the DynamicMeshComponent
+    holds, not what Unreal does when a mesh is set (UE 5.7.4): the component
+    stops listening to the mesh it got back, so an in-place edit of that mesh
+    outside simul (a Blueprint, Python GeometryScript, Modeling Mode) no longer
+    updates its bounds or what it draws, and its physics keeps the simple
+    collision it had before the Undo or Redo (a trace against a hull that Redo
+    put back misses). Every mesh tool repairs both on each DynamicMeshActor it
+    touches, `validate_unreal_mesh` included: it rebuilds the collision, and
+    where an Undo or Redo left the actor's package dirty (or in a level never
+    saved) it sets the component's mesh again, which binds it (and renames the
+    mesh object). A clean level is left alone, so a level saved right after an
+    Undo keeps the stale binding until it is reloaded or edited.
+  - Each in-place edit keeps the mesh it replaced alive for Undo: a full copy
+    that the editor's undo buffer limit (256 MB by default) does not count, so
+    it is freed only when the edit leaves the undo history. A hundred edits of
+    a 32,256-triangle mesh added about 370 MB to the editor; one UV unwrap of a
+    1M-triangle mesh about 760 MB.
+  - A mesh tool leaves at most 2,000,000 triangles in a mesh it makes or
+    edits. A larger result is refused with `details.code: "RESULT_TOO_LARGE"`
+    (`details.predicted` says whether it was predicted or measured) and
+    nothing is changed: before anything runs when the size is known up front
+    (a subdivision, a remesh, which makes up to 1.6 times its target, a UV
+    unwrap or topology edit of a mesh already over the cap, a primitive with
+    more than 512 segments), otherwise when the operation has run and before
+    its result replaces anything.
+  - `compute_unreal_mesh_uv` unwraps with XAtlas only up to 20,000 triangles:
+    XAtlas crashed the editor on a 130,048- and a 318,400-triangle mesh, and
+    took 28.6 s for 32,256 (UE 5.7.4). Method `auto`, the default, uses
+    PatchBuilder above that size (29 s for 318,400 triangles) and the reply's
+    `method` names the one that ran; `xatlas` on a larger mesh is refused with
+    `details.code: "MESH_TOO_LARGE_FOR_XATLAS"`. A `uv_channel` the mesh does
+    not have is refused (`"UV_CHANNEL_MISSING"`).
+  - A mesh script runs under an HTTP timeout of at least 300 s, whatever
+    `UNREAL__TIMEOUT` says, since a GeometryScript call cannot be cancelled.
+    The slowest operations on a 2M-triangle mesh took 83 to 109 s (a
+    PatchBuilder unwrap, a convex hull, a simplification; UE 5.7.4, Apple
+    M-series). A script commits its result only within that timeout less 10
+    s: one that finishes later discards its result, so a `TimeoutError`
+    (`details.code: "MESH_TIME_BUDGET"`) leaves the level as it was once the
+    editor finishes, though the editor stays busy until then. For an editor on
+    this machine the limit runs on this machine's clock, so it holds however
+    long the call waited in the editor's queue; for a remote editor it is the
+    script's own run time, and a call that first waited behind another script
+    may still commit late.
+  - In attached mode, a call the attachment guard refuses (the editor shows
+    another map or instance) is `error_type: "InvalidState"`, `details.code:
+    "ATTACHMENT_CHANGED"`.
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.

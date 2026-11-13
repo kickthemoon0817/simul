@@ -48,6 +48,38 @@ from ._unreal_errors import (
     remote_control_message,
     script_not_found,
 )
+from ._unreal_mesh_scripts import (
+    COMPUTE_UV,
+    CONVERT,
+    CONVEX_DECOMPOSITION,
+    CONVEX_HULL,
+    EDIT_TOPOLOGY,
+    GENERATE_PRIMITIVE,
+    MESH_BOOLEAN,
+    MAX_REMESH_TARGET_TRIANGLES,
+    MAX_RESULT_TRIANGLES,
+    MAX_SEGMENTS,
+    MESH_COMMIT_MARGIN_S,
+    MESH_REFUSALS,
+    MESH_SCRIPT_TIMEOUT_S,
+    MIN_SEGMENTS,
+    PLANE_CUT,
+    PRIMITIVE_TYPES,
+    REMESH,
+    REMESH_OVERSHOOT,
+    SIMPLIFY,
+    SUBDIVIDE,
+    TARGET_FORMATS,
+    TOPOLOGY_OPERATIONS,
+    UV_METHODS,
+    VALIDATE,
+    attachment_refusal,
+    invalid_choice,
+    is_loopback,
+    mesh_script,
+    mesh_timeout_error,
+    refusal,
+)
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_python import isolate, python_command
 from ._unreal_scripts import (
@@ -1902,29 +1934,44 @@ class UnrealRuntimeSession(LoggerMixin):
         )
         return await self._execute_json_script(script)
 
-    async def _run_mesh_script(
-        self, body: str, *, pie_action: Optional[str] = None, **actors: str
-    ) -> Dict[str, Any]:
-        """Run a GeometryScript body against actors resolved by path.
+    async def _run_mesh_script(self, body: str, **args: Any) -> Dict[str, Any]:
+        """Run one mesh tool's editor script and return its payload or typed error.
 
-        Each keyword binds a script variable to ``actor_at(path)`` from
-        ``ACTOR_HELPERS`` -- a lookup among loaded objects instead of a scan
-        over every level actor, which never loads a map. ``body`` is the mesh
-        op's block, indented one level; it is dedented here. A path that names
-        no live actor of the editor world raises SimulNotFound inside the
-        editor and comes back as an error envelope. With ``pie_action`` (a body that
-        spawns actors), the body runs only while Play In Editor is stopped
-        and the call is otherwise refused as PIEActive (``_outside_pie``).
+        The script is ``_unreal_mesh_scripts.mesh_script(body, args)``: the
+        tool's data, the shared mesh helpers and ``body``. It runs under an
+        HTTP timeout of at least ``MESH_SCRIPT_TIMEOUT_S``, since a
+        GeometryScript call blocks the editor until it returns and cannot be
+        cancelled, and commits its result only within that timeout less
+        ``MESH_COMMIT_MARGIN_S``: by the clock of this host for an editor on
+        it, by its own run time otherwise. So a timeout reported here leaves
+        the level as it was once the editor finishes. The script reports its
+        own refusals with an ``error_type``; the attachment guard's refusal,
+        which is raised before the script runs, comes back as
+        ``InvalidState`` instead of a traceback.
+
+        Args:
+            body: The tool body, from ``_unreal_mesh_scripts``.
+            **args: The tool's data, embedded with repr.
+
+        Returns:
+            The payload, or an error envelope.
+
+        Raises:
+            UnrealTimeoutError: The editor did not answer within the timeout.
         """
-        lookups = "".join(f"{name} = actor_at({path!r})\n" for name, path in actors.items())
-        operation = (
-            "subsys = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)\n"
-            + lookups
-            + textwrap.dedent(body)
-        )
-        if pie_action is not None:
-            operation = _outside_pie(operation, pie_action)
-        return await self._execute_json_script(ACTOR_HELPERS + operation)
+        timeout = max(self.timeout, MESH_SCRIPT_TIMEOUT_S)
+        budget = timeout - MESH_COMMIT_MARGIN_S
+        deadline = time.time() + budget if is_loopback(self.host) else None
+        script = mesh_script(body, args, budget_s=budget, deadline=deadline)
+        try:
+            result = await self._execute_json_script(script, expected_errors=MESH_REFUSALS, timeout=timeout)
+        except UnrealTimeoutError as exc:
+            raise mesh_timeout_error(exc, timeout, budget, same_clock=deadline is not None) from exc
+        stopped = attachment_refusal(result)
+        if stopped is not None:
+            self.logger.info("Unreal refused the request (%s): %s", stopped["error_type"], stopped["error"])
+            return stopped
+        return result
 
     @staticmethod
     def _script_execution_denied() -> Dict[str, Any]:
@@ -5163,6 +5210,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
     # ------------------------------------------------------------------
     # Phase 8: Geometry & Modeling (GeometryScript)
+    #
+    # The scripts are in _unreal_mesh_scripts, which says what they share:
+    # the GeometryScripting check, actor_at lookups, a GeometryScriptDebug
+    # check after every call, edits on a copy swapped in inside one
+    # transaction, and the PIE refusal.
     # ------------------------------------------------------------------
 
     async def generate_mesh_primitive(
@@ -5174,107 +5226,36 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Create a parametric mesh primitive via GeometryScript.
+        Create a parametric mesh primitive as a new DynamicMeshActor.
+
+        The spawn and its mesh are one undoable transaction.
 
         Args:
-            primitive_type: box, sphere, cylinder, cone, torus, capsule.
+            primitive_type: box, sphere, cylinder, cone or capsule.
             dimensions: Type-specific dimensions.
-            segments: Tessellation segments.
+            segments: Tessellation segments, 3 to 512 (a 512-segment sphere
+                has 522,240 triangles).
             location: Spawn location [x, y, z] in cm.
             actor_label: Optional label for the actor.
 
         Returns:
-            Dict with actor_path, primitive_type, triangle/vertex counts.
+            Dict with actor_path, primitive_type, triangle/vertex counts and
+            warnings, or an error envelope.
         """
-        if dimensions is None:
-            dimensions = {}
-        if location is None:
-            location = [0.0, 0.0, 0.0]
-        label = actor_label or f"DynMesh_{primitive_type}"
-        seg = max(segments, 4)
-        d = {key: float(value) for key, value in dimensions.items()}
-
-        # Build the append call depending on primitive_type
-        ptype = primitive_type.lower()
-        if ptype == "box":
-            w = d.get("width", 100.0)
-            h = d.get("height", 100.0)
-            dp = d.get("depth", 100.0)
-            append_line = (
-                f"gs_prim.append_box(mesh, opts, xf, {w}, {h}, {dp},"
-                f" 1, 1, 1, origin)"
-            )
-        elif ptype == "sphere":
-            r = d.get("radius", 50.0)
-            append_line = (
-                f"gs_prim.append_sphere_lat_long(mesh, opts, xf,"
-                f" {r}, {seg}, {seg}, origin)"
-            )
-        elif ptype == "cylinder":
-            r = d.get("radius", 50.0)
-            h = d.get("height", 100.0)
-            append_line = (
-                f"gs_prim.append_cylinder(mesh, opts, xf,"
-                f" {r}, {h}, {seg}, 1, True, origin)"
-            )
-        elif ptype == "cone":
-            r = d.get("base_radius", 50.0)
-            h = d.get("height", 100.0)
-            append_line = (
-                f"gs_prim.append_cone(mesh, opts, xf,"
-                f" {r}, 0.0, {h}, {seg}, 1, True, origin)"
-            )
-        elif ptype == "capsule":
-            r = d.get("radius", 50.0)
-            h = d.get("hemisphere_height", 50.0)
-            append_line = (
-                f"gs_prim.append_capsule(mesh, opts, xf,"
-                f" {r}, {h}, {h}, {seg}, {max(seg // 2, 4)}, origin)"
-            )
-        elif ptype == "torus":
-            inner = d.get("inner_radius", 20.0)
-            outer = d.get("outer_radius", 50.0)
-            append_line = (
-                f"gs_prim.append_torus(mesh, opts, xf,"
-                f" {inner}, {outer}, {seg}, {seg}, origin)"
-            )
-        else:
-            return {
-                "success": False,
-                "error": f"Unsupported primitive type: {primitive_type}",
-            }
-
-        lx, ly, lz = (float(value) for value in location)
-        code = (
-            "import unreal, json\n"
-            "gs_prim = unreal.GeometryScript_Primitives\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "mesh = unreal.DynamicMesh()\n"
-            "opts = unreal.GeometryScriptPrimitiveOptions()\n"
-            "opts.polygroup_mode = "
-            "unreal.GeometryScriptPrimitivePolygroupMode.PER_FACE\n"
-            "xf = unreal.Transform()\n"
-            "origin = unreal.GeometryScriptPrimitiveOriginMode.CENTER\n"
-            f"{append_line}\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            f"actor = subsys.spawn_actor_from_class("
-            f"unreal.DynamicMeshActor, "
-            f"unreal.Vector({lx}, {ly}, {lz}))\n"
-            f"actor.set_actor_label({label!r})\n"
-            "comp = actor.dynamic_mesh_component\n"
-            "comp.set_dynamic_mesh(mesh)\n"
-            "tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "verts = gs_q.get_vertex_count(mesh)\n"
-            "print(json.dumps({"
-            "'actor_path': actor.get_path_name(),"
-            f"'primitive_type': {ptype!r},"
-            "'triangle_count': tris,"
-            "'vertex_count': verts"
-            "}))\n"
+        kind = primitive_type.lower()
+        problem = invalid_choice("primitive_type", kind, PRIMITIVE_TYPES, "UNKNOWN_PRIMITIVE")
+        if problem is None and not MIN_SEGMENTS <= int(segments) <= MAX_SEGMENTS:
+            problem = refusal("INVALID_SEGMENTS", f"segments must be {MIN_SEGMENTS} to {MAX_SEGMENTS}, not {segments}")
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            GENERATE_PRIMITIVE,
+            primitive_type=kind,
+            dimensions={key: float(value) for key, value in (dimensions or {}).items()},
+            segments=int(segments),
+            location=[float(value) for value in (location or [0.0, 0.0, 0.0])],
+            label=actor_label or f"DynMesh_{primitive_type}",
         )
-        result = await self._execute_python(_outside_pie(code, "spawn actors"))
-        return self._parse_python_json(result)
 
     async def apply_mesh_boolean(
         self,
@@ -5283,7 +5264,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         operation: str,
     ) -> Dict[str, Any]:
         """
-        Apply boolean operation between two meshes via GeometryScript.
+        Apply a boolean operation between two meshes via GeometryScript.
 
         Args:
             target_mesh_path: Target mesh actor (modified in-place).
@@ -5291,80 +5272,29 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             operation: union, subtract, or intersect.
 
         Returns:
-            Dict with target_mesh_path, operation, result triangle/vertex counts.
+            Dict with target_mesh_path, operation, previous and result
+            triangle counts, result vertex count and warnings.
         """
-        op_map = {
-            "union": "UNION",
-            "subtract": "SUBTRACT",
-            "intersect": "INTERSECTION",
-        }
-        ue_op = op_map.get(operation.lower(), "UNION")
-        code = (
-            "    gs_bool = unreal.GeometryScript_MeshBooleans\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    t_mesh = target_actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    tool_mesh = tool_actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    bool_opts = unreal.GeometryScriptMeshBooleanOptions()\n"
-            "    gs_bool.apply_mesh_boolean(\n"
-            "        t_mesh, unreal.Transform(),\n"
-            "        tool_mesh, unreal.Transform(),\n"
-            f"        unreal.GeometryScriptBooleanOperation.{ue_op},"
-            " bool_opts)\n"
-            "    target_actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(t_mesh)\n"
-            "    verts = gs_q.get_vertex_count(t_mesh)\n"
-            "    print(json.dumps({"
-            f"'target_mesh_path': {target_mesh_path!r},"
-            f"'operation': {operation!r},"
-            "'result_triangle_count': tris,"
-            "'result_vertex_count': verts"
-            "}))\n"
+        return await self._run_mesh_script(
+            MESH_BOOLEAN, target=target_mesh_path, tool=tool_mesh_path, operation=operation
         )
-        return await self._run_mesh_script(code, target_actor=target_mesh_path, tool_actor=tool_mesh_path)
 
     async def compute_convex_hull(
         self,
         mesh_path: str,
     ) -> Dict[str, Any]:
         """
-        Compute convex hull envelope of a mesh.
+        Compute the convex hull of a mesh as a new DynamicMeshActor.
 
         Args:
             mesh_path: Source mesh actor path.
 
         Returns:
-            Dict with hull actor path, vertex/triangle counts.
+            Dict with hull_actor_path, hull vertex/triangle counts, the
+            source triangle count, hull_volume, source_volume and volume_ratio
+            (both None for a source that is not closed) and warnings.
         """
-        code = (
-            "    gs_c = unreal.GeometryScript_Containment\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = src.dynamic_mesh_component.get_dynamic_mesh()\n"
-            "    hull_mesh = unreal.DynamicMesh()\n"
-            "    sel = unreal.GeometryScriptMeshSelection()\n"
-            "    opts = unreal.GeometryScriptConvexHullOptions()\n"
-            "    gs_c.compute_mesh_convex_hull("
-            "mesh, hull_mesh, sel, opts)\n"
-            "    hull_actor = subsys.spawn_actor_from_class("
-            "unreal.DynamicMeshActor, src.get_actor_location())\n"
-            "    hull_actor.set_actor_label("
-            "src.get_actor_label() + '_Hull')\n"
-            "    hull_actor.dynamic_mesh_component"
-            ".set_dynamic_mesh(hull_mesh)\n"
-            "    h_tris = gs_q.get_num_triangle_i_ds(hull_mesh)\n"
-            "    h_verts = gs_q.get_vertex_count(hull_mesh)\n"
-            "    s_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            "'hull_actor_path': hull_actor.get_path_name(),"
-            "'hull_vertex_count': h_verts,"
-            "'hull_triangle_count': h_tris,"
-            "'source_triangle_count': s_tris"
-            "}))\n"
-        )
-        return await self._run_mesh_script(code, pie_action="spawn actors", src=mesh_path)
+        return await self._run_mesh_script(CONVEX_HULL, mesh=mesh_path)
 
     async def decompose_convex_hull(
         self,
@@ -5375,50 +5305,27 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         resolution: int = 100000,
     ) -> Dict[str, Any]:
         """
-        V-HACD convex decomposition for collision geometry.
+        Convex decomposition of a mesh, as one new DynamicMeshActor.
 
         Args:
             mesh_path: Source mesh actor path.
             max_hulls: Maximum convex pieces.
-            max_vertices_per_hull: Max vertices per hull.
-            min_cluster_size: Minimum cluster size for V-HACD.
-            resolution: Voxelization resolution.
+            max_vertices_per_hull: Simplifies each piece to this many
+                triangles.
+            min_cluster_size: Unused.
+            resolution: Unused.
 
         Returns:
-            Dict with hull_count, triangle/vertex counts for combined hull.
+            Dict with decomp_actor_path, hull_count, hulls (per hull: index,
+            vertex_count, triangle_count, volume, bounds), total vertices and
+            triangles, and warnings.
         """
-        # GeometryScriptConvexDecompositionOptions has:
-        # num_hulls, error_tolerance, search_factor,
-        # simplify_to_face_count, min_part_thickness
-        code = (
-            "    gs_c = unreal.GeometryScript_Containment\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = src.dynamic_mesh_component.get_dynamic_mesh()\n"
-            "    decomp_mesh = unreal.DynamicMesh()\n"
-            "    opts = unreal.GeometryScriptConvexDecompositionOptions()\n"
-            f"    opts.num_hulls = {max_hulls}\n"
-            f"    opts.simplify_to_face_count = {max_vertices_per_hull}\n"
-            "    gs_c.compute_mesh_convex_decomposition("
-            "mesh, decomp_mesh, opts)\n"
-            "    d_actor = subsys.spawn_actor_from_class("
-            "unreal.DynamicMeshActor, src.get_actor_location())\n"
-            "    d_actor.set_actor_label("
-            "src.get_actor_label() + '_Decomp')\n"
-            "    d_actor.dynamic_mesh_component"
-            ".set_dynamic_mesh(decomp_mesh)\n"
-            "    d_tris = gs_q.get_num_triangle_i_ds(decomp_mesh)\n"
-            "    d_verts = gs_q.get_vertex_count(decomp_mesh)\n"
-            "    n_comp = gs_q.get_num_connected_components("
-            "decomp_mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            "'hull_count': n_comp,"
-            "'decomp_actor_path': d_actor.get_path_name(),"
-            "'total_triangles': d_tris,"
-            "'total_vertices': d_verts"
-            "}))\n"
+        return await self._run_mesh_script(
+            CONVEX_DECOMPOSITION,
+            mesh=mesh_path,
+            max_hulls=int(max_hulls),
+            max_vertices_per_hull=int(max_vertices_per_hull),
         )
-        return await self._run_mesh_script(code, pie_action="spawn actors", src=mesh_path)
 
     async def edit_mesh_topology(
         self,
@@ -5432,12 +5339,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Edit mesh topology (extrude, bevel, inset, loop cut, scale_faces).
+        Edit mesh topology (extrude, bevel, inset).
 
         Args:
             mesh_path: Mesh actor path.
-            operation: extrude_faces, bevel_edges, inset_faces,
-                loop_cut, scale_faces.
+            operation: extrude_faces, bevel_edges or inset_faces.
             face_selection: Face selection filter (unused in current impl).
             edge_selection: Edge selection filter (unused in current impl).
             distance: Extrude/bevel distance.
@@ -5446,69 +5352,20 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             count: Subdivision count for bevel.
 
         Returns:
-            Dict with mesh_path, operation, result triangle/vertex counts.
+            Dict with mesh_path, operation, previous and result triangle
+            counts, result vertex count and warnings.
         """
-        dist = distance if distance is not None else 20.0
-        ofs = offset if offset is not None else 5.0
-        subdivs = count if count is not None else 1
-        op = operation.lower()
-
-        # Build the operation-specific Python block
-        if op == "extrude_faces":
-            op_block = (
-                "    ext_opts = unreal"
-                ".GeometryScriptMeshLinearExtrudeOptions()\n"
-                f"    ext_opts.distance = {dist}\n"
-                "    sel = unreal.GeometryScriptMeshSelection()\n"
-                "    gs_mod.apply_mesh_linear_extrude_faces("
-                "mesh, ext_opts, sel)\n"
-            )
-        elif op == "bevel_edges":
-            op_block = (
-                "    bev_opts = unreal"
-                ".GeometryScriptMeshBevelSelectionOptions()\n"
-                f"    bev_opts.bevel_distance = {dist}\n"
-                f"    bev_opts.subdivisions = {subdivs}\n"
-                "    sel = unreal.GeometryScriptMeshSelection()\n"
-                "    gs_mod.apply_mesh_bevel_selection(mesh, sel,\n"
-                "        unreal.GeometryScriptMeshBevelSelectionMode"
-                ".TRIANGLE_AREA, bev_opts)\n"
-            )
-        elif op == "inset_faces":
-            op_block = (
-                "    ins_opts = unreal"
-                ".GeometryScriptMeshInsetOutsetFacesOptions()\n"
-                f"    ins_opts.distance = {ofs}\n"
-                "    sel = unreal.GeometryScriptMeshSelection()\n"
-                "    gs_mod.apply_mesh_inset_outset_faces("
-                "mesh, ins_opts, sel)\n"
-            )
-        else:
-            return {
-                "success": False,
-                "error": f"Unsupported topology operation: {operation}",
-            }
-
-        code = (
-            "    gs_mod = unreal.GeometryScript_MeshModeling\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            + op_block
-            + "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            f"'operation': {operation!r},"
-            "'result_triangle_count': tris,"
-            "'result_vertex_count': verts,"
-            "'previous_triangle_count': before_tris"
-            "}))\n"
+        refusal = invalid_choice("operation", operation.lower(), TOPOLOGY_OPERATIONS, "UNKNOWN_OPERATION")
+        if refusal is not None:
+            return refusal
+        return await self._run_mesh_script(
+            EDIT_TOPOLOGY,
+            mesh=mesh_path,
+            operation=operation.lower(),
+            distance=float(distance) if distance is not None else 20.0,
+            offset=float(offset) if offset is not None else 5.0,
+            count=int(count) if count is not None else 1,
         )
-        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def subdivide_mesh(
         self,
@@ -5519,50 +5376,20 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Catmull-Clark or uniform tessellation subdivision.
 
+        A result over ``MAX_RESULT_TRIANGLES`` triangles is refused before
+        anything runs (``RESULT_TOO_LARGE``).
+
         Args:
             mesh_path: Mesh actor path.
-            level: Subdivision level (1-4).
-            scheme: catmull_clark, loop, or uniform.
+            level: Subdivision level, clamped to 1-4.
+            scheme: catmull_clark; any other value runs uniform
+                tessellation.
 
         Returns:
-            Dict with mesh_path, level, scheme, result triangle/vertex counts.
+            Dict with mesh_path, level, scheme, previous and result triangle
+            counts, result vertex count and warnings.
         """
-        lvl = max(1, min(level, 4))
-        sch = scheme.lower()
-
-        if sch == "catmull_clark":
-            subdiv_block = (
-                "    gl = unreal.GeometryScriptGroupLayer()\n"
-                "    unreal.GeometryScript_OpenSubdiv"
-                f".apply_polygroup_catmull_clark_sub_d(mesh, {lvl}, gl)\n"
-            )
-        else:
-            # uniform tessellation for loop / uniform / bilinear
-            subdiv_block = (
-                "    unreal.GeometryScript_MeshSubdivide"
-                f".apply_uniform_tessellation(mesh, {lvl})\n"
-            )
-
-        code = (
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            + subdiv_block
-            + "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            f"'level': {lvl},"
-            f"'scheme': {scheme!r},"
-            "'result_triangle_count': tris,"
-            "'result_vertex_count': verts,"
-            "'previous_triangle_count': before_tris"
-            "}))\n"
-        )
-        return await self._run_mesh_script(code, actor=mesh_path)
+        return await self._run_mesh_script(SUBDIVIDE, mesh=mesh_path, level=int(level), scheme=scheme)
 
     async def simplify_mesh(
         self,
@@ -5577,49 +5404,19 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Args:
             mesh_path: Mesh actor path.
             target_triangle_count: Target triangle count.
-            target_percentage: Target percentage (0.0-1.0).
-            max_error: Max geometric error tolerance.
+            target_percentage: Fraction of the triangles to keep (0.0-1.0).
+            max_error: Unused.
 
         Returns:
-            Dict with original/result triangles, reduction ratio.
+            Dict with original/result triangles, result vertex count,
+            reduction ratio and warnings.
         """
-        # Determine target count: explicit, or derived from percentage
-        target_line = ""
-        if target_triangle_count is not None:
-            target_line = f"    target_count = {target_triangle_count}\n"
-        elif target_percentage is not None:
-            target_line = (
-                f"    target_count = max(1, int(before_tris"
-                f" * {target_percentage}))\n"
-            )
-        else:
-            target_line = "    target_count = max(1, before_tris // 2)\n"
-
-        code = (
-            "    gs_s = unreal.GeometryScript_MeshSimplification\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            + target_line
-            + "    opts = unreal.GeometryScriptSimplifyMeshOptions()\n"
-            "    gs_s.apply_simplify_to_triangle_count("
-            "mesh, target_count, opts)\n"
-            "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    ratio = round(1.0 - tris / before_tris, 4)"
-            " if before_tris > 0 else 0.0\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            "'original_triangles': before_tris,"
-            "'result_triangles': tris,"
-            "'result_vertex_count': verts,"
-            "'reduction_ratio': ratio"
-            "}))\n"
+        return await self._run_mesh_script(
+            SIMPLIFY,
+            mesh=mesh_path,
+            target_triangle_count=target_triangle_count,
+            target_percentage=target_percentage,
         )
-        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def cut_mesh_plane(
         self,
@@ -5630,52 +5427,27 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         keep_both_sides: bool = False,
     ) -> Dict[str, Any]:
         """
-        Cut/slice a mesh along an arbitrary plane.
+        Cut a mesh along a plane, keeping one side.
 
         Args:
             mesh_path: Mesh actor path.
-            plane_origin: Plane origin [x, y, z] in cm.
+            plane_origin: Plane origin [x, y, z] in cm, in the mesh's space.
             plane_normal: Plane normal [x, y, z].
             fill_holes: Fill cut holes with faces.
-            keep_both_sides: Keep both halves (unused — UE plane cut
-                keeps one side and optionally fills).
+            keep_both_sides: Keep both halves (unused: the cut keeps one side).
 
         Returns:
-            Dict with mesh_path, result triangle/vertex counts.
+            Dict with mesh_path, pieces (the cut actor), cut_faces_added
+            (triangles the hole fill added), previous and result triangle
+            counts, result vertex count and warnings.
         """
-        ox, oy, oz = plane_origin[0], plane_origin[1], plane_origin[2]
-        nx, ny, nz = plane_normal[0], plane_normal[1], plane_normal[2]
-        fill_py = "True" if fill_holes else "False"
-        code = (
-            "    gs_bool = unreal.GeometryScript_MeshBooleans\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    cut_frame = unreal.Transform()\n"
-            f"    cut_frame.translation = "
-            f"unreal.Vector({ox}, {oy}, {oz})\n"
-            # Build rotation from normal — use MathLibrary.make_rot_from_z
-            f"    normal = unreal.Vector({nx}, {ny}, {nz})\n"
-            "    rot = unreal.MathLibrary.make_rot_from_z(normal)\n"
-            "    cut_frame.rotation = rot.quaternion()\n"
-            "    cut_opts = unreal"
-            ".GeometryScriptMeshPlaneCutOptions()\n"
-            f"    cut_opts.fill_holes = {fill_py}\n"
-            "    gs_bool.apply_mesh_plane_cut("
-            "mesh, cut_frame, cut_opts)\n"
-            "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            "'result_triangle_count': tris,"
-            "'result_vertex_count': verts,"
-            "'previous_triangle_count': before_tris"
-            "}))\n"
+        return await self._run_mesh_script(
+            PLANE_CUT,
+            mesh=mesh_path,
+            origin=[float(value) for value in plane_origin[:3]],
+            normal=[float(value) for value in plane_normal[:3]],
+            fill_holes=bool(fill_holes),
         )
-        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def validate_mesh(
         self,
@@ -5685,58 +5457,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Validate mesh geometry using GeometryScript query functions.
 
+        Reads only, so it also runs while Play In Editor runs.
+
         Args:
             mesh_path: Mesh actor path.
             checks: Checks to run (currently all checks always run).
 
         Returns:
-            Dict with is_valid, triangle/vertex counts, border/component
-            info.
+            Dict with is_valid, checks (watertight, compact, has_normals),
+            issues, triangle/vertex counts, border/component info and
+            warnings.
         """
-        code = (
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            # UFUNCTIONs with out-params (e.g. GetNumOpenBorderLoops'
-            # bAmbiguousTopologyFound) come back as (count, *outs) tuples.
-            "    def _count(r):\n"
-            "        return r[0] if isinstance(r, tuple) else r\n"
-            "    tris = _count(gs_q.get_num_triangle_i_ds(mesh))\n"
-            "    verts = _count(gs_q.get_vertex_count(mesh))\n"
-            "    open_edges = _count("
-            "gs_q.get_num_open_border_edges(mesh))\n"
-            "    open_loops = _count("
-            "gs_q.get_num_open_border_loops(mesh))\n"
-            "    components = _count("
-            "gs_q.get_num_connected_components(mesh))\n"
-            "    has_normals = gs_q.get_has_triangle_normals(mesh)\n"
-            "    has_gaps = gs_q.get_has_triangle_id_gaps(mesh)\n"
-            "    is_watertight = (open_edges == 0)\n"
-            "    is_valid = is_watertight and not has_gaps\n"
-            "    issues = []\n"
-            "    if open_edges > 0:\n"
-            "        issues.append("
-            "f'Non-watertight: {open_edges} open border edges')\n"
-            "    if open_loops > 0:\n"
-            "        issues.append("
-            "f'{open_loops} open border loops')\n"
-            "    if has_gaps:\n"
-            "        issues.append('Triangle ID gaps detected')\n"
-            "    if not has_normals:\n"
-            "        issues.append('Missing triangle normals')\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            "'is_valid': is_valid,"
-            "'triangle_count': tris,"
-            "'vertex_count': verts,"
-            "'open_border_edges': open_edges,"
-            "'open_border_loops': open_loops,"
-            "'connected_components': components,"
-            "'has_normals': has_normals,"
-            "'issues': issues"
-            "}))\n"
-        )
-        return await self._run_mesh_script(code, actor=mesh_path)
+        return await self._run_mesh_script(VALIDATE, mesh=mesh_path)
 
     async def convert_mesh_format(
         self,
@@ -5745,85 +5477,23 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         tessellation_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Convert between StaticMesh and DynamicMesh via GeometryScript.
+        Place an editable DynamicMeshActor copy of a StaticMesh asset.
 
         Args:
-            mesh_path: Source mesh actor/asset path.
-            target_format: 'static_mesh' or 'dynamic_mesh'.
+            mesh_path: Source StaticMesh asset path.
+            target_format: 'dynamic_mesh'; 'static_mesh' is refused as not
+                implemented yet.
             tessellation_options: Unused (reserved for future CAD support).
 
         Returns:
-            Dict with source/result paths, formats, triangle count.
+            Dict with source_path, source_format, result_path,
+            target_format, triangle/vertex counts and warnings.
         """
-        fmt = target_format.lower()
-        if fmt == "static_mesh":
-            # DynamicMeshActor → new StaticMesh asset
-            code = (
-                "    gs_a = unreal.GeometryScript_AssetUtils\n"
-                "    gs_q = unreal.GeometryScript_MeshQueries\n"
-                "    mesh = actor.dynamic_mesh_component"
-                ".get_dynamic_mesh()\n"
-                "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-                "    # Create a transient StaticMesh asset\n"
-                "    pkg_name = '/Game/Generated/' + "
-                "actor.get_actor_label()\n"
-                "    sm = unreal.EditorAssetLibrary"
-                ".does_asset_exist(pkg_name)\n"
-                "    # For now report conversion info\n"
-                "    print(json.dumps({"
-                f"'source_path': {mesh_path!r},"
-                "'target_format': 'static_mesh',"
-                "'triangle_count': tris,"
-                "'note': 'copy_mesh_to_static_mesh requires "
-                "an existing StaticMesh asset target'"
-                "}))\n"
-            )
-            return await self._run_mesh_script(code, actor=mesh_path)
-        elif fmt == "dynamic_mesh":
-            # StaticMesh asset → DynamicMeshActor in the level
-            code = (
-                "import unreal, json\n"
-                "gs_a = unreal.GeometryScript_AssetUtils\n"
-                "gs_q = unreal.GeometryScript_MeshQueries\n"
-                "subsys = unreal.get_editor_subsystem("
-                "unreal.EditorActorSubsystem)\n"
-                f"sm_asset = unreal.EditorAssetLibrary"
-                f".load_asset({mesh_path!r})\n"
-                "if sm_asset is None:\n"
-                "    print(json.dumps({'error': "
-                f"{('Asset not found: ' + mesh_path)!r}"
-                "}))\n"
-                "else:\n"
-                "    dyn_mesh = unreal.DynamicMesh()\n"
-                "    asset_opts = unreal"
-                ".GeometryScriptCopyMeshFromAssetOptions()\n"
-                "    gs_a.copy_mesh_from_static_mesh("
-                "sm_asset, dyn_mesh, asset_opts)\n"
-                "    actor = subsys.spawn_actor_from_class("
-                "unreal.DynamicMeshActor, unreal.Vector())\n"
-                "    actor.set_actor_label("
-                "sm_asset.get_name() + '_Dynamic')\n"
-                "    actor.dynamic_mesh_component"
-                ".set_dynamic_mesh(dyn_mesh)\n"
-                "    tris = gs_q.get_num_triangle_i_ds(dyn_mesh)\n"
-                "    verts = gs_q.get_vertex_count(dyn_mesh)\n"
-                "    print(json.dumps({"
-                f"'source_path': {mesh_path!r},"
-                "'result_path': actor.get_path_name(),"
-                "'target_format': 'dynamic_mesh',"
-                "'triangle_count': tris,"
-                "'vertex_count': verts"
-                "}))\n"
-            )
-        else:
-            return {
-                "success": False,
-                "error": f"Unsupported target format: {target_format}",
-            }
-
-        # Only dynamic_mesh gets here; it spawns the DynamicMeshActor.
-        result = await self._execute_python(_outside_pie(code, "spawn actors"))
-        return self._parse_python_json(result)
+        target = target_format.lower()
+        refusal = invalid_choice("target_format", target, TARGET_FORMATS, "UNKNOWN_FORMAT")
+        if refusal is not None:
+            return refusal
+        return await self._run_mesh_script(CONVERT, mesh=mesh_path, target_format=target)
 
     async def remesh_mesh(
         self,
@@ -5836,119 +5506,75 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Remesh for clean topology using GeometryScript_Remeshing.
 
+        The remesher makes up to ``REMESH_OVERSHOOT`` times the triangles a
+        target asks for, so a target predicted over ``MAX_RESULT_TRIANGLES``
+        is refused before anything runs (``RESULT_TOO_LARGE``), as is a
+        result over it.
+
         Args:
             mesh_path: Mesh actor path.
             mode: 'uniform' (only mode currently supported).
             target_edge_length: Target edge length in cm.
-            target_triangle_count: Target triangle count.
+            target_triangle_count: Target triangle count, 4 to
+                ``MAX_REMESH_TARGET_TRIANGLES``.
             smoothing_iterations: Smoothing passes (remesh_iterations).
 
         Returns:
-            Dict with original/result triangles, vertex count.
+            Dict with original/result triangles, result vertex count,
+            average_edge_length (the mean length of the result's triangle
+            edges, in cm) and warnings.
         """
-        edge_len = target_edge_length if target_edge_length else 5.0
-        tri_count = target_triangle_count if target_triangle_count else 0
-        iters = max(1, smoothing_iterations)
-
-        # Build target_type — use GeometryScriptUniformRemeshTargetType enum
-        if target_triangle_count is not None:
-            target_block = (
-                f"    uni_opts.target_triangle_count = {tri_count}\n"
-                "    uni_opts.target_type = unreal"
-                ".GeometryScriptUniformRemeshTargetType"
-                ".TRIANGLE_COUNT\n"
+        if target_triangle_count is not None and not 4 <= int(target_triangle_count) <= MAX_REMESH_TARGET_TRIANGLES:
+            return refusal(
+                "INVALID_TARGET",
+                f"target_triangle_count must be 4 to {MAX_REMESH_TARGET_TRIANGLES}, not {target_triangle_count}: "
+                f"the remesher makes up to {REMESH_OVERSHOOT:g} times the target, and a result over "
+                f"{MAX_RESULT_TRIANGLES} triangles is refused",
             )
-        else:
-            target_block = (
-                f"    uni_opts.target_edge_length = {edge_len}\n"
-                "    uni_opts.target_type = unreal"
-                ".GeometryScriptUniformRemeshTargetType"
-                ".TARGET_EDGE_LENGTH\n"
-            )
-
-        code = (
-            "    gs_r = unreal.GeometryScript_Remeshing\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    remesh_opts = unreal"
-            ".GeometryScriptRemeshOptions()\n"
-            f"    remesh_opts.remesh_iterations = {iters}\n"
-            "    uni_opts = unreal"
-            ".GeometryScriptUniformRemeshOptions()\n"
-            + target_block
-            + "    gs_r.apply_uniform_remesh("
-            "mesh, remesh_opts, uni_opts)\n"
-            "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            f"'mode': {mode!r},"
-            "'original_triangles': before_tris,"
-            "'result_triangles': tris,"
-            "'result_vertex_count': verts"
-            "}))\n"
+        return await self._run_mesh_script(
+            REMESH,
+            mesh=mesh_path,
+            mode=mode,
+            target_edge_length=target_edge_length,
+            target_triangle_count=target_triangle_count,
+            smoothing_iterations=int(smoothing_iterations),
         )
-        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def compute_mesh_uv(
         self,
         mesh_path: str,
-        method: str = "auto_uv",
+        method: str = "auto",
         uv_channel: int = 0,
         island_padding: float = 2.0,
     ) -> Dict[str, Any]:
         """
         Generate UV coordinates using GeometryScript_UVs.
 
+        XAtlas unwraps meshes of at most ``XATLAS_MAX_TRIANGLES`` triangles:
+        it crashed the editor on larger ones. ``auto`` picks XAtlas up to that
+        size and PatchBuilder above it; ``xatlas`` on a larger mesh is
+        refused (``MESH_TOO_LARGE_FOR_XATLAS``) with nothing changed.
+
         Args:
             mesh_path: Mesh actor path.
-            method: 'xatlas' or 'patch_builder' (default xatlas).
-            uv_channel: UV set index.
-            island_padding: Unused (reserved for future option support).
+            method: 'auto' (default; 'auto_uv' is the same), 'xatlas' or
+                'patch_builder'.
+            uv_channel: UV channel index; it must exist on the mesh.
+            island_padding: Unused.
 
         Returns:
-            Dict with method, uv_channel, triangle/vertex counts.
+            Dict with method (the one that ran), requested_method,
+            uv_channel, island_count, coverage_ratio (the UV area of the
+            triangles over the area of the unit UV square, or of the UV
+            bounds when they extend past it), triangle/vertex counts and
+            warnings.
         """
-        m = method.lower()
-        if m in ("patch_builder", "patchbuilder"):
-            uv_block = (
-                "    uv_opts = unreal"
-                ".GeometryScriptPatchBuilderOptions()\n"
-                f"    gs_uv.auto_generate_patch_builder_mesh_u_vs("
-                f"mesh, {uv_channel}, uv_opts)\n"
-            )
-            method_label = "patch_builder"
-        else:
-            # Default to XAtlas for auto_uv, xatlas, atlas_pack, etc.
-            uv_block = (
-                "    uv_opts = unreal"
-                ".GeometryScriptXAtlasOptions()\n"
-                f"    gs_uv.auto_generate_x_atlas_mesh_u_vs("
-                f"mesh, {uv_channel}, uv_opts)\n"
-            )
-            method_label = "xatlas"
-
-        code = (
-            "    gs_uv = unreal.GeometryScript_UVs\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n" + uv_block + "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            f"'method': {method_label!r},"
-            f"'uv_channel': {uv_channel},"
-            "'triangle_count': tris,"
-            "'vertex_count': verts"
-            "}))\n"
-        )
-        return await self._run_mesh_script(code, actor=mesh_path)
+        requested = method.lower()
+        requested = {"auto_uv": "auto", "patchbuilder": "patch_builder"}.get(requested, requested)
+        refusal = invalid_choice("method", requested, UV_METHODS, "UNKNOWN_UV_METHOD")
+        if refusal is not None:
+            return refusal
+        return await self._run_mesh_script(COMPUTE_UV, mesh=mesh_path, method=requested, uv_channel=int(uv_channel))
 
     # ------------------------------------------------------------------
     # Internal helpers
