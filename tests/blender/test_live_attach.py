@@ -668,11 +668,32 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             client.execute_script(
                 "bpy.data.collections.remove(bpy.data.collections['HiddenCameras'])"
             )
-            # A pattern that can backtrack for hours is refused before it
-            # runs on Blender's main thread; a plain one still searches.
-            refused = tool("search_blender_objects", name_pattern=r"^(\w+)+_x$")
-            assert refused["success"] is False, refused
-            assert "repeated group" in refused["error"]
+            # Patterns Python's re backtracks on for hours on Blender's main
+            # thread are searched in linear time instead (B1-17: .*.*.*.*.*.*x
+            # froze Blender for 15.6 s over ten 63-character names).
+            client.execute_script(
+                "mesh = bpy.data.meshes.new('LongNames')\n"
+                "for i in range(10):\n"
+                "    o = bpy.data.objects.new(('LongAssetName_' + str(i)).ljust(255, 'a'), mesh)\n"
+                "    bpy.context.scene.collection.objects.link(o)\n"
+            )
+            for pattern in (r"^(\w+)+_x$", ".*.*.*.*.*.*x", r".*left.*front.*wheel.*joint"):
+                started = time.monotonic()
+                searched = tool("search_blender_objects", name_pattern=pattern)
+                assert searched["success"] is True and searched["total"] == 0, searched
+                assert time.monotonic() - started < 5, pattern
+            # Re-review: (?=.*.*.*.*\d) went to re and froze Blender for 2.16 s
+            # on one 128-character name.
+            for pattern in (r"(.*).*.*.*\1x", r"(?=.*.*.*.*\d)"):
+                started = time.monotonic()
+                refused = tool("search_blender_objects", name_pattern=pattern)
+                assert refused["error_type"] == "ValidationError", refused
+                assert refused["details"]["code"] == "regex_backtracking"
+                assert time.monotonic() - started < 5, pattern
+            client.execute_script(
+                "for o in [o for o in bpy.data.objects if o.name.startswith('LongAssetName_')]:\n"
+                "    bpy.data.objects.remove(o)\n"
+            )
             found = tool("search_blender_objects", name_pattern=r"^Attachment\w+$")
             assert [o["name"] for o in found["objects"]] == ["AttachmentProbe"]
             # The tool lists location as optional; omitting it means the origin.
@@ -1000,7 +1021,7 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             )["position"] == [0.3, 0.7]
             manager.detach()
             assert process.poll() is None
-            with pytest.raises(RuntimeError, match="No Blender window attached"):
+            with pytest.raises(ConnectionError, match="No Blender window attached"):
                 client.get_runtime_info()
             # B1-02: the agent's edits count as unsaved, so the user's quit asks
             # to save them instead of closing Blender at once.
@@ -1081,11 +1102,58 @@ def test_recover_from_file_loads_context_loss_and_exit(
             assert printed["output"] == "x" * 4096
             assert printed["output_truncated"] is True
             assert printed["output_total_chars"] == 6001
-            # A refusal keeps its class across the bridge. A camera is refused
+            # B1-09: calls sent beside a long script wait their turn instead of
+            # being dropped with a bare Errno 54, and one whose timeout runs out
+            # while it waits is reported as not executed and never runs.
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=12) as pool:
+                slow = pool.submit(
+                    call, "execute_blender_script", script="import time\ntime.sleep(3)"
+                )
+                time.sleep(0.5)
+                quick = [pool.submit(BlenderConnection(settings).get_frame) for _ in range(10)]
+                queued = pool.submit(
+                    call,
+                    "execute_blender_script",
+                    timeout=0.5,
+                    script=(
+                        "never = bpy.data.objects.new('NeverRun', None)\n"
+                        "bpy.context.scene.collection.objects.link(never)"
+                    ),
+                )
+                assert slow.result()["success"] is True
+                assert all("current_frame" in frame.result() for frame in quick)
+                late = queued.result()
+            assert late["error_type"] == "TimeoutError", late
+            assert late["details"]["executed"] is False
+            assert "not executed" in late["error"]
+            assert call("search_blender_objects", name_pattern="^NeverRun$")["count"] == 0
+            # B1-23: a script past its timeout reports timed_out, as in embedded mode.
+            overdue = call(
+                "execute_blender_script", script="import time\ntime.sleep(1.5)", timeout=0.3
+            )
+            assert overdue["timed_out"] is True, overdue
+            assert overdue["details"] == {"executed": True}
+            time.sleep(1.5)
+            # M16: a request of tens of MB is read while it arrives, not cut at 5 s.
+            side = 400
+            vertices = [[x * 0.01, y * 0.01, 0.0] for y in range(side + 1) for x in range(side + 1)]
+            faces = [
+                [y * (side + 1) + x, y * (side + 1) + x + 1, (y + 1) * (side + 1) + x + 1, (y + 1) * (side + 1) + x]
+                for y in range(side)
+                for x in range(side)
+            ]
+            grid = call(
+                "create_blender_mesh_from_data", name="BigGrid", vertices=vertices, faces=faces
+            )
+            assert grid["success"] is True, grid
+            assert call("delete_blender_object", object_name="BigGrid")["success"] is True
+            # A refusal keeps its type across the bridge. A camera is refused
             # before Blender's operator runs, which only said "poll() failed",
             # and it leaves no rigid body world behind.
             no_mesh = call("setup_blender_rigid_body", object_name="Camera")
-            assert no_mesh["error_type"] == "ValueError", no_mesh
+            assert no_mesh["error_type"] == "ValidationError", no_mesh
             assert "need a mesh object, and 'Camera' is a CAMERA" in no_mesh["error"]
             world = call("get_blender_rigid_body_world")
             assert world["success"] is True and world["exists"] is False, world
@@ -1138,7 +1206,7 @@ def test_recover_from_file_loads_context_loss_and_exit(
                 frame=10,
             )
             assert missing["success"] is False, missing
-            assert missing["error_type"] == "ValueError", missing
+            assert missing["error_type"] == "ValidationError", missing
             keys = call("get_blender_keyframes", object_name="Ball")
             assert [c["keyframe_count"] for c in keys["channels"]] == [1, 1, 1], keys
             # Another object animated by the same action, through its own slot.

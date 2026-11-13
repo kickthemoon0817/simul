@@ -82,6 +82,10 @@ UNREAL_MAX_ASPECT_RATIO = 16384.0
 UNREAL_MAX_PAGE = 5000
 UNREAL_MAX_SCENE_DEPTH = 64
 UNREAL_MIN_FOV_DEGREES = 0.001
+#: Longest force ``apply_force`` keeps on (``FORCE_MAX_DURATION_S``, seconds of
+#: physics time) and the largest physics-state page (``PHYSICS_STATE_MAX_RESULTS``).
+UNREAL_FORCE_MAX_DURATION_S = 600.0
+UNREAL_PHYSICS_STATE_MAX_RESULTS = 1000
 
 PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     # -- Isaac Sim -------------------------------------------------------------
@@ -225,6 +229,12 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     "control_unreal_simulation": {
         "action": Choices(("start", "stop", "pause", "resume", "step")),
     },
+    "apply_unreal_force": {"duration": Bounds(ge=0.0, le=UNREAL_FORCE_MAX_DURATION_S)},
+    "get_unreal_physics_state": {
+        "max_results": Bounds(ge=1, le=UNREAL_PHYSICS_STATE_MAX_RESULTS),
+        "offset": _OFFSET,
+    },
+    "list_unreal_simulation_actors": {"max_results": Bounds(ge=1, le=UNREAL_MAX_PAGE), "offset": _OFFSET},
     # The editor also takes aliases (patchbuilder, auto_uv; any case), so the
     # canonical names are advertised without refusing the rest.
     "compute_unreal_mesh_uv": {"method": Choices(("auto", "auto_uv", "xatlas", "patch_builder"), enforced=False)},

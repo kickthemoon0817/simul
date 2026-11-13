@@ -1048,6 +1048,13 @@ class UnrealControlSimulationResponse(BaseModel):
         ...,
         description="Resulting PIE state: playing, paused, or stopped",
     )
+    mode: Optional[str] = Field(
+        None,
+        description=(
+            "For start: the mode the session began in, simulate or play; null when a session "
+            "already ran (start then resumes it) and for the other actions"
+        ),
+    )
 
 
 class UnrealGetSimulationStatusResponse(BaseModel):
@@ -1152,10 +1159,53 @@ class UnrealApplyForceResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    actor_path: str = Field(..., description="Actor the force was applied to")
+    actor_path: str = Field(..., description="Actor path given")
+    simulation_actor_path: Optional[str] = Field(
+        None, description="The actor's copy in the running simulation, which the force acted on"
+    )
+    component_path: Optional[str] = Field(None, description="Body the force acted on")
+    world: str = Field("simulation", description="World acted on: always the running simulation")
     force_applied: bool = Field(True, description="Whether force was applied")
-    force_vector: List[float] = Field(..., description="Applied force vector [x, y, z]")
+    force_vector: List[float] = Field(..., description="Force or impulse [x, y, z] as given, in units")
+    units: str = Field("unreal", description="unreal (kg cm/s^2 or kg cm/s) or si (N or N s)")
+    force_vector_unreal: Optional[List[float]] = Field(
+        None, description="Force (kg cm/s^2) or impulse (kg cm/s) applied, in Unreal units"
+    )
     is_impulse: bool = Field(..., description="Whether an impulse was applied")
+    application: Optional[str] = Field(
+        None,
+        description=(
+            "impulse (instant), one_frame (a force with duration 0, acting for one physics step) or "
+            "continuous (each frame an impulse carrying the force over the physics time that frame "
+            "simulated, for duration_s of physics time)"
+        ),
+    )
+    duration_s: float = Field(0.0, description="Seconds of physics time a continuous force acts")
+    mass_kg: Optional[float] = Field(None, description="Mass of the body in the simulation")
+    expected_delta_v: Optional[List[float]] = Field(
+        None,
+        description=(
+            "Change of linear velocity in cm/s the impulse, or the force over its duration, gives "
+            "the body alone (gravity, contacts and damping add to it); null for one frame"
+        ),
+    )
+    physics_step_limit_s: Optional[float] = Field(
+        None,
+        description=(
+            "Longest physics step Unreal takes in one frame (MaxPhysicsDeltaTime, 1/30 s by default); a "
+            "slower frame advances physics by this much only. Null when Unreal sets no limit"
+        ),
+    )
+    sim_time: Optional[float] = Field(None, description="Simulation game time when applied, s")
+    ends_at_sim_time: Optional[float] = Field(
+        None,
+        description=(
+            "Simulation game time a continuous force stops at when no frame is slower than "
+            "physics_step_limit_s; slower frames stretch it"
+        ),
+    )
+    paused: bool = Field(False, description="Whether the simulation was paused (the force acts on resume)")
+    warning: Optional[str] = Field(None, description="What to know about the result")
 
 
 class UnrealSetPhysicsParamsResponse(UnrealPhysicsBody):
@@ -1166,6 +1216,84 @@ class UnrealSetPhysicsParamsResponse(UnrealPhysicsBody):
         default_factory=dict,
         description="Each parameter given, read back (mass as the override, as the 32-bit float stored)",
     )
+
+
+class UnrealBodyState(BaseModel):
+    """One actor's body as ``get_unreal_physics_state`` reads it."""
+
+    name: str = Field(..., description="Actor label")
+    class_name: str = Field(..., description="Actor class")
+    editor_path: Optional[str] = Field(
+        None, description="The actor in the editor world; null for one the simulation spawned"
+    )
+    simulation_path: Optional[str] = Field(
+        None, description="The actor's copy in the running simulation; null when the editor world was read"
+    )
+    location: List[float] = Field(..., description="World location [x, y, z] in cm")
+    rotation: List[float] = Field(..., description="Rotation [pitch, yaw, roll] in degrees")
+    component_path: Optional[str] = Field(
+        None, description="Root (or only) primitive component read; null when the actor has none"
+    )
+    physics_mode: Optional[str] = Field(None, description="simulated, kinematic, static or none")
+    linear_velocity: Optional[List[float]] = Field(None, description="Linear velocity [x, y, z], cm/s")
+    angular_velocity: Optional[List[float]] = Field(None, description="Angular velocity [x, y, z], degrees/s")
+    speed: Optional[float] = Field(None, description="Linear speed, cm/s")
+    awake: Optional[bool] = Field(
+        None, description="Whether the simulated body is awake (false: asleep); null unless it simulates"
+    )
+    mass_kg: Optional[float] = Field(None, description="Mass Unreal computes for the body")
+    center_of_mass: Optional[List[float]] = Field(None, description="World center of mass [x, y, z], cm")
+    gravity_enabled: Optional[bool] = Field(None, description="Whether gravity affects the body")
+    simulate_physics: Optional[bool] = Field(None, description="The body's Simulate Physics flag")
+
+
+class UnrealPhysicsStateResponse(BaseModel):
+    """Response with bodies' physics state, in the running simulation or the editor world."""
+
+    success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    world: str = Field(..., description="World read: simulation (while one runs) or editor")
+    pie_active: bool = Field(False, description="Whether a simulation (Play or Simulate In Editor) runs")
+    sim_time: Optional[float] = Field(None, description="Simulation game time, s; null for the editor world")
+    paused: Optional[bool] = Field(None, description="Whether the simulation is paused; null for the editor")
+    bodies: List[UnrealBodyState] = Field(default_factory=list, description="The bodies on this page")
+    count: int = Field(0, description="Bodies on this page")
+    total: int = Field(0, description="Bodies matched, on every page")
+    offset: int = Field(0, description="Bodies skipped before this page")
+    next_offset: Optional[int] = _next_offset_field()
+    truncated: bool = Field(False, description="Whether more bodies are left after this page")
+    hint: Optional[str] = _page_hint_field()
+    not_found: List[str] = Field(
+        default_factory=list, description="Paths with no actor, or no copy in the world read"
+    )
+
+
+class UnrealSimulationActor(BaseModel):
+    """One actor of the running simulation."""
+
+    name: str = Field(..., description="Actor label")
+    class_name: str = Field(..., description="Actor class")
+    simulation_path: str = Field(..., description="Path in the simulation's world")
+    editor_path: Optional[str] = Field(
+        None, description="The editor actor it copies; null for one the simulation spawned"
+    )
+    simulating: bool = Field(False, description="Whether a body of it simulates physics")
+
+
+class UnrealListSimulationActorsResponse(BaseModel):
+    """Response listing the running simulation's actors."""
+
+    success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    world: str = Field(..., description="The simulation's world")
+    actors: List[UnrealSimulationActor] = Field(default_factory=list, description="The actors on this page")
+    count: int = Field(0, description="Actors on this page")
+    total: int = Field(0, description="Actors matched, on every page")
+    offset: int = Field(0, description="Actors skipped before this page")
+    next_offset: Optional[int] = _next_offset_field()
+    truncated: bool = Field(False, description="Whether more actors are left after this page")
+    hint: Optional[str] = _page_hint_field()
+    sim_time: Optional[float] = Field(None, description="Simulation game time, s")
 
 
 # ----------------------------------------------------------------------
