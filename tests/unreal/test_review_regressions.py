@@ -413,8 +413,11 @@ async def test_component_operations_and_missing_component(script_session):
         await session.set_collision(actor.path, "BlockAll"),
         await session.set_physics_params(actor.path, mass=9),
     ):
+        # Round-2 audit R2B-03: a typed refusal with a code, not a ScriptError traceback.
         assert result["success"] is False
-        assert "exactly one PrimitiveComponent" in result["error"]
+        assert result["error_type"] == "IncompatibleBody"
+        assert result["details"]["problems"][0]["code"] == "NO_PRIMITIVE_COMPONENT"
+        assert "no primitive component" in result["error"]
 
 
 @pytest.mark.asyncio

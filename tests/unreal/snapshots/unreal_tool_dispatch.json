@@ -2739,7 +2739,8 @@
       "enable": true,
       "kinematic": false,
       "make_movable": true,
-      "allow_detach": false
+      "allow_detach": false,
+      "component_name": ""
      }
     }
    ],
@@ -2764,7 +2765,8 @@
     "enable": false,
     "kinematic": true,
     "make_movable": false,
-    "allow_detach": true
+    "allow_detach": true,
+    "component_name": "Part1"
    },
    "envelope": [
     {
@@ -2782,7 +2784,8 @@
       "enable": false,
       "kinematic": true,
       "make_movable": false,
-      "allow_detach": true
+      "allow_detach": true,
+      "component_name": "Part1"
      }
     }
    ],
@@ -2819,7 +2822,8 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "collision_preset": "",
-      "collision_enabled": null
+      "collision_enabled": null,
+      "component_name": ""
      }
     }
    ],
@@ -2842,7 +2846,8 @@
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "collision_preset": "OverlapAll",
-    "collision_enabled": false
+    "collision_enabled": false,
+    "component_name": "Part1"
    },
    "envelope": [
     {
@@ -2858,7 +2863,8 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "collision_preset": "OverlapAll",
-      "collision_enabled": false
+      "collision_enabled": false,
+      "component_name": "Part1"
      }
     }
    ],
@@ -2902,7 +2908,8 @@
       "location_y": null,
       "location_z": null,
       "duration": 0.0,
-      "units": "unreal"
+      "units": "unreal",
+      "component_name": ""
      }
     }
    ],
@@ -2932,7 +2939,8 @@
     "location_y": 5.0,
     "location_z": 6.0,
     "duration": 2.5,
-    "units": "si"
+    "units": "si",
+    "component_name": "Part1"
    },
    "envelope": [
     {
@@ -2955,7 +2963,8 @@
       "location_y": 5.0,
       "location_z": 6.0,
       "duration": 2.5,
-      "units": "si"
+      "units": "si",
+      "component_name": "Part1"
      }
     }
    ],
@@ -2994,7 +3003,8 @@
       "mass": null,
       "linear_damping": null,
       "angular_damping": null,
-      "enable_gravity": null
+      "enable_gravity": null,
+      "component_name": ""
      }
     }
    ],
@@ -3019,7 +3029,8 @@
     "mass": 12.5,
     "linear_damping": 0.1,
     "angular_damping": 0.2,
-    "enable_gravity": false
+    "enable_gravity": false,
+    "component_name": "Part1"
    },
    "envelope": [
     {
@@ -3037,7 +3048,8 @@
       "mass": 12.5,
       "linear_damping": 0.1,
       "angular_damping": 0.2,
-      "enable_gravity": false
+      "enable_gravity": false,
+      "component_name": "Part1"
      }
     }
    ],
@@ -4728,7 +4740,8 @@
      "method": "validate_mesh",
      "arguments": {
       "mesh_path": "/Game/Meshes/SM_Chair",
-      "checks": null
+      "checks": null,
+      "weld": false
      }
     }
    ],
@@ -4750,7 +4763,8 @@
    "case": "every argument",
    "arguments": {
     "mesh_path": "/Game/Meshes/SM_Chair",
-    "checks": "manifold,, normals "
+    "checks": "manifold,, normals ",
+    "weld": true
    },
    "envelope": [
     {
@@ -4768,7 +4782,8 @@
       "checks": [
        "manifold",
        "normals"
-      ]
+      ],
+      "weld": true
      }
     }
    ],
