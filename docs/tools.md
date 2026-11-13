@@ -30,11 +30,17 @@ plus a notice).
   every entry once and always moves forward.
 - **Oversized entries.** An entry too large on its own is sent compacted to its
   identifying and small fields (`truncated_item`, `dropped_keys`), so the next
-  page starts after it.
+  page starts after it. A page that keeps all its entries, some compacted,
+  keeps the tool's `next_offset`, which is `null` on the last page.
+- **Bulk mappings.** A tool whose bulk is one mapping declares it
+  (`get_prim_info`'s `attributes`). That mapping is cut first, to its leading
+  entries, and named in `truncated_fields` with `returned`, `total`,
+  `first_omitted` and how to ask for the rest. The small fields and lists
+  beside it, such as the prim's `api_schemas`, arrive whole.
 - **Other lists.** Any other list cut to fit is listed in `truncated_fields` (or
   in `truncation` when the tool does not page), with `next_offset: "unchanged"`
   whenever the result is paged: its dropped entries will not come back on a
-  later page. The paged lists of each tool are declared in
+  later page. The paged lists and bulk mappings of each tool are declared in
   `simul.mcp.paged_results`.
 - **Hard limit.** Above 400 KB, the field carrying the excess is cut at any
   depth. A string becomes a `truncated_field` marker, and a list or mapping
@@ -70,6 +76,10 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   relationship as `{targets, authored}`, applied API schemas, and metadata:
   specifier, instanceable, composition arcs with `resolved`, variant sets
   and selections, the layers holding opinions, and other authored metadata.
+  Layers are named by their file path. When a prim's attributes exceed the
+  result budget, the leading ones that fit are sent and `truncated_fields`
+  says how many there are and where the cut fell. Narrow with
+  `attribute_filter` to read the rest.
   An array attribute carries its `length` and first `array_preview`
   elements (default 16, up to 10000), so a million-point mesh costs a few
   KB; `attribute_filter` takes glob patterns, `time_code` reads animated
@@ -92,6 +102,9 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   depth-first (path, type, depth, child count, API schemas), paged with
   `max_results`/`offset`. `include_properties` adds each prim's authored
   attributes and relationship targets, so a whole robot reads in one call.
+  The first page spends the tool's own rate-limit bucket. Each later page
+  (a nonzero `offset`) counts only against the per-agent ceiling, so walking
+  a large stage is not throttled page by page.
 - **Meshes.** `get_mesh_info` is computed with numpy over whole arrays (a
   million-vertex mesh in about 0.3 s). It reports normals from
   `primvars:normals` or `normals` (`normals_source`), `uv_sets`, and the
@@ -99,8 +112,12 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   `materialBind` subset's (also on the subset entry), plus a
   `physics_material` that carries `PhysicsMaterialAPI`. `surface_area`, `volume` and
   `bbox` are in the mesh's own space; `volume` is null unless the mesh is
-  closed, `surface_area` null for invalid topology, and `bbox` null without
-  points. Face areas use Newell's method, exact for planar faces, concave
+  closed and consistently oriented, `surface_area` null for invalid
+  topology, and `bbox` null without points. `consistently_oriented` says
+  whether the two faces sharing each edge run it in opposite directions. A
+  closed mesh with a flipped face reports `false`, with no volume, because
+  the divergence theorem over that winding gives a wrong number, and a
+  `note` says so. A prim that is not a Mesh is an `InvalidAssetType` error. Face areas use Newell's method, exact for planar faces, concave
   ones included. Faces listed in `holeIndices` add no area and leave their
   edges open. `time_code` reads a deforming mesh, and `points_time_samples`
   says whether it deforms. A mesh whose points or topology exist only as
@@ -112,11 +129,19 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   - `scene_size_meters` next to `scene_size`;
   - `has_animation` from an authored time range or time samples spanning
     more than one time (`time_sample_range`), with `duration_seconds` (time
-    codes divided by `timeCodesPerSecond`);
+    codes divided by `timeCodesPerSecond`). The sample range is in stage time
+    codes, as pxr composes them: each layer's samples are mapped through its
+    sublayer offset and the offset and scale of every reference or payload
+    that brings it in, and value clips through their `times` and `active`
+    (with or without a manifest). Mapping offsets costs the stage's arcs, not
+    its prims; finding clip sets reads each layer's prim specs once (about
+    0.25 s per 200,000 prims);
   - `warnings` for layers whose authored `upAxis` or `metersPerUnit` differs
     from the stage's (USD rescales and reorients nothing), one entry per
     mismatch and value with `layer_count` and up to 5 example `layers`;
     at most 10 groups, then a `MoreUnitMismatches` count;
+  - `inconsistently_wound_meshes` among the mesh totals: closed meshes
+    with a flipped face, whose volume is left out of `total_volume`;
   - `materials`, `root_prims` and their counts;
   - `(typeless)` as the type key of untyped prims.
 
@@ -151,7 +176,11 @@ parse error). The checks, in order:
   the bytes do not match the extension (text in a `.usdc`).
 - Composition: `MissingSublayer`, `MissingReference`, `MissingPayload`,
   `UnresolvedPrimPath`, and pxr's `UnresolvableDependency` for other asset
-  paths such as textures.
+  paths such as textures. For an Unreal content path in an asset value
+  (`/Engine/.../Name.Name`, as Unreal's USD exporter writes
+  `info:unreal:sourceAsset`), `UnresolvableDependency` and
+  `MissingSourceTypeInRegistry` are warnings, not errors: the path names an
+  object in Unreal's content, not a file.
 - Stage metadata: a dangling defaultPrim is an error; an unset defaultPrim,
   upAxis or metersPerUnit is a warning, since consumers fall back to Y up and
   centimeters.
@@ -164,7 +193,8 @@ parse error). The checks, in order:
 `load_usd_file` fails with `error_type: LoadError` and `details.reason` set
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
-them in `warnings`. `simul usd validate` runs the same checks and exits 1
+them in `warnings`, along with an `UnrealContentPath` entry for each Unreal
+content path the sandbox let through (none with the sandbox off). `simul usd validate` runs the same checks and exits 1
 when the file is invalid. A relative `file_path` resolves against
 `security.relative_path_base` (default: the server's working directory), and
 the result's `file_path` is the resolved path. A URL needs an asset resolver
@@ -195,7 +225,9 @@ changed nothing.
 Edit errors use the same types as the lookups above. Invalid input is a
 `ValidationError` whose `details.code` says which check failed
 (`InvalidPrimPath`, `UnknownPrimType`, `InvalidAttribute`,
-`InvalidTimeCode`). A missing stage or prim is a `NotFoundError`. A write
+`InvalidTimeCode`; `search_prims` reports a bad regular expression as
+`InvalidRegex`). A missing stage or prim is a `NotFoundError`, in
+`summarize_scene` too. A write
 that fails after the checks passed is an
 `EngineError` with `details.rolled_back: true`. A refusal that an explicit flag
 overrides is a `RefusedOperation` naming the flag in `details.override`, and
@@ -307,7 +339,9 @@ and unsaved edits are lost when the server exits.
   as one layer. A `.usdz` is packaged with the files it depends on. The
   stage stays bound to its own file and keeps its unsaved state.
 - **`reload_usd_stage`** rereads the root file and any changed sublayer or
-  referenced file, each held to the sandbox first as above.
+  referenced file, each held to the sandbox first as above. A reread that
+  fails is an `EngineError` with `details.code: ReloadFailed` (a failed save
+  or export says `SaveFailed`).
   **`unload_usd_stage`** closes the stage. Both refuse a stage with unsaved
   edits unless `discard_unsaved=true`.
 
@@ -610,7 +644,6 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 | Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `setup_unreal_physics_bulk`, `apply_unreal_force`, `get_unreal_physics_state`, `list_unreal_simulation_actors`, `control_unreal_simulation`, `get_unreal_simulation_status` |
 | Mesh operations | `generate_unreal_mesh_primitive`, `generate_unreal_procedural_scene`, `validate_unreal_mesh`, `simplify_unreal_mesh`, `remesh_unreal_mesh`, `subdivide_unreal_mesh`, `edit_unreal_mesh_topology`, `apply_unreal_mesh_boolean`, `cut_unreal_mesh_plane`, `compute_unreal_convex_hull`, `decompose_unreal_convex_hull`, `compute_unreal_mesh_uv`, `convert_unreal_mesh_format` |
 | USD interchange | `get_unreal_interchange_info`, `import_unreal_usd`, `export_unreal_usd` |
-| SimReady | `validate_simready_asset`, `convert_to_simready` |
 | Generic dispatch | `call_unreal_actor_function`, `batch_unreal_operations` |
 
 Behaviour worth knowing:
@@ -932,8 +965,17 @@ Behaviour worth knowing:
     `expected_delta_v`. With no simulation running it returns
     `error_type: "SimulationNotRunning"`; an actor without a live copy
     (spawned after the simulation started, not loaded in it, or destroyed in
-    it) returns `NotInSimulation`, and a copy that does not simulate physics
-    returns `IncompatibleBody`.
+    it) returns `NotInSimulation` (`details.code: NOT_IN_SIMULATION`, with a
+    `details.hint`), and a copy that does not simulate physics returns
+    `IncompatibleBody`. A multi-part actor needs `component_name`, as the
+    physics edits below do: the part's name, or its component path in the
+    editor or in the simulation.
+  - In a World Partition level the simulation streams in only the cells
+    around the level viewport's camera, so an actor far from it has no copy:
+    a cube 1 km from the camera was `NotInSimulation` until
+    `focus_unreal_on_actor` moved the camera to it, after which the force and
+    state tools found its copy (UE 5.7.4). The refusal's hint and the state
+    read's `warning` say so.
   - Its units are Unreal's: a force in kg·cm/s² and an impulse in kg·cm/s
     (1 N or 1 N·s is 100), or newtons and newton-seconds with `units: "si"`.
     The application point is a world location in cm, fixed in the world for
@@ -960,8 +1002,19 @@ Behaviour worth knowing:
     mass, gravity and the physics mode. Each body lists both its
     `editor_path` and `simulation_path`, and a body given by both is read
     once; a path with no live actor, or no live copy in the world read, is in
-    `not_found`. Unreal reports contacts only to hit-event handlers, so none
-    are listed.
+    `not_found`, and `warning` then says why that can be. A multi-part actor
+    (several primitive components, none the root) has a body per component:
+    its top-level body fields are null, `components` holds each component's
+    (`component_name`, its world location and rotation and the body fields,
+    the first 20), `components_total` counts them and `note` says so. Unreal
+    reports contacts only to hit-event handlers, so none are listed.
+  - Every tool has its own rate limit, 60 calls a minute after a burst of 10
+    (`SECURITY__REQUESTS_PER_MINUTE`, `SECURITY__BURST_SIZE`; see
+    [configuration](configuration.md#rate-limiting)): sampling one body a call
+    hit `RateLimitError` on the 11th call, and paging a 5,000-actor robotics
+    analysis took 39 calls and 30 s. Read many bodies a call (`actor_paths`,
+    `tag_filter`, up to 1000 a page), and raise the burst for a trajectory
+    sampled call by call.
   - `list_unreal_simulation_actors` lists the running simulation's actors
     with their simulation and editor paths; an actor the simulation spawned,
     such as the player's pawn, has a `null` editor path.
@@ -989,14 +1042,41 @@ Behaviour worth knowing:
   values read back (scalars and colors as the 32-bit floats Unreal stores)
   and `params_set` counts them. The instance is left unsaved.
 - `enable_unreal_physics`, `set_unreal_physics_params` and
-  `set_unreal_collision` edit the actor's primitive component (its root, else
-  its only one) the way the Details panel does: in one undoable editor
+  `set_unreal_collision` edit one primitive component (`component_name`,
+  else the actor's root, else its only one) the way the Details panel does: in one undoable editor
   transaction that marks the map dirty, so Save All writes the edit and one
   Undo reverts that call alone. Each reply is the body read back:
   `physics_mode` (`simulated`, `kinematic`, `static` for a body that is not
   Movable, `none` without physics collision), mobility, collision mode and
-  preset, `mass_kg` (the mass Unreal computes) and the mass override, gravity
+  preset, `blocked_object_types` (the object types its collision responses
+  block), `mass_kg` (the mass Unreal computes) and the mass override, gravity
   and damping, the attach parent and a `warning`.
+  - A multi-part actor (a SceneComponent root with several primitive
+    components, as `add_unreal_component` builds) has a body per component;
+    editor-only components, such as the sprite an Actor spawned from the
+    class carries, never count. A part is attached to the root, so
+    simulating one needs `allow_detach`.
+    Without `component_name` these tools and `apply_unreal_force` refuse it
+    with a `ValidationError` (`details.code: AMBIGUOUS_COMPONENT`, the
+    components in `details.components`), and an unknown name is
+    `COMPONENT_NOT_FOUND`; an actor with no primitive component is an
+    `IncompatibleBody` (`NO_PRIMITIVE_COMPONENT`). They used to answer with a
+    ScriptError traceback. `setup_unreal_physics_bulk` sets up one body an
+    actor, so it lists such an actor among the failed ones (problem
+    `AMBIGUOUS_COMPONENT`) and names `enable_unreal_physics` with
+    `component_name` for each part.
+  - The collision mode alone does not make a body collide: Unreal makes two
+    bodies collide only when each blocks the other's object type, and a
+    preset keeps its responses when its mode is changed. OverlapAll,
+    OverlapAllDynamic and Trigger overlap every object type, so
+    `collision_enabled: true` on one of them gives QUERY_AND_PHYSICS (preset
+    Custom) and a body that still collides with nothing: a cube made so and
+    then simulated fell through the floor at about 2000 cm/s (UE 5.7.4).
+    `set_unreal_collision` warns when the mode has physics but the responses
+    block nothing, and names the preset to use instead (PhysicsActor for a
+    simulated body, BlockAllDynamic for a Movable one moved by its transform,
+    such as a kinematic body, BlockAll for a static one); NoCollision's responses
+    block every object type, so `collision_enabled: true` is enough there.
   - `enable_unreal_physics` makes the body simulate (`enable` true), makes it
     kinematic (`kinematic` true: physics collision on, so simulated bodies hit
     it, but moved only by its transform) or turns physics off (`enable`
@@ -1005,11 +1085,18 @@ Behaviour worth knowing:
     so the tool checks first and refuses, with nothing changed, a body that
     cannot take the mode: `error_type: "IncompatibleBody"`, each reason in
     `details.problems` (`NOT_MOVABLE`, `NO_PHYSICS_COLLISION` for NoCollision
-    or a query-only preset such as OverlapAll, `NO_GEOMETRY` for a
-    StaticMeshActor without a mesh, `NO_SIMPLE_COLLISION`,
-    `COMPLEX_AS_SIMPLE` for a simulated mesh that uses its render triangles
-    as simple collision, `ATTACHED`). A Static or Stationary body is made
-    Movable (`mobility_changed_from`) unless `make_movable` is false.
+    or a query-only preset such as OverlapAll, `NO_BLOCKING_RESPONSE` for
+    physics collision whose responses block no object type,
+    `NO_GEOMETRY` for a StaticMeshActor without a mesh,
+    `NO_SIMPLE_COLLISION` for a static or generated dynamic mesh without a
+    simple shape, `COMPLEX_AS_SIMPLE` for a simulated mesh that uses its
+    render triangles as simple collision, `ATTACHED`), each message naming
+    the fix: a blocking preset, or `collision_enabled: true` only where the
+    body's responses already block. A body that blocks some object types
+    but not WorldStatic, the type of the level's static floors and walls,
+    is set up with a `warning` that it passes through them. A Static or
+    Stationary body is made Movable (`mobility_changed_from`) unless
+    `make_movable` is false.
   - Unreal detaches a body from its parent when it starts simulating, keeping
     its world transform, and turning physics off does not reattach it. An
     attached body is refused unless `allow_detach` is true; it is then
@@ -1036,7 +1123,7 @@ Behaviour worth knowing:
     is made simulated, kinematic or not physical as `enable_unreal_physics`
     makes it, after an optional `collision_preset` (PhysicsActor makes props
     physics-ready) and with optional mass, damping and gravity. Every actor
-    is checked first, the preset's collision standing in for its own: one
+    is checked first, the preset's collision mode and responses standing in for its own: one
     that cannot be set up refuses the call with nothing changed
     (`IncompatibleBody`, the actors and reasons in `details.failed`), unless
     `skip_failures` sets up the rest. An actor can still not take the setup
@@ -1074,9 +1161,20 @@ Behaviour worth knowing:
     Unreal's default, whatever the project's saved settings say. By default
     the importer merges the meshes under a prim of a collapsing kind into one
     (three exported StaticMeshActors came back as one `SM_Root`); pass
-    `use_prim_kinds_for_collapsing` false for a mesh per prim. The default
-    fallback collision, `none`, uses the render triangles as collision, so a
-    mesh has no simple shapes; `convex_hull` gives each a hull. Earlier simul
+    `use_prim_kinds_for_collapsing` false for a mesh per prim.
+    `fallback_collision_type` is the collision a mesh whose prim has no
+    UsdPhysics collision gets, and its default, `none`, gives it none: no
+    simple shape and a NoCollision component, so an exported ground slab
+    came back as no floor and bodies would fall through it (UE 5.7.4; simul
+    documented it as using the render triangles). The reply counts the new
+    actors' mesh components (`mesh_components`), lists the first 20 new
+    actors with a mesh simulated bodies pass through in
+    `actors_without_collision` (`actors_without_collision_count` counts
+    them) and warns, naming the fix: import again with `replace_existing`
+    and `fallback_collision_type` `convex_decomposition` (concave meshes,
+    such as a floor with walls) or `convex_hull` (one hull a mesh, which
+    gave each mesh BlockAll and a hull), or give a mesh simple collision
+    with `compute_unreal_convex_hull`. Earlier simul
     versions documented `import_lights` and `import_cameras`, which 5.7 does
     not have ("Failed to find property"): lights and cameras are imported as
     actors with `import_actors`. Any other name or a malformed value is a
@@ -1122,7 +1220,10 @@ Behaviour worth knowing:
     reference, payload or clip) whose value is under `/Engine`, `/Game` or
     `/Script` and ends in `<Name>.<Name>` with no file extension, naming no
     file on disk. `@/Engine/x.usda@`, a relative path and another content
-    root (a plugin's) are refused like any path outside the sandbox.
+    root (a plugin's) are refused like any path outside the sandbox. The
+    rule lives in `CompositionSandbox`, so `load_usd_file` and
+    `validate_usd_file` accept the same exports (see
+    [configuration.md](configuration.md#file-sandbox)).
   - An import can leave engine or plugin packages modified in memory: on UE
     5.7.4 Interchange set `bUsedWithNanite` on its shared parent material
     `/InterchangeAssets/Materials/PBRSurfaceMaterial_MR`. Unreal does that on
@@ -1277,8 +1378,12 @@ Behaviour worth knowing:
   changed fails with `InvalidState` and `details.reason`
   `"attachment_changed"`, having run nothing; run `simul unreal attach` again.
   It used to come back as the tool's own traceback.
-- SimReady conversion and validation are not implemented for Unreal. Those
-  tools return `UnsupportedOperation` without changing files.
+- SimReady conversion and validation are not available for Unreal: author
+  and check a SimReady asset with Blender's SimReady tools
+  (`export_simready_usd`, `validate_simready_compliance`) and bring it into
+  the level with `import_unreal_usd`. The Unreal surface used to register
+  `convert_to_simready` and `validate_simready_asset`, which only ever
+  returned `UnsupportedOperation`.
 - `analyze_unreal_scene_for_robotics` classifies the actors loaded in the
   editor world by the oriented box of their physics-collision components: a
   single component's box rotated and scaled with it (a static mesh's bounds,
@@ -1302,10 +1407,17 @@ Behaviour worth knowing:
     tile and each instanced box on a shelf a graspable object; such an entry
     adds `component_path` and `instance_index`, and `mass_kg` is null, since
     instances share their component's body. A component with more than 1000
-    instances is one entry by its world-axis bounds, with the count in
-    `instances`. Such a component used to be measured as one mesh at the
+    instances is not classified: it is listed in
+    `skipped_instance_components` (the first 20, with `instances`, `size` and
+    `bounds_center` of its world-axis bounds; `skipped_instance_components_count`
+    counts them), and `warning` says its instances may hold floors or props
+    the lists leave out. Counted whole by its bounds, 1,500 instanced 30 cm
+    cubes scattered over 50 × 50 m read as one 2,523 m² floor among the real
+    ones. Such a component used to be measured as one mesh at the
     component's own transform, where no instance need be drawn, so a floor
     of instanced tiles read as a single tile.
+  - Each actor is analyzed once, even when Unreal's level listing holds it
+    twice, as it did for the actors a replacing USD import added.
   - The two lists are paged together: surfaces largest first, graspable
     objects by path, each cut to `max_results` (default 50, at most 500) from
     `offset`. `totals` counts every match, `returned` this page's, and
@@ -1705,7 +1817,13 @@ Behaviour worth knowing:
     default): `closed`, `manifold` (bowtie vertices), `degenerate_triangles`,
     `orientation` (a closed mesh encloses a positive volume), `compact`,
     `normals` and `uvs`, each with `passed`, `count` and `detail`. It does not
-    look for self-intersections.
+    look for self-intersections. A hard-edged mesh imported from glTF or FBX
+    stores each face's vertices apart, so read as it is its seams are open
+    edges and its faces separate pieces (a cube: 6 pieces and 24 open edges;
+    a flat-shaded ball: 512 pieces and no volume). `weld: true` checks a copy
+    whose coincident open edges (within 0.001 cm) are welded first, leaving
+    the mesh as it is (`welded` in the reply); without it, a mesh that reads
+    open in more than one piece gets a warning naming the option.
   - A mesh script runs under an HTTP timeout of at least 300 s, whatever
     `UNREAL__TIMEOUT` says, since a GeometryScript call cannot be cancelled.
     The slowest operations on a 2M-triangle mesh took 83 to 109 s (a
@@ -2857,6 +2975,7 @@ Domain types of the engines:
 | `SpawnError` | Unreal could not spawn the actor from the class or asset given |
 | `PluginUnavailable` | The optional Unreal plugin the tool needs is not enabled |
 | `IncompatibleBody` | The Unreal body cannot simulate as asked; `details.problems` says why |
+| `NotInSimulation` | The Unreal actor has no copy in the running simulation (added after it started, destroyed in it, or in a World Partition cell it has not streamed in; `details.hint` says what to do) |
 | `EditorExited` | The Unreal editor exited while `simul unreal setup` waited for it |
 | `BridgeUnavailable` | The Isaac Sim bridge extension the tool needs is not configured |
 | `BridgeProtocolError` | A transport (Isaac Sim's bridge or stock socket, Blender's bridge) answered outside its protocol: another version, a reply that is not JSON, malformed or unmatched; the request may have run |

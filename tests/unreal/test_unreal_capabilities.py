@@ -69,9 +69,9 @@ def test_full_surface_reports_every_declared_tool(monkeypatch: pytest.MonkeyPatc
         "list_unreal_instances",
         "execute_unreal_script",
         "control_unreal_ui",
-        "convert_to_simready",
-        "validate_simready_asset",
     } <= set(capabilities)
+    # The SimReady stubs, which only returned UnsupportedOperation, are gone (round-2 audit R2B-12).
+    assert not [name for name in capabilities if "simready" in name]
 
 
 def test_script_tools_follow_the_script_execution_switch(monkeypatch: pytest.MonkeyPatch) -> None:

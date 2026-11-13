@@ -16,6 +16,9 @@ did in a live editor (observed through Remote Control):
 * ``set_collision_profile_name`` with an unknown name sets the profile to
   Custom; on a static mesh component it clears Use Default Collision, which
   ``set_collision_enabled`` does not;
+* a preset sets the collision responses too (``PRESET_RESPONSES``: OverlapAll
+  and Trigger overlap every object type, NoCollision's block them), and
+  ``set_collision_enabled`` keeps them, turning the preset into Custom;
 * ``StaticMeshEditorSubsystem`` reports -1 for every mesh while Play In
   Editor runs;
 * a running simulation has its own world, ``/Game/Maps/UEDPIE_0_Lab``, with
@@ -98,7 +101,41 @@ PRESETS: Dict[str, Optional[str]] = {
     "BlockAllDynamic": "QUERY_AND_PHYSICS",
     "PhysicsActor": "QUERY_AND_PHYSICS",
     "OverlapAll": "QUERY_ONLY",
+    "Trigger": "QUERY_ONLY",
+    "Spectator": "QUERY_ONLY",
     "NoCollision": "NO_COLLISION",
+    "Custom": None,
+}
+#: Unreal's object channels, which the physics checks read the responses to.
+OBJECT_CHANNELS = (
+    "ECC_WORLD_STATIC",
+    "ECC_WORLD_DYNAMIC",
+    "ECC_PAWN",
+    "ECC_PHYSICS_BODY",
+    "ECC_VEHICLE",
+    "ECC_DESTRUCTIBLE",
+)
+CHANNELS = SimpleNamespace(
+    **{name: Enum(name) for name in OBJECT_CHANNELS + ("ECC_VISIBILITY", "ECC_CAMERA")}
+)
+
+
+def _responses(default: str, **overrides: str) -> Dict[str, str]:
+    responses = {name: default for name in OBJECT_CHANNELS}
+    responses.update(overrides)
+    return responses
+
+
+#: Each preset's responses to the object channels, as UE 5.7.4 read them off a
+#: transient component; Custom keeps the current ones.
+PRESET_RESPONSES: Dict[str, Optional[Dict[str, str]]] = {
+    "BlockAll": _responses("ECR_BLOCK"),
+    "BlockAllDynamic": _responses("ECR_BLOCK"),
+    "PhysicsActor": _responses("ECR_BLOCK"),
+    "OverlapAll": _responses("ECR_OVERLAP"),
+    "Trigger": _responses("ECR_OVERLAP"),
+    "Spectator": _responses("ECR_IGNORE", ECC_WORLD_STATIC="ECR_BLOCK"),
+    "NoCollision": _responses("ECR_BLOCK"),
     "Custom": None,
 }
 
@@ -188,7 +225,8 @@ class Body:
         component = self._component
         assert component is not None
         return dict(component.body, collision_profile_name=component.preset,
-                    collision_enabled=Enum(component.collision))
+                    collision_enabled=Enum(component.collision),
+                    collision_responses=dict(component.responses))
 
     def get_editor_property(self, name: str) -> Any:
         return self.values[name]
@@ -202,7 +240,27 @@ class ActorComponent:
 
 
 class SceneComponent(ActorComponent):
-    pass
+    """A component with a transform and no body, such as a multi-part actor's root."""
+
+    def __init__(self, name: str = "DefaultSceneRoot") -> None:
+        self.name = name
+        self.owner: Optional["Actor"] = None
+
+    def get_name(self) -> str:
+        return self.name
+
+    def get_path_name(self) -> str:
+        assert self.owner is not None
+        return self.owner.get_path_name() + "." + self.name
+
+    def get_class(self) -> "Class":
+        return Class(type(self).__name__)
+
+    def modify(self, always_mark_dirty: bool = True) -> bool:
+        return True
+
+    def _write(self, what: str) -> None:
+        pass
 
 
 class PrimitiveComponent(SceneComponent):
@@ -219,6 +277,7 @@ class PrimitiveComponent(SceneComponent):
         self._mobility = Enum(mobility)
         self.preset = preset
         self.collision = PRESETS[preset] or "QUERY_AND_PHYSICS"
+        self.responses: Dict[str, str] = dict(PRESET_RESPONSES[preset] or _responses("ECR_BLOCK"))
         self.base_mass = mass
         self.parent: Optional["PrimitiveComponent"] = None
         self.socket = "None"
@@ -413,6 +472,13 @@ class PrimitiveComponent(SceneComponent):
         assert self.owner is not None
         return self.owner.location
 
+    def get_world_location(self) -> Vector:
+        assert self.owner is not None
+        return self.owner.location
+
+    def get_world_rotation(self) -> Rotator:
+        return Rotator()
+
     # -- collision ----------------------------------------------------------------
     def get_collision_enabled(self) -> Enum:
         return Enum(self.collision)
@@ -420,18 +486,25 @@ class PrimitiveComponent(SceneComponent):
     def get_collision_profile_name(self) -> str:
         return self.preset
 
+    def get_collision_response_to_channel(self, channel: Enum) -> Enum:
+        return Enum(self.responses.get(channel.name, "ECR_BLOCK"))
+
     def set_collision_profile_name(self, name: str) -> None:
         self._write("collision_profile")
         known = {preset.lower(): preset for preset in PRESETS}
         if name.lower() not in known:
             self.preset = "Custom"
             return
-        self.preset = name
-        mode = PRESETS[known[name.lower()]]
+        self.preset = known[name.lower()]
+        mode = PRESETS[self.preset]
         if mode is not None:
             self.collision = mode
+        responses = PRESET_RESPONSES[self.preset]
+        if responses is not None:
+            self.responses = dict(responses)
 
     def set_collision_enabled(self, mode: Enum) -> None:
+        # Keeps the preset's responses, as Unreal does.
         self._write("collision_enabled")
         self.collision = mode.name
         self.preset = "Custom"
@@ -450,6 +523,7 @@ class PrimitiveComponent(SceneComponent):
             values = dict(value.values)
             self.preset = values.pop("collision_profile_name")
             self.collision = values.pop("collision_enabled").name
+            self.responses = values.pop("collision_responses")
             self.body = values
             return
         raise AttributeError(f"{type(self).__name__} has no property {name!r}")
@@ -491,6 +565,29 @@ class StaticMeshComponent(PrimitiveComponent):
 
 class CapsuleComponent(PrimitiveComponent):
     pass
+
+
+class BillboardComponent(PrimitiveComponent):
+    """The editor-only sprite an Actor spawned from the class carries (UE 5.7.4)."""
+
+    def get_editor_property(self, name: str) -> Any:
+        if name == "is_editor_only":
+            return True
+        return super().get_editor_property(name)
+
+
+class DynamicMeshComponent(PrimitiveComponent):
+    """A generated mesh's component: ``simple`` collision shapes, as GeometryScript reads them."""
+
+    def __init__(self, editor: "Editor", name: str, simple: int = 0, **kwargs: Any) -> None:
+        super().__init__(editor, name, **kwargs)
+        self.simple = simple
+        self.collision_type = "CTF_USE_DEFAULT"
+
+    def get_editor_property(self, name: str) -> Any:
+        if name == "collision_type":
+            return Enum(self.collision_type)
+        return super().get_editor_property(name)
 
 
 _guids = itertools.count(1)
@@ -640,6 +737,33 @@ class Editor:
         self.actors[actor.get_path_name()] = actor
         return actor
 
+    def multi_part_actor(self, label: str, parts: int = 2, simulation: bool = False) -> Actor:
+        """An Actor with a SceneComponent root, its editor-only sprite and ``parts`` cube StaticMeshComponents."""
+        name = f"Actor_{len(self.actors)}"
+        root = SceneComponent()
+        actor = Actor(self, name, label, None, simulation=simulation, class_name="Actor")
+        actor.root_component = root  # type: ignore[assignment]
+        root.owner = actor
+        sprite = BillboardComponent(self, "BillboardComponent_0", mobility="MOVABLE", preset="NoCollision")
+        sprite.owner = actor
+        actor.components.append(sprite)
+        for index in range(parts):
+            part = StaticMeshComponent(self, f"Part{index}", Mesh(CUBE), mobility="MOVABLE")
+            part.owner = actor
+            part.parent = root  # type: ignore[assignment]
+            actor.components.append(part)
+        actor.components.insert(0, root)
+        self.actors[actor.get_path_name()] = actor
+        return actor
+
+    def dynamic_mesh_actor(self, label: str, simple: int = 0) -> Actor:
+        """A generated DynamicMeshActor, with ``simple`` simple collision shapes."""
+        name = f"DynamicMeshActor_{len(self.actors)}"
+        component = DynamicMeshComponent(self, "DynamicMeshComponent0", simple=simple, mobility="MOVABLE")
+        actor = Actor(self, name, label, component, class_name="DynamicMeshActor")
+        self.actors[actor.get_path_name()] = actor
+        return actor
+
     def capsule_actor(self, label: str, preset: str = "NoCollision") -> Actor:
         name = f"PlayerStart_{len(self.actors)}"
         actor = Actor(
@@ -654,6 +778,8 @@ class Editor:
 
     def simulation_copy(self, actor: Actor, level: Optional[str] = None) -> Actor:
         """The running simulation's copy of ``actor``, at its path in the play world (or ``level``)."""
+        if not isinstance(actor.root_component, PrimitiveComponent):
+            return self._multi_part_copy(actor)
         source = actor.root_component
         assert isinstance(source, StaticMeshComponent)
         component = StaticMeshComponent(
@@ -664,6 +790,7 @@ class Editor:
             preset=source.preset,
         )
         component.collision = source.collision
+        component.responses = dict(source.responses)
         component.body = dict(source.body)
         copy = Actor(
             self,
@@ -677,6 +804,18 @@ class Editor:
         copy.tags = list(actor.tags)
         copy.location = Vector(*actor.location.as_list())
         copy.level = level
+        self.actors[copy.get_path_name()] = copy
+        return copy
+
+    def _multi_part_copy(self, actor: Actor) -> Actor:
+        parts = [c for c in actor.components if isinstance(c, StaticMeshComponent)]
+        copy = self.multi_part_actor(actor.label, parts=len(parts), simulation=True)
+        del self.actors[copy.get_path_name()]
+        copy.name, copy.guid = actor.name, Guid(actor.guid.value)
+        for source, part in zip(parts, [c for c in copy.components if isinstance(c, StaticMeshComponent)]):
+            part.collision, part.responses, part.body = source.collision, dict(source.responses), dict(source.body)
+            part._mobility = source.mobility
+        copy.location = Vector(*actor.location.as_list())
         self.actors[copy.get_path_name()] = copy
         return copy
 
@@ -729,7 +868,7 @@ class Editor:
                 for actor in list(self.actors.values()):
                     if (
                         actor.simulation
-                        and actor.root_component is not None
+                        and isinstance(actor.root_component, PrimitiveComponent)
                         and not actor.destroyed
                     ):
                         actor.root_component.step(step)
@@ -808,6 +947,11 @@ class Editor:
             ),
         }
 
+        geometry_collision = SimpleNamespace(
+            get_simple_collision_from_component=lambda component: component.simple,
+            get_simple_collision_shape_count=lambda collision: collision,
+        )
+
         def new_object(cls: type) -> Any:
             assert cls is StaticMeshComponent
             probe = StaticMeshComponent(editor, "Probe", Mesh(CUBE))
@@ -870,6 +1014,9 @@ class Editor:
             StaticMeshComponent=StaticMeshComponent,
             ComponentMobility=MOBILITY,
             CollisionEnabled=COLLISION,
+            CollisionChannel=CHANNELS,
+            DynamicMeshComponent=DynamicMeshComponent,
+            GeometryScript_Collision=geometry_collision,
             AttachmentRule=SimpleNamespace(KEEP_WORLD=Enum("KEEP_WORLD")),
             ScopedEditorTransaction=lambda description: Transaction(
                 editor, description

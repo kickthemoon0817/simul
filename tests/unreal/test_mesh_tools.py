@@ -830,6 +830,40 @@ def test_validation_runs_only_the_checks_asked_for(editor: FakeEditor) -> None:
     assert refused["details"]["code"] == "UNKNOWN_CHECK"
 
 
+def _hard_edged_cube(editor: FakeEditor) -> Any:
+    """An imported hard-edged cube: each face's vertices apart, so 6 pieces and 24 open edges."""
+    mesh = editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh()
+    mesh.stats.update(verts=24, open_edges=24, open_loops=6, components=6, seams=24)
+    return mesh
+
+
+def test_a_hard_edged_mesh_read_unwelded_says_to_weld(editor: FakeEditor) -> None:
+    """Round-2 audit R2B-11: a glTF cube read as 6 pieces with 24 open edges, a
+    flat-shaded ball as 512 pieces with no volume, and there was no weld."""
+    _hard_edged_cube(editor)
+
+    payload = _call(editor, "validate_unreal_mesh", checks=["closed"])
+
+    assert payload["welded"] is False
+    assert payload["checks"]["closed"]["passed"] is False and payload["connected_components"] == 6
+    assert any("weld true" in warning for warning in payload["warnings"]), payload["warnings"]
+
+
+def test_weld_checks_a_welded_copy_and_leaves_the_mesh(editor: FakeEditor) -> None:
+    mesh = _hard_edged_cube(editor)
+
+    payload = _call(editor, "validate_unreal_mesh", weld=True)
+
+    assert payload["welded"] is True and payload["is_valid"] is True, payload
+    assert payload["checks"]["closed"]["passed"] is True and payload["connected_components"] == 1
+    assert payload["volume"] is not None
+    assert not any("weld true" in warning for warning in payload["warnings"])
+    assert editor.weld_tolerances == [unreal_runtime.MESH_WELD_TOLERANCE_CM]
+    # The mesh itself is as it was.
+    assert editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh() is mesh
+    assert (mesh.stats["open_edges"], mesh.stats["components"]) == (24, 6)
+
+
 def test_an_open_mesh_has_no_orientation_to_check(editor: FakeEditor) -> None:
     editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh().stats.update(open_edges=4, open_loops=1)
     payload = _call(editor, "validate_unreal_mesh", checks=["orientation"])

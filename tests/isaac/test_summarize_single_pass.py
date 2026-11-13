@@ -96,7 +96,8 @@ def _reference_passes(summarizer: SceneSummarizer, stage: Usd.Stage) -> Dict[str
     stats = {
         'total_meshes': 0, 'total_vertices': 0, 'total_faces': 0,
         'meshes_with_normals': 0, 'meshes_with_uvs': 0, 'meshes_with_colors': 0,
-        'closed_meshes': 0, 'invalid_topology_meshes': 0, 'meshes_measured_at_first_sample': 0,
+        'closed_meshes': 0, 'inconsistently_wound_meshes': 0, 'invalid_topology_meshes': 0,
+        'meshes_measured_at_first_sample': 0,
         'instanced_meshes': 0,
         'total_surface_area': 0.0, 'total_volume': 0.0,
     }
@@ -110,6 +111,7 @@ def _reference_passes(summarizer: SceneSummarizer, stage: Usd.Stage) -> Dict[str
             stats['meshes_with_uvs'] += int(bool(info.has_uvs))
             stats['meshes_with_colors'] += int(bool(info.has_colors))
             stats['closed_meshes'] += int(bool(info.is_closed))
+            stats['inconsistently_wound_meshes'] += int(info.consistently_oriented is False)
             stats['invalid_topology_meshes'] += int(not info.topology_valid)
             stats['total_surface_area'] += info.surface_area or 0.0
             stats['total_volume'] += info.volume or 0.0
