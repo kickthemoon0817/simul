@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from ...schemas.common import ErrorResponse
 from ._shared import (
+    ASSET_SANDBOX_CORE,
     COERCE_ATTRIBUTE_VALUE_CORE,
     DEFAULT_WORLD_PATH,
     DEFINE_PRIM_CORE,
@@ -697,39 +698,6 @@ class PrimEditMixin:
         """Whether writes that would plant code must be refused."""
         return not self.settings.security.allow_script_execution
 
-    def _asset_value_checks(self, value: Any) -> Dict[str, Dict[str, Any]]:
-        """Judge every string in ``value`` as a path, in case the attribute is an asset.
-
-        Only Kit knows the attribute's type, so each candidate is checked here
-        against the file sandbox and the script applies the verdict when the
-        attribute turns out to be asset-valued (``asset`` / ``asset[]``).
-
-        Args:
-            value: The JSON value about to be written.
-
-        Returns:
-            ``{string: {"path": authorized}}`` or ``{string: {"denial": envelope}}``
-            for each non-empty string in ``value`` (or in its top-level list).
-        """
-        items = value if isinstance(value, list) else [value]
-        checks: Dict[str, Dict[str, Any]] = {}
-        for item in items:
-            if not isinstance(item, str) or not item or item in checks:
-                continue
-            denial = self._sandbox_denial(item)
-            if denial is None:
-                try:
-                    checks[item] = {"path": self._path_policy.authorize(item)}
-                    continue
-                except Exception:  # noqa: BLE001 - any refusal is a denial here
-                    denial = self._sandbox_denial(item) or {
-                        "success": False,
-                        "error": f"Refused by the file sandbox: {item}",
-                        "error_type": "SandboxError",
-                    }
-            checks[item] = {"denial": denial}
-        return checks
-
     def _script_write_refusal(
         self, attribute_name: str, value: Any
     ) -> Optional[Dict[str, Any]]:
@@ -770,7 +738,8 @@ class PrimEditMixin:
             "Sphere, Cube, Cylinder, Cone, Capsule, Plane, Camera, ...). The type must be a "
             "registered concrete schema (a mistyped 'cube' is refused with a suggestion), "
             "and every attribute must be one the type's schema defines; otherwise nothing "
-            "is created."
+            "is created. A file path for an asset attribute (inputs:texture:file, ...) must "
+            "be inside the read sandbox (security.allowed_paths)."
         ),
         read_only=False,
     )
@@ -789,11 +758,13 @@ class PrimEditMixin:
                 "Cube", "Sphere"); "" makes a typeless prim.
             attributes: Optional dict of attribute name→value to set on
                 creation. Each must be defined by the type's schema; values
-                convert like set_isaac_prim_attribute's.
+                convert like set_isaac_prim_attribute's, and a path for an
+                asset attribute is checked against the file sandbox.
 
         Returns:
             Dict confirming the created prim path and type, and any missing
-            ancestors it created (``ancestors_created``).
+            ancestors it created (``ancestors_created``); a SandboxError,
+            with nothing created, when an asset path is outside the sandbox.
         """
         if self._script_guard and is_script_capable_node_type(prim_type):
             return _script_execution_refusal(
@@ -806,6 +777,7 @@ class PrimEditMixin:
         _prim_path = _pyval(prim_path)
         _prim_type = _pyval(prim_type)
         _attributes = _pyval(dict(attributes or {}))
+        _asset_checks = _pyval(self._asset_value_checks(list((attributes or {}).values())))
         script = _compose_script(
             """\
             import json
@@ -813,13 +785,16 @@ class PrimEditMixin:
             from pxr import Gf, Sdf, Tf, Usd
             """,
             COERCE_ATTRIBUTE_VALUE_CORE,
+            ASSET_SANDBOX_CORE,
             DEFINE_PRIM_CORE,
             f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                print(json.dumps(_define_prim(stage, {_prim_path}, {_prim_type}, {_attributes})))
+                print(json.dumps(_define_prim(
+                    stage, {_prim_path}, {_prim_type}, {_attributes}, {_asset_checks}
+                )))
             """,
         )
         return await self._execute_json_script(script)
@@ -1031,7 +1006,8 @@ class PrimEditMixin:
             "USD type: quaternions (xformOp:orient, physics:localRot0) as [w, x, y, z] with "
             "the real part first, matrices (xformOp:transform) as a list of rows or a flat "
             "row-major list, vectors as [x, y, z], arrays as lists of those. Writes the "
-            "default (static) value; the reply warns when time samples hide it. With "
+            "default (static) value; the reply warns when time samples hide it. A file path "
+            "for an asset attribute must be inside the read sandbox (security.allowed_paths). With "
             "script execution disabled, writes that would plant code are refused: "
             "code-carrying attributes (inputs:script*, inputs:codeStr, ...), a node:type "
             "that runs code, any attribute of such a node, and the Python Scripting "
@@ -1074,7 +1050,7 @@ class PrimEditMixin:
         _attr_name = _pyval(attribute_name)
         _val_str = _pyval(json.dumps(value))
         _guard = _pyval(self._script_guard)
-        _asset_checks = _pyval(self._asset_value_checks(value))
+        _asset_checks = _pyval(self._asset_value_checks([value]))
         script = _compose_script(
             """\
             import json
@@ -1083,6 +1059,7 @@ class PrimEditMixin:
             """,
             JSON_VALUE_CORE,
             COERCE_ATTRIBUTE_VALUE_CORE,
+            ASSET_SANDBOX_CORE,
             script_guard_source(),
             SCRIPT_GUARD_REFUSAL_CORE,
             f"""\
@@ -1119,30 +1096,10 @@ class PrimEditMixin:
                         val = json.loads({_val_str})
                         type_label = str(attr.GetTypeName())
                         failure = None
-                        to_set = val
-                        denial = None
                         # An asset path is read by Kit (a texture, an HDRI): it
                         # goes through the file sandbox, as create_isaac_light's
                         # texture_file does, and is written as the resolved path.
-                        asset_checks = {_asset_checks}
-                        if attr.GetTypeName() in (Sdf.ValueTypeNames.Asset, Sdf.ValueTypeNames.AssetArray):
-                            items = val if isinstance(val, list) else [val]
-                            resolved = []
-                            for item in items:
-                                if item == "":
-                                    resolved.append(item)  # clears the asset
-                                    continue
-                                check = asset_checks.get(item) if isinstance(item, str) else None
-                                if check is None or "denial" in check:
-                                    # Unchecked counts as refused: fail closed.
-                                    denial = (check or {{}}).get("denial") or {{
-                                        "success": False,
-                                        "error": "Not an asset path the sandbox checked: " + repr(item),
-                                        "error_type": "SandboxError",
-                                    }}
-                                    break
-                                resolved.append(check["path"])
-                            to_set = resolved if isinstance(val, list) else resolved[0] if resolved else val
+                        to_set, denial = _sandboxed_asset(attr.GetTypeName(), val, {_asset_checks})
                         if denial is not None:
                             failure = denial.get("error") or "Refused by the file sandbox"
                         try:

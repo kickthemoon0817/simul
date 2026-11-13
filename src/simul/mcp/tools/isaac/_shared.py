@@ -1,6 +1,7 @@
 """Shared constants and helpers for the Isaac tool mixins."""
 
 import json
+import re
 import textwrap
 from typing import Annotated, Any, List, Optional
 
@@ -542,9 +543,72 @@ COERCE_ATTRIBUTE_VALUE_CORE = """\
         return _coerce_one(value, type_name.type.pythonClass, str(type_name))
 """
 
+# A value bound for an asset (or asset[]) attribute is a file Kit reads: a
+# texture, an HDRI, an MDL module. Only Kit knows an attribute's type, so the
+# server judges every string the caller sent against the file sandbox
+# (IsaacScriptBase._asset_value_checks) and the script applies the verdict
+# here, once the type is known. A string the server did not check, or any
+# other non-empty item, is refused: fail closed. Needs ``Sdf``.
+ASSET_SANDBOX_CORE = """\
+    def _sandboxed_asset(type_name, value, checks):
+        # Returns (value to write, SandboxError payload or None).
+        if type_name not in (Sdf.ValueTypeNames.Asset, Sdf.ValueTypeNames.AssetArray):
+            return value, None
+        items = value if isinstance(value, list) else [value]
+        resolved = []
+        for item in items:
+            if item == "":
+                resolved.append(item)  # clears the asset
+                continue
+            check = (checks or {}).get(item) if isinstance(item, str) else None
+            if check is None or "denial" in check:
+                return value, (check or {}).get("denial") or {
+                    "success": False,
+                    "error": "Not an asset path the sandbox checked: " + repr(item),
+                    "error_type": "SandboxError",
+                }
+            resolved.append(check["path"])
+        return (resolved if isinstance(value, list) else resolved[0]), None
+"""
+
+# Words that make a name (a Carb key's last segment, an OmniGraph input) say
+# it holds a file location. A prim path is not a file, so a name that also
+# says prim, camera or target is left alone.
+FILE_LOCATION_WORDS = frozenset(
+    {
+        "file", "files", "filename", "filenames", "filepath", "filepaths",
+        "dir", "dirs", "directory", "directories", "folder", "folders",
+        "path", "paths", "url", "urls", "uri", "uris",
+    }
+)
+PRIM_PATH_WORDS = frozenset({"prim", "prims", "camera", "cameras", "target", "targets"})
+
+
+def names_file_location(name: str) -> bool:
+    """Whether ``name`` says its value is a file, folder or URL.
+
+    The last segment of a Carb key (``/log/file``) or an attribute name
+    (``inputs:outputDir``) is split into camelCase, ``_`` and ``-`` words.
+
+    Args:
+        name: The key or attribute name.
+
+    Returns:
+        True when a word is in ``FILE_LOCATION_WORDS`` and none is in
+        ``PRIM_PATH_WORDS``.
+    """
+    last = re.split(r"[/:]", str(name).rstrip("/"))[-1]
+    words = {
+        word.lower()
+        for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", last)
+    }
+    return bool(words & FILE_LOCATION_WORDS) and not words & PRIM_PATH_WORDS
+
+
 DEFINE_PRIM_CORE = """\
-    def _define_prim(stage, prim_path, prim_type, attributes):
-        # Needs COERCE_ATTRIBUTE_VALUE_CORE, plus Sdf, Usd and Tf, in the script.
+    def _define_prim(stage, prim_path, prim_type, attributes, asset_checks=None):
+        # Needs COERCE_ATTRIBUTE_VALUE_CORE and ASSET_SANDBOX_CORE, plus Sdf,
+        # Usd and Tf, in the script.
         valid = Sdf.Path.IsValidPathString(prim_path)
         # Returns True, or a (False, reason) tuple, which is truthy.
         if isinstance(valid, tuple):
@@ -616,6 +680,15 @@ DEFINE_PRIM_CORE = """\
             }
         for name, value in attributes.items():
             attr = prim.GetAttribute(name)
+            denial = None
+            if attr.IsValid():
+                # An asset value is a file Kit reads: through the sandbox.
+                value, denial = _sandboxed_asset(attr.GetTypeName(), value, asset_checks)
+            if denial is not None:
+                stage.RemovePrim(created_ancestors[0] if created_ancestors else prim_path)
+                denied = dict(denial)
+                denied.update({"attribute": name, "prim_path": prim_path, "created": False})
+                return denied
             try:
                 if not attr.IsValid():
                     raise ValueError("it is a relationship, not an attribute")

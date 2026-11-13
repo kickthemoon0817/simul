@@ -6,6 +6,7 @@ from ...schemas.common import ErrorResponse
 from ._shared import (
     APPLY_COLLISION_CORE,
     APPLY_RIGID_BODY_CORE,
+    ASSET_SANDBOX_CORE,
     BIND_MATERIAL_CORE,
     COERCE_ATTRIBUTE_VALUE_CORE,
     COLLISION_APPROXIMATIONS,
@@ -148,7 +149,7 @@ class CompoundMixin:
             (
                 "prim",
                 f"_define_prim(stage, prim_path, {_pyval(prim_type)}, {{}})",
-                (COERCE_ATTRIBUTE_VALUE_CORE, DEFINE_PRIM_CORE),
+                (COERCE_ATTRIBUTE_VALUE_CORE, ASSET_SANDBOX_CORE, DEFINE_PRIM_CORE),
             ),
         ]
         if translation is not None or rotation_euler is not None or scale is not None:

@@ -335,6 +335,28 @@ directory you share with it on purpose instead.
 Every allowed root admits reads and writes alike, so in a source checkout
 `examples/` and `tests/data/` are writable by the tools too.
 
+The Isaac Sim tools hold every caller value that becomes a file location in
+Kit to the same rules, so a free-form attribute or settings map is not a way
+around them:
+
+- A path for an `asset` or `asset[]` attribute or shader input is judged as
+  a read and written as the path the check resolved. This covers
+  `create_isaac_prim`'s `attributes`, `set_isaac_prim_attribute`,
+  `set_isaac_material_property`, an asset-typed input in
+  `set_isaac_graph_node_values`, and `create_isaac_light`'s `texture_file`.
+  Only Kit knows an attribute's type, so the server checks every string the
+  call carries and the script applies the verdict once the type is known. A
+  value the server did not check is refused.
+- An OmniGraph input or Carb key named like a file location is judged as a
+  write, because Kit may read or write it. Examples are `inputs:path`,
+  `inputs:outputDir`, `/log/file` and `/app/exts/folders`. "Named like a
+  file location" means the last segment contains a word such as file, dir,
+  folder, path or url, and none of prim, camera or target.
+  `set_isaac_graph_node_values` and `set_isaac_carb_settings` refuse such a
+  value outside the sandbox and set nothing.
+
+A refused value is a `SandboxError`, and nothing is created or set.
+
 For the headless USD tools the sandbox also covers everything a file draws
 on, not just the file named in the call. Before `load_usd_file` or
 `validate_usd_file` composes a stage, it walks the layers the file reaches and

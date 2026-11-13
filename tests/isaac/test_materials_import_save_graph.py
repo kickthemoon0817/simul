@@ -733,13 +733,21 @@ def _og_modules() -> Dict[str, types.ModuleType]:
         "/World/Graph/Const": _Node("omni.graph.nodes.ConstantString"),
     }
     _Controller.connections = []
+    # The nodes' prims, as Kit keeps them; Const has an asset-typed input.
+    stage = Usd.Stage.CreateInMemory()
+    for path in _Controller.nodes:
+        stage.DefinePrim(path)
+    stage.GetPrimAtPath("/World/Graph/Const").CreateAttribute("inputs:texture", Sdf.ValueTypeNames.Asset)
     omni = types.ModuleType("omni")
     graph = types.ModuleType("omni.graph")
     core = types.ModuleType("omni.graph.core")
     core.Controller = _Controller  # type: ignore[attr-defined]
+    usd = types.ModuleType("omni.usd")
+    usd.get_context = lambda: types.SimpleNamespace(get_stage=lambda: stage)  # type: ignore[attr-defined]
     omni.graph = graph  # type: ignore[attr-defined]
+    omni.usd = usd  # type: ignore[attr-defined]
     graph.core = core  # type: ignore[attr-defined]
-    return {"omni": omni, "omni.graph": graph, "omni.graph.core": core}
+    return {"omni": omni, "omni.graph": graph, "omni.graph.core": core, "omni.usd": usd}
 
 
 def _graph_call(monkeypatch: pytest.MonkeyPatch, scripts: bool, **kwargs: Any) -> Tuple[Dict[str, Any], List[str]]:

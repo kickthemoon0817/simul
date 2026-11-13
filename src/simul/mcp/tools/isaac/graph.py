@@ -7,9 +7,11 @@ from typing import Any, Dict, Optional
 
 from ...schemas.common import ErrorResponse
 from ._shared import (
+    ASSET_SANDBOX_CORE,
     DEFAULT_MAX_RESULTS,
     _compose_script,
     _pyval,
+    names_file_location,
 )
 from .._meta import tool_meta
 
@@ -612,7 +614,11 @@ class OmniGraphMixin:
             "'inputs:velocity', 'inputs:enabled'). Use get_isaac_graph_nodes to discover "
             "attribute names first. Every attribute is attempted; the call fails "
             "(success=false) when any of them failed, with the ones that were set under "
-            "'applied' and the failures under 'errors'. With security.allow_script_execution "
+            "'applied' and the failures under 'errors'. A file location goes through the file "
+            "sandbox (security.allowed_paths) and nothing is set when one is outside it: a "
+            "string for an input named like one (inputs:path, inputs:outputDir, inputs:fileName, "
+            "...; not a prim path such as inputs:primPath), judged as a write, and a path for an "
+            "asset-typed input. With security.allow_script_execution "
             "off, code attributes (a name with a word starting with script or code) and any write to a "
             "script-capable node (ScriptNode, omni.warp.WarpKernel, ...) are refused."
         ),
@@ -637,7 +643,8 @@ class OmniGraphMixin:
             Dict with ``applied`` and ``count``. When any attribute failed,
             ``success`` is false, ``error`` names the failed attributes and
             ``errors`` holds each one's message; the attributes in
-            ``applied`` were still set.
+            ``applied`` were still set. A file location outside the sandbox
+            is a SandboxError, with nothing set.
         """
         if not values:
             return ErrorResponse(error="values is empty; nothing to set", error_type="ValidationError").model_dump()
@@ -649,16 +656,31 @@ class OmniGraphMixin:
                 + ": a code attribute holds Python the node runs. Nothing was set.",
                 attributes=script_attributes,
             )
+        # An input named like a file location (IsaacReadFilePath's
+        # inputs:path, a writer's output directory) is a file Kit reads or
+        # writes; OmniGraph types it as a string or token, so the name is
+        # all there is to go on.
+        values = dict(values)
+        for name in sorted(values):
+            if names_file_location(name):
+                values[name], denial = self._sandboxed_location(name, values[name])
+                if denial is not None:
+                    denial["details"].update(attribute=name, node_path=node_path)
+                    return denial
         script = _compose_script(
             """\
             import json
             import omni.graph.core as og
+            import omni.usd
+            from pxr import Sdf
             """,
             script_guard_source(),
+            ASSET_SANDBOX_CORE,
             f"""\
             node_path = {_pyval(node_path)}
             values = {_pyval(values)}
             guard = {_pyval(guard)}
+            asset_checks = {_pyval(self._asset_value_checks(list(values.values())))}
             """,
             """\
             applied = {}
@@ -667,6 +689,20 @@ class OmniGraphMixin:
                 node = og.Controller.node(node_path)
             except Exception:
                 node = None
+            denial = None
+            if node is not None and node.is_valid():
+                # An input stored as a USD asset is a file Kit reads.
+                stage = omni.usd.get_context().get_stage()
+                prim = stage.GetPrimAtPath(node_path) if stage is not None else None
+                for attr_name in list(values):
+                    usd_attr = prim.GetAttribute(attr_name) if prim is not None and prim.IsValid() else None
+                    if usd_attr is not None and usd_attr.IsValid():
+                        values[attr_name], denial = _sandboxed_asset(
+                            usd_attr.GetTypeName(), values[attr_name], asset_checks
+                        )
+                        if denial is not None:
+                            denial = dict(denial, attribute=attr_name, node_path=node_path)
+                            break
             if node is None or not node.is_valid():
                 print(json.dumps({"error": "Node not found: " + node_path, "error_type": "NotFoundError"}))
             elif guard and _script_capable_type(node.get_type_name()):
@@ -677,6 +713,8 @@ class OmniGraphMixin:
                     "error_type": "ScriptExecutionDisabled",
                     "node_type": node.get_type_name(),
                 }))
+            elif denial is not None:
+                print(json.dumps(denial))
             else:
                 for attr_name, val in values.items():
                     try:

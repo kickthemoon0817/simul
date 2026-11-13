@@ -11,6 +11,7 @@ from ._shared import (
     _pyval,
     carb_path_touches,
     carb_write_paths,
+    names_file_location,
 )
 from .graph import _script_execution_refusal, is_script_extension
 from .._meta import tool_meta
@@ -249,6 +250,35 @@ class SystemMixin:
         """)
         return await self._execute_json_script(script)
 
+    def _sandboxed_carb_value(self, key: str, value: Any) -> Tuple[Any, Optional[Dict[str, Any]]]:
+        """Pass the file locations in a Carb write through the write sandbox.
+
+        A dict value writes a subtree, so each of its keys is judged by its
+        own full path.
+
+        Args:
+            key: The Carb path written.
+            value: Its value.
+
+        Returns:
+            ``(value to write, None)``, or ``(value, SandboxError payload)``.
+        """
+        if isinstance(value, dict):
+            resolved: Dict[str, Any] = {}
+            for child_key, child_value in value.items():
+                resolved[child_key], denial = self._sandboxed_carb_value(
+                    key.rstrip("/") + "/" + str(child_key), child_value
+                )
+                if denial is not None:
+                    return value, denial
+            return resolved, None
+        if not names_file_location(key):
+            return value, None
+        resolved_value, denial = self._sandboxed_location(key, value)
+        if denial is not None:
+            denial["details"]["setting"] = key
+        return resolved_value, denial
+
     @tool_meta(
         name="set_isaac_carb_settings",
         description=(
@@ -262,7 +292,10 @@ class SystemMixin:
             "subtree). With script execution disabled, /app/scripting (the Python Scripting "
             "Component's settings) is refused the same way. Keys under /persistent/ are saved "
             "to the user's Kit configuration and outlive this session, so they are refused "
-            "unless allow_persistent=true."
+            "unless allow_persistent=true. A string for a key named like a file location "
+            "(/log/file, a ...Dir, ...Folder, ...Path or ...Url key; not a prim or camera path) "
+            "must be inside the file sandbox (security.allowed_paths), judged as a write, or "
+            "nothing is applied."
         ),
         read_only=False,
         destructive=True,
@@ -294,7 +327,8 @@ class SystemMixin:
             RefusedOperation error when any key touches the MCP transport's
             settings, is malformed or is persistent without allow_persistent,
             or a ScriptExecutionDisabled error for /app/scripting while
-            script execution is off.
+            script execution is off, or a SandboxError when a key named like
+            a file location gets a path outside the file sandbox.
         """
         written: Dict[str, List[str]] = {}
         malformed = []
@@ -353,7 +387,15 @@ class SystemMixin:
                 refused_keys=persistent_keys,
                 override="allow_persistent",
             )
-        _settings = _pyval(settings)
+        # A key named like a file location (/log/file, a dump or output
+        # directory, /app/exts/folders) makes Kit write, read or load from
+        # that path.
+        sandboxed: Dict[str, Any] = {}
+        for key, value in settings.items():
+            sandboxed[key], denial = self._sandboxed_carb_value(key, value)
+            if denial is not None:
+                return denial
+        _settings = _pyval(sandboxed)
         script = textwrap.dedent(f"""\
             import json
             import carb.settings
