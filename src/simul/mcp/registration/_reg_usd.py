@@ -55,7 +55,7 @@ from ..schemas.usd import (
 )
 from ...logging import get_logger
 from ...usd.sandbox import CompositionSandbox
-from ...usd.validation import WARNING, composition_issues, url_scheme
+from ...usd.validation import WARNING, composition_issues, unreal_content_issues, url_scheme
 from ...usd.validation import validate_usd_file as run_validation
 from ..usd_scheduler import USDCallScheduler
 from ._helpers import with_param_descriptions
@@ -197,7 +197,10 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "file_path in the result is the resolved path. Paths: sandbox "
             "(security.allowed_paths), which also holds every sublayer, reference, "
             "payload, clip and asset path the file draws on: one outside it fails the "
-            "load with SandboxError listing them."
+            "load with SandboxError listing them. An Unreal content path in an asset value "
+            "(/Engine, /Game or /Script .../Name.Name, as Unreal's USD exporter writes "
+            "info:unreal:sourceAsset) names an editor object, not a file: it passes and is "
+            "listed in warnings as UnrealContentPath."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -249,7 +252,11 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 has_animation=stage_info.has_animation,
                 layer_count=len(stage_info.layers),
                 default_prim=stage_info.default_prim_path,
-                warnings=[issue.to_dict() for issue in composition_issues(stage, WARNING)],
+                warnings=[
+                    issue.to_dict()
+                    for issue in composition_issues(stage, WARNING)
+                    + unreal_content_issues(session.unreal_content_paths(stage_id))
+                ],
             ).model_dump()
 
         async def _load_call(session: "HeadlessUSDSession") -> Dict[str, Any]:
@@ -284,7 +291,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             ".usdz. Returns is_valid (no error-severity issue), can_read (pxr opened "
             "it, so load_usd_file can) and issues with severity, code and location. "
             "Paths: sandbox (security.allowed_paths), applied to everything the file "
-            "draws on as load_usd_file applies it."
+            "draws on as load_usd_file applies it. pxr's UnresolvableDependency and "
+            "MissingSourceTypeInRegistry about an Unreal content path (an editor object "
+            "Unreal's USD exporter names, not a file) are warnings, not errors."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False

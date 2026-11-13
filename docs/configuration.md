@@ -349,9 +349,10 @@ outside the sandbox fails the call with `SandboxError`;
 `details.outside_sandbox` lists each offender's `kind`, its authored
 `asset_path`, the `location` it names, and the `layer` that names it, and
 `outside_count` gives the total. The kinds are `sublayer`, `reference`,
-`payload`, `clip` (a value clip or clip manifest), `asset` (a texture or
-other non-layer file), and `layer` when the post-composition check caught
-it. Only layers that pass are opened, so a refused file is never read.
+`payload`, `clip` (a value clip, clip manifest or clip template a clip set
+authors), `asset` (a texture, an `assetInfo` identifier or any other
+asset-valued attribute or metadata), and `layer` when the post-composition
+check caught it. Only layers that pass are opened, so a refused file is never read.
 After composition, the layers the stage uses by then are checked again as a
 backstop, judged afresh so a file swapped on disk between the two passes is
 caught. That check cannot see value clips: when a clip set authors a
@@ -369,6 +370,28 @@ anchors nowhere, such as `OmniPBR.mdl`, names no location and passes. A
 URL passes when its scheme is in `allowed_url_schemes`. To use a file whose
 references or textures live elsewhere, add that directory to
 `security.allowed_paths`.
+
+An Unreal content path is not a file, so it passes. Unreal's USD exporter
+writes each mesh's source material as
+`info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@`,
+an object in the editor's content that Unreal's importer loads by name. A
+value passes this way only when all of these hold:
+
+- it is an asset value (kind `asset`), never a sublayer, reference,
+  payload or clip;
+- it sits under `/Engine`, `/Game` or `/Script` and ends in
+  `<Name>.<Name>`, where the suffix is no file extension;
+- nothing exists at that path on disk.
+
+`load_usd_file` lists each such path in `warnings` as `UnrealContentPath`,
+with the layer that names it. `validate_usd_file` reports pxr's
+`UnresolvableDependency` and `MissingSourceTypeInRegistry` about exactly
+those paths as warnings rather than errors, so an Unreal export inside the
+sandbox loads and validates. `@/Engine/x.usda@`, a relative path and another
+content root (a plugin's) are held to the sandbox like any other path. So is
+an `assetInfo` identifier, which in a copied export still names the folder
+Unreal wrote it to. Unreal's own USD import (`import_unreal_usd`) applies
+the same rule.
 
 The headless USD tools open a URL only through an asset resolver registered
 for its scheme. usd-core installs none, so `load_usd_file` refuses an

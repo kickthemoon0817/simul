@@ -49,14 +49,27 @@ sandbox needs ``security.allowed_paths`` widened to cover them.
 Each load runs one ``PathPolicy.read_check``: a location named from many
 layers (a texture every sublayer shares) is resolved and judged once, and a
 shared root's trust (``/tmp/simul-work``) is walked once, not once per path.
+
+One shape of asset path is not a file at all. Unreal's USD exporter writes
+the source material of each mesh as an asset-valued attribute holding an
+Unreal content path,
+``info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@``,
+and Unreal's importer loads that object from the editor's content, opening no
+file by the name. Such a value passes the sandbox (``is_unreal_content_path``
+has the exact rule) and is listed in ``content_paths``, so the headless tools
+can say they did not treat it as a file and Unreal's import of the same
+export agrees with them. Only an asset-valued attribute or metadata value
+(kind ``asset``) passes this way, never a sublayer, reference, payload or
+clip.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Pattern, Set, Tuple
 
 from pxr import Ar, Sdf, UsdUtils
 
@@ -75,6 +88,35 @@ _HINT = (
     "Move them under one of allowed_roots, make the asset paths relative to the file, "
     "or widen the sandbox with security.allowed_paths."
 )
+
+
+#: An Unreal object path as Unreal's USD exporter writes one into an asset-valued
+#: attribute: ``/Engine``, ``/Game`` or ``/Script``, folders, then
+#: ``<Name>.<Name>`` (a package and its asset of the same name).
+UNREAL_OBJECT_PATH = re.compile(r"^/(?:Engine|Game|Script)(?:/[A-Za-z0-9_ -]+)*/([A-Za-z0-9_-]+)\.\1$")
+
+#: Suffixes that make ``<Name>.<Name>`` a file name rather than an object path.
+_FILE_SUFFIXES = frozenset(
+    {"usd", "usda", "usdc", "usdz", "png", "jpg", "jpeg", "exr", "tga", "tif", "tiff", "bmp", "hdr", "dds",
+     "tx", "psd", "mdl", "mtlx", "abc", "vdb", "obj", "fbx", "gltf", "glb", "bin", "json", "txt", "uasset",
+     "umap", "wav", "mp4", "mov"}
+)
+
+
+def is_unreal_content_path(path: str) -> bool:
+    """Whether ``path`` is an Unreal content path, which names an editor object and reads no file.
+
+    The shape is ``/Engine``, ``/Game`` or ``/Script``, folders, then
+    ``<Name>.<Name>``, where the suffix is no file extension
+    (``/Engine/x.usda`` and ``/Engine/usda.usda`` stay files), and nothing
+    exists at the path on disk. A relative path, another content root (a
+    plugin's) or ``Cube.Sphere`` does not match. The caller decides the kind:
+    only an asset-valued attribute or metadata value may be exempted.
+    """
+    match = UNREAL_OBJECT_PATH.match(path)
+    if match is None or match.group(1).lower() in _FILE_SUFFIXES:
+        return False
+    return not os.path.lexists(path)
 
 
 @dataclass(frozen=True)
@@ -135,6 +177,59 @@ def _composition_arcs(layer: "Sdf.Layer") -> Set[str]:
     return arcs
 
 
+def _template_pattern(template: str) -> Pattern[str]:
+    """Match the clip paths a ``templateAssetPath`` (``clip.###.usd``) expands to."""
+    parts = re.split(r"#+", template)
+    return re.compile(r"-?\d+".join(re.escape(part) for part in parts) + "$")
+
+
+def _clip_paths(layer: "Sdf.Layer") -> Tuple[Set[str], List[Pattern[str]]]:
+    """The value clip paths ``layer`` authors, in every variant.
+
+    Returns:
+        The literal clip, manifest and template asset paths of every clip
+        set, and a pattern per template that matches the paths it expands to.
+    """
+    literal: Set[str] = set()
+    templates: List[Pattern[str]] = []
+    stack: List[Any] = list(layer.rootPrims)
+    while stack:
+        spec = stack.pop()
+        if spec.HasInfo("clips"):
+            for clip_set in dict(spec.GetInfo("clips")).values():
+                if not isinstance(clip_set, dict):
+                    continue
+                for asset in clip_set.get("assetPaths") or ():
+                    literal.add(str(getattr(asset, "path", asset)))
+                manifest = clip_set.get("manifestAssetPath")
+                if manifest is not None:
+                    literal.add(str(getattr(manifest, "path", manifest)))
+                template = clip_set.get("templateAssetPath")
+                if template:
+                    literal.add(str(template))
+                    templates.append(_template_pattern(str(template)))
+        stack.extend(spec.nameChildren)
+        for variant_set in spec.variantSets.values():
+            stack.extend(variant.primSpec for variant in variant_set.variants.values())
+    return literal, templates
+
+
+def unreal_content_paths(layers: Iterable["Sdf.Layer"]) -> List[OutsidePath]:
+    """The Unreal content paths ``layers`` author as asset values, as the sandbox exempts them.
+
+    For callers that walk no sandbox (validation with the sandbox off), so
+    they recognise the same paths ``CompositionSandbox.content_paths`` lists.
+    """
+    found: Dict[str, OutsidePath] = {}
+    for layer in layers:
+        if layer.anonymous:
+            continue
+        for kind, authored in CompositionSandbox._dependencies(layer):
+            if kind == "asset" and is_unreal_content_path(authored):
+                found.setdefault(authored, OutsidePath(kind, authored, authored, layer.identifier))
+    return list(found.values())
+
+
 class CompositionSandbox:
     """Check the layers and assets a USD stage draws on against a path policy.
 
@@ -155,10 +250,21 @@ class CompositionSandbox:
         # after composition rather than remembered from the first pass.
         self._allowed_check = policy.read_check()
         self._resolved: Dict[str, str] = {}
+        self._content: Dict[str, OutsidePath] = {}
 
     @property
     def enabled(self) -> bool:
         return self._policy.enabled
+
+    @property
+    def content_paths(self) -> List[OutsidePath]:
+        """The Unreal content paths the walks let through, in the order found.
+
+        Each is an asset value shaped like ``/Engine/.../Name.Name`` that
+        names no file (``is_unreal_content_path``), with the layer that
+        authors it. Empty with the sandbox disabled, since nothing is walked.
+        """
+        return list(self._content.values())
 
     def check_layers(self, root_layer: "Sdf.Layer") -> List["Sdf.Layer"]:
         """Walk the layers ``root_layer`` draws on before the stage is composed.
@@ -249,9 +355,11 @@ class CompositionSandbox:
         """The asset paths ``layer`` authors, with the kind of each.
 
         Kinds: ``sublayer``, ``reference`` and ``payload`` for composition
-        arcs; ``clip`` for another layer file the layer names, which is a
-        value clip or clip manifest; ``asset`` for anything else, such as a
-        texture.
+        arcs; ``clip`` for a value clip, clip manifest or clip template path
+        a clip set authors; ``asset`` for anything else, such as a texture or
+        an ``assetInfo`` identifier. The clip sets are read only when a path
+        could be told apart by them: one naming a layer file or shaped like
+        an Unreal content path.
         """
         arcs = _composition_arcs(layer)
         try:
@@ -268,15 +376,27 @@ class CompositionSandbox:
             yield "sublayer", path
         for path in payloads:
             yield "payload", path
+        clips: Optional[Tuple[Set[str], List[Pattern[str]]]] = None
         for path in references:
             if path in arcs:
                 yield "reference", path
-            else:
-                yield ("clip" if _is_layer_path(path) else "asset"), path
+                continue
+            if not _is_layer_path(path) and not UNREAL_OBJECT_PATH.match(path):
+                yield "asset", path
+                continue
+            if clips is None:
+                clips = _clip_paths(layer)
+            literal, templates = clips
+            is_clip = path in literal or any(pattern.match(path) for pattern in templates)
+            yield ("clip" if is_clip else "asset"), path
 
     def _check(self, layer: "Sdf.Layer", kind: str, authored: str) -> Any:
         """Return an ``OutsidePath``, the identifier to follow, or None for nothing to check."""
         if not authored:
+            return None
+        if kind == "asset" and is_unreal_content_path(authored):
+            # An editor object, not a file: nothing to resolve or follow.
+            self._content.setdefault(authored, OutsidePath(kind, authored, authored, layer.identifier))
             return None
         scheme = self._policy.url_scheme(authored)
         if scheme is not None and scheme != "file":
@@ -343,4 +463,11 @@ class CompositionSandbox:
         )
 
 
-__all__ = ["CompositionSandbox", "MAX_REPORTED_PATHS", "OutsidePath"]
+__all__ = [
+    "CompositionSandbox",
+    "MAX_REPORTED_PATHS",
+    "OutsidePath",
+    "UNREAL_OBJECT_PATH",
+    "is_unreal_content_path",
+    "unreal_content_paths",
+]
