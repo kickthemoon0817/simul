@@ -15,6 +15,13 @@ A changed file's new content is read into a throwaway layer
 (:func:`open_candidate`) and checked against the composition sandbox before
 the shared layer is reloaded in place, since a reload recomposes every
 stage that uses the layer.
+
+Changes on disk are told by each file's :func:`stamp` (modification time,
+size and inode), so a write in the same clock tick as the read still shows.
+An export is written to a temporary file beside the destination and then
+moved into place in one step (:func:`export_stage`): a reader never sees a
+partial file, and without ``overwrite`` the destination is claimed
+exclusively, so two writers cannot both create it.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -35,6 +43,9 @@ STAGE_ARG = "simul_stage"
 # The one that keys a throwaway copy of a file read to check its new content.
 CHECK_ARG = "simul_check"
 EXPORT_FORMATS = (".usda", ".usdc", ".usd", ".usdz")
+# What a file looked like when it was read: modification time (ns), size and
+# inode; None when it cannot be stat'ed.
+Stamp = Optional[Tuple[int, int, int]]
 # A scheme such as omniverse:// or https:// ; a Windows drive letter is not one.
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")
 
@@ -97,12 +108,18 @@ def open_candidate(layer: Sdf.Layer) -> Sdf.Layer:
     return candidate
 
 
-def mtime(path: str) -> Optional[int]:
-    """A file's modification time in nanoseconds, or None when it cannot be read."""
+def stamp(path: str) -> Stamp:
+    """What ``path`` looks like on disk now, to compare with a later look; None when it cannot be read.
+
+    The modification time alone misses a write in the same clock tick as the
+    read (a coarse filesystem clock); the size and the inode (a save that
+    replaces the file gets a new one) catch most of those.
+    """
     try:
-        return os.stat(path).st_mtime_ns
+        info = os.stat(path)
     except OSError:
         return None
+    return (info.st_mtime_ns, info.st_size, info.st_ino)
 
 
 def file_layers(stage: Usd.Stage) -> List[Sdf.Layer]:
@@ -112,14 +129,25 @@ def file_layers(stage: Usd.Stage) -> List[Sdf.Layer]:
     return [layer for layer in layers if not layer.anonymous and layer.realPath]
 
 
-def file_mtimes(stage: Usd.Stage) -> Dict[str, Optional[int]]:
-    """Modification time of each file the stage composes, by real path."""
-    return {layer.realPath: mtime(layer.realPath) for layer in file_layers(stage)}
+def file_stamps(stage: Usd.Stage) -> Dict[str, Stamp]:
+    """The :func:`stamp` of each file the stage composes, by real path."""
+    return {layer.realPath: stamp(layer.realPath) for layer in file_layers(stage)}
 
 
-def changed_files(stage: Usd.Stage, recorded: Dict[str, Optional[int]]) -> List[str]:
-    """The files whose modification time differs from ``recorded``."""
-    return [path for path, when in recorded.items() if mtime(path) != when]
+def changed_files(stage: Usd.Stage, recorded: Dict[str, Stamp]) -> List[str]:
+    """The files whose :func:`stamp` differs from ``recorded``."""
+    return [path for path, when in recorded.items() if stamp(path) != when]
+
+
+def composes_own_file(stage: Usd.Stage) -> bool:
+    """Whether the stage reaches its own root file again through an arc (``@./self.usda@</Proto>``).
+
+    Such an arc opens the file's shared layer, not the stage's private root,
+    so it shows the file as it is on disk, without the stage's unsaved edits.
+    """
+    root = stage.GetRootLayer()
+    path = root.realPath
+    return bool(path) and any(layer != root and layer.realPath == path for layer in stage.GetUsedLayers())
 
 
 def _reanchor(layer: Sdf.Layer, source: Sdf.Layer, destination_dir: Optional[str]) -> int:
@@ -157,7 +185,54 @@ def _reanchor(layer: Sdf.Layer, source: Sdf.Layer, destination_dir: Optional[str
     return rewritten[0]
 
 
-def export_stage(stage: Usd.Stage, destination: str, *, flatten: bool) -> Dict[str, object]:
+class DestinationExists(Exception):
+    """``export_stage`` without ``overwrite`` found its destination already there."""
+
+
+def _temporary_beside(destination: str) -> str:
+    """A path in ``destination``'s directory, with its extension, that names no file yet."""
+    directory, name = os.path.split(destination)
+    stem, suffix = os.path.splitext(name)
+    return os.path.join(directory, f".{stem}.simul-{secrets.token_hex(6)}{suffix}")
+
+
+def _commit(written: str, destination: str, *, overwrite: bool) -> None:
+    """Move the finished file ``written`` to ``destination`` in one step.
+
+    With ``overwrite`` it replaces whatever is there, keeping that file's
+    permissions. Without it the destination is claimed exclusively: a hard
+    link fails when the name exists, so of two writers only one creates it.
+    On a filesystem without hard links an empty placeholder is created with
+    ``O_EXCL`` first and then replaced.
+
+    Raises:
+        DestinationExists: ``overwrite`` is False and the destination exists.
+    """
+    if overwrite:
+        if os.path.exists(destination):
+            try:
+                shutil.copymode(destination, written)
+            except OSError:
+                pass
+        os.replace(written, destination)
+        return
+    try:
+        os.link(written, destination)
+    except FileExistsError:
+        raise DestinationExists(destination) from None
+    except OSError:
+        try:
+            os.close(os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+        except FileExistsError:
+            raise DestinationExists(destination) from None
+        os.replace(written, destination)
+        return
+    os.unlink(written)
+
+
+def export_stage(
+    stage: Usd.Stage, destination: str, *, flatten: bool, overwrite: bool = False
+) -> Dict[str, object]:
     """Write ``stage`` to ``destination``, a .usda, .usdc, .usd or .usdz file.
 
     Without ``flatten`` the root layer is written as it is (its sublayers,
@@ -168,10 +243,16 @@ def export_stage(stage: Usd.Stage, destination: str, *, flatten: bool) -> Dict[s
     temporary directory beside ``destination`` (removed afterwards), so it
     carries the files the layer depends on.
 
+    The file is written under a temporary name in ``destination``'s
+    directory and moved into place once complete (``_commit``), so a failed
+    write leaves nothing behind and a reader never sees half a file.
+
     Returns:
         ``rewritten_asset_paths``: how many asset paths were re-anchored.
 
     Raises:
+        DestinationExists: ``overwrite`` is False and ``destination`` exists
+            when the file is moved into place.
         RuntimeError: pxr failed to write the file.
     """
     root = stage.GetRootLayer()
@@ -184,18 +265,24 @@ def export_stage(stage: Usd.Stage, destination: str, *, flatten: bool) -> Dict[s
         layer = Sdf.Layer.CreateAnonymous(".usdc" if packaging else suffix)
         layer.TransferContent(root)
         rewritten = _reanchor(layer, root, None if packaging else os.path.dirname(destination))
-    if not packaging:
-        if not layer.Export(destination):
-            raise RuntimeError(f"pxr could not write {destination}")
-        return {"rewritten_asset_paths": rewritten}
-    # The intermediate goes next to the package, inside the directory the
-    # sandbox authorized for the write, never into the system temp dir.
-    with tempfile.TemporaryDirectory(prefix=".simul-usdz-", dir=os.path.dirname(destination)) as scratch:
-        intermediate = os.path.join(scratch, f"{Path(destination).stem or 'stage'}.usdc")
-        if not layer.Export(intermediate):
-            raise RuntimeError(f"pxr could not write the intermediate layer for {destination}")
-        if not UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(intermediate), destination):
-            raise RuntimeError(f"pxr could not package {destination}")
+    written = _temporary_beside(destination)
+    try:
+        if not packaging:
+            if not layer.Export(written):
+                raise RuntimeError(f"pxr could not write {destination}")
+        else:
+            # The intermediate goes next to the package, inside the directory
+            # the sandbox authorized for the write, never into the system temp dir.
+            with tempfile.TemporaryDirectory(prefix=".simul-usdz-", dir=os.path.dirname(destination)) as scratch:
+                intermediate = os.path.join(scratch, f"{Path(destination).stem or 'stage'}.usdc")
+                if not layer.Export(intermediate):
+                    raise RuntimeError(f"pxr could not write the intermediate layer for {destination}")
+                if not UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(intermediate), written):
+                    raise RuntimeError(f"pxr could not package {destination}")
+        _commit(written, destination, overwrite=overwrite)
+    finally:
+        if os.path.lexists(written):
+            os.unlink(written)
     return {"rewritten_asset_paths": rewritten}
 
 
@@ -203,13 +290,16 @@ __all__ = [
     "CHECK_ARG",
     "EXPORT_FORMATS",
     "STAGE_ARG",
+    "DestinationExists",
+    "Stamp",
     "changed_files",
     "compose_stage",
+    "composes_own_file",
     "export_stage",
     "file_layers",
-    "file_mtimes",
-    "mtime",
+    "file_stamps",
     "open_candidate",
     "open_private_root",
     "open_private_stage",
+    "stamp",
 ]
