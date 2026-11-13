@@ -2013,6 +2013,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
+    { name = "click" },
     { name = "fastmcp" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -2047,6 +2048,7 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=25.0" },
     { name = "bpy", marker = "python_full_version == '3.11.*' and extra == 'blender'", specifier = ">=4.2" },
     { name = "bpy", marker = "python_full_version == '3.13.*' and extra == 'blender'", specifier = ">=5.1" },
+    { name = "click", specifier = ">=8.1,<9" },
     { name = "fastmcp", specifier = ">=4,<5" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=6.0" },
@@ -2060,7 +2062,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=14.0" },
-    { name = "typer", specifier = ">=0.15" },
+    { name = "typer", specifier = ">=0.15,<0.26" },
     { name = "usd-core", specifier = ">=26.3" },
 ]
 provides-extras = ["dev", "blender"]
