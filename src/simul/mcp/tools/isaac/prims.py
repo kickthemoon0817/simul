@@ -495,6 +495,36 @@ REPARENT_PRIM_CORE = """\
                     changed.append(str(attr.GetPath()))
         return changed
 
+    def _retarget_arcs(layer, old_path, new_path):
+        # Internal references and payloads, inherits and specializes in the
+        # edit target that name the old path or something under it.
+        changed = []
+        prim_paths = []
+        layer.Traverse(Sdf.Path.absoluteRootPath, lambda path: prim_paths.append(path) if path.IsPrimPath() else None)
+        for spec_path in prim_paths:
+            spec = layer.GetPrimAtPath(spec_path)
+            if not spec:
+                continue
+            for proxy, kind in ((spec.inheritPathList, "inherits"), (spec.specializesList, "specializes")):
+                for item in list(proxy.GetAddedOrExplicitItems()):
+                    if item.HasPrefix(old_path):
+                        proxy.ReplaceItemEdits(item, item.ReplacePrefix(old_path, new_path))
+                        changed.append(str(spec_path) + " " + kind)
+            for proxy, cls, kind in (
+                (spec.referenceList, Sdf.Reference, "references"),
+                (spec.payloadList, Sdf.Payload, "payload"),
+            ):
+                for item in list(proxy.GetAddedOrExplicitItems()):
+                    if not item.assetPath and not item.primPath.isEmpty and item.primPath.HasPrefix(old_path):
+                        moved = item.primPath.ReplacePrefix(old_path, new_path)
+                        if cls is Sdf.Reference:
+                            replacement = Sdf.Reference("", moved, item.layerOffset, item.customData)
+                        else:
+                            replacement = Sdf.Payload("", moved, item.layerOffset)
+                        proxy.ReplaceItemEdits(item, replacement)
+                        changed.append(str(spec_path) + " " + kind)
+        return changed
+
     def _reparent_prim(stage, prim_path, new_parent_path, keep_world_transform):
         default_time = Usd.TimeCode.Default()
         prim = stage.GetPrimAtPath(prim_path)
@@ -620,30 +650,36 @@ REPARENT_PRIM_CORE = """\
 
         fixups = []
         retargeted = _retarget(stage, old_path, new_path)
+        if not method.startswith("omni.kit"):
+            # Kit's MovePrim rewrites the arcs that name a moved prim; a bare
+            # namespace edit leaves them on the old path.
+            retargeted += _retarget_arcs(stage.GetEditTarget().GetLayer(), old_path, new_path)
         if retargeted:
             fixups.append("retargeted relationships/connections")
         kept = None
         if world_before is not None:
             moved_xf = UsdGeom.Xformable(stage.GetPrimAtPath(new_path))
-            if not Gf.IsClose(moved_xf.ComputeLocalToWorldTransform(default_time), world_before, 1e-6) and keep_parts:
-                outcome = _set_prim_transform(stage, str(new_path), keep_parts[0], keep_parts[1], keep_parts[2])
-                if "error" in outcome:
-                    result["world_transform_error"] = outcome["error"]
-                fixups.append("adjusted the local transform")
-            kept = Gf.IsClose(moved_xf.ComputeLocalToWorldTransform(default_time), world_before, 1e-5)
+            if Gf.IsClose(moved_xf.ComputeLocalToWorldTransform(default_time), world_before, 1e-6):
+                kept = True
+            elif keep_parts:
+                # Written by a second script: the transform core would take
+                # this one past the size Isaac Sim 5.1's socket accepts.
+                result["pending_world_fix"] = {
+                    "translation": keep_parts[0],
+                    "rotation_euler": keep_parts[1],
+                    "scale": keep_parts[2],
+                    "world": [world_before[i][j] for i in range(4) for j in range(4)],
+                }
+            else:
+                kept = False
         result.update({
             "reparented": True,
             "method": method,
             "retargeted": retargeted[:50],
             "retargeted_count": len(retargeted),
             "world_transform_kept": kept,
-            "undoable": method.startswith("omni.kit") and not fixups,
+            "fixups": fixups,
         })
-        if method.startswith("omni.kit") and fixups:
-            result["undo_note"] = (
-                "The move is on Kit's undo stack; the " + " and ".join(fixups) + " step is not, so undoing "
-                "the move leaves it behind."
-            )
         default_prim = stage.GetRootLayer().defaultPrim
         if old_path.GetParentPath().IsAbsoluteRootPath() and default_prim == name:
             result["note"] = "It was the stage's default prim; defaultPrim still names " + default_prim + "."
@@ -660,6 +696,39 @@ class PrimEditMixin:
     def _script_guard(self) -> bool:
         """Whether writes that would plant code must be refused."""
         return not self.settings.security.allow_script_execution
+
+    def _asset_value_checks(self, value: Any) -> Dict[str, Dict[str, Any]]:
+        """Judge every string in ``value`` as a path, in case the attribute is an asset.
+
+        Only Kit knows the attribute's type, so each candidate is checked here
+        against the file sandbox and the script applies the verdict when the
+        attribute turns out to be asset-valued (``asset`` / ``asset[]``).
+
+        Args:
+            value: The JSON value about to be written.
+
+        Returns:
+            ``{string: {"path": authorized}}`` or ``{string: {"denial": envelope}}``
+            for each non-empty string in ``value`` (or in its top-level list).
+        """
+        items = value if isinstance(value, list) else [value]
+        checks: Dict[str, Dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, str) or not item or item in checks:
+                continue
+            denial = self._sandbox_denial(item)
+            if denial is None:
+                try:
+                    checks[item] = {"path": self._path_policy.authorize(item)}
+                    continue
+                except Exception:  # noqa: BLE001 - any refusal is a denial here
+                    denial = self._sandbox_denial(item) or {
+                        "success": False,
+                        "error": f"Refused by the file sandbox: {item}",
+                        "error_type": "SandboxError",
+                    }
+            checks[item] = {"denial": denial}
+        return checks
 
     def _script_write_refusal(
         self, attribute_name: str, value: Any
@@ -1005,6 +1074,7 @@ class PrimEditMixin:
         _attr_name = _pyval(attribute_name)
         _val_str = _pyval(json.dumps(value))
         _guard = _pyval(self._script_guard)
+        _asset_checks = _pyval(self._asset_value_checks(value))
         script = _compose_script(
             """\
             import json
@@ -1049,8 +1119,34 @@ class PrimEditMixin:
                         val = json.loads({_val_str})
                         type_label = str(attr.GetTypeName())
                         failure = None
+                        to_set = val
+                        denial = None
+                        # An asset path is read by Kit (a texture, an HDRI): it
+                        # goes through the file sandbox, as create_isaac_light's
+                        # texture_file does, and is written as the resolved path.
+                        asset_checks = {_asset_checks}
+                        if attr.GetTypeName() in (Sdf.ValueTypeNames.Asset, Sdf.ValueTypeNames.AssetArray):
+                            items = val if isinstance(val, list) else [val]
+                            resolved = []
+                            for item in items:
+                                if item == "":
+                                    resolved.append(item)  # clears the asset
+                                    continue
+                                check = asset_checks.get(item) if isinstance(item, str) else None
+                                if check is None or "denial" in check:
+                                    # Unchecked counts as refused: fail closed.
+                                    denial = (check or {{}}).get("denial") or {{
+                                        "success": False,
+                                        "error": "Not an asset path the sandbox checked: " + repr(item),
+                                        "error_type": "SandboxError",
+                                    }}
+                                    break
+                                resolved.append(check["path"])
+                            to_set = resolved if isinstance(val, list) else resolved[0] if resolved else val
+                        if denial is not None:
+                            failure = denial.get("error") or "Refused by the file sandbox"
                         try:
-                            if not attr.Set(_coerce_attribute_value(attr, val)):
+                            if denial is None and not attr.Set(_coerce_attribute_value(attr, to_set)):
                                 failure = "USD refused the value"
                         except Exception as e:
                             # A Tf error reads "Error in '<function>' at line N
@@ -1058,7 +1154,9 @@ class PrimEditMixin:
                             text = str(e).strip()
                             failure = text.splitlines()[-1].split(" : ", 1)[-1].strip(" '") if text else ""
                             failure = failure or type(e).__name__
-                        if failure is not None:
+                        if denial is not None:
+                            print(json.dumps(denial))
+                        elif failure is not None:
                             print(json.dumps({{
                                 "error": "Failed to set " + {_attr_name} + " (" + type_label + "): " + failure,
                                 "error_type": "ValidationError",
@@ -1184,8 +1282,6 @@ class PrimEditMixin:
             import omni.usd
             from pxr import Gf, Sdf, Usd, UsdGeom
             """,
-            XFORM_READ_CORE,
-            SET_PRIM_TRANSFORM_CORE,
             PRIM_LAYERING_CORE,
             REPARENT_PRIM_CORE,
             f"""\
@@ -1196,4 +1292,51 @@ class PrimEditMixin:
                 print(json.dumps(_reparent_prim(stage, {_prim_path}, {_new_parent}, {_keep})))
             """,
         )
-        return await self._execute_json_script(script)
+        result = await self._execute_json_script(script)
+        fixups = list(result.pop("fixups", None) or [])
+        pending = result.pop("pending_world_fix", None)
+        if pending is not None:
+            # The move left the world pose behind (no Kit to keep it): write
+            # the local transform that restores it, in a script of its own.
+            fix = await self._execute_json_script(
+                _compose_script(
+                    """\
+                    import json
+                    import omni.usd
+                    from pxr import Gf, Usd, UsdGeom
+                    """,
+                    XFORM_READ_CORE,
+                    SET_PRIM_TRANSFORM_CORE,
+                    f"""\
+                    stage = omni.usd.get_context().get_stage()
+                    path = {_pyval(result.get("new_path"))}
+                    outcome = _set_prim_transform(
+                        stage, path, {_pyval(pending["translation"])},
+                        {_pyval(pending["rotation_euler"])}, {_pyval(pending["scale"])}
+                    )
+                    expected = Gf.Matrix4d(*{_pyval(pending["world"])})
+                    world = UsdGeom.Xformable(stage.GetPrimAtPath(path)).ComputeLocalToWorldTransform(
+                        Usd.TimeCode.Default()
+                    )
+                    print(json.dumps({{
+                        "kept": "error" not in outcome and Gf.IsClose(world, expected, 1e-5),
+                        "transform_error": outcome.get("error"),
+                    }}))
+                    """,
+                )
+            )
+            fixups.append("adjusted the local transform")
+            result["world_transform_kept"] = bool(fix.get("kept"))
+            failure = fix.get("transform_error") or (fix.get("error") if fix.get("success") is False else None)
+            if failure or not fix.get("kept"):
+                result["world_transform_error"] = failure or "The world pose did not come back after the move"
+                result["success"] = False
+        if result.get("reparented"):
+            method = str(result.get("method") or "")
+            result["undoable"] = method.startswith("omni.kit") and not fixups
+            if method.startswith("omni.kit") and fixups:
+                result["undo_note"] = (
+                    "The move is on Kit's undo stack; the " + " and ".join(fixups)
+                    + " step is not, so undoing the move leaves it behind."
+                )
+        return result

@@ -221,6 +221,9 @@ class _FakePrim:
     def IsInstanceProxy(self) -> bool:
         return False
 
+    def IsPseudoRoot(self) -> bool:
+        return False
+
     def GetChildren(self) -> List[Any]:
         return []
 
