@@ -3,6 +3,7 @@
 import textwrap
 from typing import Any, Dict, List, Optional
 
+from ... import error_types
 from ...schemas.common import ErrorResponse
 from ._shared import (
     OPEN_ASSET_CORE,
@@ -967,11 +968,21 @@ class StageAssetMixin:
         report = await self._execute_json_script(script, timeout_seconds=self._heavy_script_timeout())
         if not report.get("success"):
             units["physics"] = dict(pending, applied=False, failure=report.get("error"))
-            warning = (
-                "The asset was referenced, but its physics values were not "
-                + ("rescaled" if apply else "counted") + " (" + str(report.get("error"))
-                + "); PhysX will read them in stage units."
-            )
+            if report.get("error_type") in (error_types.TIMEOUT_ERROR, error_types.CONNECTION_ERROR):
+                # Kit runs a sent script to the end whether or not its reply
+                # arrives, so the values may yet be rescaled.
+                warning = (
+                    "The asset was referenced, but the physics-units pass did not answer ("
+                    + str(report.get("error")) + "); it may still finish in Kit, so check the "
+                    "physics values before simulating."
+                )
+            else:
+                # The pass may have stopped partway through the subtree.
+                warning = (
+                    "The asset was referenced, but the physics-units pass failed ("
+                    + str(report.get("error")) + "); some or all physics values may still be in "
+                    "asset units, which PhysX reads as stage units."
+                )
         else:
             report.pop("success", None)
             units["physics"] = report

@@ -110,7 +110,30 @@ def test_a_failed_physics_pass_is_reported_not_dropped() -> None:
     assert len(captured) == 2 and "'/World/A/Robot'" in captured[1]
     assert result["units"]["physics"]["applied"] is False
     assert result["units"]["physics"]["failure"] == "socket closed"
-    assert "not rescaled (socket closed)" in result["warning"]
+    assert "physics-units pass failed (socket closed)" in result["warning"]
+    assert "may still be in asset units" in result["warning"]
+
+
+def test_a_physics_pass_that_does_not_answer_may_still_finish() -> None:
+    pending = {"pending": "/World/A/Robot", "applied": True, "length_ratio": 0.01, "mass_ratio": 1.0}
+    tools, captured = _recording_tools(
+        _settings(sandbox=False), [{"imported": True, "units": {"notes": [], "physics": pending}}]
+    )
+    record = tools._client.execute.side_effect
+
+    def _second_times_out(code: str, **kwargs: Any) -> Any:
+        if captured:
+            captured.append(code)
+            raise TimeoutError("Isaac Sim did not answer in time")
+        return record(code, **kwargs)
+
+    tools._client.execute.side_effect = _second_times_out
+    result = asyncio.run(tools.import_isaac_asset(asset_path="/tmp/simul-work/robot.usda"))
+
+    assert len(captured) == 2 and result["success"] is True
+    assert result["units"]["physics"]["applied"] is False
+    assert "did not answer (Isaac Sim did not answer in time)" in result["warning"]
+    assert "may still finish in Kit" in result["warning"]
 
 
 def _value(stage: Usd.Stage, path: str, name: str) -> Any:
