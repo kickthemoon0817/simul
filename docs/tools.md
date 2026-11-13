@@ -307,8 +307,10 @@ and unsaved edits are lost when the server exits.
   read-only package; export it instead. It also refuses a file that changed
   on disk after the stage read it, unless `overwrite_external_changes=true`.
   Another stage's save of the same file counts as such a change: saves of
-  one file run one at a time, so when two sessions save it at once the
-  second is refused instead of overwriting the first. Only the root file is
+  one file run one at a time, however each path spells it (case, or Unicode
+  NFC and NFD, on a filesystem that ignores them), so when two sessions save
+  it at once the second is refused instead of overwriting the first. Only
+  the root file is
   written, so a sublayer or referenced file that changed on disk stays
   listed in `changed_on_disk` after the save, and a later load of the file
   rereads it. `files_written` lists what was written; a stage with no
@@ -330,7 +332,9 @@ and unsaved edits are lost when the server exits.
   read and checked before anything is reread, so a refusal leaves the stage
   as it was, unsaved edits included. A changed sublayer or referenced file
   that pxr cannot parse now is listed in `failed_files` with pxr's reason;
-  it keeps its previous content and stays in `changed_on_disk`.
+  it keeps its previous content and stays in `changed_on_disk`. A load of a
+  file that composes it lists a `FileNotReread` warning, and while the file
+  stays the same a repeated load returns the same stage.
   **`unload_usd_stage`** closes the stage. Both refuse a stage with unsaved
   edits unless `discard_unsaved=true`.
 - **A session that ends during a load** gets no stage: the load checks the

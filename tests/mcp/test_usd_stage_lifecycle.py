@@ -475,11 +475,15 @@ def test_reload_reports_a_sublayer_that_no_longer_parses(sandbox: Path) -> None:
         return [
             await _call(client, "reload_usd_stage", stage_id=stage_id),
             await _call(client, "list_usd_stages"),
+            await _call(client, "load_usd_file", file_path=str(sandbox / "scene.usda")),
+            await _call(client, "load_usd_file", file_path=str(sandbox / "scene.usda")),
         ]
 
-    reloaded, listed = _run(server, steps)
+    reloaded, listed, again, once_more = _run(server, steps)
 
     sub = str((sandbox / "sub.usda").resolve())
+    assert again["stage_id"] == once_more["stage_id"] == listed["stages"][0]["stage_id"]
+    assert [(w["code"], w["location"]["layer"]) for w in again["warnings"]] == [("FileNotReread", sub)]
     assert reloaded["success"] is True
     assert sub not in reloaded["reloaded_files"]
     assert [entry["path"] for entry in reloaded["failed_files"]] == [sub]

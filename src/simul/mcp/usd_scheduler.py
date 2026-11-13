@@ -193,7 +193,7 @@ class USDCallScheduler:
                 that touches no loaded stage.
             writes: Whether the call edits a stage. A write runs alone, so it
                 needs no stage or file lock.
-            file_key: The file the call writes (a resolved path), or None.
+            file_key: The file the call writes (``stage_files.file_identity``), or None.
                 Calls writing one file run one at a time.
 
         Returns:
@@ -248,9 +248,9 @@ class USDCallScheduler:
                         waited_seconds=self._wait_timeout,
                     )
                 return stage_busy(
-                    f"{key} is being written by another call; {tool_name} waited "
+                    f"Another call is writing the same file; {tool_name} waited "
                     f"{self._wait_timeout:g} s. Retry shortly.",
-                    file_path=key,
+                    file_key=key,
                     waited_seconds=self._wait_timeout,
                 )
             held.append((locks, key, lock))

@@ -287,7 +287,7 @@ def test_a_call_waiting_on_a_file_being_written_fails_with_stage_busy() -> None:
 
     busy, scheduler = _run(scenario())
     assert busy["error_type"] == "StageBusy"
-    assert busy["details"]["file_path"] == "/f.usda"
+    assert busy["details"]["file_key"] == "/f.usda"
     assert "save_usd_stage" in busy["error"]
     assert "never" not in [label for label, _, _ in recorder.intervals]
     assert scheduler._file_locks == {} and scheduler._stage_locks == {}

@@ -280,6 +280,18 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             warnings = [issue.to_dict() for issue in composition_issues(stage, WARNING)]
             if stage_files.composes_own_file(stage):
                 warnings.append(_self_reference_warning(stage.GetRootLayer().realPath))
+            unread = getattr(session, "unread_files", None)
+            for path, reason in unread(stage_id) if unread is not None else []:
+                warnings.append(
+                    ValidationIssue(
+                        WARNING,
+                        "FileNotReread",
+                        f"{path} changed on disk, but pxr cannot parse it now ({reason}); the stage "
+                        "shows its previous content and list_usd_stages keeps it in changed_on_disk. "
+                        "Fix the file and call reload_usd_stage.",
+                        layer=path,
+                    ).to_dict()
+                )
             return StageInfo(
                 stage_id=stage_id,
                 file_path=target,
@@ -1354,7 +1366,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 "save_usd_stage",
                 _save,
                 stage_id=stage_id,
-                file_key=lambda s: s.stage_file_path(stage_id),
+                file_key=lambda s: stage_files.file_identity(s.stage_file_path(stage_id)),
             ),
             params={
                 "stage_id": stage_id,
@@ -1434,7 +1446,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 "export_usd_stage",
                 lambda s: _export(s, input_data, destination),
                 stage_id=stage_id,
-                file_key=lambda s: destination,
+                file_key=lambda s: stage_files.file_identity(destination),
             )(session)
 
         return await server._exec_backend(

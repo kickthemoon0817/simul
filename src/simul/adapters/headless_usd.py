@@ -14,7 +14,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple, Union
 
 from ..usd._pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
@@ -131,6 +131,9 @@ class HeadlessUSDSession(LoggerMixin):
         # The stamp of each shared (non-root) layer's file as of the content
         # the layer holds, to tell which ones changed since.
         self._shared_stamps: Dict[str, stage_files.Stamp] = {}
+        # Shared files whose new content pxr could not parse: the stamp of
+        # that content and pxr's reason. The layer keeps its old content.
+        self._shared_unread: Dict[str, Tuple[stage_files.Stamp, str]] = {}
         # Held by a save or export from its checks to its write, picked by
         # the file's path; a fixed set, so nothing accumulates per path.
         self._file_locks = [threading.Lock() for _ in range(FILE_LOCK_STRIPES)]
@@ -207,7 +210,7 @@ class HeadlessUSDSession(LoggerMixin):
             return True
 
     def _file_lock(self, path: str) -> Any:
-        return self._file_locks[hash(path) % len(self._file_locks)]
+        return self._file_locks[hash(stage_files.file_identity(path)) % len(self._file_locks)]
 
     def _owner(self) -> Optional[str]:
         owner = getattr(self._acting, "owner", _UNSET)
@@ -231,18 +234,58 @@ class HeadlessUSDSession(LoggerMixin):
         return str(Path(file_path).resolve())
 
     def _reusable(self, stage_id: str, owner: Optional[str], file_path: str) -> bool:
-        """Whether ``stage_id`` is ``owner``'s stage of ``file_path`` with no unsaved edits and no changed file."""
+        """Whether ``stage_id`` is ``owner``'s stage of ``file_path`` with no unsaved edits and no changed file.
+
+        A changed file pxr already failed to reread, still in that same
+        state, does not count: a fresh stage would show the same content.
+        """
         with self._registry:
             record = self._stage_records.get(stage_id)
             stage = self._active_stages.get(stage_id)
-            return (
-                record is not None
-                and stage is not None
-                and record.owner == owner
-                and record.file_path == file_path
-                and not stage.GetRootLayer().dirty
-                and not stage_files.changed_files(stage, record.stamps)
+            if (
+                record is None
+                or stage is None
+                or record.owner != owner
+                or record.file_path != file_path
+                or stage.GetRootLayer().dirty
+            ):
+                return False
+            return all(
+                self._known_unreadable(path, record)
+                for path in stage_files.changed_files(stage, record.stamps)
             )
+
+    def _known_unreadable(self, path: str, record: _StageRecord) -> bool:
+        """Whether ``path`` is a shared file pxr could not reread and that has not changed since.
+
+        Only when ``record``'s stage shows the shared layer's content, as a
+        fresh stage would.
+        """
+        entry = self._shared_unread.get(path)
+        return (
+            entry is not None
+            and entry[0] == stage_files.stamp(path)
+            and record.stamps.get(path) == self._shared_stamps.get(path)
+        )
+
+    def unread_files(self, stage_id: str) -> List[Tuple[str, str]]:
+        """
+        The files a stage composes that changed on disk but pxr cannot parse now, with pxr's reason.
+
+        The stage shows their previous content; they stay in
+        ``changed_on_disk``.
+
+        Raises:
+            USDEditError: No such stage for the caller.
+        """
+        stage, _ = self._owned_stage(stage_id)
+        with self._registry:
+            return [
+                (layer.realPath, self._shared_unread[layer.realPath][1])
+                for layer in stage_files.file_layers(stage)
+                if layer.realPath in self._shared_unread
+                and self._shared_unread[layer.realPath][0] == stage_files.stamp(layer.realPath)
+            ]
 
     def latest_stage_for(self, file_path: Union[str, Path]) -> Optional[str]:
         """
@@ -435,14 +478,26 @@ class HeadlessUSDSession(LoggerMixin):
                     stamps[path] = self._shared_stamps.get(path)
         return stamps
 
-    def _changed_shared(self, stage: Usd.Stage, skip: Optional[Set[str]] = None) -> List[Any]:
-        """The shared layers of ``stage`` whose files changed since the session read them, but ``skip``."""
+    def _changed_shared(
+        self, stage: Usd.Stage, skip: Optional[Set[str]] = None, extra: Iterable[Any] = ()
+    ) -> List[Any]:
+        """The shared layers whose files changed since the session read them, but ``skip``.
+
+        Those of ``stage``, and ``extra``: the shared layers a new version of
+        its root file names (``reload_stage`` checks them before rereading).
+        A layer with file format arguments (a private root, a throwaway
+        copy) is nobody's shared layer and is left out.
+        """
         root = stage.GetRootLayer()
         changed: List[Any] = []
+        seen: Set[str] = set()
         with self._registry:
-            for layer in stage_files.file_layers(stage):
-                if layer == root or layer.dirty:
+            for layer in [*stage_files.file_layers(stage), *extra]:
+                if layer == root or layer.dirty or layer.anonymous or not layer.realPath:
                     continue
+                if layer.identifier in seen or Sdf.Layer.SplitIdentifier(layer.identifier)[1]:
+                    continue
+                seen.add(layer.identifier)
                 path = layer.realPath
                 if skip and path in skip:
                     continue
@@ -478,6 +533,8 @@ class HeadlessUSDSession(LoggerMixin):
                 reason = editing.tf_error_reason(exc)
                 self.logger.warning(f"Not rereading {layer.realPath}, which pxr cannot parse now: {reason}")
                 unread[layer.realPath] = reason
+                with self._registry:
+                    self._shared_unread[layer.realPath] = (stage_files.stamp(layer.realPath), reason)
                 continue
             if factory is not None:
                 _checked(lambda: factory().check_layers(candidate))
@@ -509,10 +566,13 @@ class HeadlessUSDSession(LoggerMixin):
             if not done:
                 self.logger.warning(f"Not rereading {path}: {reason}")
                 unread[path] = reason
+                with self._registry:
+                    self._shared_unread[path] = (stage_files.stamp(path), reason)
                 continue
             reloaded.append(path)
             with self._registry:
                 self._shared_stamps[path] = stage_files.stamp(path)
+                self._shared_unread.pop(path, None)
         factory = self._sandbox_factory
         if reloaded and factory is not None:
             self._recheck_stages_using(reloaded, factory, skip=stage)
@@ -612,6 +672,7 @@ class HeadlessUSDSession(LoggerMixin):
             in_use = {path for record in self._stage_records.values() for path in record.stamps}
             for path in [path for path in self._shared_stamps if path not in in_use]:
                 del self._shared_stamps[path]
+                self._shared_unread.pop(path, None)
 
     def release_owner(self, owner: Optional[str]) -> List[str]:
         """
@@ -826,7 +887,7 @@ class HeadlessUSDSession(LoggerMixin):
                 f"{', '.join(stage_files.EXPORT_FORMATS)}.",
                 file_path=destination,
             )
-        if destination == record.file_path:
+        if stage_files.same_file(destination, record.file_path):
             raise USDEditError(
                 editing.REFUSED,
                 f"{destination} is the stage's own file; save it with save_usd_stage instead.",
@@ -913,6 +974,7 @@ class HeadlessUSDSession(LoggerMixin):
             )
         changed = stage_files.changed_files(stage, record.stamps)
         factory = self._sandbox_factory
+        named: List[Any] = []
         if record.file_path in changed:
             try:
                 candidate = stage_files.open_candidate(root)
@@ -923,8 +985,11 @@ class HeadlessUSDSession(LoggerMixin):
                     file_path=record.file_path,
                 ) from exc
             if factory is not None:
-                _checked(lambda: factory().check_layers(candidate))
-        refreshable, unread = self._check_rereads(self._changed_shared(stage))
+                named = _checked(lambda: factory().check_layers(candidate))
+        # The shared layers the stage uses and those the new root content
+        # names: a newly named one another stage holds may be older than its
+        # file, whose new content must pass before the root is reread.
+        refreshable, unread = self._check_rereads(self._changed_shared(stage, extra=named))
         try:
             root.Reload(True)
             reloaded, failed = self._reread(refreshable, stage)
@@ -1331,6 +1396,7 @@ class HeadlessUSDSession(LoggerMixin):
                 self._bbox_caches.clear()
                 self._stage_records.clear()
                 self._shared_stamps.clear()
+                self._shared_unread.clear()
             self.usd_reader.clear_cache()
             self.logger.info("Headless USD session cleaned up")
         except Exception as e:

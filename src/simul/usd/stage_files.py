@@ -31,6 +31,7 @@ import re
 import secrets
 import shutil
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -120,6 +121,36 @@ def stamp(path: str) -> Stamp:
     except OSError:
         return None
     return (info.st_mtime_ns, info.st_size, info.st_ino)
+
+
+def file_identity(path: str) -> str:
+    """One key for every spelling of the file ``path`` names, for locking writers of that file.
+
+    Keyed by the directory's device and inode and the file name in Unicode
+    NFC, case-folded: on APFS or NTFS ``Case.usda`` and ``case.usda``, or a
+    name in NFC and in NFD, are one file, and the key must not change when a
+    save replaces the file (a new inode) or for a destination not created
+    yet. On a case-sensitive filesystem two names that differ only in case
+    share a key, which only makes their writers take turns. Falls back to
+    the normalised path when the directory cannot be stat'ed.
+    """
+    directory, name = os.path.split(os.path.abspath(path))
+    folded = unicodedata.normalize("NFC", name).casefold()
+    try:
+        info = os.stat(directory)
+    except OSError:
+        return unicodedata.normalize("NFC", os.path.join(directory, name)).casefold()
+    return f"{info.st_dev}:{info.st_ino}:{folded}"
+
+
+def same_file(first: str, second: str) -> bool:
+    """Whether two paths name one file, however each is spelled."""
+    try:
+        if os.path.samefile(first, second):
+            return True
+    except OSError:
+        pass
+    return file_identity(first) == file_identity(second)
 
 
 def file_layers(stage: Usd.Stage) -> List[Sdf.Layer]:
@@ -225,7 +256,11 @@ def _commit(written: str, destination: str, *, overwrite: bool) -> None:
             os.close(os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
         except FileExistsError:
             raise DestinationExists(destination) from None
-        os.replace(written, destination)
+        try:
+            os.replace(written, destination)
+        except BaseException:
+            os.unlink(destination)  # the empty placeholder this call created
+            raise
         return
     os.unlink(written)
 
@@ -296,10 +331,12 @@ __all__ = [
     "compose_stage",
     "composes_own_file",
     "export_stage",
+    "file_identity",
     "file_layers",
     "file_stamps",
     "open_candidate",
     "open_private_root",
     "open_private_stage",
+    "same_file",
     "stamp",
 ]
