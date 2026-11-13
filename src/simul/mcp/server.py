@@ -1837,9 +1837,10 @@ class SimulMCPServer(LoggerMixin):
             return self._as_text_result(refusal.payload)
 
         try:
-            rate_error = self._check_rate_limit(
-                tool_name, agent_id, continuation=self._is_paging_continuation(tool_name, params)
-            )
+            if self._is_paging_continuation(tool_name, params):
+                rate_error = self._check_rate_limit(tool_name, agent_id, continuation=True)
+            else:
+                rate_error = self._check_rate_limit(tool_name, agent_id)
             if rate_error is not None:
                 return refuse(Refusal(rate_error, "rate_limited"))
             async with admission(tool_name) as refusal:
