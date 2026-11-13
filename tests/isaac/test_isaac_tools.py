@@ -4,8 +4,6 @@ import json
 from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 
 from simul.adapters.isaac_socket_client import ScriptResult
 from simul.config import Settings
@@ -97,8 +95,23 @@ class TestExecuteJsonScript:
         tools = _make_tools(execute_side_effect=RuntimeError("boom"))
         result = asyncio.run(tools.get_isaac_stage_info())
         assert result["success"] is False
-        assert result["error_type"] == "Exception"
+        assert result["error_type"] == "EngineError"
+        assert result["details"] == {"exception_type": "RuntimeError"}
         assert "boom" in result["error"]
+
+    def test_a_reset_connection_is_a_connection_error(self) -> None:
+        """A peer reset used to come back as error_type 'Exception'."""
+        tools = _make_tools(execute_side_effect=ConnectionResetError(54, "Connection reset by peer"))
+        result = asyncio.run(tools.get_isaac_stage_info())
+        assert result["error_type"] == "ConnectionError"
+        assert result["details"] == {"exception_type": "ConnectionResetError"}
+
+    def test_a_timeout_without_a_message_says_what_happened(self) -> None:
+        """A read deadline used to come back as TimeoutError with an empty error."""
+        tools = _make_tools(execute_side_effect=TimeoutError())
+        result = asyncio.run(tools.get_isaac_stage_info())
+        assert result["error_type"] == "TimeoutError"
+        assert "did not answer in time" in result["error"]
 
     def test_script_failure(self) -> None:
         """Failed script execution returns error details."""
@@ -111,7 +124,9 @@ class TestExecuteJsonScript:
         )
         result = asyncio.run(tools.get_isaac_stage_info())
         assert result["success"] is False
-        assert result["error_type"] == "NameError"
+        # Raised by the tool's own script inside Kit: the engine's failure.
+        assert result["error_type"] == "EngineError"
+        assert result["details"]["exception_type"] == "NameError"
         assert "not defined" in result["error"]
 
     def test_script_failure_includes_traceback(self) -> None:
@@ -139,12 +154,13 @@ class TestExecuteJsonScript:
         assert result["error_type"] == "EmptyOutput"
 
     def test_invalid_json(self) -> None:
-        """Non-JSON output produces a JSONDecodeError error."""
+        """Non-JSON output is the engine's failure: EngineError, naming the JSONDecodeError."""
         r = ScriptResult(success=True, output="not json at all")
         tools = _make_tools(execute_return=r)
         result = asyncio.run(tools.get_isaac_stage_info())
         assert result["success"] is False
-        assert result["error_type"] == "JSONDecodeError"
+        assert result["error_type"] == "EngineError"
+        assert result["details"]["exception_type"] == "JSONDecodeError"
         assert "raw_output" in result.get("details", {})
 
     def test_success_adds_flag(self) -> None:
@@ -563,10 +579,11 @@ class TestPrimManipulation:
         assert result["success"] is True
         assert result["visibility"] == "invisible"
 
-
     def test_set_isaac_prim_attribute(self) -> None:
         """set_isaac_prim_attribute sets a named attribute."""
-        data = {"prim_path": "/World/Cube", "attribute": "size", "value_set": 200, "value_read": "200"}
+        data = {
+            "prim_path": "/World/Cube", "attribute": "size", "value_set": 200, "value_read": "200"
+        }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(
             tools.set_isaac_prim_attribute(prim_path="/World/Cube", attribute_name="size", value=200)
@@ -585,7 +602,12 @@ class TestPrimManipulation:
 
     def test_reparent_isaac_prim(self) -> None:
         """reparent_isaac_prim moves a prim under a new parent."""
-        data = {"old_path": "/World/Cube", "new_path": "/World/Group/Cube", "parent": "/World/Group", "reparented": True}
+        data = {
+            "old_path": "/World/Cube",
+            "new_path": "/World/Group/Cube",
+            "parent": "/World/Group",
+            "reparented": True,
+        }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(tools.reparent_isaac_prim(prim_path="/World/Cube", new_parent_path="/World/Group"))
         assert result["success"] is True
@@ -651,7 +673,12 @@ class TestPhysics:
 
     def test_get_isaac_collision_info(self) -> None:
         """get_isaac_collision_info returns collision details."""
-        data = {"prim_path": "/World/Cube", "collision_enabled": True, "has_mesh_collision": False, "approximation": "convexHull"}
+        data = {
+            "prim_path": "/World/Cube",
+            "collision_enabled": True,
+            "has_mesh_collision": False,
+            "approximation": "convexHull",
+        }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(tools.get_isaac_collision_info(prim_path="/World/Cube"))
         assert result["success"] is True
@@ -692,7 +719,6 @@ class TestPhysics:
         assert result["success"] is True
         assert result["mass"] == 5.0
         assert result["density"] == 1000.0
-
 
     def test_add_isaac_rigid_body(self) -> None:
         """add_isaac_rigid_body applies the rigid body API."""

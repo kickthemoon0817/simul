@@ -66,8 +66,8 @@ def _register_ping(server: "SimulMCPServer") -> None:
         name="ping_isaac",
         description=(
             "Pre-flight check: verify that a running Isaac Sim instance is "
-            "reachable on the configured TCP socket. Call this before "
-            "execute_isaac_script to confirm connectivity and get the target address."
+            "reachable on the configured TCP socket. Call this before other Isaac "
+            "tools to confirm connectivity and get the target address."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -157,7 +157,9 @@ def _build_tool_wrapper(
         for guard in meta.sandboxed_paths:
             denial = server._sandbox_denial(arguments.get(guard.parameter), write=guard.write)
             if denial is not None:
-                return server._as_text_result(denial)
+                # Refused before Isaac is reached, but still rate limited and
+                # recorded like every other call.
+                return await server._exec_payload(meta.name, denial)
         call = getattr(server._isaac_tools, method_name)(**arguments)
         if meta.bypasses_instance_lock:
             return await server._exec_isaac(meta.name, call, bypass_instance_lock=True)

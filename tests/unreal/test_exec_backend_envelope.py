@@ -125,7 +125,8 @@ def test_session_is_closed_even_when_the_call_raises(server) -> None:
 
     result = _run(server, adapter)
 
-    assert result["error_type"] == "RuntimeError"
+    assert result["error_type"] == "EngineError"
+    assert result["details"] == {"exception_type": "RuntimeError"}
     assert "editor went away" in result["error"]
     assert adapter.sessions_opened == 1
     assert adapter.sessions_closed == 1
@@ -136,7 +137,7 @@ def test_absent_backend_reports_itself_by_name(server) -> None:
 
     result = _run(server, adapter)
 
-    assert result["error_type"] == "RuntimeError"
+    assert result["error_type"] == "ConnectionError"
     assert "Unreal runtime not available" in result["error"]
     assert adapter.sessions_opened == 0
 
@@ -144,7 +145,7 @@ def test_absent_backend_reports_itself_by_name(server) -> None:
 def test_missing_adapter_is_not_a_crash(server) -> None:
     result = _run(server, None)
 
-    assert result["error_type"] == "RuntimeError"
+    assert result["error_type"] == "ConnectionError"
 
 
 def test_error_payload_flips_success(server) -> None:
@@ -167,13 +168,13 @@ def test_rate_limit_short_circuits_before_a_session_opens(
         lambda name, agent_id=None: {
             "success": False,
             "error": "rate limited",
-            "error_type": "RateLimit",
+            "error_type": "RateLimitError",
         },
     )
 
     result = _run(server, adapter)
 
-    assert result["error_type"] == "RateLimit"
+    assert result["error_type"] == "RateLimitError"
     assert adapter.sessions_opened == 0
 
 

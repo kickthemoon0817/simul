@@ -8,6 +8,7 @@ from ....adapters.isaac_socket_client import BridgeRequestDeliveredError
 from ....config import Settings, get_settings
 from ....logging import LoggerMixin
 from ....utils.paths import PathPolicy
+from ... import error_types
 from ...registration._helpers import apply_success_from_error
 from ...schemas.common import ErrorResponse
 from ._shared import (
@@ -203,25 +204,45 @@ class IsaacScriptBase(LoggerMixin):
         """
         return ErrorResponse(
             error=message,
-            error_type="RefusedOperation",
+            error_type=error_types.REFUSED_OPERATION,
             details=details or None,
         ).model_dump()
 
     @staticmethod
-    def _script_failure(result: ScriptResult) -> Dict[str, Any]:
-        """Return the error envelope for a script that raised inside Isaac Sim.
+    def _script_failure(
+        result: ScriptResult, raised: str = error_types.ENGINE_ERROR
+    ) -> Dict[str, Any]:
+        """Return the error envelope for a script that failed in or on the way to Isaac Sim.
+
+        A failure of the transport (``error_types.ISAAC_TRANSPORT_FAILURES``, or
+        one the client marks as its own) has its type. An exception the script
+        raised inside Kit is ``raised`` whatever its name: a ``TypeError`` or
+        an ``OSError`` there is the engine's failure (or the agent's script's),
+        not the caller's arguments or a broken connection.
 
         Args:
             result: A ScriptResult whose ``success`` is False.
+            raised: The type of an exception the script raised:
+                ``EngineError`` for a tool's own script, ``ScriptError`` for
+                an agent's.
 
         Returns:
-            An ErrorResponse dict carrying the remote exception name, message
-            and traceback.
+            An ErrorResponse dict carrying the message, the traceback and the
+            name the transport reported as ``details.exception_type``.
         """
+        name = result.error_name or "UnknownError"
+        error_type = error_types.engine_failure_type(
+            name, transport_failure=result.transport_failure, raised=raised
+        )
+        details: Dict[str, Any] = {}
+        if result.traceback:
+            details["traceback"] = result.traceback
+        if name != error_type:
+            details["exception_type"] = name
         return ErrorResponse(
             error=result.error_value or "Script execution failed",
-            error_type=result.error_name or "RuntimeError",
-            details={"traceback": result.traceback} if result.traceback else None,
+            error_type=error_type,
+            details=details or None,
         ).model_dump()
 
     @staticmethod
@@ -244,15 +265,26 @@ class IsaacScriptBase(LoggerMixin):
             if not isinstance(result_payload, dict):
                 return ErrorResponse(
                     error="Bridge response payload must be an object.",
-                    error_type="BridgeProtocolError",
+                    error_type=error_types.BRIDGE_PROTOCOL_ERROR,
                 ).model_dump()
             return apply_success_from_error(result_payload)
 
         error = response.get("error", {})
+        if not isinstance(error, dict):
+            error = {}
+        # The bridge's own refusals keep their meaning; the name of an
+        # exception its handler raised is the engine's failure.
+        name = str(error.get("name") or "BridgeError")
+        error_type = error_types.engine_failure_type(name)
+        details: Dict[str, Any] = {}
+        if error.get("traceback"):
+            details["traceback"] = error.get("traceback")
+        if name != error_type:
+            details["exception_type"] = name
         return ErrorResponse(
             error=str(error.get("message", "Bridge request failed")),
-            error_type=str(error.get("name", "BridgeError")),
-            details={"traceback": error.get("traceback")} if error.get("traceback") else None,
+            error_type=error_type,
+            details=details or None,
         ).model_dump()
 
     def _heavy_script_timeout(self) -> float:
@@ -316,20 +348,26 @@ class IsaacScriptBase(LoggerMixin):
                 result = await self._client.execute_vscode_only(script, **kwargs)
             else:
                 result = await self._client.execute(script, **kwargs)
-        except ConnectionRefusedError as exc:
-            return ErrorResponse(
-                error=str(exc),
-                error_type="ConnectionError",
-            ).model_dump()
         except TimeoutError as exc:
+            # Before OSError, which TimeoutError subclasses.
             return ErrorResponse(
-                error=str(exc),
-                error_type="TimeoutError",
+                error=str(exc)
+                or f"Isaac Sim at {self._client.address} did not answer in time; the "
+                "script may still be running.",
+                **error_types.exception_fields(exc),
+            ).model_dump()
+        except (ConnectionError, OSError) as exc:
+            # Refused, reset by the peer, or broken mid-reply: the shared class,
+            # with the transport's own name as details.exception_type.
+            return ErrorResponse(
+                error=str(exc) or f"The connection to Isaac Sim at {self._client.address} failed.",
+                **error_types.exception_fields(exc),
             ).model_dump()
         except Exception as exc:
             logger.error("Script execution failed: %s", exc, exc_info=True)
             return ErrorResponse(
-                error=str(exc), error_type="Exception"
+                error=str(exc) or type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
 
         if not result.success:
@@ -340,7 +378,7 @@ class IsaacScriptBase(LoggerMixin):
         if not output:
             return ErrorResponse(
                 error="Script produced no output",
-                error_type="EmptyOutput",
+                error_type=error_types.EMPTY_OUTPUT,
             ).model_dump()
 
         data, other_output = extract_tool_json(output)
@@ -351,10 +389,11 @@ class IsaacScriptBase(LoggerMixin):
                 reason = str(exc)
             else:
                 reason = f"expected a JSON object, got {type(data).__name__}"
+            # The engine's output, not the caller's input, failed to parse.
             return ErrorResponse(
                 error=f"Failed to parse script output as JSON: {reason}",
-                error_type="JSONDecodeError",
-                details={"raw_output": output[:2000]},
+                error_type=error_types.ENGINE_ERROR,
+                details={"raw_output": output[:2000], "exception_type": "JSONDecodeError"},
             ).model_dump()
         if other_output:
             _note_foreign_output(data, other_output)
@@ -399,7 +438,7 @@ class IsaacScriptBase(LoggerMixin):
             # Running the script fallback now would apply it a second time.
             return ErrorResponse(
                 error=str(exc),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
         except (ConnectionRefusedError, TimeoutError, OSError) as exc:
             # The bridge is unreachable, not the action unsupported. When a
@@ -416,14 +455,14 @@ class IsaacScriptBase(LoggerMixin):
                 return None
             return ErrorResponse(
                 error=str(exc),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
         except ValueError as exc:
             # Protocol-level failure (oversized request, malformed frame). The
             # script path would not do better, so surface it.
             return ErrorResponse(
                 error=str(exc),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
 
         if (

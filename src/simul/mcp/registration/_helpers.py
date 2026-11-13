@@ -13,6 +13,8 @@ from typing import Annotated, Any, Callable, Optional, TypeVar
 
 from pydantic import Field
 
+from ._constraints import constrain
+
 WrappedTool = TypeVar("WrappedTool", bound=Callable[..., Any])
 
 # Google-style docstring entry: ``name: text`` or ``name (type): text``.
@@ -110,8 +112,10 @@ def with_param_descriptions(
 
     Descriptions are looked up in this order, later entries winning:
     ``sources`` from last to first, the wrapper's own docstring, then
-    ``overrides``. Parameters with no description anywhere are left as they
-    are; the registration test is what enforces full coverage.
+    ``overrides``. Parameters with no description anywhere keep their text
+    as is; the registration test is what enforces full coverage. A parameter
+    with an entry in ``_constraints.PARAM_CONSTRAINTS`` under the wrapper's
+    ``__name__`` (the registered tool name) also gets its bounds or choices.
 
     Args:
         *sources: Callables whose ``Args:`` sections document the wrapper's
@@ -133,12 +137,15 @@ def with_param_descriptions(
         descriptions.update(overrides)
         hints = typing.get_type_hints(func, include_extras=True)
         for name in inspect.signature(func).parameters:
+            hint = hints.get(name, Any)
+            # The bounds and choices the tool's prose or code states, keyed by
+            # the registered tool name the wrapper carries.
+            constrained = constrain(func.__name__, name, hint)
             text = descriptions.get(name)
-            if not text:
-                continue
-            func.__annotations__[name] = Annotated[
-                hints.get(name, Any), Field(description=text)
-            ]
+            if text:
+                func.__annotations__[name] = Annotated[constrained, Field(description=text)]
+            elif constrained is not hint:
+                func.__annotations__[name] = constrained
         return func
 
     return decorator

@@ -126,26 +126,24 @@ def _connect(
                     await client.call_tool(name, arguments, raise_on_error=False)
                     for name, arguments in calls
                 ]
-                payloads.append(
-                    [
-                        (
-                            {"is_error": True}
-                            if result.is_error
-                            else json.loads(result.content[-1].text)
-                        )
-                        for result in results
-                    ]
-                )
+                # Every result, a failure included, is one JSON envelope.
+                payloads.append([json.loads(result.content[-1].text) for result in results])
         return protocols, payloads
 
     return asyncio.run(run())
 
 
 def _agents(instance: server_module.SimulMCPServer) -> List[str]:
-    """The agent of each recorded call, oldest first."""
+    """The agent of each recorded ping_isaac call, oldest first.
+
+    The instance tools are recorded too; the pings are what these tests
+    attribute.
+    """
     return [
         row["agent_id"]
-        for row in reversed(instance.usage_tracker.get_recent(limit=1000))
+        for row in reversed(
+            instance.usage_tracker.get_recent(limit=1000, tool_name="ping_isaac")
+        )
     ]
 
 
@@ -299,9 +297,12 @@ def test_sessionless_http_clients_get_no_session_to_share(
     assert [payload["address"] for payload in pings] == [DEFAULT.address] * 3
     assert _agents(server) == [server_module._ANONYMOUS_AGENT] * 3
     assert server._session_routes == {}
+    # The refused session tools spend the shared anonymous budget too, all
+    # but release_isaac_instance, which the rate limit never refuses.
     assert set(server._rate_limiters) == {
-        (server_module._ANONYMOUS_AGENT, "ping_isaac"),
-        (server_module._ANONYMOUS_AGENT, "*"),
+        (server_module._ANONYMOUS_AGENT, tool)
+        for tool in ("ping_isaac", "*", *(name for name, _ in SESSION_TOOLS))
+        if tool != "release_isaac_instance"
     }
     assert server.session_manager.get_all_sessions() == []
 
@@ -356,7 +357,9 @@ def test_a_sessionless_http_client_cannot_take_a_handshake_clients_claim(
                 )
                 attempts = [
                     _payload(
-                        await bob.call_tool(name, {**arguments, "agent_id": "alice"})
+                        await bob.call_tool(
+                            name, {**arguments, "agent_id": "alice"}, raise_on_error=False
+                        )
                     )
                     for name, arguments in SESSION_TOOLS
                 ]
@@ -405,7 +408,9 @@ def test_a_session_header_gives_a_sessionless_request_no_session(
                 ) as bob:
                     assert bob.protocol_version == SESSIONLESS_PROTOCOL
                     ping = _payload(await bob.call_tool(*PING))
-                    switch = _payload(await bob.call_tool(*SESSION_TOOLS[0]))
+                    switch = _payload(
+                        await bob.call_tool(*SESSION_TOOLS[0], raise_on_error=False)
+                    )
                     return ping, switch
 
     ping, switch = asyncio.run(run())

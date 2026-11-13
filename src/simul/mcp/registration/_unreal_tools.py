@@ -778,6 +778,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealGetThumbnailResponse,
         read_only=True,
+        idempotent=True,
         method="get_actor_thumbnail",
         params=(
             ToolParam("asset_path", str, description="Full asset path."),
@@ -838,6 +839,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealFocusActorResponse,
         read_only=False,
+        idempotent=True,
         method="focus_on_actor",
         params=(
             ToolParam("actor_path", str, description="Full actor path to focus on."),
@@ -913,6 +915,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealDeleteActorResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="delete_actor",
         params=(ToolParam("actor_path", str, description="Full actor path, as list_unreal_actors reports it."),),
@@ -1000,6 +1003,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealSetActorParentResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="set_actor_parent",
         params=(
@@ -1473,6 +1477,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealExportUsdResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="export_usd",
         params=(

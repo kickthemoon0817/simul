@@ -4454,11 +4454,15 @@ class BlenderRuntimeSession:
             try:
                 return self._get_object_or_raise(value)
             except ValueError:
-                raise ValueError(f"{what}: object '{value}' not found") from None
+                raise NotFoundError(
+                    f"{what}: object '{value}' not found", "object_not_found", object_name=value
+                ) from None
         blender_module: Any = bpy
         datablock = getattr(blender_module.data, _ID_COLLECTIONS[rna.identifier]).get(value)
         if datablock is None:
-            raise ValueError(f"{what}: {type_name} '{value}' not found")
+            raise NotFoundError(
+                f"{what}: {type_name} '{value}' not found", "datablock_not_found", name=value
+            )
         return datablock
 
     @staticmethod
@@ -5359,7 +5363,11 @@ class BlenderRuntimeSession:
         blender_module: Any = bpy
         collection = blender_module.data.collections.get(collection_name)
         if collection is None:
-            raise ValueError(f"Collection not found: {collection_name}")
+            raise NotFoundError(
+                f"Collection not found: {collection_name}",
+                "collection_not_found",
+                collection_name=collection_name,
+            )
         view_layer = blender_module.context.view_layer
         objects = [o for o in collection.all_objects if o.name in view_layer.objects]
         if not objects:
@@ -9517,7 +9525,11 @@ class BlenderRuntimeSession:
             return scene.collection
         collection = blender_module.data.collections.get(collection_name)
         if collection is None:
-            raise ValueError(f"Collection '{collection_name}' not found")
+            raise NotFoundError(
+                f"Collection '{collection_name}' not found",
+                "collection_not_found",
+                collection_name=collection_name,
+            )
         if collection not in scene.collection.children_recursive:
             raise ValueError(
                 f"Collection '{collection_name}' is not in scene '{scene.name}', so the "
@@ -11761,7 +11773,11 @@ class BlenderRuntimeSession:
 
         collection = blender_module.data.collections.get(collection_name)
         if collection is None:
-            raise ValueError(f"Collection not found: {collection_name}")
+            raise NotFoundError(
+                f"Collection not found: {collection_name}",
+                "collection_not_found",
+                collection_name=collection_name,
+            )
         if self._scene_scope:
             return [
                 obj
@@ -11789,7 +11805,9 @@ class BlenderRuntimeSession:
             )
             cam = objects.get(camera_name)
             if cam is None or cam.type != "CAMERA":
-                raise ValueError(f"Camera not found: {camera_name}")
+                raise NotFoundError(
+                    f"Camera not found: {camera_name}", "camera_not_found", camera_name=camera_name
+                )
             return cam
 
         scene_cam = blender_module.context.scene.camera
