@@ -17,9 +17,16 @@ to the same number of entries, never fewer than one, and ``next_offset`` (with a
 ``count`` or ``returned`` that counted the page) is restated to continue right
 after what was kept, so following ``next_offset`` neither skips entries nor
 returns the same page forever. A page whose first entry alone is too large
-sends that entry compacted to what identifies it. Any other list the budget has
-to cut is reported as cut for good: ``next_offset`` is left as the tool set it,
-and the notice says the dropped entries will not appear on later pages.
+sends that entry compacted to what identifies it; when that keeps every entry
+of the page, ``next_offset`` stays as the tool set it (None on the last page).
+Any other list the budget has to cut is reported as cut for good:
+``next_offset`` is left as the tool set it, and the notice says the dropped
+entries will not appear on later pages.
+
+A tool whose bulk is one mapping declares it (``paged_results.BULK_FIELDS``,
+``get_prim_info``'s ``attributes``). That mapping is cut first, to its
+leading entries that fit, and named in ``truncated_fields`` with the tool's
+hint, so a small list beside it is never emptied in its place.
 
 A payload whose bulk is a string cannot be trimmed the same way — guessing where
 to cut an opaque blob is more likely to corrupt it than to help — so up to a
@@ -42,7 +49,16 @@ import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ..logging import get_logger
-from .paged_results import PagedList, current_paging, current_tool, paging_for, tool_result
+from .paged_results import (
+    BulkField,
+    PagedList,
+    bulk_for,
+    current_bulk,
+    current_paging,
+    current_tool,
+    paging_for,
+    tool_result,
+)
 
 logger = get_logger(__name__)
 
@@ -170,6 +186,10 @@ def _resolve_paging(tool_name: Optional[str], paging: Any) -> Optional[PagedList
     return current_paging()
 
 
+def _resolve_bulk(tool_name: Optional[str]) -> Optional[BulkField]:
+    return bulk_for(tool_name) if tool_name is not None else current_bulk()
+
+
 def apply_result_budget(
     payload: Any,
     budget_bytes: int = DEFAULT_RESULT_BUDGET_BYTES,
@@ -207,7 +227,9 @@ def apply_result_budget(
     Returns:
         The payload unchanged when it already fits, else the trimmed copy.
     """
-    return _budget(payload, budget_bytes, hint, hard_limit_bytes, _resolve_paging(tool_name, paging))[0]
+    return _budget(
+        payload, budget_bytes, hint, hard_limit_bytes, _resolve_paging(tool_name, paging), _resolve_bulk(tool_name)
+    )[0]
 
 
 def encode_result_budget(
@@ -225,11 +247,18 @@ def encode_result_budget(
     payload is the one returned, so a payload that already fits is encoded
     once instead of twice.
     """
-    return _budget(payload, budget_bytes, hint, hard_limit_bytes, _resolve_paging(tool_name, paging))[1]
+    return _budget(
+        payload, budget_bytes, hint, hard_limit_bytes, _resolve_paging(tool_name, paging), _resolve_bulk(tool_name)
+    )[1]
 
 
 def _budget(
-    payload: Any, budget_bytes: int, hint: str, hard_limit_bytes: int, paging: Optional[PagedList]
+    payload: Any,
+    budget_bytes: int,
+    hint: str,
+    hard_limit_bytes: int,
+    paging: Optional[PagedList],
+    bulk: Optional[BulkField] = None,
 ) -> Tuple[Any, str]:
     """Apply the budget; return the resulting payload and its JSON encoding."""
     payload, text = _encode_strict(payload)
@@ -252,9 +281,61 @@ def _budget(
                 )
                 lists = _paged_lists(payload, paging)
             payload, text = _trim_page(payload, len(text), budget_bytes, paging, lists)
+    if len(text) > budget_bytes and bulk is not None:
+        payload, text = _trim_bulk(payload, len(text), budget_bytes, bulk, paged_roots)
     if len(text) > budget_bytes:
         payload, text = _trim_largest_list(payload, len(text), budget_bytes, hint, paged_roots)
     return _enforce_hard_limit(payload, text, hard_limit_bytes)
+
+
+# ---------------------------------------------------------------------------
+# The declared bulk mapping
+# ---------------------------------------------------------------------------
+
+
+def _trim_bulk(
+    payload: Dict[str, Any], payload_size: int, budget_bytes: int, bulk: BulkField, paged_roots: frozenset
+) -> Tuple[Dict[str, Any], str]:
+    """Cut the declared bulk mapping to its leading entries that fit the budget.
+
+    Only when the mapping outweighs every top-level list: then it is what
+    makes the payload too large, and cutting it keeps the small fields and
+    lists beside it whole. Otherwise the largest list is cut first, as for any
+    tool. The cut is recorded in ``truncated_fields`` with the tool's hint;
+    ``next_offset`` (if any) is not touched.
+    """
+    mapping = payload.get(bulk.field)
+    if not isinstance(mapping, dict) or not mapping:
+        return payload, _encode(payload)
+    mapping_size = _encoded_size(mapping)
+    largest = _largest_list_field(payload, paged_roots)
+    if largest is not None and _list_size(largest[2], len(largest[2])) > mapping_size:
+        return payload, _encode(payload)
+    items = list(mapping.items())
+    total = len(items)
+    record: Dict[str, Any] = {"field": bulk.field, "returned": total, "total": total, "hint": bulk.hint}
+    if "next_offset" in payload:
+        record["next_offset"] = "unchanged"
+    first_left = {"first_omitted": max((key for key, _value in items), key=len)}
+    notes = {"truncated": True, "truncated_fields": [*payload.get("truncated_fields", []), {**record, **first_left}]}
+    remaining = budget_bytes - _encoded_size({**payload, bulk.field: {}}) - _encoded_size(notes)
+    # A mapping encodes as "{" + entries joined by ", " + "}", each entry
+    # '"key": value', measured once.
+    entry_sizes = [len(json.dumps(key)) + 2 + _encoded_size(value) for key, value in items]
+    kept, used = 0, 2
+    for size in entry_sizes:
+        grown = used + size + (2 if kept else 0)
+        if grown > remaining:
+            break
+        kept, used = kept + 1, grown
+    if kept >= total:
+        return payload, _encode(payload)
+    trimmed = dict(payload)
+    trimmed[bulk.field] = dict(items[:kept])
+    trimmed["truncated"] = True
+    record.update(returned=kept, first_omitted=items[kept][0])
+    trimmed["truncated_fields"] = [*payload.get("truncated_fields", []), record]
+    return trimmed, _encode(trimmed)
 
 
 def _emptied(payload: Dict[str, Any], lists: List[Tuple[Tuple[PathKey, ...], List[Any]]]) -> Any:
@@ -389,8 +470,11 @@ def _trim_page(
     for (path, _items), page in zip(lists, pages):
         trimmed = _replace_at(trimmed, path, page)
 
-    new_next = offset + kept
     old_next = payload.get("next_offset")
+    # Every entry kept (one compacted): the page still ends where the tool
+    # said, so next_offset stays as it was, None on the last page.
+    whole = kept == longest
+    new_next = old_next if whole else offset + kept
     trimmed["next_offset"] = new_next
     trimmed["truncated"] = True
     for key in paging.count_fields:
@@ -409,10 +493,10 @@ def _trim_page(
                     restated[path[0]] = len(trimmed[path[0]])
             trimmed[key] = restated
     stale = payload.get("hint")
-    if isinstance(old_next, int) and isinstance(stale, str):
+    if not whole and isinstance(old_next, int) and isinstance(stale, str):
         # "offset=1000" (Unreal's listings) or "offset 1000" (its robotics page).
         trimmed["hint"] = re.sub(rf"(\boffset[ =]){old_next}\b", rf"\g<1>{new_next}", stale)
-    trimmed["truncation"] = _page_notice(paging, kept, longest, new_next)
+    trimmed["truncation"] = _page_notice(paging, kept, longest, new_next, moved=not whole)
     if compacted:
         trimmed["truncation"]["compacted_entries"] = compacted
         trimmed["truncation"]["hint"] += (
@@ -433,20 +517,33 @@ def _page_offset(payload: Dict[str, Any], page_length: int) -> int:
     return 0
 
 
-def _page_notice(paging: PagedList, kept: int, total: int, next_offset: int) -> Dict[str, Any]:
-    advice = f"call again with {paging.offset_param}={next_offset}"
-    if paging.limit_param:
-        advice += f", or pass a smaller {paging.limit_param}"
+def _page_notice(
+    paging: PagedList, kept: int, total: int, next_offset: Optional[int], moved: bool = True
+) -> Dict[str, Any]:
+    if not moved:
+        following = (
+            "this is the last page" if next_offset is None
+            else f"call again with {paging.offset_param}={next_offset} for the next page"
+        )
+        summary = (
+            f"All {kept} entries kept, compacted to fit the response budget; next_offset is "
+            f"unchanged: {following}."
+        )
+    else:
+        advice = f"call again with {paging.offset_param}={next_offset}"
+        if paging.limit_param:
+            advice += f", or pass a smaller {paging.limit_param}"
+        summary = (
+            f"Page cut to {kept} of {total} entries to fit the response budget; "
+            f"next_offset moved to {next_offset}: {advice}."
+        )
     return {
         "field": paging.fields[0],
         "fields": list(paging.fields),
         "returned": kept,
         "total": total,
         "next_offset": next_offset,
-        "hint": (
-            f"Page cut to {kept} of {total} entries to fit the response budget; "
-            f"next_offset moved to {next_offset}: {advice}."
-        ),
+        "hint": summary,
     }
 
 

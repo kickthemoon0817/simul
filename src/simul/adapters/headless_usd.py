@@ -60,6 +60,7 @@ def _checked(check: Callable[[], Any]) -> Any:
 # A session that keeps loading without unloading is refused past this many stages.
 MAX_STAGES_PER_OWNER = 32
 SAVE_FAILED = editing.SAVE_FAILED
+RELOAD_FAILED = editing.RELOAD_FAILED
 INVALID_FILE_PATH = editing.INVALID_FILE_PATH
 
 
@@ -771,7 +772,7 @@ class HeadlessUSDSession(LoggerMixin):
                 candidate = stage_files.open_candidate(root)
             except Exception as exc:
                 raise USDEditError(
-                    SAVE_FAILED,
+                    RELOAD_FAILED,
                     f"Reloading {record.file_path} failed: {editing.tf_error_reason(exc)}",
                     file_path=record.file_path,
                 ) from exc
@@ -783,7 +784,7 @@ class HeadlessUSDSession(LoggerMixin):
             raise
         except Exception as exc:
             raise USDEditError(
-                SAVE_FAILED,
+                RELOAD_FAILED,
                 f"Reloading {record.file_path} failed: {editing.tf_error_reason(exc)}",
                 file_path=record.file_path,
             ) from exc
@@ -1026,11 +1027,13 @@ class HeadlessUSDSession(LoggerMixin):
         """
         stage = self.get_stage(stage_id)
         if stage:
-            # Get the original file path if available
-            file_path = ""
-            if stage_id in self._active_stages:
-                root_layer = stage.GetRootLayer()
-                file_path = root_layer.identifier
+            # The file the stage was loaded from, not its private root layer's
+            # identifier (which carries the session's simul_stage argument).
+            with self._registry:
+                record = self._stage_records.get(stage_id)
+            file_path = record.file_path if record is not None else stage_files.public_identifier(
+                stage.GetRootLayer().identifier
+            )
 
             return self.summarizer.summarize_stage(
                 stage,
@@ -1156,10 +1159,12 @@ class HeadlessUSDSession(LoggerMixin):
                         "volume": mesh_info.volume,
                         "materials": mesh_info.materials,
                         "subsets": mesh_info.subsets,
-                        "bbox": {
+                        # None for a mesh without points, which has no bounds.
+                        "bbox": None if mesh_info.bbox is None else {
                             "min": list(mesh_info.bbox[0]),
                             "max": list(mesh_info.bbox[1]),
                         },
+                        "consistently_oriented": mesh_info.consistently_oriented,
                     }
                 except Exception as e:
                     self.logger.error(f"Error getting mesh info for {prim_path}: {e}")
