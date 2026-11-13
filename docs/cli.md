@@ -215,6 +215,10 @@ Captures move from the editor to disk in bounded chunks, so files larger than
 the MCP inline limit still arrive. `--format jpeg` converts the downloaded PNG
 locally.
 
+`exec` runs its code as `execute_unreal_script` does, in a fresh namespace
+that is discarded when the call ends; see
+[tools.md](tools.md#unreal-engine).
+
 ## `simul blender`
 
 | Command | Purpose |

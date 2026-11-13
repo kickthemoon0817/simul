@@ -92,11 +92,15 @@
      "resolution_x": {
       "default": 1920,
       "description": "Width in pixels.",
+      "maximum": 16384,
+      "minimum": 1,
       "type": "integer"
      },
      "resolution_y": {
       "default": 1080,
       "description": "Height in pixels.",
+      "maximum": 16384,
+      "minimum": 1,
       "type": "integer"
      },
      "format": {
@@ -130,7 +134,7 @@
   {
    "name": "execute_unreal_script",
    "title": "Execute Unreal Script",
-   "description": "Execute arbitrary Python code inside the Unreal Engine editor. Use for operations not covered by other tools. The code runs via PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return structured data. UE 5.7 hazard: do not leave a reference to an unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) in a reference cycle; a later garbage collection, including the editor's own on autosave, crashes the editor. Call them inline. For granular CLI operations see: simul unreal --help",
+   "description": "Execute arbitrary Python code inside the Unreal Engine editor. Use for operations not covered by other tools. The code runs via PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return structured data. Each call starts in a fresh namespace with unreal imported, and every name it binds is discarded when it ends, returned or raised: nothing carries over to the next call (pass values back in as code), and a callback it registers must import what it uses inside itself. Never keep an unreal package or world, or an object that refers to one, in sys.modules, a module attribute or a registered callback: the next map change aborts the editor. UE 5.7 hazard: do not leave a reference to an unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) in a reference cycle (a class attribute or a method's default argument puts it in one); a later garbage collection, including the editor's own on autosave, crashes the editor. Call them inline. For granular CLI operations see: simul unreal --help",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -142,6 +146,11 @@
      "mode": {
       "default": "ExecuteFile",
       "description": "ExecuteFile (multi-line), EvaluateStatement (expression), or ExecuteStatement (single statement).",
+      "enum": [
+       "ExecuteFile",
+       "EvaluateStatement",
+       "ExecuteStatement"
+      ],
       "type": "string"
      }
     },
@@ -175,6 +184,17 @@
     "properties": {
      "agent_control": {
       "description": "inspect, select_actor, clear_selection, set_property, pilot_actor, eject_actor, set_game_view, move_cursor, or clear_cursor.",
+      "enum": [
+       "inspect",
+       "select_actor",
+       "clear_selection",
+       "set_property",
+       "pilot_actor",
+       "eject_actor",
+       "set_game_view",
+       "move_cursor",
+       "clear_cursor"
+      ],
       "type": "string"
      },
      "target": {
@@ -192,6 +212,11 @@
      "property_name": {
       "anyOf": [
        {
+        "enum": [
+         "location",
+         "rotation",
+         "scale"
+        ],
         "type": "string"
        },
        {
@@ -352,11 +377,14 @@
      "max_results": {
       "default": 200,
       "description": "Most actors in the page, 1 to 5000.",
+      "maximum": 5000,
+      "minimum": 1,
       "type": "integer"
      },
      "offset": {
       "default": 0,
       "description": "Matching actors to skip: the previous page's next_offset.",
+      "minimum": 0,
       "type": "integer"
      },
      "label_filter": {
@@ -440,11 +468,14 @@
      "offset": {
       "default": 0,
       "description": "Components to skip: the previous page's next_offset.",
+      "minimum": 0,
       "type": "integer"
      },
      "max_results": {
       "default": 200,
       "description": "Most components in the page, 1 to 5000.",
+      "maximum": 5000,
+      "minimum": 1,
       "type": "integer"
      }
     },
@@ -693,7 +724,7 @@
     "title": null,
     "readOnlyHint": true,
     "destructiveHint": null,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -870,11 +901,15 @@
      "fov": {
       "default": 90.0,
       "description": "Auto-fit only: field of view across the view, in degrees, at least 0.001 (the narrowest Unreal renders) and less than 180. The level viewport's; UE's default is 90.",
+      "exclusiveMaximum": 180.0,
+      "minimum": 0.001,
       "type": "number"
      },
      "aspect_ratio": {
       "default": 1.7777777777777777,
       "description": "Auto-fit only: the view's width over its height, from 1/16384 to 16384, such as a capture's resolution_x / resolution_y; 16:9 by default, as the default 1920x1080 capture.",
+      "maximum": 16384.0,
+      "minimum": 6.103515625e-05,
       "type": "number"
      }
     },
@@ -889,7 +924,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": null,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -990,7 +1025,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -1208,7 +1243,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -1290,6 +1325,11 @@
      "scope": {
       "default": "all",
       "description": "Which visibility to set: 'editor' (level viewport and captures), 'game' (Play In Editor and the packaged game) or 'all'.",
+      "enum": [
+       "all",
+       "editor",
+       "game"
+      ],
       "type": "string"
      },
      "persistent": {
@@ -1903,6 +1943,8 @@
      "duration": {
       "default": 0.0,
       "description": "Seconds of physics time a force keeps acting, 0 to 600: every frame the body gets, as an impulse, the force's momentum over the physics time that frame simulated (the frame time, at most Unreal's physics step limit, 1/30 s by default), so it keeps pace with gravity; paused time adds nothing. 0 acts for one physics step. Not for an impulse.",
+      "maximum": 600.0,
+      "minimum": 0.0,
       "type": "number"
      },
      "units": {
@@ -2026,7 +2068,7 @@
     "properties": {
      "actor_paths": {
       "default": "",
-      "description": "Comma-separated actor paths, editor or simulation; empty when tag_filter is given.",
+      "description": "Comma-separated actor paths (editor or simulation paths); empty when tag_filter is given.",
       "type": "string"
      },
      "tag_filter": {
@@ -2047,11 +2089,14 @@
      "max_results": {
       "default": 100,
       "description": "Most bodies on this page, 1 to 1000; a page also stops before 30,000 characters.",
+      "maximum": 1000,
+      "minimum": 1,
       "type": "integer"
      },
      "offset": {
       "default": 0,
       "description": "Bodies to skip: the previous page's next_offset.",
+      "minimum": 0,
       "type": "integer"
      }
     }
@@ -2098,11 +2143,14 @@
      "max_results": {
       "default": 200,
       "description": "Most actors on this page, 1 to 5000; a page also stops before 30,000 characters.",
+      "maximum": 5000,
+      "minimum": 1,
       "type": "integer"
      },
      "offset": {
       "default": 0,
       "description": "Actors to skip: the previous page's next_offset.",
+      "minimum": 0,
       "type": "integer"
      }
     }
@@ -2226,7 +2274,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -2364,7 +2412,7 @@
   {
    "name": "batch_unreal_operations",
    "title": "Batch Unreal Operations",
-   "description": "Execute several Remote Control requests in one HTTP call, in order. Each result is Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has error and error_type. Operations without a RequestId are numbered for you.",
+   "description": "Execute several Remote Control requests in one HTTP call, in order. Each result is Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has error and error_type. Operations without a RequestId are numbered for you. Python run through PythonScriptLibrary gets a fresh namespace per call, as in execute_unreal_script; an ExecuteConsoleCommand of a py command is refused (ValidationError).",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2417,6 +2465,8 @@
      "max_depth": {
       "default": 10,
       "description": "Levels below the root to include, 1 to 64 (the root's children are level 1).",
+      "maximum": 64,
+      "minimum": 1,
       "type": "integer"
      },
      "include_components": {
@@ -2444,11 +2494,14 @@
      "offset": {
       "default": 0,
       "description": "Root children to skip: the previous page's next_offset.",
+      "minimum": 0,
       "type": "integer"
      },
      "max_results": {
       "default": 100,
       "description": "Most root children in the page, 1 to 5000.",
+      "maximum": 5000,
+      "minimum": 1,
       "type": "integer"
      }
     }
@@ -2522,6 +2575,12 @@
     "properties": {
      "scene_type": {
       "description": "room, corridor, warehouse or outdoor.",
+      "enum": [
+       "room",
+       "corridor",
+       "warehouse",
+       "outdoor"
+      ],
       "type": "string"
      },
      "parameters": {
@@ -2575,16 +2634,24 @@
      "match_mode": {
       "default": "exact",
       "description": "exact (a tag equals label), contains (a tag contains label) or regex (label is a Python regular expression searched for in each tag; a repeated group that holds a quantifier or alternatives, as in (\\w+)+, is refused because it can run for hours); every mode ignores case.",
+      "enum": [
+       "exact",
+       "contains",
+       "regex"
+      ],
       "type": "string"
      },
      "max_results": {
       "default": 100,
       "description": "Most actors in the page, 1 to 5000.",
+      "maximum": 5000,
+      "minimum": 1,
       "type": "integer"
      },
      "offset": {
       "default": 0,
       "description": "Matching actors to skip: the previous page's next_offset.",
+      "minimum": 0,
       "type": "integer"
      }
     },
@@ -2611,13 +2678,20 @@
   {
    "name": "generate_unreal_mesh_primitive",
    "title": "Generate Unreal Mesh Primitive",
-   "description": "Create a parametric mesh primitive (box, sphere, cylinder, cone, torus, capsule).",
+   "description": "Create a parametric mesh primitive (box, sphere, cylinder, cone or capsule) as a new DynamicMeshActor; the spawn is one undoable transaction. Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "primitive_type": {
-      "description": "box, sphere, cylinder, cone, torus, capsule.",
+      "description": "box, sphere, cylinder, cone or capsule.",
+      "enum": [
+       "box",
+       "sphere",
+       "cylinder",
+       "cone",
+       "capsule"
+      ],
       "type": "string"
      },
      "dimensions": {
@@ -2627,13 +2701,25 @@
      },
      "segments": {
       "default": 32,
-      "description": "Tessellation segments.",
+      "description": "Tessellation segments, 3 to 512 (a 512-segment sphere has 522,240 triangles).",
+      "maximum": 512,
+      "minimum": 3,
       "type": "integer"
      },
      "location": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "number"
+        },
+        "type": "array"
+       }
+      ],
       "default": "",
-      "description": "Spawn location [x, y, z] in cm.",
-      "type": "string"
+      "description": "Spawn location [x, y, z] in cm."
      },
      "actor_label": {
       "anyOf": [
@@ -2671,7 +2757,7 @@
   {
    "name": "apply_unreal_mesh_boolean",
    "title": "Apply Unreal Mesh Boolean",
-   "description": "Apply boolean operation (union, subtract, intersect) between two meshes.",
+   "description": "Apply a boolean (union, subtract, intersect) of a tool DynamicMeshActor's mesh to a target DynamicMeshActor's mesh, in place and undoable. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2686,6 +2772,11 @@
      },
      "operation": {
       "description": "union, subtract, or intersect.",
+      "enum": [
+       "union",
+       "subtract",
+       "intersect"
+      ],
       "type": "string"
      }
     },
@@ -2714,7 +2805,7 @@
   {
    "name": "compute_unreal_convex_hull",
    "title": "Compute Unreal Convex Hull",
-   "description": "Compute convex hull envelope of a mesh.",
+   "description": "Compute the convex hull of a DynamicMeshActor's mesh as a new DynamicMeshActor (one undoable spawn), with the hull's and the source's volume. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2747,7 +2838,7 @@
   {
    "name": "decompose_unreal_convex_hull",
    "title": "Decompose Unreal Convex Hull",
-   "description": "V-HACD convex decomposition for collision geometry.",
+   "description": "Decompose a DynamicMeshActor's mesh into convex pieces, placed together in one new DynamicMeshActor (one undoable spawn), and report each piece. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2763,17 +2854,17 @@
      },
      "max_vertices_per_hull": {
       "default": 32,
-      "description": "Max vertices per hull.",
+      "description": "Simplifies each piece to this many triangles.",
       "type": "integer"
      },
      "min_cluster_size": {
       "default": 256,
-      "description": "Minimum cluster size for V-HACD.",
+      "description": "Unused.",
       "type": "integer"
      },
      "resolution": {
       "default": 100000,
-      "description": "Voxelization resolution.",
+      "description": "Unused.",
       "type": "integer"
      }
     },
@@ -2800,7 +2891,7 @@
   {
    "name": "edit_unreal_mesh_topology",
    "title": "Edit Unreal Mesh Topology",
-   "description": "Edit mesh topology (extrude, bevel, inset, loop cut, scale_faces).",
+   "description": "Extrude, bevel or inset the faces of a DynamicMeshActor's mesh, in place and undoable. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2810,7 +2901,12 @@
       "type": "string"
      },
      "operation": {
-      "description": "extrude_faces, bevel_edges, inset_faces, loop_cut, scale_faces.",
+      "description": "extrude_faces, bevel_edges or inset_faces.",
+      "enum": [
+       "extrude_faces",
+       "bevel_edges",
+       "inset_faces"
+      ],
       "type": "string"
      },
      "face_selection": {
@@ -2903,7 +2999,7 @@
   {
    "name": "subdivide_unreal_mesh",
    "title": "Subdivide Unreal Mesh",
-   "description": "Catmull-Clark / Loop / bilinear subdivision.",
+   "description": "Subdivide a DynamicMeshActor's mesh, in place and undoable: Catmull-Clark (needs quad polygroups) or uniform tessellation. A result over 2,000,000 triangles is refused before anything runs. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2914,12 +3010,19 @@
      },
      "level": {
       "default": 2,
-      "description": "Subdivision level (1-4).",
+      "description": "Subdivision level, clamped to 1-4.",
+      "maximum": 4,
+      "minimum": 1,
       "type": "integer"
      },
      "scheme": {
       "default": "catmull_clark",
-      "description": "catmull_clark, loop, or uniform.",
+      "description": "catmull_clark; any other value runs uniform tessellation.",
+      "enum": [
+       "catmull_clark",
+       "loop",
+       "uniform"
+      ],
       "type": "string"
      }
     },
@@ -2946,7 +3049,7 @@
   {
    "name": "simplify_unreal_mesh",
    "title": "Simplify Unreal Mesh",
-   "description": "Simplify/decimate a mesh to reduce triangle count.",
+   "description": "Simplify a DynamicMeshActor's mesh to a triangle count or a fraction of its triangles, in place and undoable. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2970,6 +3073,8 @@
      "target_percentage": {
       "anyOf": [
        {
+        "maximum": 1.0,
+        "minimum": 0.0,
         "type": "number"
        },
        {
@@ -2977,7 +3082,7 @@
        }
       ],
       "default": null,
-      "description": "Target percentage (0.0-1.0)."
+      "description": "Fraction of the triangles to keep (0.0-1.0)."
      },
      "max_error": {
       "anyOf": [
@@ -2989,7 +3094,7 @@
        }
       ],
       "default": null,
-      "description": "Max geometric error tolerance."
+      "description": "Unused."
      }
     },
     "required": [
@@ -3015,7 +3120,7 @@
   {
    "name": "cut_unreal_mesh_plane",
    "title": "Cut Unreal Mesh Plane",
-   "description": "Cut/slice a mesh along an arbitrary plane.",
+   "description": "Cut a DynamicMeshActor's mesh with a plane given in the mesh's local space, keeping one side, in place and undoable. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -3025,12 +3130,32 @@
       "type": "string"
      },
      "plane_origin": {
-      "description": "Plane origin [x, y, z] in cm.",
-      "type": "string"
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "number"
+        },
+        "type": "array"
+       }
+      ],
+      "description": "Plane origin [x, y, z] in cm, in the mesh's space."
      },
      "plane_normal": {
-      "description": "Plane normal [x, y, z].",
-      "type": "string"
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "number"
+        },
+        "type": "array"
+       }
+      ],
+      "description": "Plane normal [x, y, z]."
      },
      "fill_holes": {
       "default": true,
@@ -3039,7 +3164,7 @@
      },
      "keep_both_sides": {
       "default": false,
-      "description": "Keep both halves (unused \u2014 UE plane cut keeps one side and optionally fills).",
+      "description": "Keep both halves (unused: the cut keeps one side).",
       "type": "boolean"
      }
     },
@@ -3068,7 +3193,7 @@
   {
    "name": "validate_unreal_mesh",
    "title": "Validate Unreal Mesh",
-   "description": "Validate mesh integrity (manifold, normals, degenerates, self-intersection).",
+   "description": "Check a DynamicMeshActor's mesh: watertight (no open border edges), compact (no triangle ID gaps) and with normals, with the counts behind each. Reads only, also while PIE runs. Needs the GeometryScripting plugin, which simul unreal setup enables.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -3106,17 +3231,21 @@
   {
    "name": "convert_unreal_mesh_format",
    "title": "Convert Unreal Mesh Format",
-   "description": "Convert mesh between formats (static mesh, dynamic mesh, skeletal mesh).",
+   "description": "Place an editable DynamicMeshActor copy of a StaticMesh asset at the world origin (one undoable spawn), for the other mesh tools to edit; target_format 'dynamic_mesh'. 'static_mesh' (back to an asset) is not implemented yet and is refused. Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
-      "description": "Source mesh actor/asset path.",
+      "description": "StaticMesh asset path, such as /Game/Meshes/SM_Crate.",
       "type": "string"
      },
      "target_format": {
-      "description": "'static_mesh' or 'dynamic_mesh'.",
+      "description": "'dynamic_mesh'; 'static_mesh' is refused as not implemented yet.",
+      "enum": [
+       "static_mesh",
+       "dynamic_mesh"
+      ],
       "type": "string"
      },
      "tessellation_options": {
@@ -3149,7 +3278,7 @@
   {
    "name": "remesh_unreal_mesh",
    "title": "Remesh Unreal Mesh",
-   "description": "Remesh a mesh (uniform, adaptive) to improve triangle quality.",
+   "description": "Uniformly remesh a DynamicMeshActor's mesh to a target edge length or triangle count, in place and undoable; reports the result's mean edge length. The remesher makes up to 1.6 times the target, so a target_triangle_count over 1,250,000, or an edge length predicted to make over 2,000,000 triangles, is refused. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -3178,6 +3307,8 @@
      "target_triangle_count": {
       "anyOf": [
        {
+        "maximum": 1250000,
+        "minimum": 4,
         "type": "integer"
        },
        {
@@ -3185,7 +3316,7 @@
        }
       ],
       "default": null,
-      "description": "Target triangle count."
+      "description": "Target triangle count, 4 to 1,250,000."
      },
      "smoothing_iterations": {
       "default": 3,
@@ -3216,7 +3347,7 @@
   {
    "name": "compute_unreal_mesh_uv",
    "title": "Compute Unreal Mesh Uv",
-   "description": "Generate or recompute UV coordinates for a mesh.",
+   "description": "Generate UVs for a DynamicMeshActor's mesh with XAtlas or PatchBuilder, in place and undoable. Method 'auto' uses XAtlas up to 20,000 triangles and PatchBuilder above that; 'xatlas' on a larger mesh is refused, since XAtlas crashed the editor on larger meshes. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -3226,18 +3357,23 @@
       "type": "string"
      },
      "method": {
-      "default": "auto_uv",
-      "description": "'xatlas' or 'patch_builder' (default xatlas).",
+      "default": "auto",
+      "description": "auto, xatlas or patch_builder; the reply's method names the one that ran.",
+      "enum": [
+       "auto",
+       "xatlas",
+       "patch_builder"
+      ],
       "type": "string"
      },
      "uv_channel": {
       "default": 0,
-      "description": "UV set index.",
+      "description": "UV channel to write; it must exist on the mesh.",
       "type": "integer"
      },
      "island_padding": {
       "default": 2.0,
-      "description": "Unused (reserved for future option support).",
+      "description": "Unused.",
       "type": "number"
      }
     },

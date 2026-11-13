@@ -189,7 +189,7 @@ def test_isaac_not_running(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
         "success": False,
         "error": NOT_REACHABLE,
         "error_type": "ConnectionError",
-        "details": None,
+        "details": {"exception_type": "ConnectionRefusedError"},
     }
     assert _records(instance, "execute_isaac_script") == [
         {
@@ -213,11 +213,12 @@ def test_isaac_script_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
     payload = _call(instance, "execute_isaac_script", code=CODE)
 
+    # The agent's script raised: ScriptError, naming what it raised.
     assert payload == {
         "success": False,
         "error": "name 'stage' is not defined",
-        "error_type": "NameError",
-        "details": {"traceback": TRACEBACK},
+        "error_type": "ScriptError",
+        "details": {"traceback": TRACEBACK, "exception_type": "NameError"},
     }
     assert _records(instance, "execute_isaac_script") == [
         {
@@ -244,8 +245,8 @@ def test_isaac_tool_that_raises(
     assert payload == {
         "success": False,
         "error": "[Errno 54] Connection reset by peer",
-        "error_type": "ConnectionResetError",
-        "details": None,
+        "error_type": "ConnectionError",
+        "details": {"exception_type": "ConnectionResetError"},
     }
     assert _records(instance, "get_isaac_stage_info") == [
         {"success": False, "error": "[Errno 54] Connection reset by peer"}
@@ -270,12 +271,17 @@ def test_isaac_partial_failure_without_a_success_flag(
 
     payload = _call(instance, "get_isaac_stage_info")
 
+    # The parts that worked stay; the failure is typed and named like any other.
     assert payload == {
         "stage_url": "anon:stage",
         "timeline_error": "timeline unavailable",
         "success": False,
+        "error_type": "EngineError",
+        "error": "timeline_error: timeline unavailable",
     }
-    assert _records(instance, "get_isaac_stage_info") == [{"success": False}]
+    assert _records(instance, "get_isaac_stage_info") == [
+        {"success": False, "error": "timeline_error: timeline unavailable"}
+    ]
 
 
 def test_isaac_rate_limited(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -468,7 +474,7 @@ def _embedded_blender(
 def test_blender_bpy_failure_with_object_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """bpy's RuntimeError keeps its class; the object it concerned rides as a note."""
+    """bpy's RuntimeError is an EngineError naming it; the object it concerned rides as a note."""
     instance = _embedded_blender(monkeypatch, tmp_path)
 
     payload = _call(instance, "setup_blender_rigid_body", object_name="Cube")
@@ -477,22 +483,39 @@ def test_blender_bpy_failure_with_object_context(
     assert payload == {
         "success": False,
         "error": message,
-        "error_type": "RuntimeError",
-        "details": None,
+        "error_type": "EngineError",
+        "details": {"exception_type": "RuntimeError"},
     }
     assert _records(instance, "setup_blender_rigid_body") == [
         {"success": False, "error": message}
     ]
 
 
+def test_blender_missing_object_is_not_found(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Blender's lookups raised a bare ValueError, which read as a ValidationError."""
+    instance = _embedded_blender(monkeypatch, tmp_path)
+
+    payload = _call(instance, "setup_blender_rigid_body", object_name="Ghost")
+
+    assert payload == {
+        "success": False,
+        "error": "Object not found: Ghost",
+        "error_type": "NotFoundError",
+        "details": {"code": "object_not_found", "object_name": "Ghost"},
+    }
+
+
 def test_blender_bpy_failure_without_added_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """An operator's TypeError keeps its class and bpy's message, which says enough.
+    """An operator's TypeError keeps bpy's message, which says enough.
 
     The wrapper that restated the field type, and re-raised the TypeError as a
     RuntimeError, is gone. A type Blender does not know never reaches bpy now:
-    the request model lists the valid ones.
+    the request model lists the valid ones. One an operator still refuses is
+    the ValidationError it is, with the choices the message lists.
     """
     instance = _embedded_blender(monkeypatch, tmp_path)
 
@@ -511,8 +534,19 @@ def test_blender_bpy_failure_without_added_context(
     assert payload == {
         "success": False,
         "error": message,
-        "error_type": "TypeError",
-        "details": None,
+        "error_type": "ValidationError",
+        "details": {
+            "exception_type": "TypeError",
+            "errors": [
+                {
+                    "field": None,
+                    "message": message,
+                    "type": "enum",
+                    "constraint": {"expected": ["FORCE", "WIND", "VORTEX"]},
+                    "input": "BOGUS",
+                }
+            ],
+        },
     }
     assert _records(instance, "add_blender_force_field") == [
         {"success": False, "error": refused["error"]},
@@ -525,7 +559,8 @@ def test_blender_attached_bpy_failure(
 ) -> None:
     """The add-on replies with the failure; the client raises it as a BridgeRemoteError.
 
-    The envelope reports the class the add-on raised, which the reply names.
+    The envelope reports the class the add-on raised, which the reply names,
+    as the EngineError it is.
     """
     settings = Settings(
         blender={
@@ -575,8 +610,8 @@ def test_blender_attached_bpy_failure(
     assert payload == {
         "success": False,
         "error": remote,
-        "error_type": "RuntimeError",
-        "details": None,
+        "error_type": "EngineError",
+        "details": {"exception_type": "RuntimeError"},
     }
     assert _records(instance, "setup_blender_rigid_body") == [
         {"success": False, "error": remote}
@@ -597,12 +632,26 @@ def test_blender_validation_error(
         "max_items": 0,
         "offset": 0,
     }
-    message = _validation_message(BlenderSceneObjectsRequest, **arguments)
+    # The same shape the MCP schema layer reports: one line per field, the
+    # fields listed, the input echoed; no pydantic banner or help URL.
+    message = "max_items: Input should be greater than or equal to 1"
+    assert _validation_message(BlenderSceneObjectsRequest, **arguments).count("max_items") == 1
     assert payload == {
         "success": False,
         "error": message,
         "error_type": "ValidationError",
-        "details": {"input": arguments},
+        "details": {
+            "errors": [
+                {
+                    "field": "max_items",
+                    "message": "Input should be greater than or equal to 1",
+                    "type": "greater_than_equal",
+                    "constraint": {"ge": 1},
+                    "input": 0,
+                }
+            ],
+            "input": arguments,
+        },
     }
     assert _records(instance, "list_blender_scene_objects") == [
         {"success": False, "error": message}
@@ -653,7 +702,7 @@ def test_blender_runtime_unavailable(
     assert payload == {
         "success": False,
         "error": "Blender runtime not available",
-        "error_type": "RuntimeError",
+        "error_type": "ConnectionError",
         "details": None,
     }
     assert _records(instance, "get_blender_info") == [
@@ -729,7 +778,11 @@ def test_unreal_editor_refuses_the_connection(
 def test_unreal_health_check_reports_the_refusal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The session catches this one itself; the envelope derives ``success`` from ``error``."""
+    """The session catches this one itself; the envelope derives ``success`` from ``error``.
+
+    It names the failure too: an unreachable editor is a ConnectionError, as
+    every refused connection is, where the payload used to carry no type.
+    """
     port = _refused_port()
     instance = _unreal_server(monkeypatch, tmp_path, port)
 
@@ -743,6 +796,7 @@ def test_unreal_health_check_reports_the_refusal(
         "connected": False,
         "error": payload["error"],
         "success": False,
+        "error_type": "ConnectionError",
     }
     assert _records(instance, "unreal_health_check") == [
         {"success": False, "error": payload["error"]}
