@@ -255,7 +255,12 @@ def test_invalid_input_reports_the_check_and_the_input(monkeypatch: pytest.Monke
         "success": False,
         "error": "Invalid format 'jpg'. Must be one of ['png']",
         "error_type": "ValidationError",
-        "details": {"input": {"resolution_x": 1920, "resolution_y": 1080, "format": "jpg", "inline": False}},
+        "details": {
+            "errors": [
+                {"field": None, "message": "Invalid format 'jpg'. Must be one of ['png']", "type": "value_error"}
+            ],
+            "input": {"resolution_x": 1920, "resolution_y": 1080, "format": "jpg", "inline": False},
+        },
     }
     assert session.calls == []
     assert _records(instance, "capture_unreal_viewport") == [

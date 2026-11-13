@@ -4454,12 +4454,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Invalid format 'jpg'. Must be one of ['png']",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "Invalid format 'jpg'. Must be one of ['png']",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "resolution_x": 1920,
        "resolution_y": 1080,
@@ -4502,12 +4509,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Invalid mode 'Bogus'. Must be one of ['EvaluateStatement', 'ExecuteFile', 'ExecuteStatement']",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "Invalid mode 'Bogus'. Must be one of ['EvaluateStatement', 'ExecuteFile', 'ExecuteStatement']",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "code": "print(1)",
        "code_bytes": 8,
@@ -4545,12 +4559,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Give all three location components or none",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "Give all three location components or none",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "location_x": 1.0,
        "location_y": 2.0,
@@ -4588,12 +4609,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Give all three rotation components or none",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "Give all three rotation components or none",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "location_x": 1.0,
        "location_y": 2.0,
@@ -4619,27 +4647,29 @@
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "fov": 180.0
    },
-   "envelope": [
-    {
-     "tool": "focus_unreal_on_actor",
-     "label": "Unreal",
-     "response_model": "UnrealFocusActorResponse",
-     "params": null
-    }
-   ],
+   "envelope": [],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
-     "error": "fov must be at least 0.001 and less than 180 degrees, not 180.0",
+     "error": "fov: Input should be less than 180",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": "fov",
+        "message": "Input should be less than 180",
+        "type": "less_than",
+        "constraint": {
+         "lt": 180.0
+        },
+        "input": 180.0
+       }
+      ],
       "input": {
        "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-       "distance": 0.0,
-       "fov": 180.0,
-       "aspect_ratio": 1.7777777777777777
+       "fov": 180.0
       }
      }
     }
@@ -4647,7 +4677,7 @@
    "usage": [
     {
      "success": false,
-     "error": "fov must be at least 0.001 and less than 180 degrees, not 180.0"
+     "error": "fov: Input should be less than 180"
     }
    ]
   },
@@ -4668,12 +4698,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "Pass parent_path to attach the actor, or detach=true to detach it from its parent",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
        "parent_path": "",
@@ -4707,12 +4744,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent, not both",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "Pass parent_path to attach the actor, or detach=true to detach it from its parent, not both",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
        "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
@@ -4735,28 +4779,29 @@
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "scope": "viewport"
    },
-   "envelope": [
-    {
-     "tool": "set_unreal_actor_visibility",
-     "label": "Unreal",
-     "response_model": "UnrealSetActorVisibilityResponse",
-     "params": null
-    }
-   ],
+   "envelope": [],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
-     "error": "scope must be one of ['all', 'editor', 'game'], not 'viewport'",
+     "error": "scope: Input should be 'all', 'editor' or 'game'",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": "scope",
+        "message": "Input should be 'all', 'editor' or 'game'",
+        "type": "literal_error",
+        "constraint": {
+         "expected": "'all', 'editor' or 'game'"
+        },
+        "input": "viewport"
+       }
+      ],
       "input": {
        "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-       "visible": true,
-       "propagate": true,
-       "scope": "viewport",
-       "persistent": false
+       "scope": "viewport"
       }
      }
     }
@@ -4764,7 +4809,7 @@
    "usage": [
     {
      "success": false,
-     "error": "scope must be one of ['all', 'editor', 'game'], not 'viewport'"
+     "error": "scope: Input should be 'all', 'editor' or 'game'"
     }
    ]
   },
@@ -4786,12 +4831,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "persistent applies to the editor's hiding (scope 'editor' or 'all'); hidden in game is always saved with the level",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": null,
+        "message": "persistent applies to the editor's hiding (scope 'editor' or 'all'); hidden in game is always saved with the level",
+        "type": "value_error"
+       }
+      ],
       "input": {
        "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
        "visible": true,
@@ -4815,31 +4867,28 @@
    "arguments": {
     "agent_control": "bogus"
    },
-   "envelope": [
-    {
-     "tool": "control_unreal_ui",
-     "label": "Unreal",
-     "response_model": "UnrealUIResponse",
-     "params": null
-    }
-   ],
+   "envelope": [],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
-     "error": "1 validation error for UnrealUIRequest\nagent_control\n  Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor' [type=literal_error, input_value='bogus', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
+     "error": "agent_control: Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor'",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": "agent_control",
+        "message": "Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor'",
+        "type": "literal_error",
+        "constraint": {
+         "expected": "'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor'"
+        },
+        "input": "bogus"
+       }
+      ],
       "input": {
-       "agent_control": "bogus",
-       "target": null,
-       "property_name": null,
-       "value": null,
-       "enabled": null,
-       "agent_id": "agent",
-       "position": null,
-       "activity": null
+       "agent_control": "bogus"
       }
      }
     }
@@ -4847,7 +4896,7 @@
    "usage": [
     {
      "success": false,
-     "error": "1 validation error for UnrealUIRequest\nagent_control\n  Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor' [type=literal_error, input_value='bogus', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error"
+     "error": "agent_control: Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor'"
     }
    ]
   },
@@ -4863,35 +4912,34 @@
      3.0
     ]
    },
-   "envelope": [
-    {
-     "tool": "control_unreal_ui",
-     "label": "Unreal",
-     "response_model": "UnrealUIResponse",
-     "params": null
-    }
-   ],
+   "envelope": [],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
-     "error": "1 validation error for UnrealUIRequest\nproperty_name\n  Input should be 'location', 'rotation' or 'scale' [type=literal_error, input_value='color', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
+     "error": "property_name: Input should be 'location', 'rotation' or 'scale'",
      "error_type": "ValidationError",
      "details": {
+      "errors": [
+       {
+        "field": "property_name",
+        "message": "Input should be 'location', 'rotation' or 'scale'",
+        "type": "literal_error",
+        "constraint": {
+         "expected": "'location', 'rotation' or 'scale'"
+        },
+        "input": "color"
+       }
+      ],
       "input": {
        "agent_control": "set_property",
-       "target": null,
        "property_name": "color",
        "value": [
         1.0,
         2.0,
         3.0
-       ],
-       "enabled": null,
-       "agent_id": "agent",
-       "position": null,
-       "activity": null
+       ]
       }
      }
     }
@@ -4899,7 +4947,7 @@
    "usage": [
     {
      "success": false,
-     "error": "1 validation error for UnrealUIRequest\nproperty_name\n  Input should be 'location', 'rotation' or 'scale' [type=literal_error, input_value='color', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error"
+     "error": "property_name: Input should be 'location', 'rotation' or 'scale'"
     }
    ]
   },
@@ -4920,18 +4968,26 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
-     "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-     "error_type": "JSONDecodeError",
-     "details": null
+     "error": "scalar_params_json: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+     "error_type": "ValidationError",
+     "details": {
+      "errors": [
+       {
+        "field": "scalar_params_json",
+        "message": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "type": "json_invalid"
+       }
+      ]
+     }
     }
    },
    "usage": [
     {
      "success": false,
-     "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+     "error": "scalar_params_json: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
     }
    ]
   },
@@ -4987,19 +5043,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "location: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not '1,x,3'",
      "error_type": "ValidationError",
      "details": {
-      "input": {
-       "primitive_type": "box",
-       "dimensions": "{}",
-       "segments": 32,
-       "location": "1,x,3",
-       "actor_label": null
-      }
+      "errors": [
+       {
+        "field": "location",
+        "message": "expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not '1,x,3'",
+        "type": "value_error"
+       }
+      ]
      }
     }
    },
@@ -5028,20 +5084,19 @@
    ],
    "session": [],
    "result": {
-    "is_error": false,
+    "is_error": true,
     "payload": {
      "success": false,
      "error": "plane_normal: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not 'up'",
      "error_type": "ValidationError",
      "details": {
-      "input": {
-       "mesh_path": "/Game/Meshes/SM_Chair",
-       "plane_origin": "0,0,0",
-       "plane_normal": "up",
-       "fill_holes": true,
-       "keep_both_sides": false,
-       "space": "world"
-      }
+      "errors": [
+       {
+        "field": "plane_normal",
+        "message": "expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not 'up'",
+        "type": "value_error"
+       }
+      ]
      }
     }
    },

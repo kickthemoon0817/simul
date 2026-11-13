@@ -9,6 +9,16 @@ standard library.
 from __future__ import annotations
 
 
+class ScriptExecutionDisabled(PermissionError):
+    """``security.allow_script_execution`` is off, so a script call is refused.
+
+    A PermissionError, as the refusal was raised before, with the
+    ``error_type`` the other backends report for it.
+    """
+
+    error_type = "ScriptExecutionDisabled"
+
+
 def exception_type_name(exc: BaseException) -> str:
     """Name an exception for an envelope's ``error_type``.
 

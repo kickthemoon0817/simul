@@ -74,7 +74,7 @@ def test_error_payloads_are_also_sent_once(monkeypatch: pytest.MonkeyPatch) -> N
     result = asyncio.run(instance._exec_isaac("get_isaac_stage_info", _boom()))
 
     assert result.structured_content is None
-    assert _payload(result)["error_type"] == "RuntimeError"
+    assert _payload(result)["error_type"] == "EngineError"
 
 
 def test_no_tool_declares_the_dead_permissive_output_schema(
@@ -112,8 +112,8 @@ def test_annotations_drop_constant_noise(monkeypatch: pytest.MonkeyPatch) -> Non
     ]
     assert annotated, "expected tools to carry annotations"
 
-    for annotations in annotated:
-        dumped = annotations.model_dump(by_alias=True, exclude_none=True)
+    for hints in annotated:
+        dumped = hints.model_dump(by_alias=True, exclude_none=True)
         assert "readOnlyHint" in dumped
         assert dumped.get("idempotentHint") is not False
         assert dumped.get("openWorldHint") is not True

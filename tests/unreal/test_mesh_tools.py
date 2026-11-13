@@ -18,7 +18,7 @@ from simul.adapters import _unreal_mesh_scripts as mesh_scripts
 from simul.adapters import unreal_runtime
 from simul.adapters._unreal_errors import UnrealTimeoutError
 from simul.adapters.unreal_runtime import UnrealRuntimeSession
-from simul.mcp.registration._reg_unreal import InvalidToolInput, request_model_for, session_arguments
+from simul.mcp.registration._reg_unreal import InvalidArgument, request_model_for, session_arguments
 from simul.mcp.registration._unreal_tools import UNREAL_TOOLS
 from tests.unreal.fake_geometry import LEVEL, LEVEL_PACKAGE, DynamicMesh, FakeEditor, level_editor, transform
 
@@ -1004,10 +1004,12 @@ def test_a_plane_takes_a_json_array_or_text(value: Any) -> None:
 
 @pytest.mark.parametrize("value", ["up", "0,0", "[0, 0]", [1, 2, 3, 4], "1,x,3", "nan,0,0", "", []])
 def test_a_plane_that_is_not_three_numbers_is_refused_by_validation(value: Any) -> None:
-    """The check fails the request model, which the envelope reports as a ValidationError."""
-    model = request_model_for(SPECS["cut_unreal_mesh_plane"])
-    with pytest.raises(InvalidToolInput, match="^plane_origin: expected 3 numbers"):
-        model(mesh_path=BODY, plane_origin=value, plane_normal=[0, 0, 1])
+    """The conversion fails as an InvalidArgument, which the envelope reports as a ValidationError."""
+    spec = SPECS["cut_unreal_mesh_plane"]
+    request = request_model_for(spec)(mesh_path=BODY, plane_origin=value, plane_normal=[0, 0, 1])
+    with pytest.raises(InvalidArgument, match="^plane_origin: expected 3 numbers") as raised:
+        session_arguments(spec, request)
+    assert raised.value.details["errors"][0]["field"] == "plane_origin"
 
 
 def test_a_location_is_optional() -> None:
@@ -1015,5 +1017,5 @@ def test_a_location_is_optional() -> None:
     model = request_model_for(spec)
     assert session_arguments(spec, model(primitive_type="box"))["location"] is None
     assert session_arguments(spec, model(primitive_type="box", location=[1, 2, 3]))["location"] == [1.0, 2.0, 3.0]
-    with pytest.raises(InvalidToolInput, match="^location: "):
-        model(primitive_type="box", location="1,x,3")
+    with pytest.raises(InvalidArgument, match="^location: "):
+        session_arguments(spec, model(primitive_type="box", location="1,x,3"))

@@ -1076,10 +1076,12 @@ def test_the_generator_tool_returns_its_tag_and_folder(monkeypatch: pytest.Monke
 @pytest.mark.parametrize(
     "arguments, error_type, message",
     [
-        ({"scene_type": "garage"}, "ValueError", "scene_type must be one of"),
-        ({"scene_type": "room", "parameters": "{bad"}, "JSONDecodeError", "Expecting property name"),
-        ({"scene_type": "room", "bounds_min": "0,0"}, "ValueError", "bounds_min must be three finite numbers"),
-        ({"scene_type": "room", "bounds_min": "0,0,nan"}, "ValueError", "bounds_min must be three finite numbers"),
+        # An argument check's ValueError is a ValidationError in the shared taxonomy.
+        ({"scene_type": "garage"}, "ValidationError", "scene_type must be one of"),
+        # Malformed JSON text is a ValidationError naming the parameter.
+        ({"scene_type": "room", "parameters": "{bad"}, "ValidationError", "parameters: Expecting property name"),
+        ({"scene_type": "room", "bounds_min": "0,0"}, "ValidationError", "bounds_min must be three finite"),
+        ({"scene_type": "room", "bounds_min": "0,0,nan"}, "ValidationError", "bounds_min must be three finite"),
     ],
 )
 def test_the_generator_tool_reports_invalid_input(

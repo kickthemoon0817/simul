@@ -310,7 +310,7 @@ def test_a_live_claim_of_another_session_is_still_not_reclaimable(
 
     assert claimed["error_type"] == "InstanceClaimed"
     assert "bound to a different MCP session" in claimed["error"]
-    assert released["error_type"] == "PermissionError"
+    assert released["error_type"] == "PermissionDenied"
     assert len(server.session_manager.get_instance_session(8226).view().sessions) == 1
 
 

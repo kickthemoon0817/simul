@@ -149,12 +149,14 @@ default `true`). When `false`, the server does not register
 `execute_isaac_script`, `execute_unreal_script`, `execute_blender_script`, or
 Unreal's `call_unreal_actor_function` and `batch_unreal_operations`
 dispatchers, and `simul isaac exec` / `simul unreal exec` return a
-`ScriptExecutionDisabled` error. The fixed granular tools, including
-`control_unreal_ui`, keep working. The Isaac prim tools refuse the writes
-that would plant code instead (`ScriptExecutionDisabled`): code-carrying
-attributes such as `inputs:script*` and `inputs:codeStr`, a `node:type` that
-runs code (ScriptNode, omni.warp's WarpKernel, Replicator's OgnAugment), any
-write to such a node, creating one and duplicating a subtree that holds one.
+`ScriptExecutionDisabled` error. The server's instructions and the other
+tools' descriptions then no longer point at the script tools. The fixed
+granular tools, including `control_unreal_ui`, keep working. The Isaac prim
+tools refuse the writes that would plant code instead
+(`ScriptExecutionDisabled`): code-carrying attributes such as
+`inputs:script*` and `inputs:codeStr`, a `node:type` that runs code
+(ScriptNode, omni.warp's WarpKernel, Replicator's OgnAugment), any write to
+such a node, creating one and duplicating a subtree that holds one.
 
 Isaac Sim also runs Python that an OmniGraph node carries as data:
 `omni.graph.scriptnode.ScriptNode` runs its `inputs:script`,
@@ -383,9 +385,14 @@ trusted single-agent setup, if a workflow needs more. An Unreal tool's own argum
 all-or-none camera groups of `set_unreal_camera_view` and `control_unreal_ui`'s
 control and property names) run inside the shared envelope, so a call they
 refuse spends a token and is recorded in the usage log like any other failed
-call. Arguments that do not match a tool's input schema (a wrong type, a
-missing required argument) are refused by the MCP layer before the call
-reaches the envelope: no token is spent and nothing is recorded.
+call. So do arguments that do not match a tool's input schema (a wrong type,
+a missing or unexpected argument, a value outside the schema's
+`minimum`/`maximum` or `enum`): FastMCP refuses them before the tool runs, and
+the server answers with the same `ValidationError` envelope, sent with
+`isError: true`, as every other refusal ([tools.md](tools.md#errors)), after
+spending a token and recording the call. The server's own tools (the Isaac
+instance and claim tools, `get_tool_usage_stats`) and an Isaac path the
+sandbox refuses go through the envelope too.
 
 ### Multi-agent claims
 
@@ -453,6 +460,9 @@ shows it, and by the session's default label otherwise.
 
 ## Usage statistics
 
-Every tool call is recorded in a persistent JSONL log. Agents read it with
-`get_tool_usage_stats`; operators read it with `simul stats` and clear it
-with `simul stats --reset`.
+Every tool call is recorded in a persistent JSONL log
+(`~/.simul/logs/tool_usage.jsonl`), each row with the agent label and the
+session label it came in on. Agents read their own session's calls with
+`get_tool_usage_stats` (`scope="server"` adds per-tool counts across every
+session, never other sessions' records); operators read everything with
+`simul stats` and clear it with `simul stats --reset`.

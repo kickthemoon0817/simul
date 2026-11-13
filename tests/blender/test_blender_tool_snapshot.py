@@ -61,7 +61,8 @@ SESSION_AGENT = "<session agent id>"
 SNAPSHOT_AGENT = "snapshot-agent"
 INVALID_VALUE: Dict[str, Any] = {"bogus": 1}
 _PYDANTIC_URL = re.compile(r"https://errors\.pydantic\.dev/[0-9.]+/")
-_MODEL_CHECK = re.compile(r"^\d+ validation errors? for (\w+)\n")
+# A reply the response model refuses is an EngineError naming the model.
+_MODEL_CHECK = re.compile(r"^\w+ received a reply that does not match its response schema (\w+): ")
 
 # The listing configurations: (mode, surface, script execution allowed).
 SURFACES: Dict[str, Tuple[str, str, bool]] = {
@@ -312,6 +313,9 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "data_path": "location",
             "frame": 10,
             "index": 2,
+            "value": 1.5,
+            "interpolation": "LINEAR",
+            "keyframe_type": "BREAKDOWN",
         },
     },
     "delete_blender_keyframe": {
@@ -323,7 +327,45 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "index": 2,
         },
     },
-    "get_blender_keyframes": {"minimal": {"object_name": "Cube"}},
+    "set_blender_pose_bone_transform": {
+        "minimal": {"object_name": "Rig", "bone_name": "Hand"},
+        "full": {
+            "object_name": "Rig",
+            "bone_name": "Hand",
+            "location": [0, 0.1, 0],
+            "rotation_quaternion": [1, 0, 0, 0],
+            "scale": [1, 1, 2],
+        },
+    },
+    "get_blender_keyframes": {
+        "minimal": {"object_name": "Cube"},
+        "full": {
+            "object_name": "Rig",
+            "data_path": "rotation_quaternion",
+            "bone_name": "Hand",
+            "include_keys": True,
+            "offset": 3,
+            "key_offset": 7,
+            "limit": 2,
+        },
+    },
+    "insert_blender_keyframes": {
+        "minimal": {
+            "object_name": "Cube",
+            "channels": [
+                {"data_path": "location", "frames": [1, 10], "values": [[0, 0, 0], [1, 2, 3]]}
+            ],
+        },
+        "full": {
+            "object_name": "Cube",
+            "channels": [
+                {"data_path": "location", "index": 2, "frames": [1, 5], "values": [0.5, 1.5]},
+                {"data_path": "scale", "frames": [3], "values": [[2, 2, 2]]},
+            ],
+            "interpolation": "LINEAR",
+            "keyframe_type": "EXTREME",
+        },
+    },
     "setup_blender_rigid_body": {
         "minimal": {"object_name": "Cube"},
         "full": {
@@ -399,7 +441,30 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
     "get_blender_object_trajectory": {
         "minimal": {"object_name": "Cube", "start_frame": 1, "end_frame": 10},
-        "full": {"object_name": "Cube", "start_frame": 1, "end_frame": 10, "step": 3},
+        "full": {
+            "object_name": "Rig",
+            "start_frame": 1,
+            "end_frame": 10,
+            "step": 3,
+            "bone_name": "Hand",
+            "fields": ["location", "velocity"],
+            "offset": 2,
+            "limit": 5,
+            "max_simulated_frames": 100,
+        },
+    },
+    "get_blender_trajectories": {
+        "minimal": {"targets": [{"object_name": "Cube"}], "start_frame": 1, "end_frame": 10},
+        "full": {
+            "targets": [{"object_name": "Rig", "bone_name": "Hand"}, {"object_name": "Cube"}],
+            "start_frame": 1,
+            "end_frame": 10,
+            "step": 3,
+            "fields": ["location", "rotation_quaternion"],
+            "offset": 2,
+            "limit": 5,
+            "max_simulated_frames": 100,
+        },
     },
     "bake_blender_simulation": {
         "minimal": {"frame_start": 1, "frame_end": 50},
@@ -732,7 +797,7 @@ def _outcome(payload: Dict[str, Any], called: bool) -> Dict[str, Any]:
     """The response, or just the model it was checked against when a call reached the session."""
     error = str(payload.get("error") or "")
     check = _MODEL_CHECK.match(error)
-    if called and payload.get("error_type") == "ValidationError" and check:
+    if called and payload.get("error_type") == "EngineError" and check:
         return {"checked_against": check.group(1)}
     return json.loads(
         _PYDANTIC_URL.sub("https://errors.pydantic.dev/<version>/", json.dumps(payload))
