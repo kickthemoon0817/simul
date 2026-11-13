@@ -210,7 +210,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "cast_shadows": False,
     },
     "set_unreal_render_settings": {"setting_name": "r.ScreenPercentage", "setting_value": "50"},
-    "control_unreal_simulation": {"action": "start"},
+    "control_unreal_simulation": {"action": "start", "mode": "play"},
     "get_unreal_simulation_status": {},
     "enable_unreal_physics": {
         "actor_path": ACTOR,
@@ -225,10 +225,12 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "force_x": 1.0,
         "force_y": 2.0,
         "force_z": 3.0,
-        "is_impulse": True,
+        "is_impulse": False,
         "location_x": 4.0,
         "location_y": 5.0,
         "location_z": 6.0,
+        "duration": 2.5,
+        "units": "si",
     },
     "set_unreal_physics_params": {
         "actor_path": ACTOR,
@@ -236,6 +238,20 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "linear_damping": 0.1,
         "angular_damping": 0.2,
         "enable_gravity": False,
+    },
+    "get_unreal_physics_state": {
+        "actor_paths": f"{ACTOR}, {PARENT}",
+        "tag_filter": "props",
+        "world": "simulation",
+        "max_results": 7,
+        "offset": 14,
+    },
+    "list_unreal_simulation_actors": {
+        "class_filter": "StaticMeshActor",
+        "tag_filter": "props",
+        "simulating_only": True,
+        "max_results": 9,
+        "offset": 18,
     },
     "import_unreal_usd": {
         "usd_path": "/tmp/in.usd",

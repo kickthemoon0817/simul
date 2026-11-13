@@ -2366,7 +2366,45 @@
     {
      "method": "control_simulation",
      "arguments": {
-      "action": "start"
+      "action": "start",
+      "mode": "simulate"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "control_simulation"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "control_unreal_simulation",
+   "case": "every argument",
+   "arguments": {
+    "action": "start",
+    "mode": "play"
+   },
+   "envelope": [
+    {
+     "tool": "control_unreal_simulation",
+     "label": "Unreal",
+     "response_model": "UnrealControlSimulationResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "control_simulation",
+     "arguments": {
+      "action": "start",
+      "mode": "play"
      }
     }
    ],
@@ -2597,7 +2635,9 @@
       "is_impulse": false,
       "location_x": null,
       "location_y": null,
-      "location_z": null
+      "location_z": null,
+      "duration": 0.0,
+      "units": "unreal"
      }
     }
    ],
@@ -2622,10 +2662,12 @@
     "force_x": 1.0,
     "force_y": 2.0,
     "force_z": 3.0,
-    "is_impulse": true,
+    "is_impulse": false,
     "location_x": 4.0,
     "location_y": 5.0,
-    "location_z": 6.0
+    "location_z": 6.0,
+    "duration": 2.5,
+    "units": "si"
    },
    "envelope": [
     {
@@ -2643,10 +2685,12 @@
       "force_x": 1.0,
       "force_y": 2.0,
       "force_z": 3.0,
-      "is_impulse": true,
+      "is_impulse": false,
       "location_x": 4.0,
       "location_y": 5.0,
-      "location_z": 6.0
+      "location_z": 6.0,
+      "duration": 2.5,
+      "units": "si"
      }
     }
    ],
@@ -2737,6 +2781,169 @@
     "payload": {
      "success": true,
      "method": "set_physics_params"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_physics_state",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "get_unreal_physics_state",
+     "label": "Unreal",
+     "response_model": "UnrealPhysicsStateResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_physics_state",
+     "arguments": {
+      "actor_paths": null,
+      "tag_filter": null,
+      "world": "auto",
+      "max_results": 100,
+      "offset": 0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_physics_state"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_physics_state",
+   "case": "every argument",
+   "arguments": {
+    "actor_paths": "/Game/Maps/Test.Test:PersistentLevel.Chair_0, /Game/Maps/Test.Test:PersistentLevel.Table_0",
+    "tag_filter": "props",
+    "world": "simulation",
+    "max_results": 7,
+    "offset": 14
+   },
+   "envelope": [
+    {
+     "tool": "get_unreal_physics_state",
+     "label": "Unreal",
+     "response_model": "UnrealPhysicsStateResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_physics_state",
+     "arguments": {
+      "actor_paths": [
+       "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+      ],
+      "tag_filter": "props",
+      "world": "simulation",
+      "max_results": 7,
+      "offset": 14
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_physics_state"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_simulation_actors",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "list_unreal_simulation_actors",
+     "label": "Unreal",
+     "response_model": "UnrealListSimulationActorsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "list_simulation_actors",
+     "arguments": {
+      "class_filter": null,
+      "tag_filter": null,
+      "simulating_only": false,
+      "max_results": 200,
+      "offset": 0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "list_simulation_actors"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_simulation_actors",
+   "case": "every argument",
+   "arguments": {
+    "class_filter": "StaticMeshActor",
+    "tag_filter": "props",
+    "simulating_only": true,
+    "max_results": 9,
+    "offset": 18
+   },
+   "envelope": [
+    {
+     "tool": "list_unreal_simulation_actors",
+     "label": "Unreal",
+     "response_model": "UnrealListSimulationActorsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "list_simulation_actors",
+     "arguments": {
+      "class_filter": "StaticMeshActor",
+      "tag_filter": "props",
+      "simulating_only": true,
+      "max_results": 9,
+      "offset": 18
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "list_simulation_actors"
     }
    },
    "usage": [

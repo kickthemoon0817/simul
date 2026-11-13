@@ -101,6 +101,111 @@ def level_actors():
 """
 )
 
+#: ``error_type`` of a call that acts on or reads the running simulation while
+#: none runs.
+SIMULATION_NOT_RUNNING = "SimulationNotRunning"
+
+#: ``error_type`` of an actor with no copy in the running simulation.
+NOT_IN_SIMULATION = "NotInSimulation"
+
+#: The hint of a SimulationNotRunning refusal.
+SIMULATION_START_HINT = (
+    "Start the simulation with control_unreal_simulation, action 'start' (CLI: simul unreal sim start), "
+    "then retry."
+)
+
+# The running simulation and an actor's copy in it, on top of EDITOR_WORLD:
+# simulation_world(), in_simulation(actor), simulation_counterpart(actor) and
+# editor_counterpart(actor). While Play In Editor (or Simulate In Editor) runs,
+# Unreal duplicates the editor world into a play world whose package is the
+# map's with UEDPIE_<n>_ before its name (/Game/Maps/UEDPIE_0_Lab), and each
+# actor into it at the same path in that package, keeping its name, label and
+# ActorGuid (observed on UE 5.7.4). The editor world's bodies read as
+# simulating but never step: an impulse on the editor actor returned success
+# while its copy stayed put, and reads gave the editor's z = 300 for a body
+# resting at 49.5. So whatever acts on or reads the running simulation maps the
+# actor to its copy first. An actor at a play-world path is its own copy, so
+# simulation paths are accepted as they always were. When the path does not
+# map (World Partition streams actors into cell levels), the copy is the play
+# world's actor of the same class and ActorGuid. Lookups use find_object,
+# which loads nothing. A copy destroyed during the simulation stays findable,
+# invalid, until garbage collection (about a minute), so every counterpart is
+# checked with SystemLibrary.is_valid: a destroyed one is no counterpart.
+SIMULATION_WORLD = (
+    EDITOR_WORLD
+    + f"_SIMULATION_NOT_RUNNING, _NOT_IN_SIMULATION, _SIMULATION_START_HINT = "
+    f"{SIMULATION_NOT_RUNNING!r}, {NOT_IN_SIMULATION!r}, {SIMULATION_START_HINT!r}\n"
+    + """
+def simulation_world():
+    return unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+
+def play_prefix(package_name):
+    match = re.match("UEDPIE_[0-9]+_", package_name)
+    return match.group(0) if match else None
+
+def in_simulation(actor):
+    world = actor.get_world()
+    return world is not None and play_prefix(world.get_outermost().get_name().rpartition("/")[2]) is not None
+
+def guid_of(actor):
+    guid = actor.get_editor_property("actor_guid")
+    return guid if unreal.GuidLibrary.is_valid_guid(guid) else None
+
+def same_actor(candidate, actor, guid):
+    return (candidate.get_class() == actor.get_class() and guid is not None
+            and unreal.GuidLibrary.equal_equal_guid_guid(candidate.get_editor_property("actor_guid"), guid))
+
+def live(actor):
+    return isinstance(actor, unreal.Actor) and unreal.SystemLibrary.is_valid(actor)
+
+def at_package(actor, rename):
+    package, dot, rest = actor.get_path_name().partition(".")
+    folder, slash, name = package.rpartition("/")
+    renamed = rename(name)
+    return None if renamed is None else unreal.find_object(None, folder + slash + renamed + dot + rest)
+
+def simulation_counterpart(actor):
+    world = simulation_world()
+    if world is None or not live(actor):
+        return None
+    if in_simulation(actor):
+        return actor
+    prefix = play_prefix(world.get_outermost().get_name().rpartition("/")[2]) or ""
+    copy = at_package(actor, lambda name: prefix + name)
+    if live(copy) and copy.get_class() == actor.get_class():
+        return copy
+    guid = guid_of(actor)
+    for candidate in unreal.GameplayStatics.get_all_actors_of_class(world, actor.get_class()):
+        if live(candidate) and same_actor(candidate, actor, guid):
+            return candidate
+    return None
+
+def editor_counterpart(actor):
+    if not live(actor):
+        return None
+    if not in_simulation(actor):
+        return actor
+    original = at_package(actor, lambda name: name[len(play_prefix(name)):] if play_prefix(name) else None)
+    if live(original) and not in_simulation(original):
+        return original
+    world = editor_world()
+    guid = guid_of(actor)
+    if world is None or guid is None:
+        return None
+    for candidate in unreal.GameplayStatics.get_all_actors_of_class(world, actor.get_class()):
+        if live(candidate) and same_actor(candidate, actor, guid):
+            return candidate
+    return None
+
+def simulation_refusal(what, why=None):
+    error = "No simulation is running, and " + what + " needs the running simulation"
+    if why:
+        error += ": " + why
+    return {"success": False, "error_type": _SIMULATION_NOT_RUNNING, "error": error,
+            "details": {"code": "SIMULATION_NOT_RUNNING", "hint": _SIMULATION_START_HINT}}
+"""
+)
+
 #: Message of the ``SimulNotFound`` an editor script raises for an actor path
 #: that names no live actor of the editor world; ``{path}`` is the path.
 ACTOR_NOT_FOUND = "Actor not found: {path}"
@@ -2197,15 +2302,8 @@ INCOMPATIBLE_BODY = "IncompatibleBody"
 # collision (CTF_USE_COMPLEX_AS_SIMPLE) cannot simulate at all, though it can
 # be a kinematic collider. StaticMeshEditorSubsystem reports -1 for every mesh
 # while Play In Editor runs, so the mesh checks are skipped then.
-PHYSICS_HELPERS = ACTOR_HELPERS + f"_INCOMPATIBLE_BODY = {INCOMPATIBLE_BODY!r}\n" + """
-import re
-
+PHYSICS_HELPERS = ACTOR_HELPERS + SIMULATION_WORLD + f"_INCOMPATIBLE_BODY = {INCOMPATIBLE_BODY!r}\n" + """
 PHYSICS_COLLISION = ("QUERY_AND_PHYSICS", "PHYSICS_ONLY")
-
-def in_simulation(actor):
-    world = actor.get_world()
-    package = world.get_outermost().get_name().rpartition("/")[2] if world is not None else ""
-    return re.match("UEDPIE_[0-9]+_", package) is not None
 
 def physics_component(actor):
     return actor_component(actor, unreal.PrimitiveComponent)
@@ -2297,14 +2395,11 @@ def refusal(actor, what, problems, component):
                      + "; ".join(problem["message"] for problem in problems),
             "details": {"problems": problems, "component_path": component.get_path_name()}}
 
-def pie_running():
-    return bool(unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).is_in_play_in_editor())
-
 def edit_note(simulation):
     if simulation:
         return ("This changed the running simulation's copy of the actor only: Unreal records no undo "
                 "for it and it is gone when the simulation stops.")
-    if pie_running():
+    if pie_active():
         return ("Play In Editor is running: this changed the editor world, which the running "
                 "simulation does not see; it takes effect the next time the simulation starts.")
     return None
@@ -2530,6 +2625,325 @@ def set_collision():
     return result
 
 print(json.dumps(set_collision()))
+"""
+
+#: Name of the editor-side module that keeps continuous forces going. Versioned
+#: so a newer simul never runs an older editor session's tick function.
+FORCE_MODULE = "_simul_unreal_forces_v2"
+
+# The longest physics step Unreal takes in one frame, as UWorld::SetupPhysicsTickFunctions
+# hands it to FChaosScene::SetUpForFrame (UE 5.7): min(frame time, MaxPhysicsDeltaTime),
+# 1/30 s by default, or with substepping min(frame time, MaxSubsteps x
+# MaxSubstepDeltaTime). A frame longer than that advances game time by the whole
+# frame (up to 0.4 s, MaxDeltaTime) but physics, gravity included, by the limit
+# only. None means no limit. PhysicsSettings is read through its default
+# object; where Python cannot read it the engine default, 1/30 s, stands.
+PHYSICS_STEP_LIMIT = """
+def physics_step_limit():
+    try:
+        settings = unreal.PhysicsSettings.get_default_object()
+        if settings.get_editor_property("substepping"):
+            step = settings.get_editor_property("max_substep_delta_time")
+            return step * settings.get_editor_property("max_substeps") if step > 0 else None
+        limit = settings.get_editor_property("max_physics_delta_time")
+        return limit if limit > 0 else None
+    except Exception:
+        return 1.0 / 30.0
+"""
+
+# The source of FORCE_MODULE. A force added once acts for one physics step:
+# Unreal applies AddForce to the next step and then clears it, so one call at
+# twice the body's weight gave a 19 cm/s blip (UE 5.7.4). A continuous force is a
+# job that a ticker (unreal.register_ticker_callback, called once every editor
+# frame, after the world has ticked, headless too) serves each frame: it adds,
+# as an impulse, the momentum the force carries over the physics time that frame
+# simulated, the frame's game time capped at the physics step limit
+# (PHYSICS_STEP_LIMIT), and counts the duration in that physics time. So the
+# force keeps pace with gravity: counting game time instead gave a body held up
+# by exactly its weight +1216 cm/s at 10 fps, as each 0.1 s frame added 0.1 s of
+# force but only 1/30 s of gravity. Remote Control runs the request, and the
+# ticker runs, after the frame's world tick, so an impulse lands in the next
+# frame's step: APPLY_FORCE delivers the first step's share in the request
+# itself (sized by the frame just simulated), and each ticker call delivers the
+# next one, sized by the step that frame took. So no step goes uncompensated,
+# and a frame whose length changes shifts the push by at most that change.
+# Paused time adds nothing. The job names the component by path and
+# finds it each frame, so it holds no reference to the play world; it ends when
+# the simulation stops or restarts (its game time runs behind the job's) or the
+# body is destroyed, and the ticker removes itself when no job is left
+# (returning False removes a ticker callback).
+_FORCE_MODULE_SOURCE = """
+import unreal
+
+jobs = []
+handle = None
+
+def serve(job, world):
+    component = unreal.find_object(None, job["component"])
+    if component is None or not unreal.SystemLibrary.is_valid(component):
+        return False
+    now = unreal.GameplayStatics.get_time_seconds(world)
+    if now < job["last"]:
+        return False
+    elapsed = now - job["last"]
+    job["last"] = now
+    step = elapsed if job["limit"] is None else min(elapsed, job["limit"])
+    step = min(step, job["duration"] - job["served"])
+    if step > 0:
+        impulse = unreal.Vector(*[value * step for value in job["force"]])
+        if job["location"] is None:
+            component.add_impulse(impulse)
+        else:
+            component.add_impulse_at_location(impulse, unreal.Vector(*job["location"]))
+        job["served"] += step
+        job["frames"] += 1
+    return job["served"] < job["duration"] - 1e-9
+
+def tick(delta_seconds):
+    global handle
+    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+    jobs[:] = [job for job in jobs
+               if world is not None and world.get_path_name() == job["world"] and serve(job, world)]
+    if jobs:
+        return True
+    if handle is not None:
+        try:
+            unreal.unregister_ticker_callback(handle)
+        except Exception:
+            pass
+    handle = None
+    return False
+
+def start(job):
+    global handle
+    jobs.append(job)
+    if handle is None:
+        handle = unreal.register_ticker_callback(tick)
+"""
+
+# Expects ``args`` = {"actor_path", "vector" [x, y, z] in Unreal units (kg cm/s^2
+# for a force, kg cm/s for an impulse), "location" (world cm) or None,
+# "impulse", "duration" (s of physics time; 0 is one physics step)}. Acts on the
+# actor's copy in the running simulation (SIMULATION_WORLD), the only world
+# whose bodies step; with no simulation running it refuses (SimulationNotRunning).
+APPLY_FORCE = (
+    PHYSICS_HELPERS
+    + PHYSICS_STEP_LIMIT
+    + f"_FORCE_MODULE, _FORCE_MODULE_SOURCE = {FORCE_MODULE!r}, {_FORCE_MODULE_SOURCE!r}\n"
+    + """
+import sys, types
+
+def force_module():
+    module = sys.modules.get(_FORCE_MODULE)
+    if module is None:
+        module = types.ModuleType(_FORCE_MODULE)
+        exec(_FORCE_MODULE_SOURCE, module.__dict__)
+        sys.modules[_FORCE_MODULE] = module
+    return module
+
+def push(component, vector, location, impulse):
+    if impulse:
+        if location is None:
+            component.add_impulse(unreal.Vector(*vector))
+        else:
+            component.add_impulse_at_location(unreal.Vector(*vector), unreal.Vector(*location))
+    elif location is None:
+        component.add_force(unreal.Vector(*vector))
+    else:
+        component.add_force_at_location(unreal.Vector(*vector), unreal.Vector(*location))
+
+def apply():
+    actor = actor_at(args["actor_path"], play_world=True)
+    world = simulation_world()
+    if world is None:
+        return simulation_refusal("apply_unreal_force", "the editor world's bodies never step, so a force "
+                                  "applied there would be lost")
+    copy = simulation_counterpart(actor)
+    if copy is None:
+        return {"success": False, "error_type": _NOT_IN_SIMULATION,
+                "error": actor.get_actor_label() + " has no live copy in the running simulation ("
+                         + world.get_path_name() + "): an actor spawned after the simulation started, not "
+                         "loaded in it, or destroyed in it has none; list_unreal_simulation_actors lists the "
+                         "simulation's actors",
+                "details": {"code": "NOT_IN_SIMULATION", "actor_path": args["actor_path"]}}
+    component = physics_component(copy)
+    mode = physics_mode(component)
+    if mode != "simulated":
+        return {"success": False, "error_type": _INCOMPATIBLE_BODY,
+                "error": copy.get_actor_label() + " does not simulate physics in the running simulation "
+                         "(physics_mode " + mode + "), so a force moves nothing: enable_unreal_physics on the "
+                         "editor actor and restart the simulation, or on the simulation path for this run",
+                "details": dict(physics_report(component), code="NOT_SIMULATING")}
+    vector, location = args["vector"], args["location"]
+    paused = bool(unreal.GameplayStatics.is_game_paused(world))
+    now = unreal.GameplayStatics.get_time_seconds(world)
+    limit = physics_step_limit()
+    if args["impulse"]:
+        push(component, vector, location, True)
+        application = "impulse"
+    elif args["duration"] > 0:
+        # The first step's share now, so it lands with the next step's gravity (see _FORCE_MODULE_SOURCE).
+        frame = unreal.GameplayStatics.get_world_delta_seconds(world)
+        first = 0.0 if paused else min(frame if limit is None else min(frame, limit), args["duration"])
+        if first > 0:
+            push(component, [value * first for value in vector], location, True)
+        if first < args["duration"] - 1e-9:
+            force_module().start({"world": world.get_path_name(), "component": component.get_path_name(),
+                                  "force": list(vector), "location": location, "last": now, "limit": limit,
+                                  "duration": args["duration"], "served": first, "frames": 1 if first else 0})
+        application = "continuous"
+    else:
+        push(component, vector, location, False)
+        application = "one_frame"
+    mass = component.get_mass()
+    seconds = None if application == "one_frame" else (1.0 if application == "impulse" else args["duration"])
+    expected = [value * seconds / mass for value in vector] if seconds is not None and mass > 0 else None
+    warnings = []
+    if application == "one_frame":
+        frame = unreal.GameplayStatics.get_world_delta_seconds(world)
+        step = frame if limit is None else min(frame, limit)
+        warnings.append("A force with duration 0 acts for one physics step (the frame time, at most the "
+                        "physics step limit; about " + format(step, ".4f") + " s now), changing the velocity "
+                        "by about force x step / mass; pass duration for a sustained force, or is_impulse for "
+                        "an instant change.")
+    if paused:
+        warnings.append("The simulation is paused: the force acts once it resumes.")
+    return {"actor_path": args["actor_path"], "simulation_actor_path": copy.get_path_name(),
+            "component_path": component.get_path_name(), "world": "simulation", "force_applied": True,
+            "application": application, "mass_kg": mass, "expected_delta_v": expected,
+            "physics_step_limit_s": limit, "sim_time": now,
+            "ends_at_sim_time": now + args["duration"] if application == "continuous" else None,
+            "paused": paused, "warning": " ".join(warnings) or None}
+
+print(json.dumps(apply()))
+"""
+)
+
+# Expects ``args`` = {"paths", "tag" (or None), "world" ("auto", "simulation"
+# or "editor"), "offset", "max_results", "budget"}. Reads each actor's body: in
+# the running simulation (its copy, SIMULATION_WORLD) or in the editor world.
+# The actors at paths come first, then the actors with the tag, each once (an
+# editor path and the simulation path of the same body are one body); one page
+# of them, from offset, is rendered (SCENE_READ_HELPERS.page). A body's state is
+# its actor's root primitive component, else its only one; an actor without one
+# reports its transform alone. A path with no live actor, or no live copy in the
+# world read, is listed in not_found.
+PHYSICS_STATE = PHYSICS_HELPERS + SCENE_READ_HELPERS + """
+import math
+
+def vector(value):
+    return [value.x, value.y, value.z]
+
+def body_of(actor):
+    root = actor.root_component
+    if isinstance(root, unreal.PrimitiveComponent):
+        return root
+    components = actor.get_components_by_class(unreal.PrimitiveComponent)
+    return components[0] if len(components) == 1 else None
+
+def state(actor, simulation):
+    location, rotation = actor.get_actor_location(), actor.get_actor_rotation()
+    editor = editor_counterpart(actor) if simulation else actor
+    entry = {"name": actor.get_actor_label(), "class_name": actor.get_class().get_name(),
+             "editor_path": editor.get_path_name() if editor is not None else None,
+             "simulation_path": actor.get_path_name() if simulation else None,
+             "location": vector(location), "rotation": [rotation.pitch, rotation.yaw, rotation.roll]}
+    component = body_of(actor)
+    if component is None:
+        entry.update(component_path=None, physics_mode=None)
+        return entry
+    linear = component.get_physics_linear_velocity()
+    report = physics_report(component)
+    entry.update(component_path=component.get_path_name(), physics_mode=report["physics_mode"],
+                 linear_velocity=vector(linear),
+                 angular_velocity=vector(component.get_physics_angular_velocity_in_degrees()),
+                 speed=math.sqrt(linear.x * linear.x + linear.y * linear.y + linear.z * linear.z),
+                 awake=bool(component.is_any_rigid_body_awake()) if report["physics_mode"] == "simulated" else None,
+                 mass_kg=report["mass_kg"], center_of_mass=vector(component.get_center_of_mass()),
+                 gravity_enabled=report["gravity_enabled"], simulate_physics=report["simulate_physics"])
+    return entry
+
+def read():
+    world = simulation_world()
+    if args["world"] == "simulation" and world is None:
+        return simulation_refusal("get_unreal_physics_state with world 'simulation'")
+    simulation = world is not None and args["world"] != "editor"
+    actors, missing, seen = [], [], set()
+
+    def add(actor):
+        key = actor.get_path_name()
+        if key not in seen:
+            seen.add(key)
+            actors.append(actor)
+
+    for path in args["paths"]:
+        try:
+            found = actor_at(path, play_world=True)
+        except SimulNotFound:
+            missing.append(path)
+            continue
+        target = simulation_counterpart(found) if simulation else editor_counterpart(found)
+        if target is None:
+            missing.append(path)
+        else:
+            add(target)
+    if args["tag"]:
+        pool = (unreal.GameplayStatics.get_all_actors_of_class(world, unreal.Actor) if simulation
+                else level_actors())
+        for actor in pool:
+            if live(actor) and actor.actor_has_tag(args["tag"]):
+                add(actor)
+    entries, next_offset, ended = page(actors, args["offset"], args["max_results"], args["budget"],
+                                       lambda actor: state(actor, simulation))
+    return {"world": "simulation" if simulation else "editor", "pie_active": pie_active(),
+            "sim_time": unreal.GameplayStatics.get_time_seconds(world) if simulation else None,
+            "paused": bool(unreal.GameplayStatics.is_game_paused(world)) if simulation else None,
+            "bodies": entries, "count": len(entries), "total": len(actors), "offset": args["offset"],
+            "next_offset": next_offset, "page_ended_by": ended, "not_found": missing}
+
+print(json.dumps(read()))
+"""
+
+# Expects ``args`` = {"class_filter", "tag_filter", "simulating_only",
+# "offset", "max_results", "budget"}. Lists the running simulation's live actors
+# with their editor counterparts (null for one the simulation spawned, such as
+# its player controller and pawn), one page from offset
+# (SCENE_READ_HELPERS.page); total counts every match.
+SIMULATION_ACTORS = PHYSICS_HELPERS + SCENE_READ_HELPERS + """
+def simulating(actor):
+    return any(physics_mode(component) == "simulated"
+               for component in actor.get_components_by_class(unreal.PrimitiveComponent))
+
+def entry(match):
+    actor, moving = match
+    editor = editor_counterpart(actor)
+    return {"name": actor.get_actor_label(), "class_name": actor.get_class().get_name(),
+            "simulation_path": actor.get_path_name(),
+            "editor_path": editor.get_path_name() if editor is not None else None, "simulating": moving}
+
+def listing():
+    world = simulation_world()
+    if world is None:
+        return simulation_refusal("list_unreal_simulation_actors")
+    found = []
+    for actor in unreal.GameplayStatics.get_all_actors_of_class(world, unreal.Actor):
+        if not live(actor):
+            continue
+        cls = actor.get_class()
+        if args["class_filter"] and args["class_filter"] not in (cls.get_name(), cls.get_path_name()):
+            continue
+        if args["tag_filter"] and not actor.actor_has_tag(args["tag_filter"]):
+            continue
+        moving = simulating(actor)
+        if args["simulating_only"] and not moving:
+            continue
+        found.append((actor, moving))
+    entries, next_offset, ended = page(found, args["offset"], args["max_results"], args["budget"], entry)
+    return {"world": world.get_path_name(), "actors": entries, "count": len(entries), "total": len(found),
+            "offset": args["offset"], "next_offset": next_offset, "page_ended_by": ended,
+            "sim_time": unreal.GameplayStatics.get_time_seconds(world)}
+
+print(json.dumps(listing()))
 """
 
 # Expects ``args`` = {"path", "values"}, where ``values`` maps "scalar",

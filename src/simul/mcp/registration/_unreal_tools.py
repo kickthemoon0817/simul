@@ -80,7 +80,9 @@ from ..schemas.unreal import (
     UnrealListActorComponentsResponse,
     UnrealListActorsResponse,
     UnrealListInstancesResponse,
+    UnrealListSimulationActorsResponse,
     UnrealLoadedMapResponse,
+    UnrealPhysicsStateResponse,
     UnrealPingResponse,
     UnrealQuerySceneGraphResponse,
     UnrealRemeshMeshResponse,
@@ -1361,18 +1363,40 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="control_unreal_simulation",
         description=(
-            "Control Play-In-Editor: start, stop, pause or resume. Exact frame stepping is unsupported. "
-            "While PIE runs, Unreal's editor spawns and deletes no actors, so those tools return "
-            "PIEActive until it stops; level reads keep working and report pie_active."
+            "Start, stop, pause or resume the editor's simulation. start begins Simulate In Editor (the "
+            "level runs and its physics steps, no player) or, with mode play, a Play session that spawns "
+            "the player's pawn. Exact frame stepping is unsupported (step is refused). While either "
+            "runs, Unreal's editor spawns and deletes no actors, so those tools return PIEActive until "
+            "it stops; level reads keep working and report pie_active. apply_unreal_force, "
+            "get_unreal_physics_state and list_unreal_simulation_actors act on and read the simulation's "
+            "copies of the actors; physics and collision edits given an editor path change the editor "
+            "world, which the running simulation does not see."
         ),
         response=UnrealControlSimulationResponse,
         read_only=False,
         method="control_simulation",
-        params=(ToolParam("action", str),),
+        params=(
+            ToolParam(
+                "action",
+                Literal["start", "stop", "pause", "resume", "step"],
+                description="start, stop, pause or resume; step is refused (UnsupportedOperation).",
+            ),
+            ToolParam(
+                "mode",
+                Literal["simulate", "play"],
+                "simulate",
+                description=(
+                    "For start: simulate (Simulate In Editor: physics runs, no player, the viewport keeps "
+                    "the editor camera) or play (a Play session in the level viewport: the game mode "
+                    "possesses a pawn, and when it stops Unreal puts the game camera's view in the "
+                    "viewport). Ignored by the other actions."
+                ),
+            ),
+        ),
     ),
     UnrealTool(
         name="get_unreal_simulation_status",
-        description="Get current Play-In-Editor simulation status (playing, paused, stopped).",
+        description="Get the editor's simulation status (Play or Simulate In Editor: playing, paused, stopped).",
         response=UnrealGetSimulationStatusResponse,
         read_only=True,
         idempotent=True,
@@ -1456,7 +1480,16 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="apply_unreal_force",
-        description="Apply a force or impulse to an actor's physics body.",
+        description=(
+            "Apply a force or impulse to an actor's body in the running simulation (start it with "
+            "control_unreal_simulation; the editor world's bodies never move, so the call is refused "
+            "without one). Editor and simulation paths are both accepted. Units are Unreal's: force in "
+            "kg cm/s^2 and impulse in kg cm/s (1 N or 1 N s is 100), or N and N s with units si; the "
+            "application point is a world location in cm, fixed in the world while the body moves. An "
+            "impulse changes the velocity at once by impulse / mass; a force acts for one physics step "
+            "unless duration keeps it on for that many seconds of physics time, in step with gravity. "
+            "Returns the copy acted on, its mass and the expected change of velocity."
+        ),
         response=UnrealApplyForceResponse,
         read_only=False,
         method="apply_force",
@@ -1469,6 +1502,23 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("location_x", Optional[float], None),
             ToolParam("location_y", Optional[float], None),
             ToolParam("location_z", Optional[float], None),
+            ToolParam(
+                "duration",
+                float,
+                0.0,
+                description=(
+                    "Seconds of physics time a force keeps acting, 0 to 600: every frame the body gets, as "
+                    "an impulse, the force's momentum over the physics time that frame simulated (the frame "
+                    "time, at most Unreal's physics step limit, 1/30 s by default), so it keeps pace with "
+                    "gravity; paused time adds nothing. 0 acts for one physics step. Not for an impulse."
+                ),
+            ),
+            ToolParam(
+                "units",
+                Literal["unreal", "si"],
+                "unreal",
+                description="unreal: kg cm/s^2 (force), kg cm/s (impulse); si: N, N s.",
+            ),
         ),
     ),
     UnrealTool(
@@ -1490,6 +1540,90 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("linear_damping", Optional[float], None),
             ToolParam("angular_damping", Optional[float], None),
             ToolParam("enable_gravity", Optional[bool], None),
+        ),
+    ),
+    UnrealTool(
+        name="get_unreal_physics_state",
+        description=(
+            "Read bodies' live physics state: location, rotation, linear and angular velocity, awake "
+            "or asleep, mass and center of mass. While a simulation runs each actor is read through "
+            "its copy there (the editor world's actors stay where they were placed), otherwise in the "
+            "editor world; world picks one. Editor and simulation paths are both accepted, and each "
+            "body lists both. Paged: total counts every body, next_offset starts the next page."
+        ),
+        response=UnrealPhysicsStateResponse,
+        read_only=True,
+        idempotent=True,
+        method="get_physics_state",
+        params=(
+            ToolParam(
+                "actor_paths",
+                str,
+                "",
+                description=(
+                    "Comma-separated actor paths (editor or simulation paths); empty when tag_filter is given."
+                ),
+                convert=_name_list,
+            ),
+            ToolParam(
+                "tag_filter",
+                str,
+                "",
+                description="Also read every actor with this actor tag in the world read (empty: none).",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "world",
+                Literal["auto", "simulation", "editor"],
+                "auto",
+                description=(
+                    "auto: the running simulation while one runs, else the editor world; simulation "
+                    "(refused when none runs); editor."
+                ),
+            ),
+            ToolParam(
+                "max_results",
+                int,
+                100,
+                description="Most bodies on this page, 1 to 1000; a page also stops before 30,000 characters.",
+            ),
+            ToolParam("offset", int, 0, description="Bodies to skip: the previous page's next_offset."),
+        ),
+    ),
+    UnrealTool(
+        name="list_unreal_simulation_actors",
+        description=(
+            "List the running simulation's actors with their simulation and editor paths (null editor "
+            "path for an actor the simulation spawned, such as the player's pawn) and whether they "
+            "simulate physics, a page at a time (total, next_offset). Refused when no simulation runs."
+        ),
+        response=UnrealListSimulationActorsResponse,
+        read_only=True,
+        idempotent=True,
+        method="list_simulation_actors",
+        params=(
+            ToolParam(
+                "class_filter",
+                str,
+                "",
+                description="Only actors of this class, by name or path (empty: any).",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "tag_filter",
+                str,
+                "",
+                description="Only actors with this actor tag (empty: any).",
+                convert=_optional_text,
+            ),
+            ToolParam("simulating_only", bool, False, description="Only actors with a body that simulates physics."),
+            ToolParam(
+                "max_results",
+                int,
+                200,
+                description="Most actors on this page, 1 to 5000; a page also stops before 30,000 characters.",
+            ),
+            ToolParam("offset", int, 0, description="Actors to skip: the previous page's next_offset."),
         ),
     ),
     # -- USD and SimReady ----------------------------------------------------------

@@ -97,6 +97,7 @@ from ._unreal_scripts import (
     ACTOR_HELPERS,
     ACTOR_INFO,
     ADD_COMPONENT,
+    APPLY_FORCE,
     ASSET_IMPORT,
     ASSET_SEARCH,
     ASSIGN_MATERIAL,
@@ -115,6 +116,8 @@ from ._unreal_scripts import (
     LISTED_CHILDREN,
     LOADED_MAP,
     MATERIAL_INFO,
+    NOT_IN_SIMULATION,
+    PHYSICS_STATE,
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
@@ -128,6 +131,9 @@ from ._unreal_scripts import (
     SET_LIGHT_PARAMS,
     SET_MATERIAL_PARAMS,
     SET_PHYSICS_PARAMS,
+    SIMULATION_ACTORS,
+    SIMULATION_NOT_RUNNING,
+    SIMULATION_START_HINT,
     SIMULATION_STATUS,
     SPAWN_ACTOR,
     USD_EXPORT,
@@ -240,6 +246,69 @@ USD_IMPORT_OPTIONS: Tuple[str, ...] = USD_IMPORT_BOOLEAN_OPTIONS + (
 # Characters Unreal does not allow in a folder name (INVALID_LONGPACKAGE_CHARACTERS,
 # UE 5.7); an object name's are _INVALID_OBJECT_NAME_CHARACTERS, below.
 _INVALID_FOLDER_CHARACTERS = frozenset("\\:*?\"<>|' ,.&!~\n\r\t@#")
+
+#: ``control_simulation`` actions and start modes, as the tool's enums list them.
+SIMULATION_ACTIONS: Tuple[str, ...] = ("start", "stop", "pause", "resume", "step")
+SIMULATION_MODES: Tuple[str, ...] = ("simulate", "play")
+
+#: ``apply_force`` units and how many Unreal units (kg cm/s^2 for a force,
+#: kg cm/s for an impulse) one of each is.
+FORCE_UNITS: Tuple[str, ...] = ("unreal", "si")
+FORCE_UNIT_SCALE: Dict[str, float] = {"unreal": 1.0, "si": 100.0}
+
+#: Longest ``apply_force`` duration, in seconds of simulation time.
+FORCE_MAX_DURATION_S = 600.0
+
+#: ``get_physics_state`` worlds and its most bodies per call.
+PHYSICS_STATE_WORLDS: Tuple[str, ...] = ("auto", "simulation", "editor")
+PHYSICS_STATE_MAX_RESULTS = 1000
+
+#: Most actors ``list_simulation_actors`` returns per call.
+SIMULATION_ACTORS_MAX_RESULTS = 5000
+
+
+class ArgumentError(UnrealError, ValueError):
+    """A physics, simulation or light tool argument out of range, refused before anything is sent.
+
+    The envelope reports it as a ``ValidationError`` whose ``details.code``
+    names the problem, with the parameter, the value and the range in
+    ``details``; it is still a ``ValueError`` to ``except`` clauses.
+    """
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message, VALIDATION_ERROR, details={"code": code, **details})
+
+
+def _check_page_args(offset: int, max_results: int, most: int) -> None:
+    """Refuse a page size or offset out of range with an ArgumentError."""
+    if not 1 <= max_results <= most:
+        raise ArgumentError(
+            f"max_results must be from 1 to {most}, got {max_results}",
+            "OUT_OF_RANGE",
+            parameter="max_results",
+            value=max_results,
+            minimum=1,
+            maximum=most,
+        )
+    if offset < 0:
+        raise ArgumentError(
+            f"offset must be 0 or more, got {offset}", "OUT_OF_RANGE", parameter="offset", value=offset, minimum=0
+        )
+
+
+def _check_range(name: str, value: float, low: float, high: float, unit: str = "") -> float:
+    """``value`` as a float when it is finite and within [low, high], else an ArgumentError."""
+    if not (math.isfinite(value) and low <= value <= high):
+        raise ArgumentError(
+            f"{name} must be from {low:g} to {high:g}{unit}, got {value!r}",
+            "OUT_OF_RANGE",
+            parameter=name,
+            value=value if math.isfinite(value) else str(value),
+            minimum=low,
+            maximum=high,
+        )
+    return float(value)
+
 
 # UE's FMD5 hex output is lowercase. Accept either case from configured
 # input and normalize. Anything that isn't a clean 32-char hex digest is
@@ -2223,7 +2292,15 @@ class UnrealRuntimeSession(LoggerMixin):
     # Phase 1 session methods — Scene Read Operations
     # ------------------------------------------------------------------
 
-    async def _paged_read(self, script: str, args: Dict[str, Any], noun: str, total_key: str) -> Dict[str, Any]:
+    async def _paged_read(
+        self,
+        script: str,
+        args: Dict[str, Any],
+        noun: str,
+        total_key: str,
+        *,
+        expected_errors: Sequence[str] = (),
+    ) -> Dict[str, Any]:
         """Run a paged scene read and say how to get the rest.
 
         The editor script renders one page (``_unreal_scripts.page``) and
@@ -2235,12 +2312,14 @@ class UnrealRuntimeSession(LoggerMixin):
             args: The script's arguments; ``budget`` is set here.
             noun: What the page lists, plural, for the hint.
             total_key: The result's key for every match.
+            expected_errors: ``error_type`` values the script reports for a
+                request it refused as asked (``_execute_json_script``).
 
         Returns:
             The script's result with ``truncated`` and ``hint``, or its error.
         """
         args = {**args, "budget": PAGE_BUDGET_BYTES}
-        result = await self._execute_json_script(f"args = {args!r}\n" + script)
+        result = await self._execute_json_script(f"args = {args!r}\n" + script, expected_errors=expected_errors)
         if result.get("error"):
             return result
         ended = result.pop("page_ended_by", None)
@@ -3878,23 +3957,57 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
     # Phase 5: Physics & Simulation Control
     # ------------------------------------------------------------------
 
-    async def control_simulation(self, action: str) -> Dict[str, Any]:
+    async def control_simulation(self, action: str, mode: str = "simulate") -> Dict[str, Any]:
         """
-        Control a Play-In-Editor (PIE) session.
+        Start, stop, pause or resume the editor's simulation (Play In Editor).
 
-        Starting an already paused session resumes it. Commands targeting the
-        current state leave the session unchanged.
+        ``start`` begins Simulate In Editor by default: the level runs and its
+        physics steps with no player, the level viewport keeps the editor
+        camera. ``mode`` "play" begins a Play session instead, in the level
+        viewport: the game mode spawns and possesses the player's pawn, and
+        when it stops Unreal puts the game camera's last view in the viewport.
+        Starting a session that runs resumes it if paused and otherwise leaves
+        it as it is, whichever mode it runs in; the other actions leave a
+        session already in their state unchanged. While either mode runs the
+        editor world refuses spawns and deletes (PIEActive);
+        ``apply_force``, ``get_physics_state`` and ``list_simulation_actors``
+        act on and read the simulation's copies of the actors, while the
+        physics and collision edits given an editor path change the editor
+        world, which the running simulation does not see.
 
         Args:
-            action: One of start, stop, pause, resume, step.
+            action: start, stop, pause, resume or step (step is refused:
+                editor Python cannot advance one frame).
+            mode: For start: "simulate" (Simulate In Editor) or "play".
 
         Returns:
-            Dict with action executed and resulting state.
+            Dict with action, the resulting state (playing, paused or
+            stopped) and, for start, the mode it began in (null when a
+            session already ran); or a SimulationNotRunning envelope for
+            pause or resume with no session running.
+
+        Raises:
+            ArgumentError: An unknown action or mode (a ValidationError).
         """
 
         action = action.lower().strip()
-        if action not in {"start", "stop", "pause", "resume", "step"}:
-            raise ValueError(f"Invalid PIE action: {action}")
+        if action not in SIMULATION_ACTIONS:
+            raise ArgumentError(
+                f"Invalid PIE action: {action}; use {', '.join(SIMULATION_ACTIONS)}",
+                "UNKNOWN_ACTION",
+                parameter="action",
+                value=action,
+                allowed=list(SIMULATION_ACTIONS),
+            )
+        mode = mode.lower().strip()
+        if mode not in SIMULATION_MODES:
+            raise ArgumentError(
+                f"Invalid simulation mode: {mode}; use {', '.join(SIMULATION_MODES)}",
+                "UNKNOWN_MODE",
+                parameter="mode",
+                value=mode,
+                allowed=list(SIMULATION_MODES),
+            )
         if action == "step":
             return {
                 "success": False,
@@ -3907,11 +4020,15 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         if action in {"pause", "resume"} and not status["is_playing"]:
             return {
                 "success": False,
-                "error_type": "InvalidState",
-                "error": "PIE is not running",
+                "error_type": SIMULATION_NOT_RUNNING,
+                "error": f"No simulation is running, so there is nothing to {action}",
+                "details": {"code": "SIMULATION_NOT_RUNNING", "hint": SIMULATION_START_HINT},
             }
-        if action == "start" and not status["is_playing"]:
-            command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_play_simulate()"
+        started = action == "start" and not status["is_playing"]
+        if started:
+            command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)." + (
+                "editor_play_simulate()" if mode == "simulate" else "editor_request_begin_play()"
+            )
         elif action == "stop" and status["is_playing"]:
             command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_end_play()"
         elif action in {"start", "pause", "resume"} and status["is_paused"] != (
@@ -3949,7 +4066,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "resume": "playing",
             }[action]
             if state == target:
-                return {"action": action, "state": state}
+                result: Dict[str, Any] = {"action": action, "state": state}
+                if action == "start":
+                    result["mode"] = mode if started else None
+                return result
             if asyncio.get_running_loop().time() >= deadline:
                 return {
                     "success": False,
@@ -4099,51 +4219,126 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         location_x: Optional[float] = None,
         location_y: Optional[float] = None,
         location_z: Optional[float] = None,
+        duration: float = 0.0,
+        units: str = "unreal",
     ) -> Dict[str, Any]:
         """
-        Apply a force or impulse to an actor's physics body.
+        Apply a force or impulse to an actor's body in the running simulation.
+
+        Only the simulation's bodies step: the editor world's read as
+        simulating but never move, so an impulse on them was lost. The actor
+        (an editor or a simulation path) is mapped to its copy in the running
+        simulation and the force acts there; with no simulation running the
+        call is refused (``SimulationNotRunning``). The copy must simulate
+        physics (``enable_physics`` on the editor actor before the simulation
+        starts).
+
+        Units are Unreal's by default: a force in kg cm/s^2 (1 N is 100) and an
+        impulse in kg cm/s (1 N s is 100); ``units`` "si" takes newtons and
+        newton-seconds. The application point is a world location in cm, fixed
+        in the world for the whole duration as the body moves; without one the
+        force pushes the center of mass. An impulse changes the velocity at
+        once by impulse / mass. A force with ``duration`` 0 acts for one
+        physics step only, as Unreal clears a force after each step. A positive
+        ``duration`` keeps it on for that many seconds of physics time: every
+        frame the body gets, as an impulse, the force's momentum over the
+        physics time that frame simulated, the frame's game time capped at the
+        physics step limit (``physics_step_limit_s``, Unreal's
+        MaxPhysicsDeltaTime, 1/30 s by default). So the force keeps pace with
+        gravity at any frame rate, and frames slower than the limit stretch it
+        in game time as they slow Unreal's physics. Paused time adds nothing,
+        and the force ends early when the simulation stops. Forces add up, so a
+        second call acts with the first.
 
         Args:
-            actor_path: Full actor object path.
-            force_x: Force X component.
-            force_y: Force Y component.
-            force_z: Force Z component.
-            is_impulse: True for impulse, False for continuous force.
-            location_x: Application point X (None = center of mass).
+            actor_path: Full actor object path, in the editor or the
+                simulation's world.
+            force_x: Force or impulse X component.
+            force_y: Force or impulse Y component.
+            force_z: Force or impulse Z component.
+            is_impulse: True for an impulse (instant change of momentum),
+                False for a force.
+            location_x: Application point X in world cm (None = center of
+                mass), fixed in the world for the whole duration.
             location_y: Application point Y.
             location_z: Application point Z.
+            duration: Seconds of physics time a force keeps acting, 0 to 600;
+                0 acts for one physics step. Not for an impulse.
+            units: "unreal" (kg cm/s^2, kg cm/s) or "si" (N, N s).
 
         Returns:
-            Dict with actor_path, force_applied, force_vector, is_impulse.
+            Dict with actor_path, simulation_actor_path (the copy acted on),
+            component_path, world ("simulation"), force_applied,
+            force_vector (as given, in ``units``), units, force_vector_unreal
+            (as applied), is_impulse, application ("impulse", "one_frame" or
+            "continuous"), duration_s, mass_kg, expected_delta_v (cm/s: the
+            change of linear velocity the impulse, or the force over its
+            duration, gives the body alone; null for one step),
+            physics_step_limit_s, sim_time, ends_at_sim_time (when a continuous
+            force ends if no frame is slower than the step limit), paused and
+            warning; or a SimulationNotRunning, NotFoundError, NotInSimulation
+            or IncompatibleBody envelope.
+
+        Raises:
+            ArgumentError: Partial application coordinates, a value that is not
+                finite, an unknown unit, or a duration out of range or given
+                with an impulse (a ValidationError with ``details.code``).
         """
 
         location = (location_x, location_y, location_z)
-        if any(v is not None for v in location) and not all(
-            v is not None for v in location
-        ):
-            raise ValueError("Provide all three force application coordinates or none")
-        name = "add_impulse" if is_impulse else "add_force"
-        args = (
-            f"unreal.Vector({float(force_x)!r}, {float(force_y)!r}, {float(force_z)!r})"
+        if any(v is not None for v in location) and not all(v is not None for v in location):
+            raise ArgumentError(
+                "Provide all three force application coordinates or none",
+                "PARTIAL_LOCATION",
+                parameter="location",
+                value=[v for v in location],
+            )
+        if units not in FORCE_UNITS:
+            raise ArgumentError(
+                f"units must be one of {', '.join(FORCE_UNITS)}, got {units!r}",
+                "UNKNOWN_UNITS",
+                parameter="units",
+                value=units,
+                allowed=list(FORCE_UNITS),
+            )
+        given = (float(force_x), float(force_y), float(force_z))
+        for name, value in zip(("force_x", "force_y", "force_z", "location_x", "location_y", "location_z"),
+                               given + location):
+            if value is not None and not math.isfinite(value):
+                raise ArgumentError(
+                    f"{name} must be a finite number, got {value!r}", "NOT_FINITE", parameter=name, value=str(value)
+                )
+        duration = _check_range("duration", duration, 0.0, FORCE_MAX_DURATION_S, " s")
+        if is_impulse and duration:
+            raise ArgumentError(
+                "duration applies to a force; an impulse acts at once",
+                "DURATION_WITH_IMPULSE",
+                parameter="duration",
+                value=duration,
+            )
+        scale = FORCE_UNIT_SCALE[units]
+        applied = [v * scale for v in given]
+        args = {
+            "actor_path": actor_path,
+            "vector": applied,
+            "location": None if location_x is None else [float(v) for v in location],  # type: ignore[arg-type]
+            "impulse": bool(is_impulse),
+            "duration": duration,
+        }
+        result = await self._execute_json_script(
+            f"args = {args!r}\n" + APPLY_FORCE,
+            expected_errors=(SIMULATION_NOT_RUNNING, NOT_IN_SIMULATION, INCOMPATIBLE_BODY),
         )
-        if location_x is not None and location_y is not None and location_z is not None:
-            name += "_at_location"
-            args += f", unreal.Vector({float(location_x)!r}, {float(location_y)!r}, {float(location_z)!r})"
-        code = (
-            "if not component.is_simulating_physics():\n"
-            "    raise RuntimeError('Component is not simulating physics')\n"
-            f"component.{name}({args})\n"
-        )
-        return await self._component_operation(
-            actor_path,
-            code,
-            {
-                "actor_path": actor_path,
-                "force_applied": True,
-                "force_vector": (force_x, force_y, force_z),
-                "is_impulse": is_impulse,
-            },
-        )
+        if result.get("error"):
+            return result
+        return {
+            **result,
+            "force_vector": list(given),
+            "units": units,
+            "force_vector_unreal": applied,
+            "is_impulse": bool(is_impulse),
+            "duration_s": duration,
+        }
 
     async def set_physics_params(
         self,
@@ -4181,25 +4376,130 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             written).
 
         Raises:
-            ValueError: A value is not finite or out of its range.
+            ArgumentError: A value is not finite or out of its range (a
+                ValidationError with ``details.code`` OUT_OF_RANGE).
         """
         values: Dict[str, Any] = {}
         if mass is not None:
-            if not (math.isfinite(mass) and PHYSICS_MIN_MASS_KG <= mass <= PHYSICS_MAX_MASS_KG):
-                raise ValueError(
-                    f"mass must be from {PHYSICS_MIN_MASS_KG:g} to {PHYSICS_MAX_MASS_KG:g} kg, got {mass!r}"
-                )
-            values["mass"] = float(mass)
+            values["mass"] = _check_range("mass", mass, PHYSICS_MIN_MASS_KG, PHYSICS_MAX_MASS_KG, " kg")
         for name, value in (("linear_damping", linear_damping), ("angular_damping", angular_damping)):
             if value is not None:
-                if not (math.isfinite(value) and 0.0 <= value <= PHYSICS_MAX_DAMPING):
-                    raise ValueError(f"{name} must be from 0 to {PHYSICS_MAX_DAMPING:g}, got {value!r}")
-                values[name] = float(value)
+                values[name] = _check_range(name, value, 0.0, PHYSICS_MAX_DAMPING)
         if enable_gravity is not None:
             values["enable_gravity"] = bool(enable_gravity)
         args = {"actor_path": actor_path, "values": values, "transaction": "simul: set physics params"}
         return await self._execute_json_script(
             f"args = {args!r}\n" + SET_PHYSICS_PARAMS, expected_errors=("PhysicsParamsNotApplied",)
+        )
+
+    async def get_physics_state(
+        self,
+        actor_paths: Optional[List[str]] = None,
+        tag_filter: Optional[str] = None,
+        world: str = "auto",
+        max_results: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Read bodies' live physics state, in the running simulation or the editor world.
+
+        While a simulation runs, the editor world's actors stand where they
+        were placed (a body resting at z 49.5 read z 300 there), so by
+        default (``world`` "auto") each actor is read in the running
+        simulation, through its copy there, and in the editor world
+        otherwise. Editor and simulation paths are both accepted, and a body
+        given by both is read once. The bodies are paged: the actors at
+        ``actor_paths`` first, then those with the tag, ``max_results`` at most
+        from ``offset``, and a page stops before 30,000 characters of bodies.
+
+        Args:
+            actor_paths: Actor paths, editor or simulation.
+            tag_filter: Also read every actor with this actor tag in the
+                world read.
+            world: "auto", "simulation" (refused when none runs) or "editor".
+            max_results: Most bodies on this page, 1 to 1000.
+            offset: Bodies to skip: the previous page's next_offset.
+
+        Returns:
+            Dict with world, pie_active, sim_time and paused (null for the
+            editor world), bodies, count (on this page), total (every body
+            matched), offset, next_offset (null on the last page), truncated,
+            hint and not_found (the paths with no live actor, or no live copy
+            in the world read). Each body has name, class_name, editor_path,
+            simulation_path, location (cm), rotation (pitch, yaw, roll,
+            degrees) and, for an actor with a root or single primitive
+            component, component_path, physics_mode, linear_velocity (cm/s),
+            angular_velocity (degrees/s), speed, awake (null unless it
+            simulates), mass_kg, center_of_mass (world cm), gravity_enabled
+            and simulate_physics. Unreal reports contacts only to hit-event
+            handlers, so none are listed.
+
+        Raises:
+            ArgumentError: Neither paths nor a tag, an unknown world, or
+                max_results or offset out of range (a ValidationError).
+        """
+        paths = [path for path in (actor_paths or []) if path]
+        if not paths and not tag_filter:
+            raise ArgumentError("Give actor_paths, tag_filter or both", "NO_SELECTION", parameter="actor_paths")
+        if world not in PHYSICS_STATE_WORLDS:
+            raise ArgumentError(
+                f"world must be one of {', '.join(PHYSICS_STATE_WORLDS)}, got {world!r}",
+                "UNKNOWN_WORLD",
+                parameter="world",
+                value=world,
+                allowed=list(PHYSICS_STATE_WORLDS),
+            )
+        _check_page_args(offset, max_results, PHYSICS_STATE_MAX_RESULTS)
+        args = {
+            "paths": paths,
+            "tag": tag_filter or None,
+            "world": world,
+            "offset": offset,
+            "max_results": max_results,
+        }
+        return await self._paged_read(
+            PHYSICS_STATE, args, "bodies", "total", expected_errors=(SIMULATION_NOT_RUNNING,)
+        )
+
+    async def list_simulation_actors(
+        self,
+        class_filter: Optional[str] = None,
+        tag_filter: Optional[str] = None,
+        simulating_only: bool = False,
+        max_results: int = 200,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        List the running simulation's actors with their editor counterparts, a page at a time.
+
+        Args:
+            class_filter: Only actors of this class (name or path).
+            tag_filter: Only actors with this actor tag.
+            simulating_only: Only actors with a body that simulates physics.
+            max_results: Most actors on this page, 1 to 5000; a page also
+                stops before 30,000 characters of entries.
+            offset: Actors to skip: the previous page's next_offset.
+
+        Returns:
+            Dict with world (the simulation's world), actors (name,
+            class_name, simulation_path, editor_path, null for an actor the
+            simulation spawned such as its player controller and pawn, and
+            simulating), count, total, offset, next_offset, truncated, hint and
+            sim_time; or a SimulationNotRunning envelope.
+
+        Raises:
+            ArgumentError: max_results or offset out of range (a ValidationError).
+        """
+        _check_page_args(offset, max_results, SIMULATION_ACTORS_MAX_RESULTS)
+        args = {
+            "class_filter": class_filter or None,
+            "tag_filter": tag_filter or None,
+            "simulating_only": bool(simulating_only),
+            "offset": offset,
+            "max_results": max_results,
+        }
+        return await self._paged_read(
+            SIMULATION_ACTORS, args, "simulation actors", "total", expected_errors=(SIMULATION_NOT_RUNNING,)
         )
 
     # ------------------------------------------------------------------
