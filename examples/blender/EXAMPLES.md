@@ -839,10 +839,10 @@ All Blender MCP tools grouped by capability phase.
 | `get_blender_frame` | Current frame number |
 | `set_blender_frame` | Jump to a specific frame |
 | `set_blender_frame_range` | Set start/end frame range |
-| `insert_blender_keyframe` | Insert a keyframe on a property |
+| `insert_blender_keyframe` | Insert a keyframe on a property: its current value or a given one, with optional interpolation and key type |
 | `delete_blender_keyframe` | Remove a keyframe |
 | `get_blender_keyframes` | List all keyframes for an object |
-| `play_blender_animation` | Play/pause animation playback |
+| `play_blender_animation` | Play, reverse, pause or stop playback (needs the GUI event loop) |
 
 ### Phase 6 — Physics & Simulation
 
@@ -854,7 +854,7 @@ All Blender MCP tools grouped by capability phase.
 | `add_blender_constraint` | Add object/bone constraint |
 | `get_blender_constraint_info` | Read constraint parameters |
 | `get_blender_physics_state` | Read velocity, angular velocity, kinetic energy |
-| `get_blender_trajectory` | Sample object positions across frame range |
+| `get_blender_object_trajectory` | Sample an object's world pose across a frame range (moves the frame, then restores it) |
 | `bake_blender_simulation` | Bake physics simulation to keyframes |
 | `free_blender_bake` | Free baked simulation data |
 

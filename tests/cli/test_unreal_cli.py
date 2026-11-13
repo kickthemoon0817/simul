@@ -1290,3 +1290,35 @@ def test_sim_bad_action_or_mode_is_a_bad_invocation(monkeypatch, arguments) -> N
 
     assert result.exit_code == 2, result.output
     assert json.loads(result.stdout)["error_type"] == "InvalidArgument"
+
+
+# ---------------------------------------------------------------------------
+# simul unreal search
+# ---------------------------------------------------------------------------
+
+
+def test_search_shows_each_class_and_how_to_get_the_next_page(monkeypatch) -> None:
+    """The table read a "class" key the payload never had, so every row said "?"."""
+    calls = []
+
+    class _SearchStub(_ClosingStub):
+        async def search_assets(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "assets": [{"path": "/Engine/BasicShapes/Cube.Cube", "class_name": "StaticMesh"}],
+                "count": 1,
+                "total": 3,
+                "next_offset": 1,
+            }
+
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: _SearchStub())
+    monkeypatch.setattr(unreal_cli, "is_json_mode", lambda: False)
+
+    result = runner.invoke(app, ["unreal", "search", "Cube", "--class", "StaticMesh", "--limit", "1"])
+
+    assert result.exit_code == 0, result.output
+    assert "StaticMesh" in result.output and "(1 of 3)" in result.output
+    assert "--offset 1" in result.output
+    assert calls == [{
+        "query": "Cube", "class_names": ["StaticMesh"], "package_paths": None, "max_results": 1, "offset": 0,
+    }]

@@ -552,6 +552,81 @@ def test_an_older_addon_still_answers_calls_that_leave_the_new_parameters_alone(
     assert "keep_transform" in unsupported["error"]
 
 
+class _AddonBeforeTheAnimationFixes:
+    """The session of an add-on built before insert_keyframe took value,
+    interpolation and keyframe_type: it refuses those keywords."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def insert_keyframe(
+        self, object_name: str, data_path: str, frame: int, index: int = -1
+    ) -> dict:
+        self.calls.append(("insert_keyframe", object_name, data_path, frame, index))
+        return {"object_name": object_name, "data_path": data_path, "frame": frame}
+
+
+def test_an_older_addon_still_keys_the_current_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sent on every call, value, interpolation and keyframe_type made an add-on
+    built before them refuse every insert_blender_keyframe call."""
+    session = _AddonBeforeTheAnimationFixes()
+    instance = _strict_server(monkeypatch, session, "attached")  # type: ignore[arg-type]
+
+    keyed = _call(
+        instance,
+        "insert_blender_keyframe",
+        {"object_name": "Cube", "data_path": "location", "frame": 10, "index": 2},
+    )
+    unsupported = _call(
+        instance,
+        "insert_blender_keyframe",
+        {"object_name": "Cube", "data_path": "location", "frame": 10, "value": [1, 2, 3]},
+    )
+
+    assert keyed["success"] is True
+    assert keyed["value_source"] is None and keyed["keyframes"] == []
+    assert session.calls == [("insert_keyframe", "Cube", "location", 10, 2)]
+    assert unsupported["success"] is False
+    assert "value" in unsupported["error"]
+
+
+def test_frame_bounds_are_stated_and_checked_inside_the_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The schema states step >= 1 and Blender's frame limits; an argument out
+    of them still gets the envelope's ValidationError, recorded and rate limited
+    like any other invalid input, and never reaches Blender."""
+    session = StrictBlenderSession()
+    instance = _strict_server(monkeypatch, session, "attached")
+
+    async def _schemas() -> dict:
+        async with Client(instance.mcp) as client:
+            return {tool.name: tool.input_schema for tool in await client.list_tools()}
+
+    schemas = asyncio.run(_schemas())
+    step = schemas["get_blender_object_trajectory"]["properties"]["step"]
+    frame = schemas["set_blender_frame"]["properties"]["frame"]
+    start = schemas["set_blender_frame_range"]["properties"]["frame_start"]
+    assert step["minimum"] == 1
+    assert (frame["minimum"], frame["maximum"]) == (-1_048_574, 1_048_574)
+    assert (start["minimum"], start["maximum"]) == (0, 1_048_574)
+
+    refused = [
+        _call(
+            instance,
+            "get_blender_object_trajectory",
+            {"object_name": "Cube", "start_frame": 1, "end_frame": 5, "step": 0},
+        ),
+        _call(instance, "set_blender_frame", {"frame": 10**7}),
+        _call(instance, "set_blender_frame_range", {"frame_start": -1, "frame_end": 9}),
+    ]
+
+    assert [r["error_type"] for r in refused] == ["ValidationError"] * 3
+    assert session.calls == []
+
+
 class _AddonBeforePaging:
     """The session of an add-on built before listing pages and scene-only delete."""
 
