@@ -294,10 +294,13 @@ def _one_remesh_target(request: Any) -> Optional[str]:
     return None
 
 
-#: Ends the description of the mesh tool that creates a mesh from nothing.
-_MESH_CREATE_NOTE = (
+#: Ends the description of the mesh tools that read any mesh source.
+_MESH_SOURCE_NOTE = (
     " Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs."
 )
+
+#: Ends the description of the mesh tool that creates a mesh from nothing.
+_MESH_CREATE_NOTE = _MESH_SOURCE_NOTE
 
 #: Ends the description of every mesh tool that changes or creates a mesh from another.
 _MESH_EDIT_NOTE = (
@@ -1869,10 +1872,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="compute_unreal_convex_hull",
         description=(
-            "Compute the convex hull of a DynamicMeshActor's mesh, simplified to max_faces triangles, "
-            "as simple collision: on a new DynamicMeshActor at the source's transform whose mesh is the "
-            "hull (output 'actor'), on the source itself ('collision', replacing its simple collision) "
-            "or both; one undoable transaction." + _MESH_EDIT_NOTE
+            "Compute the convex hull of a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset, "
+            "simplified to max_faces triangles, as simple collision: on a new DynamicMeshActor at the "
+            "source's transform whose mesh is the hull (output 'actor'), on the source itself "
+            "('collision': a StaticMesh's asset, under /Game, saved with save) or both; one undoable "
+            "transaction." + _MESH_SOURCE_NOTE
         ),
         response=UnrealComputeConvexHullResponse,
         read_only=False,
@@ -1882,16 +1886,18 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("mesh_path", str),
             ToolParam("max_faces", Annotated[int, Field(ge=0, le=10000)], 250),
             ToolParam("output", Literal["actor", "collision", "both"], "actor"),
+            ToolParam("save", bool, False),
         ),
     ),
     UnrealTool(
         name="decompose_unreal_convex_hull",
         description=(
-            "Decompose a DynamicMeshActor's mesh into convex hulls with Unreal's own convex "
-            "decomposition (GeometryScript's, not V-HACD), as simple collision: on a new DynamicMeshActor "
-            "at the source's transform holding the pieces (output 'actor'), on the source itself "
-            "('collision', replacing its simple collision) or both; one undoable transaction. Reports "
-            "each piece and how much of the source's volume they cover." + _MESH_EDIT_NOTE
+            "Decompose a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset into convex hulls "
+            "with Unreal's own convex decomposition (GeometryScript's, not V-HACD), as simple collision: "
+            "on a new DynamicMeshActor at the source's transform holding the pieces (output 'actor'), on "
+            "the source itself ('collision': a StaticMesh's asset, under /Game, saved with save) or both; "
+            "one undoable transaction. Reports each piece and how much of the source's volume they cover."
+            + _MESH_SOURCE_NOTE
         ),
         response=UnrealDecomposeConvexHullResponse,
         read_only=False,
@@ -1904,6 +1910,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("error_tolerance", Annotated[float, Field(ge=0)], 0.0),
             ToolParam("min_part_thickness", Annotated[float, Field(ge=0)], 0.1),
             ToolParam("output", Literal["actor", "collision", "both"], "actor"),
+            ToolParam("save", bool, False),
         ),
     ),
     UnrealTool(
@@ -1986,7 +1993,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="validate_unreal_mesh",
         description=(
-            "Check a DynamicMeshActor's mesh: closed (no open border edges), manifold (no bowtie "
+            "Check the mesh of a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset: closed (no open "
+            "border edges), manifold (no bowtie "
             "vertices), degenerate_triangles, orientation (a closed mesh's faces point out), compact (no ID "
             "gaps), normals and uvs, each with its count and detail. It does not look for "
             "self-intersections. Reads only, also while PIE runs. Needs the GeometryScripting plugin, "
@@ -2016,9 +2024,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="convert_unreal_mesh_format",
         description=(
-            "Place an editable DynamicMeshActor copy of a StaticMesh asset at the world origin (one "
-            "undoable spawn), for the other mesh tools to edit; target_format 'dynamic_mesh'. "
-            "'static_mesh' (back to an asset) is not implemented yet and is refused. Needs the "
+            "Convert between StaticMeshes and editable DynamicMeshActors. dynamic_mesh places a "
+            "DynamicMeshActor copy of a StaticMesh asset (at location) or of a StaticMeshActor (at its "
+            "transform), with its materials, for the other mesh tools to edit. static_mesh writes a "
+            "DynamicMeshActor's mesh, materials and simple collision into a StaticMesh asset under /Game "
+            "(refusing /Engine and plugin content and, without overwrite, an existing asset) and saves "
+            "only that asset; writing the asset is not undoable. replace_actor swaps the source actor for "
+            "the result in one undoable step. Unreal's USD exporter "
+            "writes DynamicMeshActors as empty Xforms, so convert (with replace_actor) before exporting a "
+            "mesh made with these tools. Needs the "
             "GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs."
         ),
         response=UnrealConvertMeshFormatResponse,
@@ -2026,9 +2040,22 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         destructive=True,
         method="convert_mesh_format",
         params=(
-            ToolParam("mesh_path", str, description="StaticMesh asset path, such as /Game/Meshes/SM_Crate."),
+            ToolParam(
+                "mesh_path",
+                str,
+                description=(
+                    "dynamic_mesh: a StaticMesh asset (/Game/Meshes/SM_Crate) or a StaticMeshActor; "
+                    "static_mesh: a DynamicMeshActor."
+                ),
+            ),
             ToolParam("target_format", Literal["dynamic_mesh", "static_mesh"]),
-            ToolParam("tessellation_options", str, "{}", convert=_optional_json),
+            ToolParam("asset_path", Optional[str], None),
+            ToolParam("overwrite", bool, False),
+            ToolParam("save", bool, True),
+            ToolParam("replace_actor", bool, False),
+            ToolParam("collision", Literal["auto", "component", "convex_hull", "none"], "auto"),
+            ToolParam("nanite", bool, False),
+            ToolParam("location", _Vector3, "", convert=_three_numbers),
         ),
     ),
     UnrealTool(

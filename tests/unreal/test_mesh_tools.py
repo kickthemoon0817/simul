@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from typing import Any, Dict, Tuple
 
 import pytest
@@ -213,10 +214,9 @@ def test_without_geometry_scripting_every_tool_says_how_to_enable_it(editor: Fak
     assert editor.transactions == [] and editor.spawned == 0
 
 
-@pytest.mark.parametrize("tool", sorted(name for name, (_, _, edited) in TOOLS.items() if edited)
-                         + ["compute_unreal_convex_hull", "validate_unreal_mesh"])
+@pytest.mark.parametrize("tool", sorted(name for name, (_, _, edited) in TOOLS.items() if edited))
 def test_a_static_mesh_actor_is_refused_with_the_way_in(editor: FakeEditor, tool: str) -> None:
-    """It used to fail with "AttributeError: ... dynamic_mesh_component" (M12)."""
+    """An edit in place used to fail with "AttributeError: ... dynamic_mesh_component" (M12)."""
     key = "target_mesh_path" if tool == "apply_unreal_mesh_boolean" else "mesh_path"
     payload = _call(editor, tool, **{key: CRATE})
     assert payload["success"] is False
@@ -266,10 +266,15 @@ def test_validation_reads_during_pie(editor: FakeEditor) -> None:
 
 
 def test_an_asset_path_is_told_apart_during_pie(editor: FakeEditor) -> None:
-    """EditorAssetLibrary finds nothing while PIE runs, which made an asset path "Actor not found" (#342 review)."""
+    """EditorAssetLibrary finds nothing while PIE runs, which made an asset path "Actor not found" (#342 review).
+
+    The asset registry still knows the asset; the editor cannot load it, which is PIEActive.
+    """
     editor.pie = True
-    payload = _call(editor, "validate_unreal_mesh", mesh_path="/Game/Meshes/SM_Crate")
-    assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", "STATIC_MESH_ASSET")
+    for path in ("/Game/Meshes/SM_Crate", "/Game/Meshes/SM_Crate.SM_Crate"):
+        payload = _call(editor, "validate_unreal_mesh", mesh_path=path)
+        assert payload["error_type"] == "PIEActive", payload
+        assert "validate_unreal_mesh keeps working" in payload["details"]["hint"]
 
 
 def test_xatlas_is_refused_above_its_limit_and_auto_picks_patch_builder(editor: FakeEditor) -> None:
@@ -360,19 +365,13 @@ def test_conversion_places_a_copy_of_the_asset(editor: FakeEditor) -> None:
 
 @pytest.mark.parametrize(
     ("overrides", "code"),
-    [({"mesh_path": BODY}, "NOT_A_STATIC_MESH_ASSET"), ({"mesh_path": "/Game/Meshes/Nope"}, None)],
+    [({"mesh_path": BODY}, "NOT_A_STATIC_MESH"), ({"mesh_path": "/Game/Meshes/Nope"}, None)],
 )
 def test_conversion_needs_a_static_mesh_asset(editor: FakeEditor, overrides: Dict[str, Any], code: Any) -> None:
     payload = _call(editor, "convert_unreal_mesh_format", **overrides)
     assert payload["success"] is False
     assert (payload.get("details") or {}).get("code") == code
     assert payload["error_type"] == ("ValidationError" if code else "NotFoundError")
-
-
-def test_conversion_to_a_static_mesh_is_refused_honestly(editor: FakeEditor) -> None:
-    """It used to return a success with only a note."""
-    payload = _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh")
-    assert (payload["error_type"], payload["details"]["code"]) == ("UnsupportedOperation", "NOT_IMPLEMENTED")
 
 
 @pytest.mark.parametrize(
@@ -523,14 +522,16 @@ def test_a_hull_actor_takes_the_source_transform_and_is_collision(editor: FakeEd
         "CONVEX_HULLS", 1, 64)
     assert options.simplify_hulls is True and options.emit_transaction is False
     assert not (options.auto_detect_spheres or options.auto_detect_boxes or options.auto_detect_capsules)
-    assert payload["collision"] == [{"actor_path": hull.path, "collision_shape_count": 1}]
+    assert payload["collision"] == [{"actor_path": hull.path, "asset_path": None, "collision_shape_count": 1,
+                                     "saved_file": None}]
     assert editor.transactions == ["simul: convex hull of Ball"]
 
 
 def test_a_hull_can_be_the_source_collision(editor: FakeEditor) -> None:
     payload = _call(editor, "compute_unreal_convex_hull", output="collision")
     assert payload["hull_actor_path"] is None and editor.spawned == 0
-    assert payload["collision"] == [{"actor_path": BALL, "collision_shape_count": 1}]
+    assert payload["collision"] == [{"actor_path": BALL, "asset_path": None, "collision_shape_count": 1,
+                                     "saved_file": None}]
     assert BALL in editor.modified and len(editor.transactions) == 1
     both = _call(level_editor(), "compute_unreal_convex_hull", output="both")
     assert [c["actor_path"] for c in both["collision"]] == [both["hull_actor_path"], BALL]
@@ -844,6 +845,193 @@ def test_destructive_and_idempotent_hints_are_consistent() -> None:
     for name in ("apply_unreal_mesh_boolean", "edit_unreal_mesh_topology", "subdivide_unreal_mesh",
                  "simplify_unreal_mesh", "cut_unreal_mesh_plane", "remesh_unreal_mesh", "compute_unreal_mesh_uv"):
         assert hints[name] == (False, True, False), name
+
+
+# ---------------------------------------------------------------------------
+# StaticMesh interop (PR 3: B7 and the StaticMesh workflows)
+# ---------------------------------------------------------------------------
+
+CRATE_ASSET = "/Game/Meshes/SM_Crate"
+
+
+@pytest.mark.parametrize(("path", "kind"), [(CRATE, "static_mesh_actor"), (CRATE_ASSET, "static_mesh_asset"),
+                                            (BODY, "dynamic_mesh_actor")])
+def test_validation_reads_any_mesh(editor: FakeEditor, path: str, kind: str) -> None:
+    payload = _call(editor, "validate_unreal_mesh", mesh_path=path)
+    vertices = 8 if kind == "dynamic_mesh_actor" else 24
+    assert (payload["source_kind"], payload["is_valid"], payload["vertex_count"]) == (kind, True, vertices)
+
+
+def test_a_static_mesh_actor_hull_lands_at_its_transform(editor: FakeEditor) -> None:
+    payload = _call(editor, "compute_unreal_convex_hull", mesh_path=CRATE)
+    hull = editor.objects[payload["hull_actor_path"]]
+    assert payload["source_kind"] == "static_mesh_actor"
+    assert hull.get_actor_transform() is editor.objects[CRATE].transform and hull.label == "Crate_Hull"
+    assert editor.arguments["copy_mesh_from_static_mesh"][0] is editor.assets[CRATE_ASSET]
+
+
+@pytest.mark.parametrize("tool", ["compute_unreal_convex_hull", "decompose_unreal_convex_hull"])
+def test_collision_on_a_game_static_mesh_is_set_undoably_and_saved(editor: FakeEditor, tool: str) -> None:
+    """Hulls and decompositions as a StaticMesh's simple collision, the top production need."""
+    payload = _call(editor, tool, mesh_path=CRATE, output="collision", save=True)
+    asset = editor.assets[CRATE_ASSET]
+    assert payload["collision"] == [{"actor_path": None, "asset_path": asset.path,
+                                     "collision_shape_count": asset.collision.shapes,
+                                     "saved_file": "/Projects/Mesh/Content/Meshes/SM_Crate.uasset"}]
+    assert ("set_static_collision", asset.path, asset.collision.shapes, True) in editor.events
+    assert asset.modified == 1 and len(editor.transactions) == 1 and editor.spawned == 0
+    assert editor.saved == ["/Game/Meshes/SM_Crate"]
+
+
+def test_engine_content_is_never_given_collision(editor: FakeEditor) -> None:
+    payload = _call(editor, "compute_unreal_convex_hull", mesh_path="/Engine/BasicShapes/Cube", output="both")
+    assert (payload["error_type"], payload["details"]["code"]) == ("SandboxError", "OUTSIDE_GAME_CONTENT")
+    assert editor.spawned == 0 and editor.transactions == [] and editor.saved == []
+
+
+def test_a_static_mesh_asset_becomes_a_dynamic_mesh_actor_where_asked(editor: FakeEditor) -> None:
+    payload = _call(editor, "convert_unreal_mesh_format", location=[10, 20, 30])
+    placed = editor.objects[payload["result_path"]]
+    assert (payload["source_format"], payload["placed_actor_path"]) == ("static_mesh_asset", placed.path)
+    assert list(placed.get_actor_location()) == [10.0, 20.0, 30.0]
+    assert placed.dynamic_mesh_component.materials == ["Material_SM_Crate"]
+    assert payload["asset"] is None and payload["removed_actor_path"] is None
+
+
+def test_a_static_mesh_actor_is_replaced_by_its_dynamic_copy_in_one_transaction(editor: FakeEditor) -> None:
+    payload = _call(editor, "convert_unreal_mesh_format", mesh_path=CRATE, replace_actor=True)
+    placed = editor.objects[payload["result_path"]]
+    assert placed.get_actor_transform() is editor.objects[CRATE].transform and placed.label == "Crate"
+    assert editor.objects[CRATE].valid is False and payload["removed_actor_path"] == CRATE
+    assert len(editor.transactions) == 1
+
+
+def test_a_dynamic_mesh_becomes_a_saved_game_static_mesh(editor: FakeEditor) -> None:
+    """static_mesh used to be a no-op that returned a note (B7)."""
+    editor.objects[BODY].dynamic_mesh_component.materials = ["M_Red"]
+    payload = _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh")
+    asset = editor.assets["/Game/Generated/SM_Body"]
+    assert payload["result_path"] == asset.path == "/Game/Generated/SM_Body.SM_Body"
+    assert payload["asset"] == {
+        "asset_path": asset.path, "overwritten": False,
+        "saved_file": "/Projects/Mesh/Content/Generated/SM_Body.uasset",
+        "collision": "convex_hull", "collision_shape_count": 1, "material_slots": 1, "nanite": False,
+        "triangle_count": 12, "vertex_count": 8, "fallback_triangle_count": None, "fallback_vertex_count": None,
+    }
+    assert asset.materials == {0: "M_Red"}
+    assert editor.saved == ["/Game/Generated/SM_Body"]
+    assert "empty Xform" in payload["hint"]
+    assert editor.objects[BODY].valid  # left in the level without replace_actor
+
+
+def test_the_component_collision_goes_with_the_mesh(editor: FakeEditor) -> None:
+    _call(editor, "compute_unreal_convex_hull", mesh_path=BODY, output="collision")
+    payload = _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh",
+                    asset_path="/Game/Props/SM_Box", nanite=True, save=False)
+    asset = editor.assets["/Game/Props/SM_Box"]
+    assert payload["asset"]["collision"] == "component" and asset.collision is editor.objects[
+        BODY].dynamic_mesh_component.collision
+    assert payload["asset"]["nanite"] is True and asset.nanite_settings.enabled is True
+    assert payload["asset"]["saved_file"] is None and editor.saved == []
+
+
+def test_a_nanite_asset_reports_its_full_mesh_and_its_fallback(editor: FakeEditor) -> None:
+    """The reply gave the fallback's 316 triangles of a 1,920-triangle sphere as the asset's (#342 review)."""
+    payload = _call(editor, "convert_unreal_mesh_format", mesh_path=BALL, target_format="static_mesh", nanite=True)
+    asset = payload["asset"]
+    assert (asset["triangle_count"], asset["vertex_count"]) == (1920, 962)
+    assert (asset["fallback_triangle_count"], asset["fallback_vertex_count"]) == (320, 160)
+
+
+@pytest.mark.parametrize(("replace", "steps"), [(False, []), (True, ["simul: replace Body with a StaticMeshActor"])])
+def test_writing_the_asset_is_no_undo_step(editor: FakeEditor, replace: bool, steps: Any) -> None:
+    """Its collision was its own Undo step: one Undo dropped it and left the asset as written (#342 review).
+
+    Unreal records no undo step for a new asset, so its collision is written the same way; with
+    replace_actor, the swap of the actors is the one Undo step.
+    """
+    _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh", replace_actor=replace)
+    assert editor.transactions == steps
+    assert [e for e in editor.events if e[0] == "set_static_collision"] == [
+        ("set_static_collision", "/Game/Generated/SM_Body.SM_Body", 1, False)]
+
+
+def test_an_overwrite_is_no_undo_step_either(editor: FakeEditor) -> None:
+    _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh",
+          asset_path=CRATE_ASSET, overwrite=True)
+    assert editor.arguments["copy_mesh_to_static_mesh"][2].emit_transaction is False
+    assert editor.transactions == []
+
+
+@pytest.mark.parametrize(
+    ("label", "asset"),
+    [("상자 Box", "SM_Box"), ("!!!", "SM_Mesh"), ("Crate.v2 (final)", "SM_Crate_v2_final"), ("A__b", "SM_A_b")],
+)
+def test_the_default_asset_name_is_ascii(editor: FakeEditor, label: str, asset: str) -> None:
+    """A Korean label made /Game/Generated/SM_상자_Box, which an explicit asset_path would refuse (#342 review)."""
+    editor.objects[BODY].label = label
+    payload = _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh")
+    assert payload["result_path"] == f"/Game/Generated/{asset}.{asset}"
+
+
+def test_an_existing_static_mesh_is_kept_unless_overwrite(editor: FakeEditor) -> None:
+    refused = _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh",
+                    asset_path=CRATE_ASSET)
+    assert refused["details"]["code"] == "ASSET_EXISTS"
+    assert ("copy_mesh_to_static_mesh", True) not in editor.calls and editor.saved == []
+    replaced = _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh",
+                     asset_path=CRATE_ASSET, overwrite=True, collision="none")
+    assert replaced["asset"]["overwritten"] is True and replaced["asset"]["collision_shape_count"] == 0
+    assert editor.arguments["copy_mesh_to_static_mesh"][1] is editor.assets[CRATE_ASSET]
+    assert ("create_new_static_mesh_asset_from_mesh", True) not in editor.calls
+
+
+def test_replace_actor_swaps_the_dynamic_mesh_actor_for_a_static_mesh_actor(editor: FakeEditor) -> None:
+    editor.objects[BODY].transform = transform((5, 6, 7), yaw=30)
+    payload = _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh",
+                    replace_actor=True)
+    placed = editor.objects[payload["placed_actor_path"]]
+    assert placed.cls_name == "StaticMeshActor" and placed.label == "Body"
+    assert placed.static_mesh_component.static_mesh is editor.assets["/Game/Generated/SM_Body"]
+    assert placed.get_actor_transform() is editor.objects[BODY].transform
+    assert editor.objects[BODY].valid is False and payload["removed_actor_path"] == BODY
+    assert payload["hint"] is None
+
+
+@pytest.mark.parametrize(("overrides", "error_type", "code"), [
+    ({"asset_path": "/Engine/BasicShapes/SM_Mine"}, "SandboxError", "OUTSIDE_GAME_CONTENT"),
+    ({"asset_path": "/MyPlugin/Meshes/SM_Mine"}, "SandboxError", "OUTSIDE_GAME_CONTENT"),
+    ({"asset_path": "/Game/../Engine/SM_Mine"}, "ValidationError", "INVALID_ASSET_PATH"),
+    ({"asset_path": "/Game/My Meshes/SM_Mine"}, "ValidationError", "INVALID_ASSET_PATH"),
+    ({"asset_path": "/Game/Meshes/SM_A.SM_B"}, "ValidationError", "INVALID_ASSET_PATH"),
+    ({"location": [1, 2, 3]}, "ValidationError", "OPTION_NOT_APPLICABLE"),
+    ({"collision": "sphere"}, "ValidationError", "UNKNOWN_COLLISION"),
+])
+def test_static_mesh_destinations_are_sandboxed(editor: FakeEditor, overrides: Dict[str, Any], error_type: str,
+                                                code: str) -> None:
+    payload = _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh", **overrides)
+    assert (payload["error_type"], payload["details"]["code"]) == (error_type, code)
+    assert editor.calls == [] and editor.saved == []
+
+
+@pytest.mark.parametrize("overrides", [{"asset_path": "/Game/X/SM_X"}, {"overwrite": True}, {"save": False},
+                                       {"nanite": True}, {"collision": "none"}])
+def test_asset_options_are_refused_for_a_dynamic_mesh(editor: FakeEditor, overrides: Dict[str, Any]) -> None:
+    payload = _call(editor, "convert_unreal_mesh_format", **overrides)
+    assert payload["details"]["code"] == "OPTION_NOT_APPLICABLE"
+
+
+def test_a_path_holding_another_asset_kind_is_refused(editor: FakeEditor) -> None:
+    editor.assets["/Game/Maps/Level"] = SimpleNamespace(get_path_name=lambda: "/Game/Maps/Level.Level")
+    payload = _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh",
+                    asset_path="/Game/Maps/Level", overwrite=True)
+    assert payload["details"]["code"] == "ASSET_PATH_TAKEN"
+
+
+def test_assets_are_not_written_during_pie(editor: FakeEditor) -> None:
+    editor.pie = True
+    payload = _call(editor, "convert_unreal_mesh_format", mesh_path=BODY, target_format="static_mesh")
+    assert payload["error_type"] == "PIEActive" and editor.saved == []
 
 
 # -- the time budget ----------------------------------------------------------------
