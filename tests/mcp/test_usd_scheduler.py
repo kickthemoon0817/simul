@@ -251,3 +251,43 @@ def test_stage_locks_do_not_accumulate() -> None:
 
     scheduler = _run(scenario())
     assert scheduler._stage_locks == {}
+
+
+def test_calls_writing_one_file_run_one_at_a_time() -> None:
+    """Two saves of one file from different stages, or a save and an export to it, never overlap."""
+    recorder = Recorder()
+
+    async def scenario() -> None:
+        scheduler = USDCallScheduler(5)
+        await asyncio.gather(
+            scheduler.run("save", recorder.work("save", 0.3), stage_key="S1", file_key="/f.usda"),
+            scheduler.run("export", recorder.work("export", 0.3), stage_key="S2", file_key="/f.usda"),
+            scheduler.run("other", recorder.work("other", 0.3), stage_key="S3", file_key="/g.usda"),
+        )
+
+    _run(scenario())
+    assert not recorder.overlaps("save", "export")
+    assert recorder.overlaps("save", "other")
+
+
+def test_a_call_waiting_on_a_file_being_written_fails_with_stage_busy() -> None:
+    recorder = Recorder()
+
+    async def scenario() -> Tuple[Dict[str, Any], USDCallScheduler]:
+        scheduler = USDCallScheduler(0.2)
+        slow = asyncio.create_task(
+            scheduler.run("export", recorder.work("slow", 0.6), stage_key="S1", file_key="/f.usda")
+        )
+        await asyncio.sleep(0.05)
+        busy = await scheduler.run("save_usd_stage", recorder.work("never", 0), stage_key="S2", file_key="/f.usda")
+        # The refused call released its stage at once.
+        await scheduler.run("read", recorder.work("read", 0), stage_key="S2")
+        await slow
+        return busy, scheduler
+
+    busy, scheduler = _run(scenario())
+    assert busy["error_type"] == "StageBusy"
+    assert busy["details"]["file_key"] == "/f.usda"
+    assert "save_usd_stage" in busy["error"]
+    assert "never" not in [label for label, _, _ in recorder.intervals]
+    assert scheduler._file_locks == {} and scheduler._stage_locks == {}

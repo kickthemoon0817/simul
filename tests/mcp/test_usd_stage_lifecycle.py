@@ -253,3 +253,259 @@ def test_a_load_waits_for_a_running_read(sandbox: Path, monkeypatch: pytest.Monk
     assert outcome["overlapped"] is False
     assert outcome["read"]["success"] is True
     assert outcome["load"]["success"] is True
+
+
+def _legacy_pair(server: SimulMCPServer, steps) -> Any:
+    """Run ``steps(first, second)`` over two initialize-handshake sessions."""
+
+    async def _main() -> Any:
+        async with Client(server.mcp, mode="legacy") as first, Client(server.mcp, mode="legacy") as second:
+            return await steps(first, second)
+
+    return asyncio.run(_main())
+
+
+def test_concurrent_saves_of_one_file_from_two_sessions_lose_no_write(sandbox: Path) -> None:
+    """The audit's race: both saves reported saved and one session's prim was missing."""
+    server = _server(sandbox)
+    robot = sandbox / "robot.usda"
+
+    async def steps(first: Client, second: Client) -> List[Dict[str, Any]]:
+        mine = (await _call(first, "load_usd_file", file_path=str(robot)))["stage_id"]
+        theirs = (await _call(second, "load_usd_file", file_path=str(robot)))["stage_id"]
+        rounds = []
+        for index in range(5):
+            await _call(first, "reload_usd_stage", stage_id=mine, discard_unsaved=True)
+            await _call(second, "reload_usd_stage", stage_id=theirs, discard_unsaved=True)
+            await _call(first, "create_prim", stage_id=mine, prim_path=f"/Robot/A{index}", prim_type="Xform")
+            await _call(second, "create_prim", stage_id=theirs, prim_path=f"/Robot/B{index}", prim_type="Xform")
+            a, b = await asyncio.gather(
+                _call(first, "save_usd_stage", stage_id=mine), _call(second, "save_usd_stage", stage_id=theirs)
+            )
+            layer = Sdf.Layer.OpenAsAnonymous(str(robot))
+            rounds.append(
+                {
+                    "a": a,
+                    "b": b,
+                    "has_a": bool(layer.GetPrimAtPath(f"/Robot/A{index}")),
+                    "has_b": bool(layer.GetPrimAtPath(f"/Robot/B{index}")),
+                }
+            )
+        return rounds
+
+    for outcome in _legacy_pair(server, steps):
+        saved = [key for key in ("a", "b") if outcome[key].get("saved") is True]
+        refused = [outcome[key] for key in ("a", "b") if outcome[key].get("success") is False]
+        assert len(saved) == 1 and len(refused) == 1, outcome
+        assert refused[0]["error_type"] == "RefusedOperation"
+        assert refused[0]["details"]["override"] == "overwrite_external_changes"
+        assert outcome[f"has_{saved[0]}"] is True
+
+
+def test_concurrent_exports_to_one_new_path_create_it_once(sandbox: Path) -> None:
+    server = _server(sandbox)
+    robot = sandbox / "robot.usda"
+    (sandbox / "out").mkdir()
+
+    async def steps(first: Client, second: Client) -> List[List[Dict[str, Any]]]:
+        mine = (await _call(first, "load_usd_file", file_path=str(robot)))["stage_id"]
+        theirs = (await _call(second, "load_usd_file", file_path=str(robot)))["stage_id"]
+        rounds = []
+        for index in range(5):
+            destination = str(sandbox / "out" / f"copy_{index}.usdc")
+            rounds.append(
+                list(
+                    await asyncio.gather(
+                        _call(first, "export_usd_stage", stage_id=mine, file_path=destination),
+                        _call(second, "export_usd_stage", stage_id=theirs, file_path=destination),
+                    )
+                )
+            )
+        return rounds
+
+    for pair in _legacy_pair(server, steps):
+        assert sorted(bool(result.get("success")) for result in pair) == [False, True], pair
+        refused = next(result for result in pair if not result.get("success"))
+        assert refused["error_type"] == "RefusedOperation" and refused["details"]["override"] == "overwrite"
+    assert sorted(path.name for path in (sandbox / "out").iterdir()) == [f"copy_{i}.usdc" for i in range(5)]
+
+
+def test_a_load_that_reuses_a_stage_runs_beside_reads(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Handing back a clean, current stage reads nothing from disk, so it does not wait for the backend."""
+    import threading
+
+    from simul.adapters.headless_usd import HeadlessUSDSession
+
+    (sandbox / "other.usda").write_text((sandbox / "robot.usda").read_text())
+    server = _server(sandbox)
+    armed, entered, release = threading.Event(), threading.Event(), threading.Event()
+    original = HeadlessUSDSession.get_stage
+
+    def gated(session: HeadlessUSDSession, stage_id: str) -> Any:
+        if armed.is_set():
+            armed.clear()
+            entered.set()
+            release.wait(5)
+        return original(session, stage_id)
+
+    monkeypatch.setattr(HeadlessUSDSession, "get_stage", gated)
+
+    async def _main() -> Dict[str, Any]:
+        async with Client(server.mcp) as client:
+            robot = (await _call(client, "load_usd_file", file_path=str(sandbox / "robot.usda")))["stage_id"]
+            other = (await _call(client, "load_usd_file", file_path=str(sandbox / "other.usda")))["stage_id"]
+            armed.set()
+            read = asyncio.create_task(_call(client, "get_bounding_box", stage_id=other))
+            while not entered.is_set():
+                await asyncio.sleep(0.01)
+            again = await asyncio.wait_for(
+                _call(client, "load_usd_file", file_path=str(sandbox / "robot.usda")), 5
+            )
+            read_still_running = not read.done()
+            release.set()
+            await read
+            layer = Sdf.Layer.OpenAsAnonymous(str(sandbox / "robot.usda"))
+            Sdf.CreatePrimInLayer(layer, "/Robot/Outside").specifier = Sdf.SpecifierDef
+            layer.Export(str(sandbox / "robot.usda"))
+            fresh = await _call(client, "load_usd_file", file_path=str(sandbox / "robot.usda"))
+            return {"robot": robot, "again": again, "overlapped": read_still_running, "fresh": fresh}
+
+    outcome = asyncio.run(_main())
+
+    assert outcome["overlapped"] is True
+    assert outcome["again"]["stage_id"] == outcome["robot"]
+    assert outcome["again"]["total_prims"] == 2
+    assert outcome["fresh"]["stage_id"] != outcome["robot"]
+    assert outcome["fresh"]["total_prims"] == 3
+
+
+def test_a_session_that_ends_during_a_load_leaves_no_stage(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stage used to register after the session-end cleanup had run, with no owner left to reach it."""
+    import threading
+
+    from simul.adapters.headless_usd import HeadlessUSDSession
+    from simul.usd import stage_files
+
+    server = _server(sandbox)
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    compose = stage_files.compose_stage
+    load = HeadlessUSDSession.load_stage_or_raise
+
+    def gated_compose(root: Any) -> Any:
+        entered.set()
+        release.wait(5)
+        return compose(root)
+
+    def tracked_load(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return load(*args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(stage_files, "compose_stage", gated_compose)
+    monkeypatch.setattr(HeadlessUSDSession, "load_stage_or_raise", tracked_load)
+
+    async def _main() -> None:
+        client = Client(server.mcp, mode="legacy")
+        await client.__aenter__()
+        call = asyncio.create_task(
+            client.call_tool("load_usd_file", {"file_path": str(sandbox / "robot.usda")}, raise_on_error=False)
+        )
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        call.cancel()
+        try:
+            await asyncio.wait_for(client.__aexit__(None, None, None), 5)
+        except Exception:
+            pass
+        while server._watched_sessions:
+            await asyncio.sleep(0.01)
+        release.set()
+        while not finished.is_set():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+
+    asyncio.run(_main())
+
+    session = server.headless_adapter._session
+    assert session._stage_records == {} and session._active_stages == {}
+
+
+def test_a_relative_export_path_resolves_against_relative_path_base(tmp_path: Path) -> None:
+    """With the sandbox off as with it on, as load_usd_file resolves its path."""
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "robot.usda").write_text('#usda 1.0\ndef Xform "Robot"\n{\n}\n')
+    defaults = Settings()
+    settings = defaults.model_copy(
+        update={
+            "security": defaults.security.model_copy(
+                update={
+                    "sandbox_enabled": False,
+                    "relative_path_base": str(base),
+                    "rate_limiting_enabled": False,
+                }
+            )
+        }
+    )
+    server = SimulMCPServer(settings, backends={"usd"})
+
+    async def steps(client: Client) -> List[Dict[str, Any]]:
+        loaded = await _call(client, "load_usd_file", file_path="robot.usda")
+        exported = await _call(client, "export_usd_stage", stage_id=loaded["stage_id"], file_path="copy.usda")
+        return [loaded, exported]
+
+    loaded, exported = _run(server, steps)
+
+    assert loaded["file_path"] == str((base / "robot.usda").resolve())
+    assert exported["file_path"] == str((base / "copy.usda").resolve())
+    assert (base / "copy.usda").is_file()
+
+
+def test_reload_reports_a_sublayer_that_no_longer_parses(sandbox: Path) -> None:
+    (sandbox / "sub.usda").write_text('#usda 1.0\ndef Xform "World"\n{\n    def Xform "FromSub"\n    {\n    }\n}\n')
+    (sandbox / "scene.usda").write_text("#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\n")
+    server = _server(sandbox)
+
+    async def steps(client: Client) -> List[Dict[str, Any]]:
+        stage_id = (await _call(client, "load_usd_file", file_path=str(sandbox / "scene.usda")))["stage_id"]
+        (sandbox / "sub.usda").write_text('#usda 1.0\ndef Xform "World"\n{\n    broken\n')
+        return [
+            await _call(client, "reload_usd_stage", stage_id=stage_id),
+            await _call(client, "list_usd_stages"),
+            await _call(client, "load_usd_file", file_path=str(sandbox / "scene.usda")),
+            await _call(client, "load_usd_file", file_path=str(sandbox / "scene.usda")),
+        ]
+
+    reloaded, listed, again, once_more = _run(server, steps)
+
+    sub = str((sandbox / "sub.usda").resolve())
+    assert again["stage_id"] == once_more["stage_id"] == listed["stages"][0]["stage_id"]
+    assert [(w["code"], w["location"]["layer"]) for w in again["warnings"]] == [("FileNotReread", sub)]
+    assert reloaded["success"] is True
+    assert sub not in reloaded["reloaded_files"]
+    assert [entry["path"] for entry in reloaded["failed_files"]] == [sub]
+    assert "cannot parse" in reloaded["message"]
+    assert listed["stages"][0]["changed_on_disk"] == [sub]
+
+
+def test_a_self_referencing_file_loads_with_a_warning(sandbox: Path) -> None:
+    (sandbox / "self.usda").write_text(
+        '#usda 1.0\ndef Xform "W"\n{\n    def Cube "Proto"\n    {\n        double size = 1\n    }\n'
+        '    def "Inst" (\n        references = @./self.usda@</W/Proto>\n    )\n    {\n    }\n}\n'
+    )
+    server = _server(sandbox)
+
+    async def steps(client: Client) -> List[Dict[str, Any]]:
+        return [
+            await _call(client, "load_usd_file", file_path=str(sandbox / "self.usda")),
+            await _call(client, "load_usd_file", file_path=str(sandbox / "robot.usda")),
+        ]
+
+    looped, plain = _run(server, steps)
+
+    assert [warning["code"] for warning in looped["warnings"]] == ["SelfReference"]
+    assert looped["warnings"][0]["location"]["layer"] == str((sandbox / "self.usda").resolve())
+    assert plain["warnings"] == []

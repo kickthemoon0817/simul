@@ -10,8 +10,12 @@ server relies on is tested without a server.
 from __future__ import annotations
 
 import os
+import stat
+import threading
+import time
+import unicodedata
 from pathlib import Path
-from typing import Any, Dict, Iterator
+from typing import Any, Callable, Dict, Iterator, List, Tuple
 
 import pytest
 
@@ -338,6 +342,381 @@ class TestExport:
         assert same.error_type == "RefusedOperation" and "save_usd_stage" in same.message
 
 
+class TestSaveTracksOnlyWhatItWrote:
+    """A save writes the root file, so only the root file's change tracking moves."""
+
+    def test_a_changed_sublayer_stays_changed_after_the_stage_is_saved(self, session, files) -> None:
+        scene = session.load_stage(files["scene"])
+        sub = session.load_stage(files["sub"])
+        session.create_prim(sub, "/World/FromSub/Added", "Cube", {"size": 42})
+        session.save_stage(sub)
+        sub_path = str(files["sub"].resolve())
+        assert session.stage_status(scene)["changed_on_disk"] == [sub_path]
+
+        session.create_prim(scene, "/World/Mine", "Xform")
+        session.save_stage(scene)
+
+        assert session.stage_status(scene)["changed_on_disk"] == [sub_path]
+        again = session.load_stage(files["scene"])
+        assert again != scene
+        assert session.get_stage(again).GetPrimAtPath("/World/FromSub/Added").GetAttribute("size").Get() == 42
+        assert session.stage_status(again)["changed_on_disk"] == []
+
+    def test_a_saved_stage_is_current_for_its_own_file(self, session, files) -> None:
+        stage_id = session.load_stage(files["robot"])
+        session.create_prim(stage_id, "/Robot/Mine", "Xform")
+
+        session.save_stage(stage_id)
+
+        assert session.stage_status(stage_id)["changed_on_disk"] == []
+        assert session.load_stage(files["robot"]) == stage_id
+
+
+def _race(calls: List[Tuple[str, Callable[[], Any]]]) -> Dict[str, Any]:
+    """Run each call on its own thread, released together; return each one's result or USDEditError."""
+    barrier = threading.Barrier(len(calls))
+    outcomes: Dict[str, Any] = {}
+
+    def run(name: str, call: Callable[[], Any]) -> None:
+        barrier.wait()
+        try:
+            outcomes[name] = call()
+        except USDEditError as exc:
+            outcomes[name] = exc
+
+    threads = [threading.Thread(target=run, args=item) for item in calls]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    return outcomes
+
+
+class TestConcurrentWrites:
+    """Two writers of one file: the check and the write happen as one step per file."""
+
+    def test_two_stages_saving_one_file_at_once_lose_no_write(self, session, files, monkeypatch) -> None:
+        with session.acting_for("session-a"):
+            first = session.load_stage(files["robot"])
+            session.create_prim(first, "/Robot/FromA", "Xform")
+        with session.acting_for("session-b"):
+            second = session.load_stage(files["robot"])
+            session.create_prim(second, "/Robot/FromB", "Xform")
+        real = stage_files.changed_files
+
+        def slow_check(stage: Any, recorded: Any) -> List[str]:
+            changed = real(stage, recorded)
+            time.sleep(0.3)  # without a lock, both saves pass their check before either writes
+            return changed
+
+        monkeypatch.setattr(stage_files, "changed_files", slow_check)
+
+        def save(owner: str, stage_id: str) -> Callable[[], Any]:
+            def call() -> Any:
+                with session.acting_for(owner):
+                    return session.save_stage(stage_id)
+
+            return call
+
+        outcomes = _race([("a", save("session-a", first)), ("b", save("session-b", second))])
+
+        saved = [name for name, outcome in outcomes.items() if isinstance(outcome, dict)]
+        refused = [outcome for outcome in outcomes.values() if isinstance(outcome, USDEditError)]
+        assert len(saved) == 1 and len(refused) == 1, outcomes
+        assert refused[0].details["override"] == "overwrite_external_changes"
+        on_disk = _on_disk(files["robot"])
+        assert on_disk.GetPrimAtPath("/Robot/FromA" if saved == ["a"] else "/Robot/FromB")
+        loser = ("session-b", second) if saved == ["a"] else ("session-a", first)
+        with session.acting_for(loser[0]):
+            assert session.stage_status(loser[1])["has_unsaved_changes"] is True
+
+    def test_two_exports_to_one_new_path_create_it_once(self, session, files, tmp_path, monkeypatch) -> None:
+        robot = session.load_stage(files["robot"])
+        scene = session.load_stage(files["scene"])
+        destination = tmp_path / "out.usda"
+        real = stage_files.export_stage
+
+        def slow_export(*args: Any, **kwargs: Any) -> Any:
+            time.sleep(0.3)  # without a lock, both exports pass the existence check first
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(stage_files, "export_stage", slow_export)
+
+        outcomes = _race(
+            [
+                ("robot", lambda: session.export_stage(robot, str(destination))),
+                ("scene", lambda: session.export_stage(scene, str(destination))),
+            ]
+        )
+
+        written = [name for name, outcome in outcomes.items() if isinstance(outcome, dict)]
+        refused = [outcome for outcome in outcomes.values() if isinstance(outcome, USDEditError)]
+        assert len(written) == 1 and len(refused) == 1, outcomes
+        assert refused[0].details["override"] == "overwrite"
+        root_prim = "/Robot" if written == ["robot"] else "/World"
+        assert _on_disk(destination).GetPrimAtPath(root_prim)
+        assert [p.name for p in tmp_path.iterdir() if ".simul-" in p.name] == []
+
+    def test_a_destination_another_program_creates_meanwhile_is_kept(
+        self, session, files, tmp_path, monkeypatch
+    ) -> None:
+        destination = tmp_path / "out.usda"
+        real = stage_files._commit
+
+        def created_meanwhile(written: str, target: str, *, overwrite: bool) -> None:
+            Path(target).write_text("#usda 1.0\n")
+            real(written, target, overwrite=overwrite)
+
+        monkeypatch.setattr(stage_files, "_commit", created_meanwhile)
+
+        error = _refusal(session.export_stage, session.load_stage(files["robot"]), str(destination))
+
+        assert error.error_type == "RefusedOperation" and error.details["override"] == "overwrite"
+        assert destination.read_text() == "#usda 1.0\n"
+        assert [p.name for p in tmp_path.iterdir() if ".simul-" in p.name] == []
+
+    def test_exclusive_create_without_hard_links(self, session, files, tmp_path, monkeypatch) -> None:
+        def no_links(*args: Any) -> None:
+            raise PermissionError("hard links not supported")
+
+        monkeypatch.setattr(stage_files.os, "link", no_links)
+        stage = session.get_stage(session.load_stage(files["robot"]))
+        destination = str(tmp_path / "out.usdc")
+
+        stage_files.export_stage(stage, destination, flatten=False)
+
+        assert _on_disk(Path(destination)).GetPrimAtPath("/Robot/link1")
+        with pytest.raises(stage_files.DestinationExists):
+            stage_files.export_stage(stage, destination, flatten=True)
+        assert [p.name for p in tmp_path.iterdir() if ".simul-" in p.name] == []
+
+    def test_the_no_hard_link_fallback_removes_its_placeholder_when_the_move_fails(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        written = tmp_path / "written.usda"
+        written.write_text("#usda 1.0\n")
+        destination = tmp_path / "out.usda"
+
+        def no_links(*args: Any) -> None:
+            raise PermissionError("hard links not supported")
+
+        def failing_replace(*args: Any) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(stage_files.os, "link", no_links)
+        monkeypatch.setattr(stage_files.os, "replace", failing_replace)
+
+        with pytest.raises(OSError, match="disk full"):
+            stage_files._commit(str(written), str(destination), overwrite=False)
+
+        assert not destination.exists()
+
+    def test_overwrite_keeps_the_replaced_files_permissions(self, session, files, tmp_path) -> None:
+        destination = tmp_path / "out.usda"
+        destination.write_text("#usda 1.0\n")
+        destination.chmod(0o640)
+
+        session.export_stage(session.load_stage(files["robot"]), str(destination), overwrite=True)
+
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o640
+        assert _on_disk(destination).GetPrimAtPath("/Robot")
+
+    def test_a_save_in_the_same_clock_tick_still_counts_as_a_change(self, session, files) -> None:
+        """The stamp carries size and inode as well as the modification time."""
+        stage_id = session.load_stage(files["robot"])
+        session.create_prim(stage_id, "/Robot/Mine", "Xform")
+        before = os.stat(files["robot"])
+        _edit_externally(files["robot"], "/Robot/Theirs")
+        os.utime(files["robot"], ns=(before.st_atime_ns, before.st_mtime_ns))
+
+        assert session.stage_status(stage_id)["changed_on_disk"] == [str(files["robot"].resolve())]
+        assert _refusal(session.save_stage, stage_id).details["override"] == "overwrite_external_changes"
+
+
+def _other_spelling(path: Path, spell: Callable[[str], str]) -> Path:
+    """``path`` with its name spelled by ``spell``; skips unless the filesystem finds the same file."""
+    other = path.with_name(spell(path.name))
+    if other.name == path.name or not other.exists() or not os.path.samefile(other, path):
+        pytest.skip("this filesystem tells the two spellings apart")
+    return other
+
+
+_SPELLINGS = {
+    "case": lambda name: name.upper(),
+    "unicode": lambda name: unicodedata.normalize("NFD", name),
+}
+
+
+class TestOneFileManySpellings:
+    """Two names for one file (case on APFS/NTFS, NFC and NFD) are one file to the write locks."""
+
+    def test_the_identity_of_a_file_ignores_spelling_and_survives_a_save(self, session, tmp_path) -> None:
+        path = tmp_path / "장면.usda"
+        path.write_text('#usda 1.0\ndef Xform "W"\n{\n}\n')
+        key = stage_files.file_identity(str(path))
+        stage_id = session.load_stage(path)
+        session.create_prim(stage_id, "/W/New", "Xform")
+        session.save_stage(stage_id)  # a .usda save replaces the file: a new inode
+
+        assert stage_files.file_identity(str(path)) == key
+        assert stage_files.file_identity(unicodedata.normalize("NFD", str(path))) == key
+        assert stage_files.file_identity(str(path.with_name(path.name.upper()))) == key
+        assert stage_files.file_identity(str(tmp_path / "new.usda")) != key
+
+    @pytest.mark.parametrize("spelling", sorted(_SPELLINGS))
+    def test_two_spellings_saving_at_once_lose_no_write(self, session, tmp_path, monkeypatch, spelling) -> None:
+        path = tmp_path / "Scène.usda"
+        path.write_text('#usda 1.0\ndef Xform "W"\n{\n}\n')
+        other = _other_spelling(path, _SPELLINGS[spelling])
+        with session.acting_for("session-a"):
+            first = session.load_stage(path)
+            session.create_prim(first, "/W/FromA", "Xform")
+        with session.acting_for("session-b"):
+            second = session.load_stage(other)
+            session.create_prim(second, "/W/FromB", "Xform")
+        real = stage_files.changed_files
+
+        def slow_check(stage: Any, recorded: Any) -> List[str]:
+            changed = real(stage, recorded)
+            time.sleep(0.3)
+            return changed
+
+        monkeypatch.setattr(stage_files, "changed_files", slow_check)
+
+        def save(owner: str, stage_id: str) -> Callable[[], Any]:
+            def call() -> Any:
+                with session.acting_for(owner):
+                    return session.save_stage(stage_id)
+
+            return call
+
+        outcomes = _race([("a", save("session-a", first)), ("b", save("session-b", second))])
+
+        saved = [name for name, outcome in outcomes.items() if isinstance(outcome, dict)]
+        assert len(saved) == 1, outcomes
+        assert _on_disk(path).GetPrimAtPath("/W/FromA" if saved == ["a"] else "/W/FromB")
+
+    def test_exporting_onto_the_stages_own_file_in_another_case_is_refused(self, session, files) -> None:
+        other = _other_spelling(files["robot"], _SPELLINGS["case"])
+
+        error = _refusal(session.export_stage, session.load_stage(files["robot"]), str(other), overwrite=True)
+
+        assert error.error_type == "RefusedOperation" and "save_usd_stage" in error.message
+
+
+_BROKEN = '#usda 1.0\ndef Xform "World"\n{\n    this is not usda\n'
+
+
+class TestUnparseableRereads:
+    """A changed file pxr cannot parse now keeps its content and stays changed on disk."""
+
+    def test_reload_reports_a_sublayer_that_no_longer_parses(self, session, files) -> None:
+        stage_id = session.load_stage(files["scene"])
+        sub = str(files["sub"].resolve())
+        good = files["sub"].read_text()
+        files["sub"].write_text(_BROKEN)
+        _touch_later(files["sub"])
+
+        result = session.reload_stage(stage_id)
+
+        assert sub not in result["reloaded_files"]
+        assert [entry["path"] for entry in result["failed_files"]] == [sub]
+        assert result["failed_files"][0]["reason"]
+        assert session.get_stage(stage_id).GetPrimAtPath("/World/FromSub")
+        assert session.stage_status(stage_id)["changed_on_disk"] == [sub]
+
+        files["sub"].write_text(good.replace('def Xform "FromSub"', 'def Xform "Fixed"'))
+        _touch_later(files["sub"])
+        result = session.reload_stage(stage_id)
+
+        assert sub in result["reloaded_files"] and result["failed_files"] == []
+        assert session.get_stage(stage_id).GetPrimAtPath("/World/Fixed")
+        assert session.stage_status(stage_id)["changed_on_disk"] == []
+
+    def test_a_load_keeps_an_unparseable_shared_file_changed_on_disk(self, session, files) -> None:
+        (files["scene"].parent / "scene2.usda").write_text(files["scene"].read_text())
+        session.load_stage(files["scene"])
+        files["sub"].write_text(_BROKEN)
+        _touch_later(files["sub"])
+
+        other = session.load_stage(files["scene"].parent / "scene2.usda")
+
+        assert session.get_stage(other).GetPrimAtPath("/World/FromSub")
+        assert session.stage_status(other)["changed_on_disk"] == [str(files["sub"].resolve())]
+
+    def test_repeated_loads_reuse_a_stage_while_a_sublayer_stays_unparseable(self, session, files) -> None:
+        held = session.load_stage(files["scene"])
+        sub = str(files["sub"].resolve())
+        files["sub"].write_text(_BROKEN)
+        _touch_later(files["sub"])
+
+        loaded = [session.load_stage(files["scene"]) for _ in range(4)]
+
+        assert loaded[0] != held and set(loaded[1:]) <= {held, loaded[0]}
+        assert len(session.list_stages()) == 2
+        for stage_id in (held, loaded[-1]):
+            assert [path for path, _ in session.unread_files(stage_id)] == [sub]
+            assert session.stage_status(stage_id)["changed_on_disk"] == [sub]
+
+        files["sub"].write_text('#usda 1.0\ndef Xform "World"\n{\n    def Xform "Fixed"\n    {\n    }\n}\n')
+        _touch_later(files["sub"])
+        fixed = session.load_stage(files["scene"])
+
+        assert fixed not in loaded and session.get_stage(fixed).GetPrimAtPath("/World/Fixed")
+        assert session.unread_files(fixed) == []
+
+    def test_a_root_that_no_longer_parses_keeps_the_unsaved_edits(self, session, files) -> None:
+        stage_id = session.load_stage(files["robot"])
+        session.create_prim(stage_id, "/Robot/Unsaved", "Xform")
+        files["robot"].write_text(_BROKEN)
+        _touch_later(files["robot"])
+
+        error = _refusal(session.reload_stage, stage_id, discard_unsaved=True)
+
+        assert "Reloading" in error.message
+        assert session.get_stage(stage_id).GetPrimAtPath("/Robot/Unsaved")
+        assert session.stage_status(stage_id)["has_unsaved_changes"] is True
+
+
+class TestSelfReference:
+    def test_a_file_that_references_itself_is_recognised(self, session, tmp_path, files) -> None:
+        path = tmp_path / "self.usda"
+        path.write_text(
+            '#usda 1.0\ndef Xform "W"\n{\n    def Cube "Proto"\n    {\n        double size = 1\n    }\n'
+            '    def "Inst" (\n        references = @./self.usda@</W/Proto>\n    )\n    {\n    }\n}\n'
+        )
+
+        stage = session.get_stage(session.load_stage(path))
+
+        assert stage_files.composes_own_file(stage)
+        assert not stage_files.composes_own_file(session.get_stage(session.load_stage(files["scene"])))
+
+
+class TestLoadOwnership:
+    def test_a_load_for_a_session_that_ended_meanwhile_is_not_kept(self, session, files) -> None:
+        with session.acting_for("gone", alive=lambda: False):
+            error = _refusal(session.load_stage_or_raise, files["robot"])
+
+        assert error.error_type == "RefusedOperation" and "ended" in error.message
+        assert session._stage_records == {} and session._active_stages == {}
+        with session.acting_for("open", alive=lambda: True):
+            assert session.load_stage_or_raise(files["robot"])
+
+    def test_reuse_lookup_reads_the_registry_and_checks_on_demand(self, session, files) -> None:
+        assert session.latest_stage_for(files["robot"]) is None
+        first = session.load_stage(files["robot"])
+        assert session.latest_stage_for(files["robot"]) == first
+        assert session.reuse_stage(first, files["robot"]) is True
+
+        session.create_prim(first, "/Robot/Extra", "Xform")
+        assert session.reuse_stage(first, files["robot"]) is False
+        second = session.load_stage(files["robot"])
+        assert session.latest_stage_for(files["robot"]) == second
+
+        _edit_externally(files["robot"], "/Robot/Outside")
+        assert session.reuse_stage(second, files["robot"]) is False
+
+
 class TestDiscard:
     def test_reload_refuses_unsaved_edits_unless_discarded(self, session, files) -> None:
         stage_id = session.load_stage(files["robot"])
@@ -444,6 +823,38 @@ class TestRereadsStayInTheSandbox:
         stage = guarded.get_stage(scene)
         assert stage is not None and stage.GetPrimAtPath("/World/Asset")
         assert not stage.GetPrimAtPath("/World/Asset").GetAttribute("marker")
+
+    def test_a_refused_reload_keeps_the_unsaved_edits(self, guarded, tree) -> None:
+        """Every file is checked before anything is reread, the root included."""
+        scene = self._load(guarded, tree["inside"] / "scene.usda")
+        guarded.create_prim(scene, "/World/Unsaved", "Xform")
+        self._rewrite(tree["inside"] / "asset.usda", _ASSET_REACHING_OUT)
+
+        with pytest.raises(SandboxDenied):
+            guarded.reload_stage(scene, discard_unsaved=True)
+
+        stage = guarded.get_stage(scene)
+        assert stage.GetPrimAtPath("/World/Unsaved")
+        assert guarded.stage_status(scene)["has_unsaved_changes"] is True
+        assert not stage.GetPrimAtPath("/World/Asset/Extra")
+
+    def test_a_refused_reload_keeps_the_edits_when_the_new_root_names_a_held_layer(self, guarded, tree) -> None:
+        """The new root content sublayers a file another stage holds, whose file now reaches outside."""
+        inside = tree["inside"]
+        (inside / "shared.usda").write_text('#usda 1.0\ndef Xform "World"\n{\n}\n')
+        (inside / "holder.usda").write_text("#usda 1.0\n(\n    subLayers = [@./shared.usda@]\n)\n")
+        (inside / "p.usda").write_text('#usda 1.0\ndef Xform "P"\n{\n}\n')
+        self._load(guarded, inside / "holder.usda")
+        p = self._load(guarded, inside / "p.usda")
+        guarded.create_prim(p, "/P/Unsaved", "Xform")
+        self._rewrite(inside / "shared.usda", "#usda 1.0\n(\n    subLayers = [@../outside/secret.usda@]\n)\n")
+        self._rewrite(inside / "p.usda", '#usda 1.0\n(\n    subLayers = [@./shared.usda@]\n)\ndef Xform "P"\n{\n}\n')
+
+        with pytest.raises(SandboxDenied):
+            guarded.reload_stage(p, discard_unsaved=True)
+
+        assert guarded.get_stage(p).GetPrimAtPath("/P/Unsaved")
+        assert guarded.stage_status(p)["has_unsaved_changes"] is True
 
     def test_an_allowed_change_is_reread_by_every_stage_using_it(self, guarded, tree) -> None:
         scene = self._load(guarded, tree["inside"] / "scene.usda")

@@ -631,6 +631,13 @@ class StageExportResponse(BaseModel):
     message: str = Field(..., description="Status message")
 
 
+class FileNotReread(BaseModel):
+    """A changed file a reload could not reread."""
+
+    path: str = Field(..., description="Absolute path of the file")
+    reason: str = Field(..., description="Why pxr could not reread it")
+
+
 class StageReloadResponse(BaseModel):
     """Result of rereading a stage from disk."""
 
@@ -639,6 +646,13 @@ class StageReloadResponse(BaseModel):
     file_path: str = Field(..., description="The stage's root file")
     discarded_unsaved: bool = Field(..., description="Unsaved edits were dropped")
     reloaded_files: List[str] = Field(..., description="Files reread from disk")
+    failed_files: List[FileNotReread] = Field(
+        default_factory=list,
+        description=(
+            "Changed sublayers and referenced files pxr cannot parse now; each keeps its "
+            "previous content and stays changed on disk"
+        ),
+    )
     message: str = Field(..., description="Status message")
 
 
@@ -678,6 +692,7 @@ __all__ = [
     "StageSaveRequest",
     "StageExportRequest",
     "StageDiscardRequest",
+    "FileNotReread",
     "FileWritten",
     "StageStatus",
     "StageListResponse",
