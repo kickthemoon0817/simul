@@ -10,14 +10,6 @@ STATE_MODULE = """
 import os, uuid, unreal
 instance_id = uuid.uuid4().hex
 document_id = uuid.uuid4().hex
-
-def map_changed(flags):
-    global document_id
-    # MapChangeEventFlags::NewMap | WorldTornDown; rebuilds do not detach.
-    if flags & 5:
-        document_id = uuid.uuid4().hex
-
-unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).on_map_changed.add_callable(map_changed)
 """
 
 # Defined in that module again on every call, so an editor whose module an
@@ -25,7 +17,34 @@ unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).on_map_changed.add_call
 # world comes from editor_world(), which finds the editor world while Play In
 # Editor runs: UnrealEditorSubsystem.get_editor_world() returns None then, and
 # every attached call used to fail with "No editor world is available".
-STATE_FUNCTIONS = "import os, re, unreal\n" + EDITOR_WORLD_FUNCTION + """
+STATE_FUNCTIONS = "import os, re, uuid, unreal\n" + EDITOR_WORLD_FUNCTION + """
+# The map listener is a bound method of one object made once per module.
+# Unreal tells the Python callables on a delegate apart by their type alone,
+# and by self for a bound method (AreCallablesEqual, PyWrapperDelegate.cpp,
+# UE 5.7): every plain function equals every other, so add_callable_unique
+# of a function added nothing once any other script's function was bound to
+# on_map_changed, and same-map reloads stopped renewing document_id.
+if "map_listener" not in globals():
+    class MapListener:
+        def changed(self, flags):
+            global document_id
+            # MapChangeEventFlags::NewMap | WorldTornDown; rebuilds do not detach.
+            if flags & 5:
+                document_id = uuid.uuid4().hex
+
+    map_listener = MapListener()
+
+# A delegate holds the object its Python callable is bound through weakly, and
+# that proxy lives only while Python holds a wrapper of the object the
+# delegate is on (PyWrapperDelegate.cpp, UE 5.7). The module holds the
+# subsystem, so the listener lives as long as the module. Every simul call
+# runs in a namespace of its own that is discarded, so nothing else holds
+# one; the listener used to survive only because scripts left `level` in the
+# editor's shared console dict. add_callable_unique re-binds a listener
+# collected before this held it, and adds no second one.
+level_editor = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+level_editor.on_map_changed.add_callable_unique(map_listener.changed)
+
 def identity():
     world = editor_world()
     if world is None:
@@ -50,9 +69,12 @@ def verify(expected):
         raise RuntimeError("Attached viewport is unavailable; run simul unreal attach again")
 """
 
+# A module is replaced unless it is a plain module: a subclass could carry a
+# verify property that the refresh below would not override. The new module's
+# instance_id then fails the attachment, as it should.
 EDITOR_STATE = (
     "import sys, types, json, unreal\n"
-    "if '_simul_unreal_attachment_v1' not in sys.modules:\n"
+    "if type(sys.modules.get('_simul_unreal_attachment_v1')) is not types.ModuleType:\n"
     "    _simul_new = types.ModuleType('_simul_unreal_attachment_v1')\n"
     f"    exec({STATE_MODULE!r}, _simul_new.__dict__)\n"
     "    sys.modules['_simul_unreal_attachment_v1'] = _simul_new\n"

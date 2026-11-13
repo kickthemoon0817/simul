@@ -228,7 +228,7 @@ async def test_release_refuses_someone_elses_claim(monkeypatch: pytest.MonkeyPat
 
     refused = _payload(await _as(ctx, "agent-b", lambda: release(agent_id="agent-a")))
     assert refused["success"] is False
-    assert refused["error_type"] == "PermissionError"
+    assert refused["error_type"] == "PermissionDenied"
 
     sessions = instance.session_manager.get_instance_session(8226).get_status()["sessions"]
     assert sorted(s["agent_id"] for s in sessions) == sorted(
@@ -261,8 +261,9 @@ async def test_a_refused_claim_reaches_the_client_once(
     )
 
     async with Client(instance.mcp) as client:
-        result = await client.call_tool(tool, arguments)
+        result = await client.call_tool(tool, arguments, raise_on_error=False)
 
+    assert result.is_error is True
     assert result.structured_content is None
     (block,) = result.content
     payload = json.loads(block.text)

@@ -92,11 +92,15 @@
      "resolution_x": {
       "default": 1920,
       "description": "Width in pixels.",
+      "maximum": 16384,
+      "minimum": 1,
       "type": "integer"
      },
      "resolution_y": {
       "default": 1080,
       "description": "Height in pixels.",
+      "maximum": 16384,
+      "minimum": 1,
       "type": "integer"
      },
      "format": {
@@ -130,7 +134,7 @@
   {
    "name": "execute_unreal_script",
    "title": "Execute Unreal Script",
-   "description": "Execute arbitrary Python code inside the Unreal Engine editor. Use for operations not covered by other tools. The code runs via PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return structured data. UE 5.7 hazard: do not leave a reference to an unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) in a reference cycle; a later garbage collection, including the editor's own on autosave, crashes the editor. Call them inline. For granular CLI operations see: simul unreal --help",
+   "description": "Execute arbitrary Python code inside the Unreal Engine editor. Use for operations not covered by other tools. The code runs via PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return structured data. Each call starts in a fresh namespace with unreal imported, and every name it binds is discarded when it ends, returned or raised: nothing carries over to the next call (pass values back in as code), and a callback it registers must import what it uses inside itself. Never keep an unreal package or world, or an object that refers to one, in sys.modules, a module attribute or a registered callback: the next map change aborts the editor. UE 5.7 hazard: do not leave a reference to an unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) in a reference cycle (a class attribute or a method's default argument puts it in one); a later garbage collection, including the editor's own on autosave, crashes the editor. Call them inline. For granular CLI operations see: simul unreal --help",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -142,6 +146,11 @@
      "mode": {
       "default": "ExecuteFile",
       "description": "ExecuteFile (multi-line), EvaluateStatement (expression), or ExecuteStatement (single statement).",
+      "enum": [
+       "ExecuteFile",
+       "EvaluateStatement",
+       "ExecuteStatement"
+      ],
       "type": "string"
      }
     },
@@ -175,6 +184,17 @@
     "properties": {
      "agent_control": {
       "description": "inspect, select_actor, clear_selection, set_property, pilot_actor, eject_actor, set_game_view, move_cursor, or clear_cursor.",
+      "enum": [
+       "inspect",
+       "select_actor",
+       "clear_selection",
+       "set_property",
+       "pilot_actor",
+       "eject_actor",
+       "set_game_view",
+       "move_cursor",
+       "clear_cursor"
+      ],
       "type": "string"
      },
      "target": {
@@ -192,6 +212,11 @@
      "property_name": {
       "anyOf": [
        {
+        "enum": [
+         "location",
+         "rotation",
+         "scale"
+        ],
         "type": "string"
        },
        {
@@ -352,11 +377,14 @@
      "max_results": {
       "default": 200,
       "description": "Most actors in the page, 1 to 5000.",
+      "maximum": 5000,
+      "minimum": 1,
       "type": "integer"
      },
      "offset": {
       "default": 0,
       "description": "Matching actors to skip: the previous page's next_offset.",
+      "minimum": 0,
       "type": "integer"
      },
      "label_filter": {
@@ -440,11 +468,14 @@
      "offset": {
       "default": 0,
       "description": "Components to skip: the previous page's next_offset.",
+      "minimum": 0,
       "type": "integer"
      },
      "max_results": {
       "default": 200,
       "description": "Most components in the page, 1 to 5000.",
+      "maximum": 5000,
+      "minimum": 1,
       "type": "integer"
      }
     },
@@ -693,7 +724,7 @@
     "title": null,
     "readOnlyHint": true,
     "destructiveHint": null,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -870,11 +901,15 @@
      "fov": {
       "default": 90.0,
       "description": "Auto-fit only: field of view across the view, in degrees, at least 0.001 (the narrowest Unreal renders) and less than 180. The level viewport's; UE's default is 90.",
+      "exclusiveMaximum": 180.0,
+      "minimum": 0.001,
       "type": "number"
      },
      "aspect_ratio": {
       "default": 1.7777777777777777,
       "description": "Auto-fit only: the view's width over its height, from 1/16384 to 16384, such as a capture's resolution_x / resolution_y; 16:9 by default, as the default 1920x1080 capture.",
+      "maximum": 16384.0,
+      "minimum": 6.103515625e-05,
       "type": "number"
      }
     },
@@ -889,7 +924,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": null,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -990,7 +1025,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -1208,7 +1243,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -1290,6 +1325,11 @@
      "scope": {
       "default": "all",
       "description": "Which visibility to set: 'editor' (level viewport and captures), 'game' (Play In Editor and the packaged game) or 'all'.",
+      "enum": [
+       "all",
+       "editor",
+       "game"
+      ],
       "type": "string"
      },
      "persistent": {
@@ -1665,6 +1705,13 @@
     "properties": {
      "action": {
       "description": "One of start, stop, pause, resume, step.",
+      "enum": [
+       "start",
+       "stop",
+       "pause",
+       "resume",
+       "step"
+      ],
       "type": "string"
      }
     },
@@ -2089,7 +2136,7 @@
     "title": null,
     "readOnlyHint": false,
     "destructiveHint": true,
-    "idempotentHint": null,
+    "idempotentHint": true,
     "openWorldHint": null
    },
    "_meta": {
@@ -2227,7 +2274,7 @@
   {
    "name": "batch_unreal_operations",
    "title": "Batch Unreal Operations",
-   "description": "Execute several Remote Control requests in one HTTP call, in order. Each result is Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has error and error_type. Operations without a RequestId are numbered for you.",
+   "description": "Execute several Remote Control requests in one HTTP call, in order. Each result is Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has error and error_type. Operations without a RequestId are numbered for you. Python run through PythonScriptLibrary gets a fresh namespace per call, as in execute_unreal_script; an ExecuteConsoleCommand of a py command is refused (ValidationError).",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2280,6 +2327,8 @@
      "max_depth": {
       "default": 10,
       "description": "Levels below the root to include, 1 to 64 (the root's children are level 1).",
+      "maximum": 64,
+      "minimum": 1,
       "type": "integer"
      },
      "include_components": {
@@ -2307,11 +2356,14 @@
      "offset": {
       "default": 0,
       "description": "Root children to skip: the previous page's next_offset.",
+      "minimum": 0,
       "type": "integer"
      },
      "max_results": {
       "default": 100,
       "description": "Most root children in the page, 1 to 5000.",
+      "maximum": 5000,
+      "minimum": 1,
       "type": "integer"
      }
     }
@@ -2385,6 +2437,12 @@
     "properties": {
      "scene_type": {
       "description": "room, corridor, warehouse or outdoor.",
+      "enum": [
+       "room",
+       "corridor",
+       "warehouse",
+       "outdoor"
+      ],
       "type": "string"
      },
      "parameters": {
@@ -2438,16 +2496,24 @@
      "match_mode": {
       "default": "exact",
       "description": "exact (a tag equals label), contains (a tag contains label) or regex (label is a Python regular expression searched for in each tag; a repeated group that holds a quantifier or alternatives, as in (\\w+)+, is refused because it can run for hours); every mode ignores case.",
+      "enum": [
+       "exact",
+       "contains",
+       "regex"
+      ],
       "type": "string"
      },
      "max_results": {
       "default": 100,
       "description": "Most actors in the page, 1 to 5000.",
+      "maximum": 5000,
+      "minimum": 1,
       "type": "integer"
      },
      "offset": {
       "default": 0,
       "description": "Matching actors to skip: the previous page's next_offset.",
+      "minimum": 0,
       "type": "integer"
      }
     },
@@ -2916,6 +2982,8 @@
        {
         "exclusiveMaximum": 1,
         "exclusiveMinimum": 0,
+        "maximum": 1.0,
+        "minimum": 0.0,
         "type": "number"
        },
        {

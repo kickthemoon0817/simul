@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastmcp.tools import ToolResult
 
+from .. import error_types
 from ..schemas.common import ErrorResponse
 from ..session_manager import ClaimStoreError, claim_is_orphaned
 from ._helpers import with_param_descriptions
@@ -82,85 +83,86 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         Returns:
             List of instance info dicts with session status and compatibility.
         """
-        if scan:
-            discovered = await server._scan_isaac_instances()
-            server._isaac_clients.update(discovered)
+        async def compute() -> Dict[str, Any]:
+            if scan:
+                discovered = await server._scan_isaac_instances()
+                server._isaac_clients.update(discovered)
 
-        async def _instance_entry(name: str, client: Any) -> Dict[str, Any]:
-            brief = await server._get_instance_brief(name, client)
-            try:
-                session_status = server.session_manager.get_instance_session(
-                    client._port
-                ).get_status()
-            except ClaimStoreError as exc:
-                # One instance's unreadable records must not hide the others,
-                # nor read as "free".
-                session_status = {
-                    "sessions": [],
-                    "session_count": 0,
-                    "status": "unverified",
-                }
-                brief["claims_error"] = str(exc)
-            brief["sessions"] = public_records(session_status["sessions"])
-            brief["session_count"] = session_status["session_count"]
-            # Open means this server is skipping the bridge after repeated
-            # transport failures and talking to the stock socket instead.
-            brief["bridge_circuit_open"] = client.bridge_circuit_open
-            if not brief.get("reachable"):
-                # Session bookkeeping says nothing about whether we can talk to
-                # the instance, so an empty session list must not read as
-                # "available". Reporting free/clear/1.0 next to reachable=false
-                # is what let an agent select an instance that was not running.
-                brief["instance_status"] = "unreachable"
-                brief["compatibility"] = "blocked"
-                brief["compatibility_score"] = 0.0
-                brief["compatibility_reason"] = (
-                    "Instance is not reachable — is Isaac Sim running with the "
-                    "bridge extension enabled?"
-                )
+            async def _instance_entry(name: str, client: Any) -> Dict[str, Any]:
+                brief = await server._get_instance_brief(name, client)
+                try:
+                    session_status = server.session_manager.get_instance_session(
+                        client._port
+                    ).get_status()
+                except ClaimStoreError as exc:
+                    # One instance's unreadable records must not hide the others,
+                    # nor read as "free".
+                    session_status = {
+                        "sessions": [],
+                        "session_count": 0,
+                        "status": "unverified",
+                    }
+                    brief["claims_error"] = str(exc)
+                brief["sessions"] = public_records(session_status["sessions"])
+                brief["session_count"] = session_status["session_count"]
+                # Open means this server is skipping the bridge after repeated
+                # transport failures and talking to the stock socket instead.
+                brief["bridge_circuit_open"] = client.bridge_circuit_open
+                if not brief.get("reachable"):
+                    # Session bookkeeping says nothing about whether we can talk to
+                    # the instance, so an empty session list must not read as
+                    # "available". Reporting free/clear/1.0 next to reachable=false
+                    # is what let an agent select an instance that was not running.
+                    brief["instance_status"] = "unreachable"
+                    brief["compatibility"] = "blocked"
+                    brief["compatibility_score"] = 0.0
+                    brief["compatibility_reason"] = (
+                        "Instance is not reachable — is Isaac Sim running with the "
+                        "bridge extension enabled?"
+                    )
+                    return brief
+
+                brief["instance_status"] = session_status["status"]
+
+                if session_status["status"] == "unverified":
+                    brief["compatibility"] = "blocked"
+                    brief["compatibility_score"] = 0.0
+                    brief["compatibility_reason"] = (
+                        "The instance's claims cannot be verified (unreadable or just "
+                        "repaired records); a claim may still be live."
+                    )
+                elif my_purpose and session_status["sessions"]:
+                    compat = server.session_manager.score_compatibility(
+                        my_purpose, client._port, status=session_status
+                    )
+                    brief["compatibility"] = compat["compatibility"]
+                    brief["compatibility_score"] = compat["score"]
+                    brief["compatibility_reason"] = compat["reason"]
+                elif not session_status["sessions"]:
+                    brief["compatibility"] = "clear"
+                    brief["compatibility_score"] = 1.0
+                    brief["compatibility_reason"] = "No active sessions — instance is free"
+
                 return brief
 
-            brief["instance_status"] = session_status["status"]
-
-            if session_status["status"] == "unverified":
-                brief["compatibility"] = "blocked"
-                brief["compatibility_score"] = 0.0
-                brief["compatibility_reason"] = (
-                    "The instance's claims cannot be verified (unreadable or just "
-                    "repaired records); a claim may still be live."
-                )
-            elif my_purpose and session_status["sessions"]:
-                compat = server.session_manager.score_compatibility(
-                    my_purpose, client._port, status=session_status
-                )
-                brief["compatibility"] = compat["compatibility"]
-                brief["compatibility_score"] = compat["score"]
-                brief["compatibility_reason"] = compat["reason"]
-            elif not session_status["sessions"]:
-                brief["compatibility"] = "clear"
-                brief["compatibility_score"] = 1.0
-                brief["compatibility_reason"] = "No active sessions — instance is free"
-
-            return brief
-
-        instances = list(
-            await asyncio.gather(
-                *(
-                    _instance_entry(name, client)
-                    for name, client in server._isaac_clients.items()
+            instances = list(
+                await asyncio.gather(
+                    *(
+                        _instance_entry(name, client)
+                        for name, client in server._isaac_clients.items()
+                    )
                 )
             )
-        )
 
-        reachable = [i for i in instances if i["reachable"]]
-        return server._as_text_result(
-            {
+            reachable = [i for i in instances if i["reachable"]]
+            return {
                 "success": True,
                 "instances": instances,
                 "active_instance": server._get_effective_instance_name(),
                 "total_discovered": len(reachable),
             }
-        )
+
+        return await server._exec_payload("list_isaac_instances", compute)
 
     @server.mcp.tool(
         name="set_active_isaac_instance",
@@ -202,80 +204,79 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             Confirmation with the new active instance, session info,
             and compatibility status.
         """
-        refusal = server._session_required_error("set_active_isaac_instance")
-        if refusal is not None:
-            return server._as_text_result(refusal)
-        if instance_name not in server._isaac_clients:
-            available = list(server._isaac_clients.keys())
-            return server._as_text_result(
-                ErrorResponse(
+        async def compute() -> Dict[str, Any]:
+            refusal = server._session_required_error("set_active_isaac_instance")
+            if refusal is not None:
+                return refusal
+            if instance_name not in server._isaac_clients:
+                available = list(server._isaac_clients.keys())
+                return ErrorResponse(
                     error=f"Unknown instance '{instance_name}'. Available: {available}",
-                    error_type="NotFoundError",
+                    error_type=error_types.NOT_FOUND_ERROR,
                     details={"available": available},
                 ).model_dump()
-            )
 
-        client = server._isaac_clients[instance_name]
-        port = client._port
-        _agent_id = server._resolve_agent_id(agent_id)
+            client = server._isaac_clients[instance_name]
+            port = client._port
+            _agent_id = server._resolve_agent_id(agent_id)
 
-        compat_info: Dict[str, Any] = {}
-        session_result: Dict[str, Any] = {}
-        if purpose:
-            # Registered before the switch, so a refused claim leaves the
-            # session on the instance it was using.
-            try:
-                compat_info = server.session_manager.score_compatibility(purpose, port)
-                session_result = server.session_manager.get_instance_session(port).register(
-                    _agent_id,
-                    purpose,
-                    owner=server._claim_owner(),
-                    conflict=(
-                        server._claim_conflict(instance_name, _agent_id) if enforced else None
-                    ),
+            compat_info: Dict[str, Any] = {}
+            session_result: Dict[str, Any] = {}
+            if purpose:
+                # Registered before the switch, so a refused claim leaves the
+                # session on the instance it was using.
+                try:
+                    compat_info = server.session_manager.score_compatibility(purpose, port)
+                    session_result = server.session_manager.get_instance_session(port).register(
+                        _agent_id,
+                        purpose,
+                        owner=server._claim_owner(),
+                        conflict=(
+                            server._claim_conflict(instance_name, _agent_id) if enforced else None
+                        ),
+                    )
+                except ClaimStoreError as exc:
+                    return server._claim_store_error(exc, instance_name)
+                if session_result["status"] == "refused":
+                    return server._claimed_error(instance_name, session_result["holder"], _agent_id)
+
+            server._set_request_active_instance(instance_name)
+            reachable = await client.ping()
+
+            binding_result: Dict[str, Any] = {}
+            if purpose:
+                binding = server._bind_request_session(
+                    instance_name=instance_name,
+                    port=port,
+                    agent_id=_agent_id,
+                    purpose=purpose,
                 )
-            except ClaimStoreError as exc:
-                return server._as_text_result(server._claim_store_error(exc, instance_name))
-            if session_result["status"] == "refused":
-                return server._as_text_result(
-                    server._claimed_error(instance_name, session_result["holder"], _agent_id)
-                )
+                binding_result = {
+                    "binding_id": binding.binding_id,
+                    "agent_id": binding.agent_id,
+                    "session_id": binding.session_id,
+                }
 
-        server._set_request_active_instance(instance_name)
-        reachable = await client.ping()
-
-        binding_result: Dict[str, Any] = {}
-        if purpose:
-            binding = server._bind_request_session(
-                instance_name=instance_name,
-                port=port,
-                agent_id=_agent_id,
-                purpose=purpose,
-            )
-            binding_result = {
-                "binding_id": binding.binding_id,
-                "agent_id": binding.agent_id,
-                "session_id": binding.session_id,
+            result: Dict[str, Any] = {
+                "success": True,
+                "active_instance": instance_name,
+                "address": client.address,
+                "bridge_address": client.bridge_address,
+                "vscode_address": client.vscode_address,
+                "reachable": reachable,
             }
+            if compat_info:
+                result["compatibility"] = compat_info.get("compatibility")
+                result["compatibility_score"] = compat_info.get("score")
+                result["compatibility_reason"] = compat_info.get("reason")
+                result["existing_sessions"] = public_records(compat_info.get("sessions", []))
+            if session_result:
+                result["session"] = session_result
+            if binding_result:
+                result["binding"] = binding_result
+            return result
 
-        result: Dict[str, Any] = {
-            "success": True,
-            "active_instance": instance_name,
-            "address": client.address,
-            "bridge_address": client.bridge_address,
-            "vscode_address": client.vscode_address,
-            "reachable": reachable,
-        }
-        if compat_info:
-            result["compatibility"] = compat_info.get("compatibility")
-            result["compatibility_score"] = compat_info.get("score")
-            result["compatibility_reason"] = compat_info.get("reason")
-            result["existing_sessions"] = public_records(compat_info.get("sessions", []))
-        if session_result:
-            result["session"] = session_result
-        if binding_result:
-            result["binding"] = binding_result
-        return server._as_text_result(result)
+        return await server._exec_payload("set_active_isaac_instance", compute)
 
     @server.mcp.tool(
         name="claim_isaac_instance",
@@ -328,44 +329,40 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         Returns:
             Registration result with compatibility info.
         """
-        refusal = server._session_required_error("claim_isaac_instance")
-        if refusal is not None:
-            return server._as_text_result(refusal)
-        instance_name = server._get_effective_instance_name()
-        client = server._isaac_clients.get(instance_name)
-        if not client:
-            return server._as_text_result(
-                ErrorResponse(
-                    error="No active instance", error_type="StateError"
+        async def compute() -> Dict[str, Any]:
+            refusal = server._session_required_error("claim_isaac_instance")
+            if refusal is not None:
+                return refusal
+            instance_name = server._get_effective_instance_name()
+            client = server._isaac_clients.get(instance_name)
+            if not client:
+                return ErrorResponse(
+                    error="No active instance", error_type=error_types.INVALID_STATE
                 ).model_dump()
+
+            port = client._port
+            _agent_id = server._resolve_agent_id(agent_id)
+            inst_session = server.session_manager.get_instance_session(port)
+            try:
+                compat = server.session_manager.score_compatibility(purpose, port)
+                reg = inst_session.register(
+                    _agent_id,
+                    purpose,
+                    owner=server._claim_owner(),
+                    conflict=server._claim_conflict(instance_name, _agent_id) if enforced else None,
+                )
+            except ClaimStoreError as exc:
+                return server._claim_store_error(exc, instance_name)
+            if reg["status"] == "refused":
+                return server._claimed_error(instance_name, reg["holder"], _agent_id)
+            binding = server._bind_request_session(
+                instance_name=instance_name,
+                port=port,
+                agent_id=_agent_id,
+                purpose=purpose,
             )
 
-        port = client._port
-        _agent_id = server._resolve_agent_id(agent_id)
-        inst_session = server.session_manager.get_instance_session(port)
-        try:
-            compat = server.session_manager.score_compatibility(purpose, port)
-            reg = inst_session.register(
-                _agent_id,
-                purpose,
-                owner=server._claim_owner(),
-                conflict=server._claim_conflict(instance_name, _agent_id) if enforced else None,
-            )
-        except ClaimStoreError as exc:
-            return server._as_text_result(server._claim_store_error(exc, instance_name))
-        if reg["status"] == "refused":
-            return server._as_text_result(
-                server._claimed_error(instance_name, reg["holder"], _agent_id)
-            )
-        binding = server._bind_request_session(
-            instance_name=instance_name,
-            port=port,
-            agent_id=_agent_id,
-            purpose=purpose,
-        )
-
-        return server._as_text_result(
-            {
+            return {
                 "success": True,
                 "instance": instance_name,
                 "port": port,
@@ -380,7 +377,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
                 "compatibility_reason": compat["reason"],
                 "existing_sessions": public_records(compat["sessions"]),
             }
-        )
+
+        return await server._exec_payload("claim_isaac_instance", compute)
 
     @server.mcp.tool(
         name="release_isaac_instance",
@@ -411,58 +409,62 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         Returns:
             Release confirmation.
         """
-        refusal = server._session_required_error("release_isaac_instance")
-        if refusal is not None:
-            return server._as_text_result(refusal)
-        instance_name = server._get_effective_instance_name()
-        binding = server._get_active_binding()
-        _agent_id = agent_id or (binding.agent_id if binding is not None else None)
-        if binding is not None and _agent_id != binding.agent_id:
-            return server._as_text_result(
-                ErrorResponse(
+        async def compute() -> Dict[str, Any]:
+            refusal = server._session_required_error("release_isaac_instance")
+            if refusal is not None:
+                return refusal
+            instance_name = server._get_effective_instance_name()
+            binding = server._get_active_binding()
+            _agent_id = agent_id or (binding.agent_id if binding is not None else None)
+            if binding is not None and _agent_id != binding.agent_id:
+                return ErrorResponse(
                     error=(
                         f"agent_id {_agent_id!r} is not this session's claim "
                         f"({binding.agent_id!r}); only your own claim can be released."
                     ),
-                    error_type="PermissionError",
+                    error_type=error_types.PERMISSION_DENIED,
                 ).model_dump()
-            )
-        if binding is not None:
-            _port: Optional[int] = binding.port
-        else:
-            _port = server._port_of(instance_name) if _agent_id else None
-        if not _agent_id or not _port:
-            return server._as_text_result(
-                {"success": False, "error": "No active session to release"}
-            )
+            if binding is not None:
+                _port: Optional[int] = binding.port
+            else:
+                _port = server._port_of(instance_name) if _agent_id else None
+            if not _agent_id or not _port:
+                return ErrorResponse(
+                    error="No active session to release",
+                    error_type=error_types.INVALID_STATE,
+                    details={
+                        "hint": (
+                            "This session holds no claim. Pass agent_id to release an "
+                            "orphaned claim of yours after a reconnect."
+                        )
+                    },
+                ).model_dump()
 
-        owner = server._claim_owner()
+            owner = server._claim_owner()
 
-        def releasable(record: Dict[str, Any]) -> bool:
-            # This session's own claim, or one nothing can renew any more.
-            return binding is not None or record.get("owner") == owner or claim_is_orphaned(record)
+            def releasable(record: Dict[str, Any]) -> bool:
+                # This session's own claim, or one nothing can renew any more.
+                return binding is not None or record.get("owner") == owner or claim_is_orphaned(record)
 
-        inst_session = server.session_manager.get_instance_session(_port)
-        try:
-            result = inst_session.release(_agent_id, allowed=releasable)
-        except ClaimStoreError as exc:
-            return server._as_text_result(server._claim_store_error(exc, instance_name))
-        if result["status"] == "refused":
-            return server._as_text_result(
-                ErrorResponse(
+            inst_session = server.session_manager.get_instance_session(_port)
+            try:
+                result = inst_session.release(_agent_id, allowed=releasable)
+            except ClaimStoreError as exc:
+                return server._claim_store_error(exc, instance_name)
+            if result["status"] == "refused":
+                return ErrorResponse(
                     error=(
                         f"The claim of agent_id {_agent_id!r} on {instance_name!r} belongs "
                         "to another live MCP session; only your own claim, or an orphaned "
                         "one, can be released."
                     ),
-                    error_type="PermissionError",
+                    error_type=error_types.PERMISSION_DENIED,
                 ).model_dump()
-            )
-        released = server._release_request_binding(instance_name, _agent_id)
-        return server._as_text_result(
-            {
+            released = server._release_request_binding(instance_name, _agent_id)
+            return {
                 "success": True,
                 **result,
                 "binding_released": released.binding_id if released is not None else None,
             }
-        )
+
+        return await server._exec_payload("release_isaac_instance", compute)

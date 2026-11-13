@@ -40,8 +40,10 @@ class UsdTools:
     def text(self, name: str, arguments: Dict[str, Any]) -> str:
         """Return the tool's JSON text exactly as it crossed the wire."""
         result = self.raw(name, arguments)
-        assert not result.is_error, result.content
-        return result.content[-1].text
+        text = result.content[-1].text
+        # A failed call is an MCP error and still one JSON envelope.
+        assert result.is_error is (json.loads(text).get("success") is False), result.content
+        return text
 
     def call(self, name: str, **arguments: Any) -> Dict[str, Any]:
         """Invoke a tool and decode its payload with a strict JSON parser."""

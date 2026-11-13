@@ -242,8 +242,8 @@ def _optional_json(value: str) -> Any:
 def _three_numbers(value: Any) -> Optional[List[float]]:
     """A vector given as a JSON array of 3 numbers or as text, "x,y,z" or "[x, y, z]".
 
-    An empty string or array means none. ``_vectors`` checks the values
-    before the call, so this never fails inside it.
+    An empty string or array means none. Anything else raises ValueError,
+    which the call reports as a ValidationError naming the parameter.
     """
     items = value
     if isinstance(value, str):
@@ -274,26 +274,6 @@ def _required_three_numbers(value: Any) -> List[float]:
 
 #: A point or direction: a JSON array of 3 numbers, or the same as text.
 _Vector3 = Union[str, List[float]]
-
-
-def _vectors(*names: str, optional: bool = False) -> Callable[[Any], Optional[str]]:
-    """The check that each of ``names`` is 3 numbers (or, when ``optional``, empty).
-
-    A check's message fails the call as a ValidationError envelope; a
-    validator in the annotation would fail it in FastMCP's own argument
-    validation instead, as untyped pydantic text.
-    """
-    parse = _three_numbers if optional else _required_three_numbers
-
-    def check(request: Any) -> Optional[str]:
-        for name in names:
-            try:
-                parse(getattr(request, name))
-            except ValueError as exc:
-                return f"{name}: {exc}"
-        return None
-
-    return check
 
 
 # ---------------------------------------------------------------------------
@@ -514,11 +494,18 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "Execute arbitrary Python code inside the Unreal Engine editor. "
             "Use for operations not covered by other tools. The code runs via "
             "PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return "
-            "structured data. UE 5.7 hazard: do not leave a reference to an "
+            "structured data. Each call starts in a fresh namespace with unreal "
+            "imported, and every name it binds is discarded when it ends, returned "
+            "or raised: nothing carries over to the next call (pass values back in "
+            "as code), and a callback it registers must import what it uses inside "
+            "itself. Never keep an unreal package or world, or an object that refers to "
+            "one, in sys.modules, a module attribute or a registered callback: the next "
+            "map change aborts the editor. UE 5.7 hazard: do not leave a reference to an "
             "unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, "
             "unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) "
-            "in a reference cycle; a later garbage collection, including the editor's "
-            "own on autosave, crashes the editor. Call them inline. "
+            "in a reference cycle (a class attribute or a method's default argument puts "
+            "it in one); a later garbage collection, including the editor's own on "
+            "autosave, crashes the editor. Call them inline. "
             "For granular CLI operations see: simul unreal --help"
         ),
         response=UnrealExecuteScriptResponse,
@@ -865,6 +852,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealGetThumbnailResponse,
         read_only=True,
+        idempotent=True,
         method="get_actor_thumbnail",
         params=(
             ToolParam("asset_path", str, description="Full asset path."),
@@ -925,6 +913,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealFocusActorResponse,
         read_only=False,
+        idempotent=True,
         method="focus_on_actor",
         params=(
             ToolParam("actor_path", str, description="Full actor path to focus on."),
@@ -1000,6 +989,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealDeleteActorResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="delete_actor",
         params=(ToolParam("actor_path", str, description="Full actor path, as list_unreal_actors reports it."),),
@@ -1087,6 +1077,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealSetActorParentResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="set_actor_parent",
         params=(
@@ -1560,6 +1551,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealExportUsdResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="export_usd",
         params=(
@@ -1649,7 +1641,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Execute several Remote Control requests in one HTTP call, in order. Each result is "
             "Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has "
-            "error and error_type. Operations without a RequestId are numbered for you."
+            "error and error_type. Operations without a RequestId are numbered for you. Python run "
+            "through PythonScriptLibrary gets a fresh namespace per call, as in execute_unreal_script; "
+            "an ExecuteConsoleCommand of a py command is refused (ValidationError)."
         ),
         response=UnrealBatchOperationsResponse,
         read_only=False,
@@ -1834,7 +1828,6 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         response=UnrealGenerateMeshPrimitiveResponse,
         read_only=False,
         method="generate_mesh_primitive",
-        check=_vectors("location", optional=True),
         params=(
             ToolParam("primitive_type", Literal["box", "sphere", "cylinder", "cone", "capsule", "torus"]),
             ToolParam(
@@ -1988,7 +1981,6 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         read_only=False,
         destructive=True,
         method="cut_mesh_plane",
-        check=_vectors("plane_origin", "plane_normal"),
         params=(
             ToolParam("mesh_path", str),
             ToolParam("plane_origin", _Vector3, convert=_required_three_numbers),
@@ -2047,7 +2039,6 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         read_only=False,
         destructive=True,
         method="convert_mesh_format",
-        check=_vectors("location", optional=True),
         params=(
             ToolParam(
                 "mesh_path",

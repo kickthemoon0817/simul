@@ -8,9 +8,11 @@ selected (`--backends`), on `--unreal-tools` / `--blender-tools`, and on
 simul tools            # add --json for descriptions and input schemas
 ```
 
-Every tool returns a JSON object. Failures carry `success: false` and an
-error type such as `NotRunning`, `RefusedOperation` or
-`UnsupportedOperation`.
+Every tool returns a JSON object. A failure is sent with MCP `isError: true`
+and carries `success: false`, an `error_type` and an `error` message; see
+[Errors](#errors) for the types. Parameter bounds and choices are in each
+tool's input schema (`minimum`, `maximum`, `enum`), and a value outside them
+is refused with `ValidationError` before the tool runs.
 
 Results are strict JSON: a non-finite float is sent as the string
 `"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token. Each result
@@ -1290,9 +1292,54 @@ Behaviour worth knowing:
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.
-- `execute_unreal_script` runs the code you send in the editor's persistent
-  Python console namespace through `PythonScriptLibrary.ExecutePythonCommandEx`,
-  in or out of PIE. On UE 5.7 avoid one engine hazard in that code: Unreal wraps
+- Every Python call simul makes runs in a namespace of its own, and that
+  namespace is cleared when the call ends, whether it returns or raises. This
+  covers its own tools, `execute_unreal_script`, `simul unreal exec`, and
+  `batch_unreal_operations` calls to `ExecutePythonCommandEx` or
+  `ExecutePythonCommand`. (`call_unreal_actor_function` takes only actors of
+  the level open in the editor, so it never reaches the Python library.)
+  - **Why it matters.** UE 5.7 runs all literal Python in one dict that every
+    call and the editor's own Python console share, and `FileExecutionScope`
+    applies only to `.py` files. A name a script leaves there keeps its object
+    alive for Unreal's garbage collector.
+  - **The crash it prevents.** When the editor changes maps it releases
+    Python's hold on the old world and the objects inside it, but not on the
+    world's package or on objects outside it. A kept
+    `pkg = world.get_outermost()` therefore made the next `new_blank_map` or
+    map load abort the editor with "World Memory Leaks: Old Package ... not
+    cleaned up by GC", losing unsaved work.
+  - **`py` console commands are refused.** An `ExecuteConsoleCommand` whose
+    command is `py <code>`, or has a line or `|`-separated part that is one,
+    would run the code in that shared dict, past the per-call namespace. simul
+    refuses it with a `ValidationError` before anything is sent; run the code
+    with `execute_unreal_script` instead.
+  - **What remains.** Anything a script stores outside its namespace stays
+    alive for the editor's lifetime. A package or world kept that way, or an
+    object that refers to one, still aborts the editor at the next map change
+    as above. Places that keep things include a module attribute, an entry in
+    `sys.modules`, a registered callback or what its closure holds, and a
+    `unreal.uclass` type. An editor that ran an older simul keeps what those
+    calls bound until it restarts.
+- `execute_unreal_script` runs the code you send through
+  `PythonScriptLibrary.ExecutePythonCommandEx`, in or out of PIE.
+  - **A fresh namespace per call.** Each call starts with what a fresh
+    `__main__` holds (`__builtins__`, `__doc__`, `__spec__` and the rest) and
+    `unreal` imported. Nothing carries over between calls, so pass values back
+    in as code. A callback the script registers must import what it uses
+    inside itself, because the script's names are gone once it returns.
+  - **Mode behaviour is unchanged.** `ExecuteStatement` prints an expression's
+    value as the console does, but no longer keeps it in `builtins._`. A
+    `sys.displayhook` the script installs itself stays installed.
+  - **Code mentioning `.py` now runs.** Code that names a `.py` file followed
+    by a space (`print('see my.py first')`) runs as code; Unreal used to take
+    it for the path of a file to run.
+  - **A byte-order mark is skipped**, as Unreal skipped it, so a file saved as
+    "UTF-8 with BOM" runs.
+  - **A traceback starts with two frames of simul's.** The command's
+    (`File "<string>", line 1`) and the runner's (`File "<simul runner>"`)
+    come before the script's own frames, which keep the script's line numbers.
+
+  On UE 5.7 avoid one engine hazard in that code: Unreal wraps
   each static-library function
   (`unreal.MaterialEditingLibrary.get_scalar_parameter_names`,
   `unreal.EditorAssetLibrary.*`, `unreal.SystemLibrary.*`, every `*Library` /
@@ -1305,7 +1352,25 @@ Behaviour worth knowing:
   that built the cycle can return cleanly and the crash land minutes later. Call
   these functions inline (`unreal.MaterialEditingLibrary.get_scalar_parameter_names(mat)`)
   and don't stash them in a dict, list, closure or object that forms a cycle; a
-  reference that is dropped or stays reachable is safe. Module functions
+  reference that is dropped or stays reachable is safe.
+  - **Top-level aliases are safe.** An alias bound at the top level
+    (`names = unreal.MaterialEditingLibrary.get_scalar_parameter_names`) is
+    dropped when the call's namespace is cleared, even alongside functions
+    that use it.
+  - **Classes the call leaves are kept safe.** A class is always in a cycle,
+    so a class the script defines becomes garbage when the call ends. simul
+    keeps the library functions held by the classes the call's namespace
+    still reaches when it ends: bound to a name or not (appended to a list in
+    a loop, made with `type()`, the class of an object there). That covers
+    their attributes, the containers there, and their methods' default
+    arguments and closures. The class is collected without them, and the
+    next call lets go of each one nothing else holds any more.
+  - **Other cycles are not.** A cycle holding such a function that the
+    namespace no longer reaches when the call ends still crashes the editor's
+    next garbage collection: a class defined and dropped inside a function,
+    or one a loop rebinds the same name over without keeping it.
+
+  Module functions
   (`unreal.load_asset`) and the common `unreal.Object` accessors
   (`actor.get_name`, `actor.get_editor_property`) are a different, in-bounds
   wrapper and are safe, and simul's own tools call the library functions inline,
@@ -1325,7 +1390,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
 | Materials and lights | `get_blender_material_info`, `assign_blender_material`, `uv_unwrap_blender_mesh`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`, `get_blender_rigid_body_world`, `set_blender_rigid_body_world` |
-| Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `delete_blender_keyframe`, `get_blender_keyframes`, `get_blender_object_trajectory` |
+| Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `insert_blender_keyframes`, `delete_blender_keyframe`, `get_blender_keyframes`, `set_blender_pose_bone_transform`, `get_blender_object_trajectory`, `get_blender_trajectories` |
 | Camera and viewport | `get_blender_camera_info`, `set_blender_camera_view`, `get_blender_viewport_info`, `focus_blender_on_object`, `capture_blender_viewport`, `capture_blender_viewport_sequence` |
 | UI and attachment | `control_blender_ui`, `attach_blender_window` |
 | SimReady | `get_simready_metadata`, `apply_simready_metadata`, `setup_simready_hierarchy`, `validate_simready_compliance`, `export_simready_usd` |
@@ -1722,6 +1787,152 @@ Behaviour worth knowing:
   collection, are not followed, so a camera that only they need is composed
   as well. An add-on built before this report answers without
   `pose_source` and `warning`, and the server returns them as `null`.
+- `play_blender_animation` takes `play`, `reverse`, `pause` or `stop`, and
+  repeating a call changes nothing more (`screen.animation_play` on its own
+  toggles playback, so a second `play` used to stop it). `play` and `reverse`
+  start playback in that direction or turn it around; `pause` stops on the
+  current frame; `stop` stops and returns to the frame playback started from,
+  as Esc does in Blender, also after the tool turned it around. The reply
+  reports `is_playing`, `direction`, `changed` (false when playback already ran
+  that way, or was already stopped) and the current `frame`. Blender does not
+  report which way playback runs, so playback that the user or a script
+  started is restarted in the requested direction. Playback needs Blender's
+  event loop: in background mode (`blender -b`, the `bpy` module) `play` and
+  `reverse` are refused rather than reported as playing on a frame that never
+  moves; step frames with `set_blender_frame` or sample them with
+  `get_blender_object_trajectory`.
+- `get_blender_frame` reports `fps` as Blender plays it, `render.fps /
+  render.fps_base` (29.97 for NTSC's 30 / 1.001), and `fps_base` itself.
+  `set_blender_frame_range` takes a one-frame range (start equal to end).
+  Frames Blender would clamp are refused instead: a scene range outside
+  0..1048574, or a current frame outside -1048574..1048574.
+- `insert_blender_keyframe` keys the property's current value, as Blender's I
+  key does, unless `value` gives one: one number for one channel (`index` 0 or
+  more, or a property that is not an array), else one per element. A given
+  value is keyed through the property, so NLA remapping applies, and each
+  keyed channel then shows what its F-curve gives at the current frame (the
+  keyed value on that frame, or where the key is the channel's only one).
+  Left to itself, a GUI Blender 5.0.1 showed a first key at once and a later
+  one only at the next frame change, and background Blender neither. Only the
+  keyed channels are written: every other channel keeps its value, an
+  unkeyed edit included, as Blender's own keying leaves it. On an object with
+  NLA tracks, which Blender blends with the action only on a frame change,
+  the keyed channels keep their values until then and `warning` says so; a
+  muted or driven channel keeps its value too. `interpolation`
+  sets the key's interpolation (otherwise Blender's choice: the previous key's
+  on a curve with two keys or more, else its preference, Bezier by default)
+  and `keyframe_type` its key type. The reply's `keyframes` give each keyed
+  channel's value, interpolation and type as Blender stored them, and
+  `value_source` says which value was keyed.
+- `insert_blender_keyframes` keys many frames in one call: per entry of
+  `channels` a `data_path`, an `index` (-1 for every element), `frames` and a
+  value per frame, up to 10 000 keys (frames times elements) a call. Each value
+  is keyed as `insert_blender_keyframe` keys a given one: the keyed channels
+  then show what their F-curves give at the current frame, and every other
+  channel keeps its value, an unkeyed edit included (on an object with NLA
+  tracks the keyed channels keep theirs too, and `warning` says so). The same
+  `interpolation` and `keyframe_type` go to every key. Every entry is checked
+  before anything is keyed: a channel keyed twice on one frame, or on two
+  frames within 0.01 of each other, which Blender keeps as one key (on Blender
+  5.0.1 a key at 11.005 replaced the one at 11), is refused, and so is an
+  F-curve Blender keys nothing on: locked, sampled, or under an F-modifier, not
+  muted or invalid, that overrides its keys (all but Cycles, Stepped, Noise and
+  an additive Generator; on Blender 5.0.1 a LIMITS modifier did). Should Blender
+  still refuse a key part way (an NLA setup it cannot remap a key onto), the
+  keys that went in stay, the reply is a `KeyframesPartlyInserted` error whose
+  `details` give the keys inserted and the one refused, and in attached mode
+  the call is one undo step. On Blender 5.0.1 it inserted 6 000 keys (a 6-DOF
+  arm over 1 000 frames) in 0.09 s, which took some 13 000 calls of 55 ms one
+  key at a time.
+- `get_blender_keyframes` lists the keyed channels a page at a time: each
+  channel's data path, array index, the pose bone it animates (`bone_name`),
+  its key count and `frame_range` (in float frames, since a key can sit between
+  frames). `include_keys` adds every key: frame, value, interpolation and key
+  type, the handles and their types for a Bezier key, and the easing of an
+  eased one. `bone_name` keeps one pose bone's channels, and `data_path` one
+  property's (the bone's, with `bone_name`: `rotation_quaternion`, or its full
+  path, `pose.bones["Bone"].rotation_quaternion`). A page holds what fits in one
+  reply, up to `limit` channels; `next_offset` (and, with `include_keys`,
+  `next_key_offset`, as a long channel can run over several pages) is what the
+  next call passes as `offset` and `key_offset`, and `truncation` says so. They
+  are null on the last page. An 80-bone rig's 800 channels came back as 301,
+  with a hint naming parameters the tool did not have; they now come in four
+  pages.
+- `set_blender_pose_bone_transform` sets a pose bone's own location, rotation
+  and scale: its pose relative to the rest position, before constraints, as the
+  bone's Transform panel in Pose Mode shows it. The rotation is written in the
+  bone's `rotation_mode`, which is kept: `rotation_euler` takes XYZ Euler
+  angles and `rotation_quaternion` a quaternion (w, x, y, z), either converted
+  to that mode (a new bone's is QUATERNION, where Blender ignores
+  `rotation_euler`). The reply gives the transform as stored, the rotation as
+  XYZ Euler angles and as a quaternion, and `world_head` and `world_tail`, where
+  Blender evaluates the bone afterwards. Channels the bone locks
+  (`lock_location`, `lock_rotation`, `lock_scale`) are written all the same, as
+  `set_blender_object_transform` writes an object's: the locks only stop
+  Blender's interactive transform tools. Key it with `insert_blender_keyframe`
+  or `insert_blender_keyframes` on `pose.bones["Bone"].<property>`.
+- `get_blender_object_trajectory` is not read-only: each sample is a frame
+  change, so frame-change handlers run, and an unbaked rigid-body world is
+  stepped on from the last frame its memory cache holds, which fills the
+  cache. The frame and subframe current before the call are set again
+  afterwards. `step` is at least 1 and `start_frame` not after `end_frame`.
+  `time` counts seconds from the scene's `frame_start` (`time_origin_frame`) at
+  `fps / fps_base`, and `velocity` is the world location change since the
+  sample before, per second (null for the first sample of the request). Each
+  point gives the world `location`, `rotation_euler` in `euler_order` (the
+  target's Euler order, XYZ for a quaternion or axis-angle one), each sample
+  the equivalent nearest the previous one, so it stays continuous while the
+  target turns less than half a turn between samples, `rotation_quaternion`
+  (w, x, y, z, its sign kept continuous) and `local_rotation`, the target's own
+  rotation channels as its `rotation_mode` stores them, unwrapped: a joint
+  keyed from 0 to 6 pi reads 6 pi there. The world rotation is the one nearest the world matrix, as
+  `get_blender_object_info` reports it: a turned child of a parent with
+  non-uniform scale has a sheared matrix, from which a plain Euler or
+  quaternion read takes another rotation (0.190 rad for a child turned 30
+  degrees under a parent scaled 3 on X). `fields` picks which of these a sample
+  reports (fewer fit more samples a page). Values are the float32 Blender holds,
+  written in their shortest form (0.1, not 0.10000000149011612).
+- `bone_name` samples a pose bone of the armature instead: its world matrix is
+  the armature's times the bone's pose matrix, and its location the bone's head.
+  A bone's name passed as `object_name` fails with the armature to pass.
+  `get_blender_trajectories` samples up to 32 objects and bones in one pass,
+  setting each frame once for all of them, with the same samples, paging and
+  side effects.
+- A trajectory comes a page at a time. A page holds the samples that fit in
+  one reply, measured as they are written, up to `limit`; `next_offset` (null on
+  the last page) is the next call's `offset`, and the pages join into exactly
+  what one long reply would hold, velocities at their edges included. A
+  1 000-frame trajectory came back as frames 1-199 before; it is now 9 pages of
+  about 120 samples with every field, or 2 with `fields: ["location"]` (596 a
+  page). 32 targets with every field fit 3 frames a page. A page holds at
+  least one sample of every target, so targets whose names and one sample
+  each are more than a reply holds are refused: before any frame is set when
+  even the narrowest samples would not fit, else once the first sample is
+  measured. `details.targets_that_fit` counts how many of them, in order, fit
+  with samples as wide as the requested fields make them, so that many fit
+  every page. The server writes each non-ASCII character as a 6-byte escape:
+  32 bones of an armature named with 127 accented letters made a page the
+  server cut, dropping a target and skipping samples.
+- For an unbaked rigid-body world, frames its memory cache already holds are
+  read, not simulated again: the walk jumps to the cache's last frame and steps
+  on from there (`simulated_frames` counts the frames it stepped). What the
+  cache holds is read from its English info text; anything else (outdated,
+  frames skipped, a translated interface) walks from the cache start. A page
+  ends before a sample whose simulation would pass 200 000 bodies times frames
+  (or `max_simulated_frames` when given), so each call does at most that much
+  and the next page goes on. A request whose first sample alone needs more is
+  refused before any frame is set, with what it would cost: bake first
+  (`bake_blender_simulation`), sample fewer frames, or pass
+  `max_simulated_frames` to go ahead. On Blender 5.0.1 on an M-series Mac a
+  body-frame took about 35 microseconds headless and 61 in a GUI Blender, so the
+  bound is some 12 s there, inside the 30 s an attached call waits by default
+  (`BLENDER__CONNECTION_TIMEOUT`); a confirmed walk that takes longer keeps
+  running in Blender after the call times out, and a later call reads what it
+  cached. A 2-point request on 1 000 unbaked bodies over 1 000 frames took 29 s
+  unasked; it is now refused at once, takes 35 s headless once confirmed, and
+  0.01 s when repeated. Samples past the cache end come with a `warning`:
+  Blender simulates nothing later and holds the bodies at their last cached
+  pose.
 - `export_blender_file` writes `file_path` exactly. The path must end in the
   format's extension (`.obj`, `.fbx`, `.glb`/`.gltf`, `.usd`/`.usda`/`.usdc`/`.usdz`,
   `.stl`, `.ply`); anything else is refused before Blender runs, as Blender's glTF
@@ -2046,7 +2257,146 @@ Behaviour worth knowing:
 
 | Tool | Purpose |
 |---|---|
-| `get_tool_usage_stats` | Per-tool call counts, success rates and durations from the persistent usage log. Clearing it is operator-only: `simul stats --reset` |
+| `get_tool_usage_stats` | Per-tool call counts, success rates and durations for the calling MCP session; `scope="server"` counts every session's calls. The recent call log (`include_recent`, `limit` 1 to 200) is always the caller's own, because records carry parameters, file paths and agent labels. Operators read every session with `simul stats`; clearing it is operator-only: `simul stats --reset` |
+
+## Errors
+
+Every failed call has the same shape, on every backend and whichever layer
+refused it (the MCP input schema, a request model, the tool, the engine):
+
+```json
+{"success": false, "error_type": "ValidationError", "error": "width: Input should be less than or equal to 3840",
+ "details": {"errors": [{"field": "width", "message": "...", "type": "less_than_equal"}], "input": {"width": 5000}}}
+```
+
+and it is sent with `isError: true`. `error_type` is always one of the names
+below (`simul.mcp.error_types`): seven classes that mean the same on every
+backend, and domain types where a backend says more than a class would.
+Nothing else reaches a client. A library's or Python's exception name
+(`ClientConnectorError`, `ConnectionResetError`, `KeyError`) is mapped onto
+its family and kept in `details.exception_type`: a name with `Timeout` in it
+is a `TimeoutError`; `Connection*` and `BrokenPipeError` a `ConnectionError`;
+`*NotFound*`, `FileNotFoundError`, `KeyError` and `LookupError` a
+`NotFoundError`; `ValueError`, `TypeError`, `JSONDecodeError`, `Invalid*` and
+`*ValidationError` a `ValidationError`; `PermissionError` a
+`PermissionDenied`; anything else (`OSError`, `RuntimeError`, `ImportError`,
+`ModuleNotFoundError`) an `EngineError`.
+
+An exception raised by code running inside Isaac Sim is the engine's,
+whatever its name: a tool's own script that raises (a `TypeError` from a
+changed Kit API, an `OSError` from a full disk, a `ModuleNotFoundError` for a
+removed `omni.isaac.*` module) is an `EngineError`, and an agent's
+`execute_isaac_script` that raises is a `ScriptError`, both naming it in
+`details.exception_type`. Only the transports' own failures keep a class of
+their own: the bridge's refusals (`StageUnavailable` is `InvalidState`,
+`UnsafeExecutionDisabled` is `ScriptExecutionDisabled`, `PrimNotFound` is
+`NotFoundError`, `RequestTimeout` is `TimeoutError`), an empty reply
+(`ConnectionError`), a reply that is not JSON (`BridgeProtocolError`) and a
+script the bridge stopped at its timeout (`TimeoutError`).
+
+| `error_type` | Meaning | What to do |
+|---|---|---|
+| `ValidationError` | The arguments do not fit the tool: wrong type, missing or unexpected argument, out of bounds, not among the choices. `details.errors` lists each field; `details.code` names the check when a tool has several (USD's `InvalidPrimPath`, `InvalidAttribute`) | Fix the call |
+| `NotFoundError` | What the call names (prim, actor, object, material, stage, instance, tool, file) does not exist | Check the name |
+| `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
+| `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
+| `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a non-domain exception, a reply that does not parse or does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
+| `InstanceBusy` | The Isaac instance is serving another call | Retry shortly |
+| `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
+
+Domain types of the server:
+
+| `error_type` | Meaning |
+|---|---|
+| `RateLimitError` | The agent spent its rate-limit budget; `retry_after_seconds` says when to retry. `release_isaac_instance` is never refused |
+| `InstanceClaimed` | Another agent holds a live claim on the Isaac instance (claims enforced) |
+| `ClaimStoreError` | The claim records could not be read or saved (check `$SIMUL_HOME/sessions`) |
+| `SessionRequired` | The tool keeps per-client state and the request has no client identity |
+| `PermissionDenied` | The caller may not act on what it named: another agent's claim, a file the process may not read or write |
+| `ScriptExecutionDisabled` | `security.allow_script_execution` is off; the arbitrary-code tools (`execute_isaac_script`, ...) answer this instead of an unknown-tool error |
+| `PayloadTooLarge` | A script, request or reply is larger than the transport accepts |
+
+Domain types of the engines:
+
+| `error_type` | Meaning |
+|---|---|
+| `RefusedOperation` | The tool refuses an operation that would damage the application or unsaved work without an override flag |
+| `AuthenticationError` | The engine refused the credentials (python_server token, Remote Control passphrase) |
+| `UnsupportedOperation` | The backend or its mode cannot do this (`attach_blender_window` outside attached mode) |
+| `InvalidState` | Not possible in the current state (nothing claimed to release, a folder that already holds the import) |
+| `ScriptError` | An agent's script raised inside the engine, whatever it raised (an `OSError` or a `ConnectionRefusedError` of its own included); `details.exception_type` names it, `details.traceback` says where |
+| `EmptyOutput` | The engine's script printed nothing where the tool expected its reply |
+| `InvalidAssetType` | The asset is not of the kind the tool needs |
+| `UnsupportedFormat` | The file format is not one the tool reads or writes |
+| `CaptureError` | A viewport capture failed |
+| `ViewportUnavailable` | There is no viewport to read or drive (a headless editor) |
+| `UiUnavailable` | The editor UI the tool drives is not available |
+| `SimulationNotRunning` | The answer needs a running simulation (play or step once) |
+| `ValidationFailed` | An asset check ran and found errors |
+| `SimReadyValidationFailed` | A SimReady export was stopped by the validation it runs first |
+| `PIEActive` | Unreal is in Play-In-Editor |
+| `SpawnError` | Unreal could not spawn the actor from the class or asset given |
+| `PluginUnavailable` | The optional Unreal plugin the tool needs is not enabled |
+| `IncompatibleBody` | The Unreal body cannot simulate as asked; `details.problems` says why |
+| `EditorExited` | The Unreal editor exited while `simul unreal setup` waited for it |
+| `BridgeUnavailable` | The Isaac Sim bridge extension the tool needs is not configured |
+| `BridgeProtocolError` | A transport (Isaac Sim's bridge or stock socket, Blender's bridge) answered outside its protocol: another version, a reply that is not JSON, malformed or unmatched; the request may have run |
+| `ResponseEncodingError` | Blender's bridge could not encode the result; the operation may have run |
+| `AttachmentError`, `AttachmentStale`, `AttachmentTargetChanged` | The attached Blender window could not be used, its process went away, or it loaded another file |
+| `UnsavedChangesError` | Blender refuses to replace a file with unsaved changes without the flag |
+| `KeyframesPartlyInserted` | Blender refused a key part way through a batch; the keys before it stay, and `details` gives how many went in and the one refused |
+| `LoadError` | A headless USD file could not be opened; `details.reason` says why |
+| `StageBusy` | A headless USD stage is serving a call that cannot run beside this one; retry shortly |
+| `ComputationError` | A headless USD computation failed |
+| `LogFileNotFound` | `simul logs` found no log file |
+| `*NotApplied` | The read-back family (`TransformNotApplied`, `MaterialNotApplied`, `RenderSettingNotApplied`, ...): the engine took the request, but what it reads back afterwards is not what was asked. The payload keeps the values read back, with `details.expected` and `details.actual` where the tool reports them. Match the family by the suffix |
+
+Each entry of a `ValidationError`'s `details.errors` has the `field` (a dotted
+path for a nested model's field, `metadata.physics.mass`), the `message` and
+pydantic's `type`, and when they apply the `constraint` that failed
+(`{"le": 3840}`, `{"min_length": 3}`, `{"expected": "'DomeLight', ... or
+'CylinderLight'"}`), the `input` given and a `suggestion`: the closest valid
+choice, or the closest argument name for an unexpected one. A bpy enum
+refusal (`enum "BOXX" not found in ('BOX', 'SPHERE')`) gets the same
+`constraint`, `input` and `suggestion`.
+
+`details.input` (and each error's `input`) echoes the arguments bounded: a
+string longer than 256 characters by its size, a list or mapping by its first
+16 entries and a count of the rest (`"<19984 more items, 20000 in all>"`), at
+most 64 values per argument. A value whose name has a word that names a
+secret is echoed as `***`: an argument, a mapping key or a settings path, at
+any depth (`token`, `password`, `passphrase`, `passwd`, `pwd`, `secret`, `key`,
+`api_key`, `auth`, `authorization`, `credential`, `cookie`, `bearer`, `jwt`,
+`pin`; `access_key`, `apiKey`, `/persistent/auth_token`, but not `author` or
+`keyframe`). `error` and each `details.errors` message are cut at 2 000
+characters (`"... <38042 more characters>"`), so a message that quotes a long
+argument stays small too.
+
+Arguments that do not fit the input schema are refused before the tool runs,
+but through the same envelope as every other failure: the call spends a
+rate-limit token and is recorded in the usage log and the audit log. A call to
+a tool that is not registered is a `NotFoundError`, recorded and rate limited
+under `<unknown tool>` with the name it gave in the record's parameters. On
+this version the audit row of a call that failed inside the envelope says
+`status: ok`, since it records only whether the MCP call raised; the usage log
+has the outcome.
+
+## Annotations
+
+Every tool's `readOnlyHint`, `destructiveHint` and `idempotentHint` follow one
+rule on every backend, pinned for all tools by
+`tests/mcp/test_tool_annotation_table.py`:
+
+- **read-only**: changes nothing, a capture that only returns the image
+  included (`capture_blender_viewport`);
+- **destructive**: overwrites or deletes existing state or files, or runs
+  arbitrary code (`capture_isaac_viewport` deletes the oldest captures in its
+  directory, so it is destructive; `capture_unreal_viewport` writes a new
+  screenshot and is only additive);
+- **idempotent**: repeating the call with the same arguments changes nothing
+  more (a set, a delete, a save or export to the same path, a focus); a
+  create, a step, a capture that writes a new file or an edit that compounds
+  (simplify, subdivide) is not.
 
 ## MCP resources
 
