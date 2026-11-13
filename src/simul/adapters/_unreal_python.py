@@ -33,10 +33,12 @@ That collection is also where UE 5.7 crashes on a library-function wrapper
 (``builtin_function_or_method_with_closure``, whose weak-reference slot lies
 one pointer past the object) that is part of the garbage. A class is always
 in a cycle, and a class the script defined used to stay in the shared dict,
-so one holding such a function was never collected. ``run`` therefore keeps,
-for the editor's lifetime, the wrappers the script's top-level classes hold
-(in attributes, containers, methods' default arguments and closures); the
-classes themselves are collected without them.
+so one holding such a function was never collected. ``run`` therefore keeps
+the wrappers its namespace reaches when the call ends: through the classes
+there, bound by name or not (in a list, as an object's class), their
+attributes, containers, methods' default arguments and closures. The classes
+are collected without them, and the next call drops each wrapper nothing
+else holds any more, which frees it by reference count, outside the collector.
 
 A ``py`` console command (``KismetSystemLibrary.ExecuteConsoleCommand``)
 runs its code in the shared dict, past the runner, so ``python_command``
@@ -51,6 +53,7 @@ matching.
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 from typing import Any, Dict, Optional, Tuple
 
@@ -83,12 +86,21 @@ def _namespace():
     namespace.update(__name__="__main__", __builtins__=builtins, unreal=sys.modules["unreal"])
     return namespace
 
-# The library-function wrappers the script's classes held, kept for the
-# editor's lifetime so that Python's collector never sweeps one. The dict
-# hangs off sys, in no cycle: this source runs again on every call, and this
-# module, whose functions make its dict a cycle, may be replaced; dropped,
-# the dict would free the wrappers by reference count, which is safe.
+# The library-function wrappers the script's classes held, kept so that
+# Python's collector never sweeps one. The dict hangs off sys, in no cycle:
+# this source runs again on every call, and this module, whose functions make
+# its dict a cycle, may be replaced; dropped, the dict would free the
+# wrappers by reference count, which is safe.
 _kept = sys.__dict__.setdefault("_simul_unreal_kept_v1", {})
+
+def _release_kept():
+    # A wrapper only the dict holds (getrefcount counts the dict and its own
+    # argument) belonged to a class the collector has freed: dropping it now
+    # frees it by reference count. Each attribute access makes a new wrapper,
+    # so without this the dict grew with every call that defined a class.
+    for key in list(_kept):
+        if sys.getrefcount(_kept[key]) == 2:
+            del _kept[key]
 
 def _unsafe(value):
     kind = type(value)
@@ -96,8 +108,9 @@ def _unsafe(value):
         0 < kind.__weakrefoffset__ >= kind.__basicsize__ and not kind.__itemsize__)
 
 def _keep_unsafe(namespace, budget=10000):
-    pending = [value for value in namespace.values()
-               if isinstance(value, type) and value.__module__ == "__main__"]
+    # From everything the call left, so a class bound by no name (appended to
+    # a list in a loop, made with type(), an object's class) counts too.
+    pending = [value for key, value in namespace.items() if key not in ("__builtins__", "unreal")]
     seen = set()
     while pending and len(seen) < budget:
         value = pending.pop()
@@ -129,6 +142,7 @@ def _keep_unsafe(namespace, budget=10000):
             pending.extend(itertools.islice(value.__dict__.values(), budget))
 
 def run(mode, code, guard=""):
+    _release_kept()
     namespace = _namespace()
     try:
         if guard:
@@ -151,6 +165,10 @@ def run(mode, code, guard=""):
             pass  # a guard against an engine crash, never a reason to fail the call
         namespace.clear()
 '''
+
+#: Where the runner module keeps RUNNER_SOURCE compiled; the digest makes a
+#: new source compile anew.
+_RUNNER_CODE_KEY = "_code_" + hashlib.sha256(RUNNER_SOURCE.encode("utf-8")).hexdigest()[:16]
 
 #: The Python library Remote Control calls run Python through.
 PYTHON_LIBRARY = "/Script/PythonScriptPlugin.Default__PythonScriptLibrary"
@@ -278,8 +296,15 @@ def runner_command(code: str, mode: str, guard: str = "") -> str:
     # A traceback shows two frames before the script's own: this command's,
     # always File "<string>", line 1, and the runner's, "<simul runner>".
     # The script's frames follow as "<string>" with its own line numbers.
+    # Compiled once per module and source: compiling the runner on every
+    # call cost about a millisecond.
+    code_key = repr(_RUNNER_CODE_KEY)
+    compiled = (
+        f"(m.__dict__.get({code_key}) or m.__dict__.setdefault({code_key}, "
+        f"compile({RUNNER_SOURCE!r}, '<simul runner>', 'exec')))"
+    )
     return (
-        f"(lambda m: (exec(compile({RUNNER_SOURCE!r}, '<simul runner>', 'exec'), m.__dict__), m)[1])({install})"
+        f"(lambda m: (exec({compiled}, m.__dict__), m)[1])({install})"
         f".run({mode!r}, {_encode(code)!r}, {_encode(guard) if guard else ''!r})"
     )
 

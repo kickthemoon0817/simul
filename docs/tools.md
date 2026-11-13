@@ -1048,14 +1048,18 @@ Behaviour worth knowing:
     (`names = unreal.MaterialEditingLibrary.get_scalar_parameter_names`) is
     dropped when the call's namespace is cleared, even alongside functions
     that use it.
-  - **Top-level classes are kept safe.** A class is always in a cycle, so a
-    class the script defines becomes garbage when the call ends. simul keeps
-    the library functions a top-level class holds for the editor's lifetime,
-    and the class is collected without them. That covers its attributes, the
-    containers there, and its methods' default arguments and closures.
-  - **Other cycles are not.** A class defined inside a function, or a
-    function, dict or object that refers back to itself while holding such a
-    function, still crashes the editor's next garbage collection.
+  - **Classes the call leaves are kept safe.** A class is always in a cycle,
+    so a class the script defines becomes garbage when the call ends. simul
+    keeps the library functions held by the classes the call's namespace
+    still reaches when it ends: bound to a name or not (appended to a list in
+    a loop, made with `type()`, the class of an object there). That covers
+    their attributes, the containers there, and their methods' default
+    arguments and closures. The class is collected without them, and the
+    next call lets go of each one nothing else holds any more.
+  - **Other cycles are not.** A cycle holding such a function that the
+    namespace no longer reaches when the call ends still crashes the editor's
+    next garbage collection: a class defined and dropped inside a function,
+    or one a loop rebinds the same name over without keeping it.
 
   Module functions
   (`unreal.load_asset`) and the common `unreal.Object` accessors

@@ -204,7 +204,9 @@ async def test_a_class_the_script_defines_is_collected_without_the_library_funct
     """On main the class stayed in the shared dict; garbage now, it would crash the collector.
 
     The runner keeps the wrappers the class held, in attributes, containers,
-    default arguments and closures, and the class goes without them.
+    default arguments and closures, and the class goes without them. The
+    collector never sweeps a kept wrapper: the dict that keeps it hangs off
+    sys and survives the runner's refresh and its replacement.
     """
     script = (
         "class Helpers:\n"
@@ -216,23 +218,122 @@ async def test_a_class_the_script_defines_is_collected_without_the_library_funct
         "    @staticmethod\n"
         "    def nested(*, test=unreal.library_function()):\n"
         "        return test\n"
-        "kept_alone = unreal.library_function()\n"
+    )
+    gc.collect()
+    before = len(LibraryFunction.alive)
+    gc.disable()  # the class is collected below, when the test says so
+    try:
+        async with editor() as (session, fake):
+            result = await session.execute_script(script)
+            # The runner's source runs again, and a replaced runner module goes.
+            sys.modules[RUNNER_MODULE] = types.ModuleType(RUNNER_MODULE)
+            await session.execute_script("pass")
+            gc.collect()
+
+            assert result["success"] is True and fake.names() == []
+            assert len(Probe.alive) == 0  # the class and what else it held are gone
+            # Swept by the collector they would crash the editor; only the dict holds them now.
+            assert len(sys._simul_unreal_kept_v1) == 4  # type: ignore[attr-defined]
+            assert len(LibraryFunction.alive) == before + 4
+    finally:
+        gc.enable()
+
+
+@pytest.mark.asyncio
+async def test_a_class_bound_by_no_name_is_kept_safe_too() -> None:
+    """Classes appended to a list in a loop, made with type(), or reached as an object's class.
+
+    Only classes bound by name were walked: the others were swept with the
+    wrapper they held, and the editor crashed at its next garbage collection.
+    """
+    script = (
+        "holders = []\n"
+        "for i in range(3):\n"
+        "    class H:\n"
+        "        exists = unreal.library_function()\n"
+        "        package = unreal.Probe()\n"
+        "    holders.append(H)\n"
+        "made = [type('T', (), {'exists': unreal.library_function()})]\n"
+        "class Node:\n"
+        "    def __init__(self):\n"
+        "        self.me = self\n"
+        "        self.check = unreal.library_function()\n"
+        "nodes = {'a': Node()}\n"
+    )
+    gc.collect()
+    before = len(LibraryFunction.alive)
+    gc.disable()
+    try:
+        async with editor() as (session, fake):
+            result = await session.execute_script(script)
+            gc.collect()
+
+            assert result["success"] is True and fake.names() == []
+            assert len(Probe.alive) == 0
+            # The three loop classes', type()'s and the node's: all kept from the sweep.
+            assert len(LibraryFunction.alive) == before + 5
+            assert len(sys._simul_unreal_kept_v1) == 5  # type: ignore[attr-defined]
+    finally:
+        gc.enable()
+
+
+@pytest.mark.asyncio
+async def test_kept_wrappers_are_let_go_once_their_class_is_gone() -> None:
+    """Each attribute access makes a new wrapper: kept forever, they grew with every call."""
+    script = "".join(
+        f"class C{n}:\n    a = unreal.library_function()\n    b = unreal.library_function()\n" for n in range(5)
     )
     async with editor() as (session, fake):
-        gc.collect()
-        before = len(LibraryFunction.alive)
-        result = await session.execute_script(script)
-        # The next call runs the runner's source again, and a replaced runner
-        # module goes; what was kept stays kept.
-        await session.execute_script("pass")
-        sys.modules[RUNNER_MODULE] = types.ModuleType(RUNNER_MODULE)
+        sizes = []
+        for _ in range(20):
+            await session.execute_script(script)
+            gc.collect()  # UE runs Python's collector before each of its own
+            sizes.append(len(sys._simul_unreal_kept_v1))  # type: ignore[attr-defined]
         await session.execute_script("pass")
         gc.collect()
 
-        assert result["success"] is True and fake.names() == []
-        assert len(Probe.alive) == 0  # the class and what else it held are gone
-        # The four the class held stay; the top-level one went with the namespace.
-        assert len(LibraryFunction.alive) == before + 4
+        # Each call keeps the ten its classes held and lets go of the last call's.
+        assert sizes == [10] * 20
+        assert len(sys._simul_unreal_kept_v1) == 0  # type: ignore[attr-defined]
+        assert len(LibraryFunction.alive) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_wrapper_still_held_elsewhere_stays_kept() -> None:
+    """A class a callback keeps alive keeps its wrapper; letting go of it would be early, not unsafe."""
+    script = (
+        "import sys, types\n"
+        "class Live:\n"
+        "    exists = unreal.library_function()\n"
+        "registry = types.ModuleType('r336_registry')\n"
+        "registry.live = Live\n"
+        "sys.modules['r336_registry'] = registry\n"
+    )
+    async with editor() as (session, fake):
+        try:
+            await session.execute_script(script)
+            await session.execute_script("pass")
+            gc.collect()
+
+            assert len(sys._simul_unreal_kept_v1) == 1  # type: ignore[attr-defined]
+        finally:
+            sys.modules.pop("r336_registry", None)
+        await session.execute_script("pass")
+        gc.collect()
+        await session.execute_script("pass")
+
+        assert len(sys._simul_unreal_kept_v1) == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_the_runner_is_compiled_once_per_module() -> None:
+    async with editor() as (session, fake):
+        await session.execute_script("pass")
+        first = [v for k, v in vars(sys.modules[RUNNER_MODULE]).items() if k.startswith("_code_")]
+        await session.execute_script("pass")
+        second = [v for k, v in vars(sys.modules[RUNNER_MODULE]).items() if k.startswith("_code_")]
+
+    assert len(first) == len(second) == 1 and second[0] is first[0]
 
 
 @pytest.mark.asyncio
