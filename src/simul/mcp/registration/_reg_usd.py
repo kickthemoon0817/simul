@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from fastmcp.tools import ToolResult
 
+from .. import error_types
 from ..schemas.common import ErrorResponse
 from ..schemas.usd import (
     BBoxRequest,
@@ -56,7 +57,7 @@ from ..schemas.usd import (
 from ...logging import get_logger
 from ...usd.pxr_errors import PxrError, is_pxr_error
 from ...usd.sandbox import CompositionSandbox
-from ...usd.validation import WARNING, composition_issues, url_scheme
+from ...usd.validation import WARNING, composition_issues, unreal_content_issues, url_scheme
 from ...usd.validation import validate_usd_file as run_validation
 from ..usd_scheduler import USDCallScheduler
 from ._helpers import with_param_descriptions
@@ -75,6 +76,9 @@ SessionCall = Callable[["HeadlessUSDSession"], Awaitable[Dict[str, Any]]]
 PER_PRIM_QUERY_TOOLS = frozenset(
     {"get_prim_info", "get_mesh_info", "get_bounding_box", "search_prims"}
 )
+# Paged reads whose follow-on pages (offset > 0) count only against the
+# per-agent ceiling: walking a large stage's subtree is one request in pages.
+PAGED_WALK_TOOLS = frozenset({"get_prim_subtree"})
 
 logger = get_logger(__name__)
 
@@ -129,6 +133,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     """Register USD-related tools."""
     scheduler = USDCallScheduler(server.settings.server.timeout)
     server.exempt_from_per_tool_rate_limit(PER_PRIM_QUERY_TOOLS)
+    server.exempt_paging_continuations(PAGED_WALK_TOOLS)
 
     def request_owner() -> Optional[str]:
         """The MCP session of the current request, read on the event loop.
@@ -215,7 +220,10 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "file_path in the result is the resolved path. Paths: sandbox "
             "(security.allowed_paths), which also holds every sublayer, reference, "
             "payload, clip and asset path the file draws on: one outside it fails the "
-            "load with SandboxError listing them."
+            "load with SandboxError listing them. An Unreal content path in an asset value "
+            "(/Engine, /Game or /Script .../Name.Name, as Unreal's USD exporter writes "
+            "info:unreal:sourceAsset) names an editor object, not a file: it passes and, "
+            "with the sandbox on, is listed in warnings as UnrealContentPath."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -267,7 +275,11 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 has_animation=stage_info.has_animation,
                 layer_count=len(stage_info.layers),
                 default_prim=stage_info.default_prim_path,
-                warnings=[issue.to_dict() for issue in composition_issues(stage, WARNING)],
+                warnings=[
+                    issue.to_dict()
+                    for issue in composition_issues(stage, WARNING)
+                    + unreal_content_issues(session.unreal_content_paths(stage_id))
+                ],
             ).model_dump()
 
         async def _load_call(session: "HeadlessUSDSession") -> Dict[str, Any]:
@@ -302,7 +314,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             ".usdz. Returns is_valid (no error-severity issue), can_read (pxr opened "
             "it, so load_usd_file can) and issues with severity, code and location. "
             "Paths: sandbox (security.allowed_paths), applied to everything the file "
-            "draws on as load_usd_file applies it."
+            "draws on as load_usd_file applies it. pxr's UnresolvableDependency and "
+            "MissingSourceTypeInRegistry about an Unreal content path (an editor object "
+            "Unreal's USD exporter names, not a file) are warnings, not errors."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -362,7 +376,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "rows, and a non-finite float the string \"Infinity\", "
             "\"-Infinity\" or \"NaN\". An array attribute carries its length "
             "and its first array_preview elements, so a large mesh stays small; "
-            "use get_mesh_info for geometry statistics. A property pxr cannot read "
+            "use get_mesh_info for geometry statistics. Attributes past the result "
+            "budget are cut, the leading ones kept, and truncated_fields says where; "
+            "narrow with attribute_filter to read the rest. A property pxr cannot read "
             "(a material:binding or physics:body0 authored as an attribute) is named "
             "in warnings instead of failing the call; the binding falls back to the "
             "nearest one pxr can read."
@@ -735,8 +751,13 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "materialBind geometry subset, and its physics material. Computed with "
             "numpy, so a million-vertex mesh takes well under a second. time_code "
             "reads a deforming mesh's points; points_time_samples says whether it "
-            "deforms. A material binding pxr cannot resolve falls back to the nearest "
-            "direct binding pxr can read and is named in warnings."
+            "deforms. A mesh whose points or topology exist only as time samples "
+            "comes back measured: false at the default time, with its "
+            "sampled_time_range and a note: pass a time_code in that range. A closed "
+            "mesh with flipped faces reports consistently_oriented: false and no "
+            "volume. A prim that is not a Mesh is an InvalidAssetType error. A "
+            "material binding pxr cannot resolve falls back to the nearest direct "
+            "binding pxr can read and is named in warnings."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -776,11 +797,15 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if not prim.IsA(UsdGeom.Mesh):
                 return ErrorResponse(
                     error=(
-                        f"Mesh not found: {input_data.prim_path} is a "
-                        f"{prim.GetTypeName() or 'typeless prim'}, not a Mesh"
+                        f"{input_data.prim_path} is a {prim.GetTypeName() or 'typeless prim'}, not a "
+                        "Mesh; get_mesh_info reads Mesh prims (get_bounding_box bounds any prim)"
                     ),
-                    error_type="NotFoundError",
-                    details={"prim_path": input_data.prim_path, "prim_type": prim.GetTypeName()},
+                    error_type=error_types.INVALID_ASSET_TYPE,
+                    details={
+                        "prim_path": input_data.prim_path,
+                        "prim_type": prim.GetTypeName() or None,
+                        "expected_type": "Mesh",
+                    },
                 ).model_dump()
             info = MeshOperations().get_mesh_statistics(prim, input_data.time_code)
             return MeshInfo(**mesh_info_to_dict(info)).model_dump()
@@ -1130,7 +1155,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "instance; a deforming mesh with time-sampled points measured at its "
             "first sample), materials, root prims, and animation: detected from "
             "time samples spanning more than one time even without an authored "
-            "time range, with its duration in seconds. warnings groups the layers "
+            "time range, with its duration in seconds; time_sample_range is in stage "
+            "time codes, through layer offsets and value clips. warnings groups the layers "
             "whose upAxis or metersPerUnit differs from the stage's (USD does not "
             "rescale them), with a count and example layers per group. format "
             "text adds a short digest."
@@ -1170,6 +1196,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if isinstance(input_data, dict):
                 return input_data
 
+            # An unknown stage_id is a NotFoundError, as every other stage read reports it.
+            _loaded_stage(session, input_data.stage_id)
             summary = session.summarize_stage(input_data.stage_id, input_data.include_meshes)
             if not summary:
                 return ErrorResponse(

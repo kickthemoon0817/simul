@@ -49,6 +49,7 @@ RELATIONSHIP_NOT_EDITABLE = "RelationshipNotEditable"
 # Stage lifecycle (save, export, reload) codes, used by the headless session.
 INVALID_FILE_PATH = "InvalidFilePath"
 SAVE_FAILED = "SaveFailed"
+RELOAD_FAILED = "ReloadFailed"
 CODE_ERROR_TYPES: Dict[str, str] = {
     INVALID_PRIM_PATH: VALIDATION,
     UNKNOWN_PRIM_TYPE: VALIDATION,
@@ -57,6 +58,7 @@ CODE_ERROR_TYPES: Dict[str, str] = {
     INVALID_FILE_PATH: VALIDATION,
     EDIT_FAILED: ENGINE,
     SAVE_FAILED: ENGINE,
+    RELOAD_FAILED: ENGINE,
     RELATIONSHIP_NOT_EDITABLE: UNSUPPORTED,
 }
 # Warning code for an attribute written for a schema the prim does not have.

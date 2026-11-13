@@ -117,7 +117,7 @@ class TestUnrealToolRegistration:
             "get_unreal_engine_info",
             "list_unreal_actors",
             "spawn_unreal_actor",
-            "convert_to_simready",
+            "import_unreal_usd",
         } <= tool_names
         assert len({name for name in tool_names if "unreal" in name}) > len(THIN_UNREAL_TOOLS)
 

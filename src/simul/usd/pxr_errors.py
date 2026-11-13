@@ -17,7 +17,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._pxr import Sdf, Tf, Usd, UsdShade
+from ._pxr import Tf, Usd, UsdShade
+from .stage_files import public_identifier
 from .validation import ValidationIssue
 
 _TF_ERROR = re.compile(
@@ -39,13 +40,15 @@ def tf_error_reason(exc: BaseException) -> str:
         exc: Usually a ``Tf.ErrorException``; any exception is accepted.
 
     Returns:
-        The messages pxr attached, joined with ``; ``, or the exception text.
+        The messages pxr attached, joined with ``; ``, or the exception text,
+        with the session's own format arguments taken out of every layer
+        identifier it quotes (``stage_files.public_identifier``).
     """
     text = str(exc)
     messages = [match.group("message").strip() for match in _TF_ERROR.finditer(text)]
     if messages:
-        return "; ".join(messages)
-    return text.strip() or type(exc).__name__
+        return public_identifier("; ".join(messages))
+    return public_identifier(text.strip()) or type(exc).__name__
 
 
 class PxrError(Exception):
@@ -75,13 +78,13 @@ def _read_failure(exc: BaseException) -> Tuple[str, Optional[str]]:
 
     pxr names a spec as ``@<layer identifier>@</Prim.property>``; the reason
     keeps the path (a path in that layer, which a reference may map to a
-    different path on the stage) and the layer is returned as its file path,
-    without the format arguments the session adds to a root layer's
-    identifier.
+    different path on the stage) and the layer is returned separately,
+    already without the format arguments the session adds to a root layer's
+    identifier (see :func:`tf_error_reason`).
     """
     reason = tf_error_reason(exc)
     match = _SPEC_REFERENCE.search(reason)
-    layer = Sdf.Layer.SplitIdentifier(match.group("layer"))[0] if match else None
+    layer = match.group("layer") if match else None
     return _SPEC_REFERENCE.sub(lambda found: found.group("path"), reason), layer or None
 
 

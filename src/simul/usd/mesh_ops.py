@@ -68,6 +68,7 @@ class MeshInfo:
     measured: bool = True
     sampled_time_range: Optional[List[float]] = None
     note: Optional[str] = None
+    consistently_oriented: Optional[bool] = None
     warnings: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -89,14 +90,43 @@ class GeometryStats:
     """What ``geometry_statistics`` measures for one mesh.
 
     ``surface_area`` is None when the topology is invalid (it would index
-    points that do not exist), ``volume`` None unless the mesh is closed, and
-    ``bbox`` None when the mesh has no points.
+    points that do not exist), ``volume`` None unless the mesh is closed and
+    consistently oriented, and ``bbox`` None when the mesh has no points.
+    ``consistently_oriented`` says, for a closed mesh, whether every edge is
+    traversed once in each direction by the two faces sharing it (None when
+    the mesh is not closed, or too large to tell).
     """
     topology_valid: Optional[bool]
     is_closed: Optional[bool]
     surface_area: Optional[float]
     volume: Optional[float]
     bbox: Optional[BBox]
+    consistently_oriented: Optional[bool] = None
+
+
+# Edge keys carry the edge's direction in their lowest bit while the doubled
+# key fits an int64; past this many vertices orientation is not checked.
+_DIRECTED_KEY_VERTEX_LIMIT = 1 << 30
+
+
+def _closed_and_oriented(keys: np.ndarray, directed: bool) -> "tuple[bool, Optional[bool]]":
+    """From sorted edge keys: whether every edge is used by exactly two faces, and in opposite directions.
+
+    With ``directed`` keys (``edge * 2 + (a > b)``) a closed, consistently
+    wound mesh sorts into pairs ``(2e, 2e + 1)``; a face wound the other way
+    from its neighbour leaves a pair with equal keys.
+    """
+    if len(keys) == 0 or len(keys) % 2:
+        return False, None
+    first, second = keys[0::2], keys[1::2]
+    if not directed:
+        closed = bool(np.array_equal(first, second) and np.all(first[1:] != first[:-1]))
+        return closed, None
+    edges = first >> 1
+    closed = bool(np.array_equal(edges, second >> 1) and np.all(edges[1:] != edges[:-1]))
+    if not closed:
+        return False, None
+    return True, bool(np.all(second - first == 1))
 
 
 def _as_array(value: Any, dtype: Any, columns: int = 0) -> np.ndarray:
@@ -157,12 +187,15 @@ def _face_pass(
     centers: np.ndarray,
     mesh_count: int,
     vertex_total: int,
+    directed: bool = False,
 ) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
     """Walk the faces in chunks: edge keys, area and signed volume per mesh.
 
     For each face it takes its boundary edges (consecutive face vertices,
     wrapping round). The undirected edges become keys ``lo * vertex_total +
-    hi`` (degenerate edges dropped) for the watertightness check. Their cross
+    hi`` (degenerate edges dropped) for the watertightness check; with
+    ``directed`` each key is doubled and its lowest bit set when the face runs
+    the edge from the higher vertex to the lower, for the winding check. Their cross
     products sum to the face's vector area (Newell's method), whose length is
     the face's area, exact for any planar polygon, concave ones included, and
     whose dot product with the face's centroid gives its divergence-theorem
@@ -199,6 +232,9 @@ def _face_pass(
         hi = np.maximum(a[edge], b[edge])
         lo *= vertex_total
         lo += hi
+        if directed:
+            lo *= 2
+            lo += a[edge] > b[edge]
         keys[filled:filled + len(lo)] = lo
         filled += len(lo)
         del lo, hi, edge
@@ -230,14 +266,6 @@ def _face_pass(
     return keys[:filled], area, raw_volume
 
 
-def _sorted_keys_closed(keys: np.ndarray) -> bool:
-    """Whether sorted edge keys come in exact pairs: every edge used by exactly two faces."""
-    if len(keys) == 0 or len(keys) % 2:
-        return False
-    first, second = keys[0::2], keys[1::2]
-    return bool(np.array_equal(first, second) and np.all(first[1:] != first[:-1]))
-
-
 def _single_mesh_statistics(mesh: MeshArrays) -> GeometryStats:
     """``geometry_statistics`` for one mesh, without the batch bookkeeping arrays."""
     points, counts, indices, holes = mesh.points, mesh.counts, mesh.indices, mesh.holes
@@ -265,16 +293,20 @@ def _single_mesh_statistics(mesh: MeshArrays) -> GeometryStats:
         kept = np.ones(faces, dtype=bool)
         kept[holes] = False
     starts = np.cumsum(counts, dtype=np.int64) - counts
-    keys, area, raw_volume = _face_pass(points, indices, starts, counts, kept, None, center, 1, max(1, vertices))
+    directed = vertices < _DIRECTED_KEY_VERTEX_LIMIT
+    keys, area, raw_volume = _face_pass(
+        points, indices, starts, counts, kept, None, center, 1, max(1, vertices), directed
+    )
     keys.sort()
-    closed = _sorted_keys_closed(keys)
+    closed, oriented = _closed_and_oriented(keys, directed)
     del keys
     return GeometryStats(
         topology_valid=True,
         is_closed=closed,
         surface_area=float(area[0]),
-        volume=abs(float(raw_volume[0])) / 3.0 if closed else None,
+        volume=abs(float(raw_volume[0])) / 3.0 if closed and oriented else None,
         bbox=bbox,
+        consistently_oriented=oriented,
     )
 
 
@@ -284,9 +316,12 @@ def geometry_statistics(meshes: Sequence[MeshArrays]) -> List[GeometryStats]:
     For each mesh: whether the topology is valid (every index in range, the
     counts summing to the index count, no face under three vertices, every
     hole index naming a face); whether it is closed (every undirected edge of
-    its non-hole faces shared by exactly two of them); its surface area
-    (Newell's method, exact for planar faces, concave ones included) and,
-    when closed, its enclosed volume; and the bounds of its points.
+    its non-hole faces shared by exactly two of them) and, if so, whether it
+    is consistently oriented (the two faces run each shared edge in opposite
+    directions); its surface area (Newell's method, exact for planar faces,
+    concave ones included) and, when closed and consistently oriented, its
+    enclosed volume (the divergence theorem over a mesh with flipped faces
+    gives a wrong number, so none is reported); and the bounds of its points.
 
     Args:
         meshes: The meshes' arrays.
@@ -330,6 +365,8 @@ def geometry_statistics(meshes: Sequence[MeshArrays]) -> List[GeometryStats]:
     area = np.zeros(mesh_count)
     raw_volume = np.zeros(mesh_count)
     closed = np.zeros(mesh_count, dtype=bool)
+    oriented = np.zeros(mesh_count, dtype=bool)
+    directed = len(points) < _DIRECTED_KEY_VERTEX_LIMIT
 
     measured = valid & (face_counts > 0)
     if measured.any():
@@ -350,29 +387,40 @@ def geometry_statistics(meshes: Sequence[MeshArrays]) -> List[GeometryStats]:
         centers = (mins + maxs) / 2.0
 
         keys, area, raw_volume = _face_pass(
-            points, gidx, starts, counts_m, kept_m, face_mesh, centers, mesh_count, vertex_total
+            points, gidx, starts, counts_m, kept_m, face_mesh, centers, mesh_count, vertex_total, directed
         )
         if len(keys):
             keys.sort()
-            change = np.flatnonzero(keys[1:] != keys[:-1]) + 1
+            edge_keys = keys >> 1 if directed else keys
+            change = np.flatnonzero(edge_keys[1:] != edge_keys[:-1]) + 1
             unique_starts = np.concatenate(([0], change))
             uses = np.diff(np.concatenate((unique_starts, [len(keys)])))
-            edge_mesh = np.searchsorted(vertex_offsets, keys[unique_starts] // vertex_total, side="right") - 1
+            edge_mesh = np.searchsorted(
+                vertex_offsets, edge_keys[unique_starts] // vertex_total, side="right"
+            ) - 1
             edges = np.bincount(edge_mesh, minlength=mesh_count)
             bad_edges = np.bincount(edge_mesh[uses != 2], minlength=mesh_count)
             closed = (edges > 0) & (bad_edges == 0)
+            if directed:
+                # Each of a shared edge's two uses runs it the other way: one direction bit set.
+                reversed_uses = np.add.reduceat(keys & 1, unique_starts)
+                misoriented = np.bincount(edge_mesh[(uses == 2) & (reversed_uses != 1)], minlength=mesh_count)
+                oriented = closed & (misoriented == 0)
+            del edge_keys
         del keys
 
     stats = []
     for index in range(mesh_count):
         is_valid = bool(valid[index])
         is_closed = bool(closed[index]) and is_valid
+        is_oriented = bool(oriented[index]) if is_closed and directed else None
         stats.append(GeometryStats(
             topology_valid=is_valid,
             is_closed=is_closed,
             surface_area=float(area[index]) if is_valid else None,
-            volume=abs(float(raw_volume[index])) / 3.0 if is_closed else None,
+            volume=abs(float(raw_volume[index])) / 3.0 if is_closed and is_oriented else None,
             bbox=(mins[index].tolist(), maxs[index].tolist()) if vertex_counts[index] else None,
+            consistently_oriented=is_oriented,
         ))
     return stats
 
@@ -561,8 +609,9 @@ class MeshOperations(LoggerMixin):
 
         Returns:
             MeshInfo; ``surface_area`` is None for invalid topology, ``volume``
-            None unless the mesh is closed, ``bbox`` (the points' bounds in the
-            mesh's own space) None without points. A deforming mesh whose
+            None unless the mesh is closed and consistently oriented (a
+            closed mesh with flipped faces says so in ``note``), ``bbox``
+            (the points' bounds in the mesh's own space) None without points. A deforming mesh whose
             points (or topology) exist only as time samples has nothing to
             measure at the default time: it comes back ``measured`` False,
             its topology and geometry None (not invalid), with its
@@ -593,6 +642,13 @@ class MeshOperations(LoggerMixin):
             geometry = GeometryStats(None, None, None, None, None)
         else:
             geometry = geometry_statistics([arrays])[0]
+            if geometry.is_closed and geometry.consistently_oriented is False:
+                note = (
+                    "The mesh is closed, but its faces are wound inconsistently: some edge is run in the "
+                    "same direction by both faces sharing it, so a face is flipped. The enclosed volume "
+                    "computed from that winding would be wrong, so volume is null; reverse the flipped "
+                    "faces' vertex order to measure it."
+                )
         attributes = mesh_attributes(mesh)
         problems: List[Dict[str, Any]] = []
         subsets = self._get_geometry_subsets(mesh_prim, problems=problems)
@@ -615,6 +671,7 @@ class MeshOperations(LoggerMixin):
             interpolate_boundary=mesh.GetInterpolateBoundaryAttr().Get(),
             topology_valid=geometry.topology_valid,
             is_closed=geometry.is_closed,
+            consistently_oriented=geometry.consistently_oriented,
             surface_area=geometry.surface_area,
             volume=geometry.volume,
             bbox=geometry.bbox,
@@ -722,6 +779,7 @@ def mesh_info_to_dict(info: MeshInfo) -> Dict[str, Any]:
         "subdivision_scheme": info.subdivision_scheme,
         "topology_valid": info.topology_valid,
         "is_closed": info.is_closed,
+        "consistently_oriented": info.consistently_oriented,
         "surface_area": info.surface_area,
         "volume": info.volume,
         "bbox": bbox,

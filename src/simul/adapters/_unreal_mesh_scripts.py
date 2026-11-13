@@ -1063,7 +1063,13 @@ def main():
 run(main, "edit meshes")
 """
 
-# Expects args: mesh, checks (names from VALIDATION_CHECKS).
+# Expects args: mesh, checks (names from VALIDATION_CHECKS), weld, weld_tolerance.
+# A hard-edged mesh imported from glTF or FBX stores each face's vertices
+# apart, so read as it is a cube was 6 components with 24 open edges and a
+# flat-shaded ball 512 components with no volume (UE 5.7.4). weld checks a
+# copy whose coincident open edges (within weld_tolerance cm) are welded
+# first, the mesh itself unchanged; without it, a mesh that reads open in
+# more than one component gets a warning naming the option.
 VALIDATE = """
 def check(passed, count, detail):
     return {"passed": bool(passed), "count": count, "detail": detail}
@@ -1115,18 +1121,31 @@ def run_check(name, mesh):
     return check(not unset, channels, str(channels) + " UV channels" + (
         "; channel 0 has triangles without UVs" if unset else ""))
 
+def welded(mesh):
+    copy = working_copy(mesh)
+    options = unreal.GeometryScriptWeldEdgesOptions()
+    options.tolerance = args["weld_tolerance"]
+    gs("weld_mesh_edges", unreal.GeometryScript_MeshRepair.weld_mesh_edges, copy, options)
+    return copy
+
 def main():
     queries = unreal.GeometryScript_MeshQueries
     source = read_source(args["mesh"])
-    mesh = source["mesh"]
-    checks = {name: run_check(name, mesh) for name in args["checks"]}
+    mesh = welded(source["mesh"]) if args["weld"] else source["mesh"]
+    # Welding leaves ID gaps in the copy, so compactness is the mesh's own.
+    checks = {name: run_check(name, source["mesh"] if name == "compact" else mesh) for name in args["checks"]}
+    components = first(queries.get_num_connected_components(mesh))
+    if not args["weld"] and components > 1 and first(queries.get_num_open_border_edges(mesh)) > 0:
+        _WARNINGS.append("The mesh reads as " + str(components) + " pieces with open edges. A hard-edged mesh "
+                         "imported from glTF or FBX stores each face's vertices apart, so its seams read as open "
+                         "edges and its faces as pieces: pass weld true to check it with coincident edges welded.")
     low, high = bounds_of(mesh)
     area, volume = queries.get_mesh_volume_area(mesh)
     return {"mesh_path": args["mesh"], "source_kind": source["kind"],
             "is_valid": all(c["passed"] for c in checks.values()),
             "checks": checks, "issues": [name + ": " + c["detail"] for name, c in checks.items() if not c["passed"]],
             "triangle_count": triangle_count(mesh), "vertex_count": vertex_count(mesh),
-            "connected_components": first(queries.get_num_connected_components(mesh)),
+            "connected_components": components, "welded": bool(args["weld"]),
             "uv_channels": queries.get_num_uv_sets(mesh), "bounds_min": low, "bounds_max": high,
             "surface_area": float(area), "volume": float(volume) if queries.get_is_closed_mesh(mesh) else None}
 
