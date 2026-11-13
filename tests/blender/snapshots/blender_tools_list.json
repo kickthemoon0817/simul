@@ -904,7 +904,15 @@
             "description": "Material name; Material_<object> when omitted."
           },
           "base_color": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {
+                "items": {"maximum": 1, "minimum": 0, "type": "number"},
+                "maxItems": 4,
+                "minItems": 3,
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
             "default": null,
             "description": "RGB or RGBA in [0, 1]; the alpha becomes the Principled Alpha, and below 1 the material renders blended."
           },
@@ -924,7 +932,10 @@
             "description": "Slot to put the material in; the slot count adds one."
           },
           "face_indices": {
-            "anyOf": [{"items": {"type": "integer"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"minimum": 0, "type": "integer"}, "minItems": 1, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Mesh faces to assign the material to."
           },
@@ -1044,7 +1055,15 @@
             "description": "Light power in watts (irradiance in W/m² for SUN), >= 0."
           },
           "color": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {
+                "items": {"minimum": 0, "type": "number"},
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Light color RGB [r, g, b], each >= 0."
           },
@@ -1669,7 +1688,14 @@
             "description": "Collision margin in meters, 0-1; omitted keeps Blender's automatic margin for a new body."
           },
           "collision_collections": {
-            "anyOf": [{"items": {"type": "integer"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {
+                "items": {"maximum": 19, "minimum": 0, "type": "integer"},
+                "maxItems": 20,
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Collision collections (0-19) the body is in; bodies collide only when they share one. A new body is in 0."
           },
@@ -2233,23 +2259,32 @@
           "name": {"description": "Desired object name.", "minLength": 1, "type": "string"},
           "vertices": {
             "description": "Vertex positions, each exactly [x, y, z] finite numbers.",
-            "items": {"items": {"type": "number"}, "type": "array"},
+            "items": {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+            "minItems": 1,
             "type": "array"
           },
           "edges": {
             "default": [],
             "description": "Loose edges as [v0, v1] pairs of two different vertices; face edges are made from the faces.",
-            "items": {"items": {"type": "integer"}, "type": "array"},
+            "items": {
+              "items": {"minimum": 0, "type": "integer"},
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
             "type": "array"
           },
           "faces": {
             "default": [],
             "description": "Faces as lists of three or more vertex indices, each vertex once and each vertex set once.",
-            "items": {"items": {"type": "integer"}, "type": "array"},
+            "items": {"items": {"minimum": 0, "type": "integer"}, "minItems": 3, "type": "array"},
             "type": "array"
           },
           "location": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Optional world-space origin [x, y, z]."
           },

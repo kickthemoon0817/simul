@@ -38,17 +38,26 @@ from simul.mcp.usage_tracker import ToolUsageTracker
 from simul.utils.script_result import apply_script_success, printed_json_object
 from tests.fakes import AvailableAdapter, BlenderSessionAdapter, StrictBlenderSession
 
-METRICS = {"position_error": 0.002, "orientation_error": 0.01, "error": 0.0, "joint": "elbow"}
+METRICS = {
+    "position_error": 0.002,
+    "orientation_error": 0.01,
+    "error": 0.0,
+    "joint": "elbow",
+}
 REPORTED = {"success": False, "error": "target unreachable", "position_error": 0.4}
 
 runner = CliRunner()
 
 
 def _settings() -> Settings:
-    return Settings(security={"allow_script_execution": True, "rate_limiting_enabled": False})
+    return Settings(
+        security={"allow_script_execution": True, "rate_limiting_enabled": False}
+    )
 
 
-def _call(instance: server_module.SimulMCPServer, tool: str, arguments: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+def _call(
+    instance: server_module.SimulMCPServer, tool: str, arguments: Dict[str, Any]
+) -> Tuple[bool, Dict[str, Any]]:
     """Call ``tool`` through a real MCP client; return isError and the JSON block."""
 
     async def run() -> Any:
@@ -70,9 +79,20 @@ def _usage(instance: server_module.SimulMCPServer, tool: str) -> List[Dict[str, 
 
 def test_only_a_printed_success_false_fails() -> None:
     assert apply_script_success(dict(METRICS)) == {**METRICS, "success": True}
-    assert apply_script_success({"success": True, "error": "kept"}) == {"success": True, "error": "kept"}
-    assert apply_script_success({"success": False}) == {"success": False, "error_type": "ScriptError"}
-    assert apply_script_success({"success": False, "error_type": "NotFoundError"})["error_type"] == "NotFoundError"
+    assert apply_script_success({"success": True, "error": "kept"}) == {
+        "success": True,
+        "error": "kept",
+    }
+    assert apply_script_success({"success": False}) == {
+        "success": False,
+        "error_type": "ScriptError",
+    }
+    assert (
+        apply_script_success({"success": False, "error_type": "NotFoundError"})[
+            "error_type"
+        ]
+        == "NotFoundError"
+    )
 
 
 @pytest.mark.parametrize(
@@ -111,7 +131,9 @@ class _IsaacClient:
         return ScriptResult(success=True, output=self.output)
 
 
-def _isaac_server(tmp_path: Path, printed: Dict[str, Any]) -> server_module.SimulMCPServer:
+def _isaac_server(
+    tmp_path: Path, printed: Dict[str, Any]
+) -> server_module.SimulMCPServer:
     instance = server_module.SimulMCPServer(_settings(), backends={"isaac"})
     instance.usage_tracker = ToolUsageTracker(log_dir=tmp_path)
     client = _IsaacClient(json.dumps(printed))
@@ -177,12 +199,17 @@ class _UnrealAdapter(AvailableAdapter):
         yield self.session
 
 
-def _unreal_server(tmp_path: Path, printed: Dict[str, Any]) -> server_module.SimulMCPServer:
+def _unreal_server(
+    tmp_path: Path, printed: Dict[str, Any]
+) -> server_module.SimulMCPServer:
     pytest.importorskip("aiohttp")
     settings = _settings()
     instance = server_module.SimulMCPServer(settings, backends={"unreal"})
     instance.usage_tracker = ToolUsageTracker(log_dir=tmp_path)
-    raw = {"ReturnValue": True, "LogOutput": [{"Type": "Info", "Output": json.dumps(printed) + "\n"}]}
+    raw = {
+        "ReturnValue": True,
+        "LogOutput": [{"Type": "Info", "Output": json.dumps(printed) + "\n"}],
+    }
     instance.unreal_adapter = _UnrealAdapter(settings, raw)
     return instance
 
@@ -214,7 +241,7 @@ def test_unreal_script_reports_a_failure_with_success_false(tmp_path: Path) -> N
 
 
 def _blender_server(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, output: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, output: str, **extra: Any
 ) -> Tuple[server_module.SimulMCPServer, StrictBlenderSession]:
     monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
     monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", AvailableAdapter)
@@ -229,6 +256,7 @@ def _blender_server(
                 "output_total_chars": len(output),
                 "return_value": None,
                 "duration_seconds": 0.01,
+                **extra,
             }
         }
     )
@@ -236,10 +264,14 @@ def _blender_server(
     return instance, session
 
 
-def test_blender_printed_metrics_stay_data(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_blender_printed_metrics_stay_data(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     instance, session = _blender_server(monkeypatch, tmp_path, json.dumps(METRICS))
 
-    is_error, payload = _call(instance, "execute_blender_script", {"script": "print(...)"})
+    is_error, payload = _call(
+        instance, "execute_blender_script", {"script": "print(...)"}
+    )
 
     assert is_error is False
     assert payload["success"] is True
@@ -248,10 +280,14 @@ def test_blender_printed_metrics_stay_data(monkeypatch: pytest.MonkeyPatch, tmp_
     assert session.rejected == []
 
 
-def test_blender_script_reports_a_failure_with_success_false(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_blender_script_reports_a_failure_with_success_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     instance, _ = _blender_server(monkeypatch, tmp_path, json.dumps(REPORTED) + "\n")
 
-    is_error, payload = _call(instance, "execute_blender_script", {"script": "print(...)"})
+    is_error, payload = _call(
+        instance, "execute_blender_script", {"script": "print(...)"}
+    )
 
     assert is_error is True
     assert payload["error_type"] == "ScriptError"
@@ -261,11 +297,46 @@ def test_blender_script_reports_a_failure_with_success_false(monkeypatch: pytest
     assert record["success"] is False
 
 
-def test_blender_success_false_inside_other_output_is_only_text(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Only a whole output that is one JSON object reports, as on Isaac."""
-    instance, _ = _blender_server(monkeypatch, tmp_path, "step 1\n" + json.dumps(REPORTED))
+@pytest.mark.parametrize(
+    ("extra", "error_type"),
+    [
+        ({"error": "RuntimeError: boom"}, "ScriptError"),
+        (
+            {
+                "error": "TimeoutError: script did not finish within 5s.",
+                "timed_out": True,
+            },
+            "TimeoutError",
+        ),
+    ],
+)
+def test_blender_raised_script_is_a_script_error_as_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    extra: Dict[str, Any],
+    error_type: str,
+) -> None:
+    """It used to come back as an EngineError while Isaac and Unreal said ScriptError."""
+    instance, _ = _blender_server(monkeypatch, tmp_path, "", **extra)
 
-    is_error, payload = _call(instance, "execute_blender_script", {"script": "print(...)"})
+    is_error, payload = _call(instance, "execute_blender_script", {"script": "raise"})
+
+    assert is_error is True
+    assert payload["error_type"] == error_type
+    assert payload["error"] == extra["error"]
+
+
+def test_blender_success_false_inside_other_output_is_only_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only a whole output that is one JSON object reports, as on Isaac."""
+    instance, _ = _blender_server(
+        monkeypatch, tmp_path, "step 1\n" + json.dumps(REPORTED)
+    )
+
+    is_error, payload = _call(
+        instance, "execute_blender_script", {"script": "print(...)"}
+    )
 
     assert is_error is False
     assert payload["success"] is True
@@ -276,7 +347,9 @@ def test_blender_success_false_inside_other_output_is_only_text(monkeypatch: pyt
 # ---------------------------------------------------------------------------
 
 
-def _isaac_cli_tools(monkeypatch: pytest.MonkeyPatch, output: str, *, success: bool = True) -> None:
+def _isaac_cli_tools(
+    monkeypatch: pytest.MonkeyPatch, output: str, *, success: bool = True
+) -> None:
     client = MagicMock()
     client.address = "127.0.0.1:8226"
     client.timeout_seconds = 30.0
@@ -294,7 +367,9 @@ def _isaac_cli_tools(monkeypatch: pytest.MonkeyPatch, output: str, *, success: b
     monkeypatch.setattr(isaac_cli, "_tools", lambda *args, **kwargs: tools)
 
 
-def test_isaac_exec_keeps_error_metrics_and_exits_0(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_isaac_exec_keeps_error_metrics_and_exits_0(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _isaac_cli_tools(monkeypatch, json.dumps(METRICS))
 
     result = runner.invoke(app, ["--json", "isaac", "exec", "print(...)"])
@@ -303,7 +378,9 @@ def test_isaac_exec_keeps_error_metrics_and_exits_0(monkeypatch: pytest.MonkeyPa
     assert json.loads(result.stdout) == {**METRICS, "success": True}
 
 
-def test_isaac_exec_exits_1_when_the_script_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_isaac_exec_exits_1_when_the_script_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """m-7: a payload saying success: false exits 1, as docs/cli.md says."""
     _isaac_cli_tools(monkeypatch, json.dumps({"success": False, "position_error": 0.4}))
 
@@ -317,7 +394,9 @@ def test_isaac_exec_exits_1_when_the_script_reports_failure(monkeypatch: pytest.
     assert payload["position_error"] == 0.4
 
 
-def test_isaac_exec_exits_1_when_the_script_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_isaac_exec_exits_1_when_the_script_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _isaac_cli_tools(monkeypatch, "", success=False)
 
     result = runner.invoke(app, ["--json", "isaac", "exec", "x"])
@@ -328,7 +407,9 @@ def test_isaac_exec_exits_1_when_the_script_raises(monkeypatch: pytest.MonkeyPat
     assert payload["error_type"] == "ScriptError"
 
 
-def test_isaac_exec_human_mode_names_the_reported_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_isaac_exec_human_mode_names_the_reported_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _isaac_cli_tools(monkeypatch, json.dumps(REPORTED))
 
     result = runner.invoke(app, ["isaac", "exec", "print(...)"])

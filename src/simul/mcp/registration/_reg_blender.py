@@ -235,13 +235,20 @@ def _execute_script(session: Any, **arguments: Any) -> Dict[str, Any]:
     """Run an agent's script; it fails when it raised or printed ``"success": false``.
 
     The printed output stays text in ``output``, so nothing the script prints
-    under ``error`` or ``*_error`` can fail the call. A script that reports a
-    failure itself does so as the other backends' scripts do: its whole
-    output is one JSON object with ``"success": false``, whose ``error`` (and
-    ``error_type``, default ``ScriptError``) the failed call carries.
+    under ``error`` or ``*_error`` can fail the call. A script that raised is
+    a ``ScriptError``, as on the other backends (``TimeoutError`` when it
+    outran its timeout). A script that reports a failure itself does so as
+    the other backends' scripts do: its whole output is one JSON object with
+    ``"success": false``, whose ``error`` (and ``error_type``, default
+    ``ScriptError``) the failed call carries.
     """
     payload: Dict[str, Any] = session.execute_script(**arguments)
-    if payload.get("error") or payload.get("output_truncated"):
+    if payload.get("error"):
+        if payload.get("error_type"):
+            return payload
+        raised = error_types.TIMEOUT_ERROR if payload.get("timed_out") else SCRIPT_ERROR
+        return {**payload, "success": False, "error_type": raised}
+    if payload.get("output_truncated"):
         return payload
     printed = printed_json_object(payload.get("output"))
     if printed is None or not script_reported_failure(printed):
