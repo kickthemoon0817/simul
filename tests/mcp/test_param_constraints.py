@@ -252,7 +252,6 @@ _PROSE_ONLY = {
     ("create_isaac_material", "diffuse_color"),
     ("create_isaac_object", "diffuse_color"),
     ("read_isaac_aovs", "resolution"),
-    ("validate_simready_asset", "checks"),
     ("export_blender_file", "file_path"),
     ("export_simready_usd", "file_path"),
     ("search_prims", "query"),

@@ -55,7 +55,6 @@ from ..schemas.unreal import (
     UnrealComputeMeshUvResponse,
     UnrealControlSimulationResponse,
     UnrealConvertMeshFormatResponse,
-    UnrealConvertToSimreadyResponse,
     UnrealCreateMaterialInstanceResponse,
     UnrealCutMeshPlaneResponse,
     UnrealDecomposeConvexHullResponse,
@@ -106,7 +105,6 @@ from ..schemas.unreal import (
     UnrealSpawnActorResponse,
     UnrealSubdivideMeshResponse,
     UnrealValidateMeshResponse,
-    UnrealValidateSimreadyResponse,
     UnrealViewportInfoResponse,
     Vector3,
 )
@@ -222,6 +220,19 @@ def _optional_text(value: str) -> Optional[str]:
 def _name_list(value: str) -> Optional[List[str]]:
     """Comma-separated names, blanks dropped; an empty string means none."""
     return [item.strip() for item in value.split(",") if item.strip()] if value else None
+
+
+#: ``component_name`` of the physics and collision tools, which edit or push one body.
+_PHYSICS_COMPONENT = ToolParam(
+    "component_name",
+    str,
+    "",
+    description=(
+        "Primitive component whose body to use, by name (StaticMeshComponent0) or path. Empty picks the actor's "
+        "root primitive component, else its only one; an actor with several and none at the root needs it "
+        "(ValidationError AMBIGUOUS_COMPONENT lists them)."
+    ),
+)
 
 
 def _path_list(value: str) -> List[str]:
@@ -1613,10 +1624,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "Make an actor's body simulate physics (falls, takes forces), make it kinematic (physics "
             "collision, moved only by its transform), or turn physics off, in one undoable editor "
             "transaction that marks the map dirty. A Static body is made Movable unless make_movable "
-            "is false; a body without physics collision or simple collision geometry is refused "
-            "(IncompatibleBody, with the reasons). Unreal detaches a simulated body from its parent, "
-            "so an attached one needs allow_detach. Returns the body read back: physics_mode, "
-            "mobility, collision and mass."
+            "is false; a body without physics collision, whose collision responses block no object type "
+            "(an overlap preset such as OverlapAll, even with collision_enabled true), or without simple "
+            "collision geometry is refused (IncompatibleBody, with the reasons and the fix). Unreal "
+            "detaches a simulated body from its parent, so an attached one needs allow_detach. Returns "
+            "the body read back: physics_mode, mobility, collision, blocked_object_types and mass."
         ),
         response=UnrealEnablePhysicsResponse,
         read_only=False,
@@ -1663,6 +1675,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "reattaches it, turning physics off does not). False refuses an attached body."
                 ),
             ),
+            _PHYSICS_COMPONENT,
         ),
     ),
     UnrealTool(
@@ -1670,7 +1683,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Set an actor's collision preset and/or enable or disable its collision, in one undoable "
             "editor transaction that marks the map dirty; what is left out is kept and an unknown "
-            "preset changes nothing. Returns the state read back."
+            "preset changes nothing. Returns the state read back, with blocked_object_types: a body "
+            "collides only with what it blocks, so for one that collides use a blocking preset "
+            "(PhysicsActor for a simulated body, BlockAll for a static one)."
         ),
         response=UnrealSetCollisionResponse,
         read_only=False,
@@ -1680,7 +1695,18 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         params=(
             ToolParam("actor_path", str),
             ToolParam("collision_preset", str, ""),
-            ToolParam("collision_enabled", Optional[bool], None),
+            ToolParam(
+                "collision_enabled",
+                Optional[bool],
+                None,
+                description=(
+                    "True turns on query and physics collision, false turns collision off; null keeps the "
+                    "mode. It keeps the preset's responses (the preset reads Custom), so on an overlap preset "
+                    "such as OverlapAll or Trigger the body still blocks nothing and nothing collides with it "
+                    "(the warning says so): set collision_preset instead."
+                ),
+            ),
+            _PHYSICS_COMPONENT,
         ),
     ),
     UnrealTool(
@@ -1724,6 +1750,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 "unreal",
                 description="unreal: kg cm/s^2 (force), kg cm/s (impulse); si: N, N s.",
             ),
+            _PHYSICS_COMPONENT,
         ),
     ),
     UnrealTool(
@@ -1745,6 +1772,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("linear_damping", Optional[float], None),
             ToolParam("angular_damping", Optional[float], None),
             ToolParam("enable_gravity", Optional[bool], None),
+            _PHYSICS_COMPONENT,
         ),
     ),
     UnrealTool(
@@ -1831,7 +1859,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "or asleep, mass and center of mass. While a simulation runs each actor is read through "
             "its copy there (the editor world's actors stay where they were placed), otherwise in the "
             "editor world; world picks one. Editor and simulation paths are both accepted, and each "
-            "body lists both. Paged: total counts every body, next_offset starts the next page."
+            "body lists both. A multi-part actor (several primitive components, none the root) has a "
+            "body per component, listed in components. Paged: total counts every body, next_offset "
+            "starts the next page."
         ),
         response=UnrealPhysicsStateResponse,
         read_only=True,
@@ -1908,7 +1938,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("offset", int, 0, description="Actors to skip: the previous page's next_offset."),
         ),
     ),
-    # -- USD and SimReady ----------------------------------------------------------
+    # -- USD ----------------------------------------------------------
     UnrealTool(
         name="import_unreal_usd",
         description=(
@@ -1938,8 +1968,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "false keeps a mesh per prim), merge_identical_material_slots, "
                     "share_assets_for_identical_prims, prim_path_folder_structure, interpret_lods. "
                     "kinds_to_collapse: list of USD kinds (model, component, group, assembly, subcomponent). "
-                    "fallback_collision_type: none (render triangles), convex_decomposition, convex_hull, "
-                    "sphere, cube, mesh_simplification, capsule, custom_mesh. nanite_triangle_threshold: int. "
+                    "fallback_collision_type, the collision of a mesh whose prim has no UsdPhysics collision: "
+                    "none (the default: no collision at all, so bodies fall through the mesh; the reply lists "
+                    "such actors in actors_without_collision), convex_decomposition (concave meshes), "
+                    "convex_hull, sphere, cube, mesh_simplification, capsule, custom_mesh. "
+                    "nanite_triangle_threshold: int. "
                     "prims_to_import: prim paths. meters_per_unit with up_axis (y or z), together, override the "
                     "stage's own. Lights and cameras import as actors with import_actors. Unset options take "
                     "Unreal's defaults."
@@ -1994,49 +2027,6 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "files, or, with export_sublayers, a sublevel layer or MaterialOverrides file beside it "
                     "exists. Every file written is listed in written_files."
                 ),
-            ),
-        ),
-    ),
-    UnrealTool(
-        name="convert_to_simready",
-        description="Unavailable in Unreal: SimReady conversion returns UnsupportedOperation without writing files.",
-        response=UnrealConvertToSimreadyResponse,
-        read_only=False,
-        destructive=True,
-        method="convert_to_simready",
-        params=(
-            ToolParam("usd_path", str, description="Source USD file; must be inside the sandbox."),
-            ToolParam("output_path", str, description="Output SimReady USD file path; must be inside the sandbox."),
-            ToolParam("add_physics", bool, True, description="Add physics schemas (rigid body) to the output."),
-            ToolParam("add_collision", bool, True, description="Generate collision geometry."),
-            ToolParam("add_semantic_labels", bool, True, description="Attach semantic labels to the output prims."),
-            ToolParam("target_up_axis", str, "Z", description="Up axis written to the output stage (Y or Z)."),
-            ToolParam(
-                "target_units",
-                str,
-                "meters",
-                description="Unit system of the output stage (meters or centimeters).",
-            ),
-        ),
-    ),
-    UnrealTool(
-        name="validate_simready_asset",
-        description="Unavailable in Unreal: SimReady validation returns UnsupportedOperation.",
-        response=UnrealValidateSimreadyResponse,
-        read_only=True,
-        idempotent=True,
-        method="validate_simready_asset",
-        params=(
-            ToolParam("usd_path", str, description="USD file path to validate; must be inside the sandbox."),
-            ToolParam(
-                "checks",
-                str,
-                "",
-                description=(
-                    "Comma-separated validation checks to run (physics, collision, materials, scale, "
-                    "up_axis, semantics). Empty string runs every check."
-                ),
-                convert=_name_list,
             ),
         ),
     ),
@@ -2462,6 +2452,17 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "compact, normals, uvs); empty runs all."
                 ),
                 convert=_name_list,
+            ),
+            ToolParam(
+                "weld",
+                bool,
+                False,
+                description=(
+                    "Check a copy whose coincident open edges (within 0.001 cm) are welded first, the mesh "
+                    "unchanged. A hard-edged mesh imported from glTF or FBX stores each face's vertices apart, so "
+                    "unwelded its seams read as open edges and its faces as pieces (a cube: 6 pieces, 24 open "
+                    "edges); such a reading gets a warning."
+                ),
             ),
         ),
     ),
