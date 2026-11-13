@@ -801,3 +801,111 @@ def test_the_simulation_tool_lists_its_actions_and_modes(
     assert force["units"]["enum"] == list(unreal_runtime.FORCE_UNITS)
     assert "kg cm/s^2" in force["units"]["description"]
     assert {"get_unreal_physics_state", "list_unreal_simulation_actors"} <= set(schemas)
+
+
+def test_not_in_simulation_reaches_the_client_as_its_own_type(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Round-2 audit R2B-04: NotInSimulation was outside the error vocabulary, so the
+    server turned it into EngineError, which the docs reserve for an engine fault;
+    the session-level tests could not see it. Through the tool it keeps its type,
+    its code and a hint for a World Partition cell the simulation has not streamed in."""
+    editor = Editor()
+    editor.start()
+    cube = simulated_cube(editor)  # placed after the simulation started: no copy
+    instance = _server(monkeypatch, tmp_path, editor)
+
+    force = _call_tool(
+        instance, "apply_unreal_force", {"actor_path": cube.get_path_name(), "force_z": 5, "is_impulse": True}
+    )
+    state = _call_tool(instance, "get_unreal_physics_state", {"actor_paths": cube.get_path_name()})
+
+    assert force["success"] is False
+    assert force["error_type"] == "NotInSimulation"
+    assert force["details"]["code"] == "NOT_IN_SIMULATION"
+    assert "focus_unreal_on_actor" in force["details"]["hint"]
+    assert "World Partition" in force["error"]
+    assert state["not_found"] == [cube.get_path_name()]
+    assert "focus_unreal_on_actor" in state["warning"]
+
+
+def test_a_multi_part_actor_s_force_is_a_validation_error_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Round-2 audit R2B-03: a SceneComponent root with two meshes came back as a
+    ScriptError traceback. component_name picks the body; without it the refusal
+    lists the components."""
+    editor = Editor()
+    robot = editor.multi_part_actor("Robot")
+    for part in robot.components[2:]:
+        part.body["simulate_physics"] = True
+        part.body["enable_gravity"] = False
+    editor.start()
+    copy = editor.actors[PIE_LEVEL + robot.name]
+    parts = {part.name: part for part in copy.components[2:]}
+    instance = _server(monkeypatch, tmp_path, editor)
+
+    refused = _call_tool(
+        instance, "apply_unreal_force", {"actor_path": robot.get_path_name(), "force_z": 5, "is_impulse": True}
+    )
+    pushed = _call_tool(
+        instance,
+        "apply_unreal_force",
+        {"actor_path": robot.get_path_name(), "force_z": 5, "is_impulse": True, "component_name": "Part1"},
+    )
+
+    assert refused["error_type"] == "ValidationError"
+    assert refused["details"]["code"] == "AMBIGUOUS_COMPONENT"
+    assert [c["component_name"] for c in refused["details"]["components"]] == ["Part0", "Part1"]
+    assert "Traceback" not in json.dumps(refused)
+    assert pushed["success"] is True
+    assert pushed["component_path"] == copy.get_path_name() + ".Part1"
+    assert [kind for kind, _, _ in parts["Part1"].pushes] == ["impulse"]
+    assert parts["Part0"].pushes == []
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+def test_a_force_takes_the_editor_component_path_of_a_part(monkeypatch: pytest.MonkeyPatch, streamed: bool) -> None:
+    """Review of #359: during Simulate the copy's component paths carry UEDPIE_<n>_, so
+    the editor component's path, which every other physics tool takes, was refused.
+    It names the copy's part of the same name, also in a World Partition cell level."""
+    editor = Editor()
+    robot = editor.multi_part_actor("Robot")
+    for part in robot.components[2:]:
+        part.body["simulate_physics"] = True
+        part.body["enable_gravity"] = False
+    editor.start()
+    copy = editor.actors.pop(PIE_LEVEL + robot.name)
+    if streamed:
+        copy.level = "/Game/Maps/UEDPIE_0_Lab_MainGrid_L0_X0_Y0.Lab_MainGrid_L0_X0_Y0:PersistentLevel."
+    editor.actors[copy.get_path_name()] = copy
+    session = physics_session(monkeypatch, editor)
+    editor_part = robot.get_path_name() + ".Part1"
+
+    by_editor_path = run(session.apply_force(robot.get_path_name(), force_z=5, is_impulse=True,
+                                             component_name=editor_part))
+    by_simulation_path = run(session.apply_force(copy.get_path_name(), force_z=5, is_impulse=True,
+                                                 component_name=editor_part))
+
+    for result in (by_editor_path, by_simulation_path):
+        assert result.get("success", True) is True, result
+        assert result["component_path"] == copy.get_path_name() + ".Part1"
+
+
+def test_a_multi_part_actor_s_state_lists_each_component_s_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-2 audit R2B-03: every physics field read null for a multi-part actor,
+    with nothing saying why."""
+    editor = Editor()
+    robot = editor.multi_part_actor("Robot")
+    bare = editor.multi_part_actor("Empty", parts=0)
+    session = physics_session(monkeypatch, editor)
+
+    result = run(session.get_physics_state([robot.get_path_name(), bare.get_path_name()]))
+
+    body, empty = result["bodies"]
+    assert (body["component_path"], body["physics_mode"]) == (None, None)
+    assert body["components_total"] == 2
+    assert [part["component_name"] for part in body["components"]] == ["Part0", "Part1"]
+    assert all(part["physics_mode"] == "kinematic" and part["mass_kg"] > 0 for part in body["components"])
+    assert "component_name" in body["note"]
+    assert "components" not in empty and "no primitive component" in empty["note"]

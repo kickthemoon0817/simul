@@ -501,7 +501,7 @@ def test_collision_preset_alone_leaves_collision_enabled_unset(mcp: SimpleNamesp
     assert mcp.session.calls == [
         (
             "set_collision",
-            {"actor_path": ACTOR, "collision_preset": "OverlapAll", "collision_enabled": None},
+            {"actor_path": ACTOR, "collision_preset": "OverlapAll", "collision_enabled": None, "component_name": ""},
         )
     ]
     assert json.loads(result.content[0].text)["collision_preset"] == "OverlapAll"
