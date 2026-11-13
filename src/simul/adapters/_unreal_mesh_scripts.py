@@ -39,6 +39,20 @@ What every script does the same way:
   active", UE 5.7.4). Actors are spawned inside the same kind of transaction,
   so the spawn and its mesh are one Undo step, and the transaction dirties the
   level.
+- The swap has a price Undo shows. Undo and Redo restore the component's mesh
+  pointer but not what ``set_dynamic_mesh`` does around it: the component
+  stops listening to the mesh it gets back, so an in-place edit of that mesh
+  outside simul (a Blueprint, Python GeometryScript, Modeling Mode) no longer
+  updates its bounds or what it draws, and its physics keeps the collision
+  from before the Undo or Redo (UE 5.7.4). Every script repairs both on each
+  actor it touches (``refresh``). And each edit keeps the replaced mesh alive
+  for Undo, a full copy that the undo buffer's size limit does not count.
+- A result is capped at ``MAX_RESULT_TRIANGLES``: refused before anything runs
+  when its size is known up front, otherwise before it is committed. So is a
+  result that would be committed after the caller stopped waiting: a mesh
+  script gets the time its HTTP call waits, less ``MESH_COMMIT_MARGIN_S``, and
+  discards its result instead of committing it later (``TimeoutError``,
+  ``details.code`` ``MESH_TIME_BUDGET``).
 - Changes are refused while Play In Editor runs (``PIEActive``): Unreal spawns
   no editor actors then, and an edit of the editor world would not reach the
   running game. ``validate_unreal_mesh`` only reads and keeps working.
@@ -46,10 +60,11 @@ What every script does the same way:
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from typing import Any, Dict, Optional, Sequence
 
-from ._unreal_errors import ENGINE_ERROR, NOT_FOUND_ERROR, VALIDATION_ERROR
+from ._unreal_errors import ENGINE_ERROR, NOT_FOUND_ERROR, TIMEOUT_ERROR, VALIDATION_ERROR, UnrealTimeoutError
 from ._unreal_scripts import ACTOR_HELPERS, PIE_ACTIVE
 
 #: ``error_type`` of a call this editor cannot serve as asked: the
@@ -60,8 +75,9 @@ UNSUPPORTED_OPERATION = "UnsupportedOperation"
 #: matches ``simul unreal attach`` (another map or editor instance).
 INVALID_STATE = "InvalidState"
 
-#: The error types a mesh script reports for a request it refused as asked.
-MESH_REFUSALS = (VALIDATION_ERROR, NOT_FOUND_ERROR, UNSUPPORTED_OPERATION, PIE_ACTIVE)
+#: The error types a mesh script reports for a request it refused as asked,
+#: or a result it discarded because it came too late.
+MESH_REFUSALS = (VALIDATION_ERROR, NOT_FOUND_ERROR, UNSUPPORTED_OPERATION, PIE_ACTIVE, TIMEOUT_ERROR)
 
 #: The most triangles ``compute_unreal_mesh_uv`` unwraps with XAtlas. XAtlas
 #: crashed the editor (a segfault in xatlas::Generate, packing the charts) on
@@ -74,11 +90,37 @@ MESH_REFUSALS = (VALIDATION_ERROR, NOT_FOUND_ERROR, UNSUPPORTED_OPERATION, PIE_A
 #: sphere in 29 s.
 XATLAS_MAX_TRIANGLES = 20_000
 
+#: The most triangles a mesh tool leaves in a mesh it makes or edits. The
+#: editor holds the result, the replaced mesh Undo restores and the render
+#: data in memory, and the time an operation takes grows with its result. A
+#: result that would be larger is refused (``RESULT_TOO_LARGE``) with nothing
+#: changed: before anything runs when its size is known up front (a
+#: subdivision, a remesh, a UV unwrap or topology edit of a mesh already over
+#: it), otherwise when the operation has run and before its result replaces
+#: anything.
+MAX_RESULT_TRIANGLES = 2_000_000
+
+#: How many more triangles than asked a uniform remesh makes: GeometryScript
+#: turns the target into an edge length for equilateral triangles, and the
+#: remesher's triangles are not. Measured from 1.17 (a box) to 1.38 (a sphere)
+#: at 10,000 to 190,000 triangles, 1.43 for 2,000,000 on a 522,000-triangle
+#: sphere and 1.57 for 1,333,333 on a 1M-triangle one (UE 5.7.4). A remesh is
+#: predicted at this factor; its result is checked against the cap as well.
+REMESH_OVERSHOOT = 1.6
+
+#: The largest ``target_triangle_count`` a remesh takes: its predicted result
+#: stays under ``MAX_RESULT_TRIANGLES``.
+MAX_REMESH_TARGET_TRIANGLES = int(MAX_RESULT_TRIANGLES / REMESH_OVERSHOOT)
+
+#: The ``segments`` range ``generate_unreal_mesh_primitive`` takes; 512 makes
+#: a 522,240-triangle sphere.
+MIN_SEGMENTS, MAX_SEGMENTS = 3, 512
+
 #: The UV methods ``compute_unreal_mesh_uv`` takes.
 UV_METHODS = ("auto", "xatlas", "patch_builder")
 
 #: The primitives ``generate_unreal_mesh_primitive`` takes.
-PRIMITIVE_TYPES = ("box", "sphere", "cylinder", "cone", "capsule", "torus")
+PRIMITIVE_TYPES = ("box", "sphere", "cylinder", "cone", "capsule")
 
 #: The operations ``edit_unreal_mesh_topology`` takes.
 TOPOLOGY_OPERATIONS = ("extrude_faces", "bevel_edges", "inset_faces")
@@ -88,10 +130,19 @@ TARGET_FORMATS = ("dynamic_mesh", "static_mesh")
 
 #: The shortest HTTP timeout, in seconds, a mesh script runs under. A
 #: GeometryScript call blocks the editor until it returns and Remote Control
-#: cannot cancel it, so a call that outlived ``UNREAL__TIMEOUT`` (30 s by
-#: default) would keep changing the level after the tool reported a timeout;
-#: PatchBuilder needs 29 s for 318,400 triangles.
-MESH_SCRIPT_TIMEOUT_S = 120
+#: cannot cancel it, so the limit has to cover the slowest operations on a
+#: mesh of ``MAX_RESULT_TRIANGLES``: a PatchBuilder unwrap of a 2M-triangle
+#: sphere took 109 s, its convex hull 94 s, simplifying it to 1,000 triangles
+#: 83 s, a 16-hull decomposition 64 s and a remesh of a 1M-triangle sphere to
+#: 1.77M 99 s (UE 5.7.4, Apple M-series), so 300 s leaves a slower machine
+#: room. A script that runs past it discards its result rather than commit it
+#: after the caller stopped waiting.
+MESH_SCRIPT_TIMEOUT_S = 300
+
+#: Seconds before the HTTP timeout by which a mesh script must commit: the
+#: commit, the reply and its trip back fit in it (swapping in a 2M-triangle
+#: mesh took 0.01 s).
+MESH_COMMIT_MARGIN_S = 10
 
 #: What the plugin refusal suggests.
 GEOMETRY_SCRIPTING_HINT = (
@@ -113,14 +164,19 @@ CONVERT_HINT = (
     "places an editable DynamicMeshActor copy in the level; the mesh tools edit that copy."
 )
 
-# Defined before each tool body. ``args`` is the tool's data.
+# Defined before each tool body. ``args`` is the tool's data; ``_BUDGET_S`` and
+# ``_DEADLINE`` (``mesh_script``) when it must commit by.
 _MESH_PRELUDE = f"""
 import math
+import time
 
+_STARTED = time.monotonic()
 _GEOMETRY_SCRIPTING_HINT = {GEOMETRY_SCRIPTING_HINT!r}
 _CONVERT_HINT = {CONVERT_HINT!r}
 _MESH_PIE_HINT = {MESH_PIE_HINT!r}
 _XATLAS_MAX_TRIANGLES = {XATLAS_MAX_TRIANGLES!r}
+_MAX_RESULT_TRIANGLES = {MAX_RESULT_TRIANGLES!r}
+_REMESH_OVERSHOOT = {REMESH_OVERSHOOT!r}
 _WARNINGS = []
 """ + """
 class MeshError(Exception):
@@ -146,11 +202,16 @@ def require_geometry_script():
                         "loaded", "GEOMETRY_SCRIPTING_DISABLED", hint=_GEOMETRY_SCRIPTING_HINT)
 
 def asset_class(path):
-    # An asset path has no subobject part; an actor path does (Map.Map:PersistentLevel.Actor).
+    # An asset path has no subobject part; an actor path does (Map.Map:PersistentLevel.Actor). The asset
+    # registry answers while PIE runs, when EditorAssetLibrary.find_asset_data finds nothing (UE 5.7.4).
     if ":" in path or not path.startswith("/"):
         return None
-    data = unreal.EditorAssetLibrary.find_asset_data(path)
-    return str(data.asset_class_path.asset_name) if data.is_valid() else None
+    package, _, name = path.partition(".")
+    name = name or package.rpartition("/")[2]
+    for data in unreal.AssetRegistryHelpers.get_asset_registry().get_assets_by_package_name(package):
+        if str(data.asset_name) == name:
+            return str(data.asset_class_path.asset_name)
+    return None
 
 def mesh_actor(path):
     try:
@@ -165,14 +226,29 @@ def mesh_actor(path):
                    "path of a DynamicMeshActor")
         raise MeshError("NotFoundError", str(missing))
 
+def package_dirty(actor):
+    package = actor.get_outermost().get_name()
+    utils = unreal.EditorLoadingAndSavingUtils
+    dirty = list(utils.get_dirty_map_packages()) + list(utils.get_dirty_content_packages())
+    return any(p.get_name() == package for p in dirty)
+
+def refresh(component):
+    # Undo and Redo restore the component's mesh pointer, not what set_dynamic_mesh does around it:
+    # the component no longer listens to the mesh it got back, so an in-place edit of it outside simul
+    # leaves the bounds and the render stale, and the physics keeps the collision from before (UE 5.7.4).
+    # Setting the mesh it holds binds it again; it also renames the mesh and dirties the level, so it is
+    # done only where an Undo or Redo has left the level dirty already. Rebuilding the collision dirties
+    # nothing.
+    if package_dirty(component.get_owner()):
+        component.set_dynamic_mesh(component.get_dynamic_mesh())
+    component.update_collision(False)
+
 def mesh_component(actor):
     root = actor.root_component
     found = [root] if isinstance(root, unreal.DynamicMeshComponent) else list(
         actor.get_components_by_class(unreal.DynamicMeshComponent))
     if len(found) == 1:
-        # After an Undo of an earlier edit the component keeps the bounds of the undone mesh
-        # (see the module docstring); recompute them from the mesh it now holds.
-        found[0].notify_mesh_modified()
+        refresh(found[0])
         return found[0]
     label = actor.get_actor_label() + " (" + actor.get_class().get_name() + ")"
     if found:
@@ -225,13 +301,50 @@ def working_copy(mesh):
     gs("copy", unreal.GeometryScript_MeshDecomposition.copy_mesh_to_mesh, mesh, copy)
     return copy
 
+def require_result_size(triangles, what, predicted=False):
+    if triangles > _MAX_RESULT_TRIANGLES:
+        refuse("RESULT_TOO_LARGE", what + (" would make about " if predicted else " made ") + str(triangles)
+               + " triangles, more than the " + str(_MAX_RESULT_TRIANGLES) + " a mesh tool may leave in a mesh; "
+               "nothing was changed", triangle_count=triangles, max_triangles=_MAX_RESULT_TRIANGLES,
+               predicted=predicted)
+
+def require_input_size(triangles, label):
+    # For the operations whose result keeps every triangle they start from (UVs, extrude, inset, bevel).
+    if triangles > _MAX_RESULT_TRIANGLES:
+        refuse("RESULT_TOO_LARGE", label + " has " + str(triangles) + " triangles, more than the "
+               + str(_MAX_RESULT_TRIANGLES) + " a mesh tool may leave in a mesh, and this operation removes "
+               "none; simplify it first. Nothing was changed", triangle_count=triangles,
+               max_triangles=_MAX_RESULT_TRIANGLES, predicted=True)
+
+def require_time_left():
+    # The caller's HTTP call waits _BUDGET_S plus a margin; a result committed later than that would
+    # change the level after the tool reported a timeout.
+    if _BUDGET_S is None:
+        return
+    elapsed = time.monotonic() - _STARTED
+    if elapsed > _BUDGET_S or (_DEADLINE is not None and time.time() > _DEADLINE):
+        raise MeshError("TimeoutError", "The mesh operation finished after the time this call allows for a "
+                        "result to be committed (it ran " + str(round(elapsed, 1)) + " s in the editor; the call "
+                        "waits " + str(round(_BUDGET_S)) + " s plus a margin, and UNREAL__TIMEOUT raises it), so "
+                        "its result was discarded and nothing was changed", "MESH_TIME_BUDGET",
+                        elapsed_s=round(elapsed, 1), budget_s=_BUDGET_S)
+
+def before_commit(*meshes):
+    # Every refusal that can stop an edit, checked before the level changes.
+    for mesh in meshes:
+        require_result_size(triangle_count(mesh), "The operation")
+    require_time_left()
+
 def commit(actor, component, mesh, description):
+    before_commit(mesh)
     with unreal.ScopedEditorTransaction(description):
         actor.modify()
         component.modify()
         component.set_dynamic_mesh(mesh)
+    component.update_collision(False)
 
 def spawn_mesh_actor(label, transform, mesh, description):
+    before_commit(mesh)
     actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     with unreal.ScopedEditorTransaction(description) as transaction:
         actor = actors.spawn_actor_from_class(unreal.DynamicMeshActor, transform.translation,
@@ -271,17 +384,29 @@ def run(main, action=None):
 MESH_HELPERS = ACTOR_HELPERS + _MESH_PRELUDE
 
 
-def mesh_script(body: str, args: Optional[Dict[str, Any]] = None) -> str:
+def mesh_script(
+    body: str,
+    args: Optional[Dict[str, Any]] = None,
+    *,
+    budget_s: Optional[float] = None,
+    deadline: Optional[float] = None,
+) -> str:
     """The full editor script of one mesh tool.
 
     Args:
         body: The tool's body: defines ``main()`` and calls ``run``.
         args: The tool's data, embedded with repr.
+        budget_s: Seconds the script may run before it commits a result;
+            None sets no limit.
+        deadline: ``time.time()`` by which it must commit, for an editor on
+            this host's clock; None checks only ``budget_s``.
 
     Returns:
         The script.
     """
-    return f"args = {dict(args or {})!r}\n" + MESH_HELPERS + body
+    return (
+        f"args = {dict(args or {})!r}\n_BUDGET_S = {budget_s!r}\n_DEADLINE = {deadline!r}\n" + MESH_HELPERS + body
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +422,7 @@ def append_primitive(mesh):
     xf = unreal.Transform()
     origin = unreal.GeometryScriptPrimitiveOriginMode.CENTER
     d = args["dimensions"]
-    seg = max(args["segments"], 4)
+    seg = args["segments"]
     kind = args["primitive_type"]
     if kind == "box":
         gs("append_box", prims.append_box, mesh, options, xf, d.get("width", 100.0), d.get("height", 100.0),
@@ -311,13 +436,10 @@ def append_primitive(mesh):
     elif kind == "cone":
         gs("append_cone", prims.append_cone, mesh, options, xf, d.get("base_radius", 50.0), 0.0,
            d.get("height", 100.0), seg, 1, True, origin)
-    elif kind == "capsule":
+    else:
         h = d.get("hemisphere_height", 50.0)
         gs("append_capsule", prims.append_capsule, mesh, options, xf, d.get("radius", 50.0), h, h, seg,
            max(seg // 2, 4), origin)
-    else:
-        raise MeshError("UnsupportedOperation", "primitive_type 'torus' is not supported yet; nothing was "
-                        "created", "NOT_IMPLEMENTED")
 
 def main():
     mesh = unreal.DynamicMesh()
@@ -346,10 +468,11 @@ def main():
     gs("apply_mesh_boolean", unreal.GeometryScript_MeshBooleans.apply_mesh_boolean, work, unreal.Transform(),
        mesh_component(tool).get_dynamic_mesh(), unreal.Transform(), operation,
        unreal.GeometryScriptMeshBooleanOptions())
+    result = {"target_mesh_path": target.get_path_name(), "operation": args["operation"],
+              "previous_triangle_count": before, "result_triangle_count": triangle_count(work),
+              "result_vertex_count": vertex_count(work)}
     commit(target, component, work, "simul: mesh boolean " + args["operation"])
-    return {"target_mesh_path": target.get_path_name(), "operation": args["operation"],
-            "previous_triangle_count": before, "result_triangle_count": triangle_count(work),
-            "result_vertex_count": vertex_count(work)}
+    return result
 
 run(main, "edit meshes")
 """
@@ -368,13 +491,14 @@ def main():
     source_volume = volume_of(mesh)
     closed = unreal.GeometryScript_MeshQueries.get_is_closed_mesh(mesh)
     hull_volume = volume_of(hull)
+    result = {"mesh_path": source.get_path_name(), "hull_vertex_count": vertex_count(hull),
+              "hull_triangle_count": triangle_count(hull), "source_triangle_count": triangle_count(mesh),
+              "hull_volume": hull_volume, "source_volume": source_volume if closed else None,
+              "volume_ratio": hull_volume / source_volume if closed and source_volume > 0 else None}
     actor = spawn_mesh_actor(source.get_actor_label() + "_Hull", location_only(source), hull,
                              "simul: convex hull of " + source.get_actor_label())
-    return {"mesh_path": source.get_path_name(), "hull_actor_path": actor.get_path_name(),
-            "hull_vertex_count": vertex_count(hull), "hull_triangle_count": triangle_count(hull),
-            "source_triangle_count": triangle_count(mesh), "hull_volume": hull_volume,
-            "source_volume": source_volume if closed else None,
-            "volume_ratio": hull_volume / source_volume if closed and source_volume > 0 else None}
+    result["hull_actor_path"] = actor.get_path_name()
+    return result
 
 run(main, "spawn actors")
 """
@@ -402,11 +526,12 @@ def main():
     parts = gs("split_mesh_by_components", unreal.GeometryScript_MeshDecomposition.split_mesh_by_components,
                decomposition, None)[1]
     hulls = [hull_info(index, part) for index, part in enumerate(parts)]
+    result = {"mesh_path": source.get_path_name(), "hull_count": len(hulls), "hulls": hulls,
+              "total_vertices": vertex_count(decomposition), "total_triangles": triangle_count(decomposition)}
     actor = spawn_mesh_actor(source.get_actor_label() + "_Decomp", location_only(source), decomposition,
                              "simul: convex decomposition of " + source.get_actor_label())
-    return {"mesh_path": source.get_path_name(), "decomp_actor_path": actor.get_path_name(),
-            "hull_count": len(hulls), "hulls": hulls, "total_vertices": vertex_count(decomposition),
-            "total_triangles": triangle_count(decomposition)}
+    result["decomp_actor_path"] = actor.get_path_name()
+    return result
 
 run(main, "spawn actors")
 """
@@ -434,13 +559,15 @@ def apply(work, operation):
 def main():
     actor = mesh_actor(args["mesh"])
     component = mesh_component(actor)
+    before = triangle_count(component.get_dynamic_mesh())
+    require_input_size(before, actor.get_actor_label())
     work = working_copy(component.get_dynamic_mesh())
-    before = triangle_count(work)
     apply(work, args["operation"])
+    result = {"mesh_path": actor.get_path_name(), "operation": args["operation"],
+              "previous_triangle_count": before, "result_triangle_count": triangle_count(work),
+              "result_vertex_count": vertex_count(work)}
     commit(actor, component, work, "simul: mesh " + args["operation"])
-    return {"mesh_path": actor.get_path_name(), "operation": args["operation"],
-            "previous_triangle_count": before, "result_triangle_count": triangle_count(work),
-            "result_vertex_count": vertex_count(work)}
+    return result
 
 run(main, "edit meshes")
 """
@@ -450,18 +577,24 @@ SUBDIVIDE = """
 def main():
     actor = mesh_actor(args["mesh"])
     component = mesh_component(actor)
-    work = working_copy(component.get_dynamic_mesh())
-    before = triangle_count(work)
+    before = triangle_count(component.get_dynamic_mesh())
     level = max(1, min(args["level"], 4))
-    if args["scheme"].lower() == "catmull_clark":
+    catmull_clark = args["scheme"].lower() == "catmull_clark"
+    # Catmull-Clark splits each quad into 4 per level, uniform tessellation each triangle into (level + 1)^2.
+    predicted = before * (4 ** level if catmull_clark else (level + 1) ** 2)
+    require_result_size(predicted, "Subdividing " + str(before) + " triangles at level " + str(level)
+                        + " (use a lower level or simplify first)", predicted=True)
+    work = working_copy(component.get_dynamic_mesh())
+    if catmull_clark:
         gs("apply_polygroup_catmull_clark_sub_d", unreal.GeometryScript_OpenSubdiv.apply_polygroup_catmull_clark_sub_d,
            work, level, unreal.GeometryScriptGroupLayer())
     else:
         gs("apply_uniform_tessellation", unreal.GeometryScript_MeshSubdivide.apply_uniform_tessellation, work, level)
+    result = {"mesh_path": actor.get_path_name(), "level": level, "scheme": args["scheme"],
+              "previous_triangle_count": before, "result_triangle_count": triangle_count(work),
+              "result_vertex_count": vertex_count(work)}
     commit(actor, component, work, "simul: subdivide mesh")
-    return {"mesh_path": actor.get_path_name(), "level": level, "scheme": args["scheme"],
-            "previous_triangle_count": before, "result_triangle_count": triangle_count(work),
-            "result_vertex_count": vertex_count(work)}
+    return result
 
 run(main, "edit meshes")
 """
@@ -481,11 +614,12 @@ def main():
         target = max(1, before // 2)
     gs("apply_simplify_to_triangle_count", unreal.GeometryScript_MeshSimplification.apply_simplify_to_triangle_count,
        work, target, unreal.GeometryScriptSimplifyMeshOptions())
-    commit(actor, component, work, "simul: simplify mesh")
     after = triangle_count(work)
-    return {"mesh_path": actor.get_path_name(), "original_triangles": before, "result_triangles": after,
-            "result_vertex_count": vertex_count(work),
-            "reduction_ratio": round(1.0 - after / before, 4) if before > 0 else 0.0}
+    result = {"mesh_path": actor.get_path_name(), "original_triangles": before, "result_triangles": after,
+              "result_vertex_count": vertex_count(work),
+              "reduction_ratio": round(1.0 - after / before, 4) if before > 0 else 0.0}
+    commit(actor, component, work, "simul: simplify mesh")
+    return result
 
 run(main, "edit meshes")
 """
@@ -513,10 +647,11 @@ def main():
         unfilled = working_copy(mesh)
         cut(unfilled, False)
         filled = triangle_count(work) - triangle_count(unfilled)
+    result = {"mesh_path": actor.get_path_name(), "pieces": [actor.get_path_name()], "cut_faces_added": filled,
+              "previous_triangle_count": before, "result_triangle_count": triangle_count(work),
+              "result_vertex_count": vertex_count(work)}
     commit(actor, component, work, "simul: cut mesh")
-    return {"mesh_path": actor.get_path_name(), "pieces": [actor.get_path_name()], "cut_faces_added": filled,
-            "previous_triangle_count": before, "result_triangle_count": triangle_count(work),
-            "result_vertex_count": vertex_count(work)}
+    return result
 
 run(main, "edit meshes")
 """
@@ -569,11 +704,12 @@ def to_dynamic_mesh():
     lod = unreal.GeometryScriptMeshReadLOD()
     gs("copy_mesh_from_static_mesh", unreal.GeometryScript_AssetUtils.copy_mesh_from_static_mesh, asset, mesh,
        unreal.GeometryScriptCopyMeshFromAssetOptions(), lod)
+    result = {"source_path": path, "source_format": "static_mesh", "target_format": "dynamic_mesh",
+              "triangle_count": triangle_count(mesh), "vertex_count": vertex_count(mesh)}
     actor = spawn_mesh_actor(asset.get_name() + "_Dynamic", unreal.Transform(), mesh,
                              "simul: convert " + asset.get_name() + " to a DynamicMeshActor")
-    return {"source_path": path, "source_format": "static_mesh", "result_path": actor.get_path_name(),
-            "target_format": "dynamic_mesh", "triangle_count": triangle_count(mesh),
-            "vertex_count": vertex_count(mesh)}
+    result["result_path"] = actor.get_path_name()
+    return result
 
 def main():
     if args["target_format"] == "dynamic_mesh":
@@ -603,22 +739,33 @@ def mean_edge_length(mesh):
 def main():
     actor = mesh_actor(args["mesh"])
     component = mesh_component(actor)
-    work = working_copy(component.get_dynamic_mesh())
-    before = triangle_count(work)
+    mesh = component.get_dynamic_mesh()
+    before = triangle_count(mesh)
     options = unreal.GeometryScriptRemeshOptions()
     options.remesh_iterations = max(1, args["smoothing_iterations"])
     uniform = unreal.GeometryScriptUniformRemeshOptions()
     if args["target_triangle_count"] is not None:
         uniform.target_triangle_count = args["target_triangle_count"]
         uniform.target_type = unreal.GeometryScriptUniformRemeshTargetType.TRIANGLE_COUNT
+        predicted = int(_REMESH_OVERSHOOT * args["target_triangle_count"])
+        what = "Remeshing to " + str(args["target_triangle_count"]) + " triangles"
     else:
-        uniform.target_edge_length = args["target_edge_length"] or 5.0
+        length = args["target_edge_length"] or 5.0
+        uniform.target_edge_length = length
         uniform.target_type = unreal.GeometryScriptUniformRemeshTargetType.TARGET_EDGE_LENGTH
+        # Equilateral triangles of edge L cover sqrt(3)/4 L^2 each.
+        area = float(unreal.GeometryScript_MeshQueries.get_mesh_volume_area(mesh)[0])
+        predicted = int(_REMESH_OVERSHOOT * 4.0 * area / (math.sqrt(3.0) * length * length))
+        what = "Remeshing " + str(round(area)) + " cm2 at a " + str(length) + " cm edge (use a longer edge)"
+    require_result_size(predicted, what, predicted=True)
+    work = working_copy(mesh)
     gs("apply_uniform_remesh", unreal.GeometryScript_Remeshing.apply_uniform_remesh, work, options, uniform)
+    before_commit(work)
+    result = {"mesh_path": actor.get_path_name(), "mode": args["mode"], "original_triangles": before,
+              "result_triangles": triangle_count(work), "result_vertex_count": vertex_count(work),
+              "average_edge_length": mean_edge_length(work)}
     commit(actor, component, work, "simul: remesh mesh")
-    return {"mesh_path": actor.get_path_name(), "mode": args["mode"], "original_triangles": before,
-            "result_triangles": triangle_count(work), "result_vertex_count": vertex_count(work),
-            "average_edge_length": mean_edge_length(work)}
+    return result
 
 run(main, "edit meshes")
 """
@@ -653,6 +800,7 @@ def main():
                + ("" if channels == 1 else "s") + (" (0 to " + str(channels - 1) + ")" if channels else "")
                + "; uv_channel " + str(channel) + " does not exist", uv_channels=channels)
     triangles = triangle_count(mesh)
+    require_input_size(triangles, actor.get_actor_label())
     method = args["method"]
     if method == "auto":
         method = "xatlas" if triangles <= _XATLAS_MAX_TRIANGLES else "patch_builder"
@@ -663,11 +811,12 @@ def main():
                triangle_count=triangles, max_triangles=_XATLAS_MAX_TRIANGLES, suggested_method="patch_builder")
     work = working_copy(mesh)
     unwrap(work, method, channel)
+    result = {"mesh_path": actor.get_path_name(), "method": method, "requested_method": args["method"],
+              "uv_channel": channel, "island_count": first(unreal.GeometryScript_MeshQueries.get_num_uv_islands(
+                  work, channel)), "coverage_ratio": coverage(work, channel),
+              "triangle_count": triangle_count(work), "vertex_count": vertex_count(work)}
     commit(actor, component, work, "simul: compute mesh UVs")
-    return {"mesh_path": actor.get_path_name(), "method": method, "requested_method": args["method"],
-            "uv_channel": channel, "island_count": first(unreal.GeometryScript_MeshQueries.get_num_uv_islands(
-                work, channel)), "coverage_ratio": coverage(work, channel),
-            "triangle_count": triangle_count(work), "vertex_count": vertex_count(work)}
+    return result
 
 run(main, "edit meshes")
 """
@@ -684,6 +833,25 @@ _ATTACHMENT_CHANGED = re.compile(
 )
 
 
+def refusal(code: str, message: str, **details: Any) -> Dict[str, Any]:
+    """A ``ValidationError`` envelope with ``details.code``; nothing was sent to the editor.
+
+    Args:
+        code: The envelope's ``details.code``.
+        message: What was wrong.
+        **details: Further details.
+
+    Returns:
+        The envelope.
+    """
+    return {
+        "success": False,
+        "error_type": VALIDATION_ERROR,
+        "error": message + ". Nothing was changed.",
+        "details": {"code": code, **details},
+    }
+
+
 def invalid_choice(parameter: str, value: str, choices: Sequence[str], code: str) -> Optional[Dict[str, Any]]:
     """The ``ValidationError`` envelope for a value outside ``choices``, or None.
 
@@ -698,12 +866,56 @@ def invalid_choice(parameter: str, value: str, choices: Sequence[str], code: str
     """
     if value in choices:
         return None
-    return {
-        "success": False,
-        "error_type": VALIDATION_ERROR,
-        "error": f"Unknown {parameter} {value!r}; use one of: {', '.join(choices)}. Nothing was changed.",
-        "details": {"code": code, "choices": list(choices)},
-    }
+    return refusal(code, f"Unknown {parameter} {value!r}; use one of: {', '.join(choices)}", choices=list(choices))
+
+
+def is_loopback(host: str) -> bool:
+    """Whether ``host`` is this machine, whose clock a mesh script's deadline can use.
+
+    Args:
+        host: The Remote Control host.
+
+    Returns:
+        True for ``localhost`` and loopback addresses.
+    """
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def mesh_timeout_error(
+    error: UnrealTimeoutError, timeout: float, budget: float, same_clock: bool
+) -> UnrealTimeoutError:
+    """The timeout of a mesh script, saying what becomes of its result.
+
+    Args:
+        error: The transport's timeout.
+        timeout: The seconds the call waited.
+        budget: The seconds the script had to commit in.
+        same_clock: The script checked a deadline on this host's clock, so
+            it commits nothing after the call stopped waiting, however long
+            it waited in the editor's queue.
+
+    Returns:
+        The error to raise, with ``details.code`` ``MESH_TIME_BUDGET``.
+    """
+    after = (
+        "so when the editor finishes this one it discards the result, and the level stays as it was"
+        if same_clock
+        else "by its own run time, so it discards a result it finishes later; one that first waited behind "
+        "another script in the editor may still commit, so check the level before retrying"
+    )
+    message = (
+        f"The editor did not finish the mesh operation within {timeout:g}s. A mesh script commits its "
+        f"result only within {budget:g}s, {after}. The editor stays busy until it finishes. Use a smaller "
+        f"mesh or target, or raise UNREAL__TIMEOUT (the mesh tools wait at least {MESH_SCRIPT_TIMEOUT_S}s)"
+    )
+    details = dict(error.details or {})
+    details.update(code="MESH_TIME_BUDGET", budget_s=budget)
+    return UnrealTimeoutError(message, TIMEOUT_ERROR, details=details)
 
 
 def attachment_refusal(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -747,16 +959,25 @@ __all__ = [
     "GENERATE_PRIMITIVE",
     "GEOMETRY_SCRIPT_FAILED",
     "INVALID_STATE",
+    "MAX_REMESH_TARGET_TRIANGLES",
+    "MAX_RESULT_TRIANGLES",
+    "MAX_SEGMENTS",
     "MESH_BOOLEAN",
+    "MESH_COMMIT_MARGIN_S",
     "MESH_HELPERS",
     "MESH_REFUSALS",
     "MESH_SCRIPT_TIMEOUT_S",
+    "MIN_SEGMENTS",
     "PLANE_CUT",
     "REMESH",
+    "REMESH_OVERSHOOT",
     "SIMPLIFY",
     "SUBDIVIDE",
     "UNSUPPORTED_OPERATION",
     "VALIDATE",
     "XATLAS_MAX_TRIANGLES",
+    "is_loopback",
     "mesh_script",
+    "mesh_timeout_error",
+    "refusal",
 ]

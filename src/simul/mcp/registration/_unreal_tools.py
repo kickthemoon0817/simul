@@ -24,12 +24,20 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 from dataclasses import KW_ONLY, dataclass
-from typing import Annotated, Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple, Type
+from typing import Annotated, Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple, Type, Union
 
 from pydantic import BaseModel, Field
 
-from ...adapters._unreal_mesh_scripts import XATLAS_MAX_TRIANGLES
+from ...adapters._unreal_mesh_scripts import (
+    MAX_REMESH_TARGET_TRIANGLES,
+    MAX_RESULT_TRIANGLES,
+    MAX_SEGMENTS,
+    MIN_SEGMENTS,
+    REMESH_OVERSHOOT,
+    XATLAS_MAX_TRIANGLES,
+)
 from ...config import Settings
 from ...tool_surfaces import THIN_UNREAL_TOOLS
 from ..schemas.unreal import (
@@ -228,11 +236,73 @@ def _optional_json(value: str) -> Any:
     return json.loads(value) if value else None
 
 
+def _three_numbers(value: Any) -> Optional[List[float]]:
+    """A vector given as a JSON array of 3 numbers or as text, "x,y,z" or "[x, y, z]".
+
+    An empty string or array means none. ``_vectors`` checks the values
+    before the call, so this never fails inside it.
+    """
+    items = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            items = json.loads(text) if text.startswith("[") else text.split(",")
+        except ValueError:
+            items = None
+    elif not value:
+        return None
+    try:
+        numbers = [float(item) for item in items]
+    except (TypeError, ValueError):
+        numbers = []
+    if len(numbers) != 3 or not all(math.isfinite(number) for number in numbers):
+        raise ValueError(f"expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not {value!r}")
+    return numbers
+
+
+def _required_three_numbers(value: Any) -> List[float]:
+    numbers = _three_numbers(value)
+    if numbers is None:
+        raise ValueError("expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z'")
+    return numbers
+
+
+#: A point or direction: a JSON array of 3 numbers, or the same as text.
+_Vector3 = Union[str, List[float]]
+
+
+def _vectors(*names: str, optional: bool = False) -> Callable[[Any], Optional[str]]:
+    """The check that each of ``names`` is 3 numbers (or, when ``optional``, empty).
+
+    A check's message fails the call as a ValidationError envelope; a
+    validator in the annotation would fail it in FastMCP's own argument
+    validation instead, as untyped pydantic text.
+    """
+    parse = _three_numbers if optional else _required_three_numbers
+
+    def check(request: Any) -> Optional[str]:
+        for name in names:
+            try:
+                parse(getattr(request, name))
+            except ValueError as exc:
+                return f"{name}: {exc}"
+        return None
+
+    return check
+
+
 # ---------------------------------------------------------------------------
 # Rules, argument builders and usage records of particular tools
 # ---------------------------------------------------------------------------
 
-#: Ends the description of every mesh tool that changes or creates a mesh.
+#: Ends the description of the mesh tool that creates a mesh from nothing.
+_MESH_CREATE_NOTE = (
+    " Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs."
+)
+
+#: Ends the description of every mesh tool that changes or creates a mesh from another.
 _MESH_EDIT_NOTE = (
     " Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); "
     "needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs."
@@ -1492,16 +1562,17 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="generate_unreal_mesh_primitive",
         description=(
             "Create a parametric mesh primitive (box, sphere, cylinder, cone or capsule) as a new "
-            "DynamicMeshActor; the spawn is one undoable transaction." + _MESH_EDIT_NOTE
+            "DynamicMeshActor; the spawn is one undoable transaction." + _MESH_CREATE_NOTE
         ),
         response=UnrealGenerateMeshPrimitiveResponse,
         read_only=False,
         method="generate_mesh_primitive",
+        check=_vectors("location", optional=True),
         params=(
             ToolParam("primitive_type", str),
             ToolParam("dimensions", str, "{}", convert=_optional_json),
-            ToolParam("segments", int, 32),
-            ToolParam("location", str, "", convert=_optional_floats),
+            ToolParam("segments", Annotated[int, Field(ge=MIN_SEGMENTS, le=MAX_SEGMENTS)], 32),
+            ToolParam("location", _Vector3, "", convert=_three_numbers),
             ToolParam("actor_label", Optional[str], None),
         ),
     ),
@@ -1575,7 +1646,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="subdivide_unreal_mesh",
         description=(
             "Subdivide a DynamicMeshActor's mesh, in place and undoable: Catmull-Clark (needs quad "
-            "polygroups) or uniform tessellation." + _MESH_EDIT_NOTE
+            f"polygroups) or uniform tessellation. A result over {MAX_RESULT_TRIANGLES:,} triangles is "
+            "refused before anything runs." + _MESH_EDIT_NOTE
         ),
         response=UnrealSubdivideMeshResponse,
         read_only=False,
@@ -1614,10 +1686,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         read_only=False,
         destructive=True,
         method="cut_mesh_plane",
+        check=_vectors("plane_origin", "plane_normal"),
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("plane_origin", str, convert=_floats),
-            ToolParam("plane_normal", str, convert=_floats),
+            ToolParam("plane_origin", _Vector3, convert=_required_three_numbers),
+            ToolParam("plane_normal", _Vector3, convert=_required_three_numbers),
             ToolParam("fill_holes", bool, True),
             ToolParam("keep_both_sides", bool, False),
         ),
@@ -1660,7 +1733,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="remesh_unreal_mesh",
         description=(
             "Uniformly remesh a DynamicMeshActor's mesh to a target edge length or triangle count, in "
-            "place and undoable; reports the result's mean edge length." + _MESH_EDIT_NOTE
+            "place and undoable; reports the result's mean edge length. The remesher makes up to "
+            f"{REMESH_OVERSHOOT:g} times the target, so a target_triangle_count over "
+            f"{MAX_REMESH_TARGET_TRIANGLES:,}, or an edge length predicted to make over "
+            f"{MAX_RESULT_TRIANGLES:,} triangles, is refused."
+            + _MESH_EDIT_NOTE
         ),
         response=UnrealRemeshMeshResponse,
         read_only=False,
@@ -1670,7 +1747,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("mesh_path", str),
             ToolParam("mode", str, "uniform"),
             ToolParam("target_edge_length", Optional[float], None),
-            ToolParam("target_triangle_count", Optional[int], None),
+            ToolParam(
+                "target_triangle_count",
+                Optional[int],
+                None,
+                description=f"Target triangle count, 4 to {MAX_REMESH_TARGET_TRIANGLES:,}.",
+            ),
             ToolParam("smoothing_iterations", int, 3),
         ),
     ),

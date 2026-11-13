@@ -307,8 +307,23 @@ def test_setup_enables_geometry_scripting_and_says_so(tmp_path: Path, monkeypatc
     assert "GeometryScripting" in payload["patched"]["uproject"]["added"]
     (warning,) = payload["patched"]["uproject"]["warnings"]
     assert "mesh tools" in warning and "restart" in warning
-    plugins = {p["Name"]: p["Enabled"] for p in json.loads(uproject.read_text())["Plugins"]}
-    assert plugins["GeometryScripting"] is True
+    plugins = {p["Name"]: p for p in json.loads(uproject.read_text())["Plugins"]}
+    assert plugins["GeometryScripting"]["Enabled"] is True
+    # Editor only: a packaged game's plugin set stays as it was.
+    assert plugins["GeometryScripting"]["TargetAllowList"] == ["Editor"]
+
+
+def test_setup_that_launches_the_editor_asks_for_no_restart(tmp_path: Path, monkeypatch) -> None:
+    """The editor setup starts loads the plugin it just enabled, so the restart warning would mislead."""
+    uproject = _write_uproject(tmp_path)
+    _stub_launch(monkeypatch, "/opt/UE/UnrealEditor", {})
+
+    result = runner.invoke(app, ["--json", "unreal", "setup", str(uproject), "--yes"])
+
+    payload = json.loads(result.stdout)
+    assert payload["launched"] is True
+    assert "GeometryScripting" in payload["patched"]["uproject"]["added"]
+    assert payload["patched"]["uproject"]["warnings"] == []
 
 
 def test_setup_payload_engine_ini_is_none_when_no_bind(

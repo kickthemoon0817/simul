@@ -4670,15 +4670,23 @@
     "is_error": false,
     "payload": {
      "success": false,
-     "error": "could not convert string to float: 'x'",
-     "error_type": "ValueError",
-     "details": null
+     "error": "location: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not '1,x,3'",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "primitive_type": "box",
+       "dimensions": "{}",
+       "segments": 32,
+       "location": "1,x,3",
+       "actor_label": null
+      }
+     }
     }
    },
    "usage": [
     {
      "success": false,
-     "error": "could not convert string to float: 'x'"
+     "error": "location: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not '1,x,3'"
     }
    ]
   },
@@ -4703,15 +4711,23 @@
     "is_error": false,
     "payload": {
      "success": false,
-     "error": "could not convert string to float: 'up'",
-     "error_type": "ValueError",
-     "details": null
+     "error": "plane_normal: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not 'up'",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "mesh_path": "/Game/Meshes/SM_Chair",
+       "plane_origin": "0,0,0",
+       "plane_normal": "up",
+       "fill_holes": true,
+       "keep_both_sides": false
+      }
+     }
     }
    },
    "usage": [
     {
      "success": false,
-     "error": "could not convert string to float: 'up'"
+     "error": "plane_normal: expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not 'up'"
     }
    ]
   }

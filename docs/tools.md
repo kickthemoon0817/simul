@@ -843,10 +843,32 @@ Behaviour worth knowing:
   - An edit runs on a copy of the mesh, and the copy replaces the component's
     mesh in one transaction, so a failed edit changes nothing, one Undo
     reverts one edit and the level is marked dirty for Save. A tool that
-    creates an actor spawns it, with its mesh, in one transaction too. After
-    an Undo the DynamicMeshComponent keeps the bounds of the mesh that was
-    undone (Unreal does not recompute them on Undo), until a mesh tool next
-    reads the actor.
+    creates an actor spawns it, with its mesh, in one transaction too.
+  - Undo and Redo of a mesh edit restore which mesh the DynamicMeshComponent
+    holds, not what Unreal does when a mesh is set (UE 5.7.4): the component
+    stops listening to the mesh it got back, so an in-place edit of that mesh
+    outside simul (a Blueprint, Python GeometryScript, Modeling Mode) no longer
+    updates its bounds or what it draws, and its physics keeps the simple
+    collision it had before the Undo or Redo (a trace against a hull that Redo
+    put back misses). Every mesh tool repairs both on each DynamicMeshActor it
+    touches, `validate_unreal_mesh` included: it rebuilds the collision, and
+    in a level an Undo or Redo left dirty it sets the component's mesh again,
+    which binds it (and renames the mesh object). A clean level is left
+    alone, so a level saved right after an Undo keeps the stale binding until
+    it is reloaded or edited.
+  - Each in-place edit keeps the mesh it replaced alive for Undo: a full copy
+    that the editor's undo buffer limit (256 MB by default) does not count, so
+    it is freed only when the edit leaves the undo history. A hundred edits of
+    a 32,256-triangle mesh added about 370 MB to the editor; one UV unwrap of a
+    1M-triangle mesh about 760 MB.
+  - A mesh tool leaves at most 2,000,000 triangles in a mesh it makes or
+    edits. A larger result is refused with `details.code: "RESULT_TOO_LARGE"`
+    (`details.predicted` says whether it was predicted or measured) and
+    nothing is changed: before anything runs when the size is known up front
+    (a subdivision, a remesh, which makes up to 1.6 times its target, a UV
+    unwrap or topology edit of a mesh already over the cap, a primitive with
+    more than 512 segments), otherwise when the operation has run and before
+    its result replaces anything.
   - `compute_unreal_mesh_uv` unwraps with XAtlas only up to 20,000 triangles:
     XAtlas crashed the editor on a 130,048- and a 318,400-triangle mesh, and
     took 28.6 s for 32,256 (UE 5.7.4). Method `auto`, the default, uses
@@ -854,8 +876,18 @@ Behaviour worth knowing:
     `method` names the one that ran; `xatlas` on a larger mesh is refused with
     `details.code: "MESH_TOO_LARGE_FOR_XATLAS"`. A `uv_channel` the mesh does
     not have is refused (`"UV_CHANNEL_MISSING"`).
-  - A mesh script runs under an HTTP timeout of at least 120 s, whatever
+  - A mesh script runs under an HTTP timeout of at least 300 s, whatever
     `UNREAL__TIMEOUT` says, since a GeometryScript call cannot be cancelled.
+    The slowest operations on a 2M-triangle mesh took 83 to 109 s (a
+    PatchBuilder unwrap, a convex hull, a simplification; UE 5.7.4, Apple
+    M-series). A script commits its result only within that timeout less 10
+    s: one that finishes later discards its result, so a `TimeoutError`
+    (`details.code: "MESH_TIME_BUDGET"`) leaves the level as it was once the
+    editor finishes, though the editor stays busy until then. For an editor on
+    this machine the limit runs on this machine's clock, so it holds however
+    long the call waited in the editor's queue; for a remote editor it is the
+    script's own run time, and a call that first waited behind another script
+    may still commit late.
   - In attached mode, a call the attachment guard refuses (the editor shows
     another map or instance) is `error_type: "InvalidState"`, `details.code:
     "ATTACHMENT_CHANGED"`.

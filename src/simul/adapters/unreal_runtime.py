@@ -49,11 +49,17 @@ from ._unreal_mesh_scripts import (
     EDIT_TOPOLOGY,
     GENERATE_PRIMITIVE,
     MESH_BOOLEAN,
+    MAX_REMESH_TARGET_TRIANGLES,
+    MAX_RESULT_TRIANGLES,
+    MAX_SEGMENTS,
+    MESH_COMMIT_MARGIN_S,
     MESH_REFUSALS,
     MESH_SCRIPT_TIMEOUT_S,
+    MIN_SEGMENTS,
     PLANE_CUT,
     PRIMITIVE_TYPES,
     REMESH,
+    REMESH_OVERSHOOT,
     SIMPLIFY,
     SUBDIVIDE,
     TARGET_FORMATS,
@@ -62,7 +68,10 @@ from ._unreal_mesh_scripts import (
     VALIDATE,
     attachment_refusal,
     invalid_choice,
+    is_loopback,
     mesh_script,
+    mesh_timeout_error,
+    refusal,
 )
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_scripts import (
@@ -1701,9 +1710,13 @@ class UnrealRuntimeSession(LoggerMixin):
         tool's data, the shared mesh helpers and ``body``. It runs under an
         HTTP timeout of at least ``MESH_SCRIPT_TIMEOUT_S``, since a
         GeometryScript call blocks the editor until it returns and cannot be
-        cancelled. The script reports its own refusals with an ``error_type``;
-        the attachment guard's refusal, which is raised before the script
-        runs, comes back as ``InvalidState`` instead of a traceback.
+        cancelled, and commits its result only within that timeout less
+        ``MESH_COMMIT_MARGIN_S``: by the clock of this host for an editor on
+        it, by its own run time otherwise. So a timeout reported here leaves
+        the level as it was once the editor finishes. The script reports its
+        own refusals with an ``error_type``; the attachment guard's refusal,
+        which is raised before the script runs, comes back as
+        ``InvalidState`` instead of a traceback.
 
         Args:
             body: The tool body, from ``_unreal_mesh_scripts``.
@@ -1711,17 +1724,22 @@ class UnrealRuntimeSession(LoggerMixin):
 
         Returns:
             The payload, or an error envelope.
+
+        Raises:
+            UnrealTimeoutError: The editor did not answer within the timeout.
         """
-        previous = self.timeout
-        self.timeout = max(previous, MESH_SCRIPT_TIMEOUT_S)
+        timeout = max(self.timeout, MESH_SCRIPT_TIMEOUT_S)
+        budget = timeout - MESH_COMMIT_MARGIN_S
+        deadline = time.time() + budget if is_loopback(self.host) else None
+        script = mesh_script(body, args, budget_s=budget, deadline=deadline)
         try:
-            result = await self._execute_json_script(mesh_script(body, args), expected_errors=MESH_REFUSALS)
-        finally:
-            self.timeout = previous
-        refusal = attachment_refusal(result)
-        if refusal is not None:
-            self.logger.info("Unreal refused the request (%s): %s", refusal["error_type"], refusal["error"])
-            return refusal
+            result = await self._execute_json_script(script, expected_errors=MESH_REFUSALS, timeout=timeout)
+        except UnrealTimeoutError as exc:
+            raise mesh_timeout_error(exc, timeout, budget, same_clock=deadline is not None) from exc
+        stopped = attachment_refusal(result)
+        if stopped is not None:
+            self.logger.info("Unreal refused the request (%s): %s", stopped["error_type"], stopped["error"])
+            return stopped
         return result
 
     @staticmethod
@@ -4481,9 +4499,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         The spawn and its mesh are one undoable transaction.
 
         Args:
-            primitive_type: box, sphere, cylinder, cone, torus, capsule.
+            primitive_type: box, sphere, cylinder, cone or capsule.
             dimensions: Type-specific dimensions.
-            segments: Tessellation segments.
+            segments: Tessellation segments, 3 to 512 (a 512-segment sphere
+                has 522,240 triangles).
             location: Spawn location [x, y, z] in cm.
             actor_label: Optional label for the actor.
 
@@ -4492,9 +4511,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             warnings, or an error envelope.
         """
         kind = primitive_type.lower()
-        refusal = invalid_choice("primitive_type", kind, PRIMITIVE_TYPES, "UNKNOWN_PRIMITIVE")
-        if refusal is not None:
-            return refusal
+        problem = invalid_choice("primitive_type", kind, PRIMITIVE_TYPES, "UNKNOWN_PRIMITIVE")
+        if problem is None and not MIN_SEGMENTS <= int(segments) <= MAX_SEGMENTS:
+            problem = refusal("INVALID_SEGMENTS", f"segments must be {MIN_SEGMENTS} to {MAX_SEGMENTS}, not {segments}")
+        if problem is not None:
+            return problem
         return await self._run_mesh_script(
             GENERATE_PRIMITIVE,
             primitive_type=kind,
@@ -4623,6 +4644,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Catmull-Clark or uniform tessellation subdivision.
 
+        A result over ``MAX_RESULT_TRIANGLES`` triangles is refused before
+        anything runs (``RESULT_TOO_LARGE``).
+
         Args:
             mesh_path: Mesh actor path.
             level: Subdivision level, clamped to 1-4.
@@ -4750,11 +4774,17 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Remesh for clean topology using GeometryScript_Remeshing.
 
+        The remesher makes up to ``REMESH_OVERSHOOT`` times the triangles a
+        target asks for, so a target predicted over ``MAX_RESULT_TRIANGLES``
+        is refused before anything runs (``RESULT_TOO_LARGE``), as is a
+        result over it.
+
         Args:
             mesh_path: Mesh actor path.
             mode: 'uniform' (only mode currently supported).
             target_edge_length: Target edge length in cm.
-            target_triangle_count: Target triangle count.
+            target_triangle_count: Target triangle count, 4 to
+                ``MAX_REMESH_TARGET_TRIANGLES``.
             smoothing_iterations: Smoothing passes (remesh_iterations).
 
         Returns:
@@ -4762,6 +4792,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             average_edge_length (the mean length of the result's triangle
             edges, in cm) and warnings.
         """
+        if target_triangle_count is not None and not 4 <= int(target_triangle_count) <= MAX_REMESH_TARGET_TRIANGLES:
+            return refusal(
+                "INVALID_TARGET",
+                f"target_triangle_count must be 4 to {MAX_REMESH_TARGET_TRIANGLES}, not {target_triangle_count}: "
+                f"the remesher makes up to {REMESH_OVERSHOOT:g} times the target, and a result over "
+                f"{MAX_RESULT_TRIANGLES} triangles is refused",
+            )
         return await self._run_mesh_script(
             REMESH,
             mesh=mesh_path,

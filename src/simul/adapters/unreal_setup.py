@@ -39,6 +39,21 @@ REQUIRED_PLUGINS: Tuple[str, ...] = ("RemoteControl", "PythonScriptPlugin", "Geo
 #: start, so an editor that was running when setup enabled it needs a restart.
 GEOMETRY_SCRIPTING_PLUGIN = "GeometryScripting"
 
+#: The targets a plugin entry setup creates loads in, by plugin. The mesh
+#: tools run in the editor only, so GeometryScripting is not added to a
+#: packaged game, whose plugin set setup leaves as it was (a Blueprint-only
+#: project then still packages without a C++ build). An entry the project
+#: already has keeps its own targets.
+EDITOR_ONLY_PLUGINS: Dict[str, List[str]] = {GEOMETRY_SCRIPTING_PLUGIN: ["Editor"]}
+
+#: What setup says when it enabled GeometryScripting for an editor it does not
+#: launch itself (``--no-launch``).
+GEOMETRY_SCRIPTING_RESTART_WARNING = (
+    "Enabled GeometryScripting, which the Unreal mesh tools (generate_unreal_mesh_primitive "
+    "and the other *_unreal_mesh* tools) need. Unreal loads plugins at startup, so an editor "
+    "that is already running needs a restart before those tools work."
+)
+
 # Identifier we stamp on simul-managed passphrase entries. UE doesn't use
 # this for matching (only the hashed Passphrase field is compared) — it's
 # purely for human bookkeeping in the project settings UI. simul also uses
@@ -366,9 +381,10 @@ def patch_uproject(uproject_path: Path, *, agent_overlay: bool = False) -> Patch
 
     Writes the file back only when something actually changed. Preserves
     existing keys and ordering. Plugin entries are matched case-sensitively
-    by ``Name`` — matches UE5's own handling. Enabling GeometryScripting adds
-    a warning that the mesh tools need it and that a running editor loads it
-    only after a restart.
+    by ``Name`` — matches UE5's own handling. A GeometryScripting entry setup
+    creates loads in the editor only (``EDITOR_ONLY_PLUGINS``). Enabling
+    GeometryScripting adds ``GEOMETRY_SCRIPTING_RESTART_WARNING``, for the
+    caller to show when it does not launch the editor itself.
     """
     uproject_path = Path(uproject_path)
     if not uproject_path.is_file():
@@ -393,7 +409,10 @@ def patch_uproject(uproject_path: Path, *, agent_overlay: bool = False) -> Patch
     for name in REQUIRED_PLUGINS + (("SimulAgentOverlay",) if agent_overlay else ()):
         existing = by_name.get(name)
         if existing is None:
-            plugins.append({"Name": name, "Enabled": True})
+            entry: Dict = {"Name": name, "Enabled": True}
+            if name in EDITOR_ONLY_PLUGINS:
+                entry["TargetAllowList"] = list(EDITOR_ONLY_PLUGINS[name])
+            plugins.append(entry)
             result.added.append(name)
         elif existing.get("Enabled") is not True:
             existing["Enabled"] = True
@@ -402,11 +421,7 @@ def patch_uproject(uproject_path: Path, *, agent_overlay: bool = False) -> Patch
             result.already_ok.append(name)
 
     if GEOMETRY_SCRIPTING_PLUGIN in result.added + result.updated:
-        result.warnings.append(
-            "Enabled GeometryScripting, which the Unreal mesh tools (generate_unreal_mesh_primitive "
-            "and the other *_unreal_mesh* tools) need. Unreal loads plugins at startup, so an editor "
-            "that is already running needs a restart before those tools work."
-        )
+        result.warnings.append(GEOMETRY_SCRIPTING_RESTART_WARNING)
 
     if result.added or result.updated:
         result.changed = True

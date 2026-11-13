@@ -9,14 +9,17 @@ did to the fake level, and against the tool's response model.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Dict, Tuple
 
 import pytest
-
 from simul.adapters import _unreal_mesh_scripts as mesh_scripts
+from simul.adapters import unreal_runtime
+from simul.adapters._unreal_errors import UnrealTimeoutError
 from simul.adapters.unreal_runtime import UnrealRuntimeSession
+from simul.mcp.registration._reg_unreal import InvalidToolInput, request_model_for, session_arguments
 from simul.mcp.registration._unreal_tools import UNREAL_TOOLS
-from tests.unreal.fake_geometry import LEVEL, DynamicMesh, FakeEditor, level_editor
+from tests.unreal.fake_geometry import LEVEL, LEVEL_PACKAGE, DynamicMesh, FakeEditor, level_editor
 
 BODY, BALL, BIG, CRATE, LIGHT = (LEVEL + name for name in ("Body", "Ball", "Big", "Crate", "Light"))
 
@@ -57,8 +60,10 @@ SPECS = {spec.name: spec for spec in UNREAL_TOOLS}
 
 def _session(editor: FakeEditor) -> UnrealRuntimeSession:
     session = UnrealRuntimeSession()
+    session.timeouts = []  # type: ignore[attr-defined]
 
-    async def execute(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
+    async def execute(code: str, mode: str = "ExecuteFile", timeout: Any = None) -> Dict[str, Any]:
+        session.timeouts.append(timeout)  # type: ignore[attr-defined]
         return editor.run(code)
 
     session._execute_python = execute  # type: ignore[method-assign]
@@ -120,6 +125,30 @@ def test_an_edit_replaces_the_mesh_in_one_transaction(editor: FakeEditor, tool: 
     assert len(editor.transactions) == 1 and editor.transactions[0].startswith("simul: ")
     assert actor.path in editor.modified
     assert ("set_dynamic_mesh", actor.path, after.name) in editor.events
+    # The new mesh's physics is rebuilt once it is in, so a trace hits what the reply describes.
+    swap = editor.events.index(("set_dynamic_mesh", actor.path, after.name))
+    assert ("update_collision", actor.path, False) in editor.events[swap:]
+
+
+def test_a_touch_after_an_undo_binds_the_component_to_its_mesh_again(editor: FakeEditor) -> None:
+    """After an Undo, in-place edits outside simul left the bounds stale (#337 review).
+
+    An Undo leaves the level dirty; the mesh the component got back is set
+    again, which binds it, and the collision is rebuilt.
+    """
+    editor.dirty.add(LEVEL_PACKAGE)
+    _call(editor, "validate_unreal_mesh")
+    assert [event[0] for event in editor.events] == ["rebind", "update_collision"]
+    assert editor.events[0][1] == BODY and editor.events[1] == ("update_collision", BODY, False)
+
+
+def test_a_read_of_a_saved_level_dirties_nothing(editor: FakeEditor) -> None:
+    """Binding the mesh again renames it and dirties the level, so a clean level is left alone."""
+    mesh = editor.objects[BODY].dynamic_mesh_component.get_dynamic_mesh()
+    name = mesh.name
+    _call(editor, "validate_unreal_mesh")
+    assert editor.events == [("update_collision", BODY, False)]
+    assert editor.dirty == set() and mesh.name == name
 
 
 @pytest.mark.parametrize("tool", sorted(TOOLS))
@@ -224,6 +253,13 @@ def test_changes_are_refused_during_pie(editor: FakeEditor, tool: str) -> None:
 def test_validation_reads_during_pie(editor: FakeEditor) -> None:
     editor.pie = True
     assert _call(editor, "validate_unreal_mesh")["is_valid"] is True
+
+
+def test_an_asset_path_is_told_apart_during_pie(editor: FakeEditor) -> None:
+    """EditorAssetLibrary finds nothing while PIE runs, which made an asset path "Actor not found" (#342 review)."""
+    editor.pie = True
+    payload = _call(editor, "validate_unreal_mesh", mesh_path="/Game/Meshes/SM_Crate")
+    assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", "STATIC_MESH_ASSET")
 
 
 def test_xatlas_is_refused_above_its_limit_and_auto_picks_patch_builder(editor: FakeEditor) -> None:
@@ -333,6 +369,8 @@ def test_conversion_to_a_static_mesh_is_refused_honestly(editor: FakeEditor) -> 
     ("tool", "overrides", "code"),
     [
         ("generate_unreal_mesh_primitive", {"primitive_type": "pyramid"}, "UNKNOWN_PRIMITIVE"),
+        # Refused as not implemented until a later change builds it, so not offered either.
+        ("generate_unreal_mesh_primitive", {"primitive_type": "torus"}, "UNKNOWN_PRIMITIVE"),
         ("edit_unreal_mesh_topology", {"operation": "bogus_op"}, "UNKNOWN_OPERATION"),
         ("convert_unreal_mesh_format", {"target_format": "fbx"}, "UNKNOWN_FORMAT"),
         ("compute_unreal_mesh_uv", {"method": "bogus"}, "UNKNOWN_UV_METHOD"),
@@ -344,13 +382,14 @@ def test_unknown_choices_are_refused_before_the_editor_is_asked(
     payload = _call(editor, tool, **overrides)
     assert (payload["success"], payload["error_type"]) == (False, "ValidationError")
     assert payload["details"]["code"] == code
+    assert "torus" not in payload["details"]["choices"]
     assert editor.calls == [] and editor.events == []
 
 
 def test_the_attachment_guard_refusal_is_typed() -> None:
     session = UnrealRuntimeSession()
 
-    async def guard_refused(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
+    async def guard_refused(code: str, mode: str = "ExecuteFile", timeout: Any = None) -> Dict[str, Any]:
         return {
             "ReturnValue": False,
             "CommandResult": (
@@ -375,33 +414,189 @@ def test_the_attachment_guard_refusal_is_typed() -> None:
 def test_mesh_scripts_run_under_the_longer_timeout(editor: FakeEditor) -> None:
     session = _session(editor)
     session.timeout = 30
-    seen = []
-    execute = session._execute_python
-
-    async def watch(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
-        seen.append(session.timeout)
-        return await execute(code, mode)
-
-    session._execute_python = watch  # type: ignore[method-assign]
     asyncio.run(session.validate_mesh(BODY))
-    assert seen == [mesh_scripts.MESH_SCRIPT_TIMEOUT_S]
+    assert session.timeouts == [mesh_scripts.MESH_SCRIPT_TIMEOUT_S]  # type: ignore[attr-defined]
     assert session.timeout == 30
 
 
-def test_scripts_bind_no_unreal_object_at_module_level(editor: FakeEditor) -> None:
+@pytest.mark.parametrize("tool", sorted(TOOLS))
+def test_scripts_bind_no_unreal_object_at_module_level(editor: FakeEditor, tool: str) -> None:
     """The editor's shared __main__ keeps module-level names; an object there leaks the world."""
-    namespace: Dict[str, Any] = {"__name__": "__main__"}
-    script = mesh_scripts.mesh_script(mesh_scripts.VALIDATE, {"mesh": BODY})
-    import io
-    import sys
-    from contextlib import redirect_stdout
-
-    sys.modules["unreal"] = editor.module()  # type: ignore[assignment]
-    try:
-        with redirect_stdout(io.StringIO()):
-            exec(script, namespace)
-    finally:
-        sys.modules.pop("unreal", None)
-    leaked = {name for name, value in namespace.items() if isinstance(value, (DynamicMesh,))
+    payload = _call(editor, tool)
+    assert payload.get("success") is not False, payload
+    leaked = {name for name, value in editor.namespace.items() if isinstance(value, (DynamicMesh,))
               or type(value).__module__ == "tests.unreal.fake_geometry"}
     assert leaked == set()
+
+
+# -- the time budget ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool", MUTATING)
+def test_a_result_past_the_time_budget_is_discarded(editor: FakeEditor, tool: str, monkeypatch) -> None:
+    """A remesh that outlived its HTTP call committed 3.5M triangles after the TimeoutError (#337 review)."""
+    monkeypatch.setattr(unreal_runtime, "MESH_SCRIPT_TIMEOUT_S", 5)
+    session = _session(editor)
+    session.timeout = 1
+    method, kwargs, _ = TOOLS[tool]
+    payload = asyncio.run(getattr(session, method)(**kwargs))
+    assert (payload["success"], payload["error_type"]) == (False, "TimeoutError")
+    assert payload["details"]["code"] == "MESH_TIME_BUDGET"
+    assert payload["details"]["budget_s"] == 5 - mesh_scripts.MESH_COMMIT_MARGIN_S
+    assert "nothing was changed" in payload["error"]
+    assert editor.transactions == [] and editor.spawned == 0
+    assert not [event for event in editor.events if event[0] in ("set_dynamic_mesh", "spawn")]
+
+
+def test_a_result_past_this_hosts_deadline_is_discarded(editor: FakeEditor) -> None:
+    """A script that waited in the editor's queue has used up the caller's wait before it starts."""
+    script = mesh_scripts.mesh_script(mesh_scripts.SIMPLIFY, {"mesh": BODY, "target_triangle_count": 6,
+                                      "target_percentage": None}, budget_s=100.0, deadline=time.time() - 1)
+    editor.run(script)
+    assert editor.transactions == []
+    assert '"error_type": "TimeoutError"' in str(editor.run(script))
+
+
+def test_the_deadline_uses_this_hosts_clock_only_for_a_local_editor(editor: FakeEditor) -> None:
+    for host, local in (("localhost", True), ("127.0.0.1", True), ("::1", True), ("10.0.0.5", False),
+                        ("editor.lan", False)):
+        assert mesh_scripts.is_loopback(host) is local, host
+    session = _session(editor)
+    scripts = []
+    execute = session._execute_python
+
+    async def watch(code: str, mode: str = "ExecuteFile", timeout: Any = None) -> Dict[str, Any]:
+        scripts.append(code)
+        return await execute(code, mode, timeout)
+
+    session._execute_python = watch  # type: ignore[method-assign]
+    session.host = "10.0.0.5"
+    asyncio.run(session.validate_mesh(BODY))
+    session.host = "localhost"
+    asyncio.run(session.validate_mesh(BODY))
+    assert "\n_DEADLINE = None\n" in scripts[0] and "\n_DEADLINE = None\n" not in scripts[1]
+
+
+@pytest.mark.parametrize(("host", "says"), [("localhost", "the level stays as it was"),
+                                            ("10.0.0.5", "check the level before retrying")])
+def test_a_timed_out_mesh_call_says_what_becomes_of_its_result(host: str, says: str) -> None:
+    session = UnrealRuntimeSession()
+    session.host = host
+
+    async def slow(code: str, mode: str = "ExecuteFile", timeout: Any = None) -> Dict[str, Any]:
+        raise UnrealTimeoutError("The editor did not finish the script within 300s", "TimeoutError",
+                                 details={"route": "/remote/object/call", "timeout_s": timeout})
+
+    session._execute_python = slow  # type: ignore[method-assign]
+    with pytest.raises(UnrealTimeoutError) as raised:
+        asyncio.run(session.remesh_mesh(BODY, target_edge_length=5.0))
+    assert says in str(raised.value) and "discards" in str(raised.value)
+    assert raised.value.details == {"route": "/remote/object/call", "timeout_s": 300, "code": "MESH_TIME_BUDGET",
+                                    "budget_s": 300 - mesh_scripts.MESH_COMMIT_MARGIN_S}
+
+
+# -- the result cap -----------------------------------------------------------------
+
+
+def _huge(editor: FakeEditor, tris: int = 2_500_000) -> str:
+    editor.dynamic_actor("Huge", tris=tris, verts=tris // 2)
+    return LEVEL + "Huge"
+
+
+@pytest.mark.parametrize(
+    ("tool", "overrides"),
+    [
+        ("subdivide_unreal_mesh", {"mesh_path": BIG, "level": 2, "scheme": "uniform"}),
+        ("subdivide_unreal_mesh", {"mesh_path": BIG, "level": 2, "scheme": "catmull_clark"}),
+        ("remesh_unreal_mesh", {"mesh_path": BALL, "target_edge_length": 0.1}),
+        ("compute_unreal_mesh_uv", {"mesh_path": "huge"}),
+        ("edit_unreal_mesh_topology", {"mesh_path": "huge"}),
+    ],
+)
+def test_a_result_predicted_over_the_cap_is_refused_before_anything_runs(
+    editor: FakeEditor, tool: str, overrides: Dict[str, Any]
+) -> None:
+    """Subdivide level 4 and a fine remesh had no bound (#337 review)."""
+    if overrides.get("mesh_path") == "huge":
+        overrides = {**overrides, "mesh_path": _huge(editor)}
+    payload = _call(editor, tool, **overrides)
+    assert (payload["success"], payload["error_type"]) == (False, "ValidationError"), payload
+    assert payload["details"]["code"] == "RESULT_TOO_LARGE"
+    assert payload["details"]["predicted"] is True
+    assert payload["details"]["triangle_count"] > mesh_scripts.MAX_RESULT_TRIANGLES
+    assert editor.calls == [] and editor.transactions == []
+
+
+def test_a_result_over_the_cap_is_refused_before_it_replaces_anything(editor: FakeEditor) -> None:
+    huge = _huge(editor, mesh_scripts.MAX_RESULT_TRIANGLES)
+    ball = editor.objects[BALL].dynamic_mesh_component.get_dynamic_mesh()
+    payload = _call(editor, "apply_unreal_mesh_boolean", target_mesh_path=BALL, tool_mesh_path=huge)
+    assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", "RESULT_TOO_LARGE")
+    assert payload["details"]["predicted"] is False
+    assert payload["details"]["triangle_count"] == mesh_scripts.MAX_RESULT_TRIANGLES + 1920
+    assert editor.transactions == [] and editor.objects[BALL].dynamic_mesh_component.get_dynamic_mesh() is ball
+
+
+def test_a_subdivision_under_the_cap_runs(editor: FakeEditor) -> None:
+    payload = _call(editor, "subdivide_unreal_mesh", mesh_path=BIG, level=1, scheme="uniform")
+    assert payload["result_triangle_count"] == 318_400 * 4
+
+
+@pytest.mark.parametrize(
+    ("tool", "overrides", "code"),
+    [
+        ("generate_unreal_mesh_primitive", {"segments": 2}, "INVALID_SEGMENTS"),
+        ("generate_unreal_mesh_primitive", {"segments": 513}, "INVALID_SEGMENTS"),
+        ("remesh_unreal_mesh", {"target_edge_length": None,
+                                "target_triangle_count": mesh_scripts.MAX_REMESH_TARGET_TRIANGLES + 1},
+         "INVALID_TARGET"),
+        ("remesh_unreal_mesh", {"target_edge_length": None, "target_triangle_count": 3}, "INVALID_TARGET"),
+    ],
+)
+def test_inputs_that_would_exceed_the_cap_are_refused_by_the_session(
+    editor: FakeEditor, tool: str, overrides: Dict[str, Any], code: str
+) -> None:
+    payload = _call(editor, tool, **overrides)
+    assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", code)
+    assert editor.calls == [] and editor.events == []
+
+
+def test_the_largest_remesh_target_is_predicted_under_the_cap() -> None:
+    target = mesh_scripts.MAX_REMESH_TARGET_TRIANGLES
+    assert target * mesh_scripts.REMESH_OVERSHOOT <= mesh_scripts.MAX_RESULT_TRIANGLES
+    assert (target + 1) * mesh_scripts.REMESH_OVERSHOOT > mesh_scripts.MAX_RESULT_TRIANGLES
+
+
+def test_the_largest_primitive_is_under_the_cap(editor: FakeEditor) -> None:
+    payload = _call(editor, "generate_unreal_mesh_primitive", primitive_type="sphere",
+                    segments=mesh_scripts.MAX_SEGMENTS)
+    assert payload["triangle_count"] == 2 * 512 * 510 < mesh_scripts.MAX_RESULT_TRIANGLES
+
+
+# -- vectors -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [[0, 0, 50], "0,0,50", "[0, 0, 50]", " 0, 0 , 50 ", [0.0, 0, 50.0]])
+def test_a_plane_takes_a_json_array_or_text(value: Any) -> None:
+    """A JSON array failed with an untyped ValueError (#337 review)."""
+    spec = SPECS["cut_unreal_mesh_plane"]
+    request = request_model_for(spec)(mesh_path=BODY, plane_origin=value, plane_normal=[0, 0, 1])
+    arguments = session_arguments(spec, request)
+    assert arguments["plane_origin"] == [0.0, 0.0, 50.0] and arguments["plane_normal"] == [0.0, 0.0, 1.0]
+
+
+@pytest.mark.parametrize("value", ["up", "0,0", "[0, 0]", [1, 2, 3, 4], "1,x,3", "nan,0,0", "", []])
+def test_a_plane_that_is_not_three_numbers_is_refused_by_validation(value: Any) -> None:
+    """The check fails the request model, which the envelope reports as a ValidationError."""
+    model = request_model_for(SPECS["cut_unreal_mesh_plane"])
+    with pytest.raises(InvalidToolInput, match="^plane_origin: expected 3 numbers"):
+        model(mesh_path=BODY, plane_origin=value, plane_normal=[0, 0, 1])
+
+
+def test_a_location_is_optional() -> None:
+    spec = SPECS["generate_unreal_mesh_primitive"]
+    model = request_model_for(spec)
+    assert session_arguments(spec, model(primitive_type="box"))["location"] is None
+    assert session_arguments(spec, model(primitive_type="box", location=[1, 2, 3]))["location"] == [1.0, 2.0, 3.0]
+    with pytest.raises(InvalidToolInput, match="^location: "):
+        model(primitive_type="box", location="1,x,3")

@@ -25,6 +25,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from simul.adapters.unreal_setup import (
+    GEOMETRY_SCRIPTING_RESTART_WARNING,
     LauncherNotFound,
     ensure_remote_control_config,
     is_loopback_bind,
@@ -1182,13 +1183,20 @@ def setup(
         console.print(f"[red]config patch failed: {exc}[/red]")
         raise typer.Exit(1)
 
+    # An editor setup launches itself loads the plugins it just enabled; only one
+    # already running needs the restart.
+    uproject_warnings = [
+        warning
+        for warning in patch.uproject.warnings
+        if not (launch and warning == GEOMETRY_SCRIPTING_RESTART_WARNING)
+    ]
     if not is_json_mode():
         console.print(patch.uproject.summary())
         console.print(patch.ini.summary())
         if patch.engine_ini is not None and patch.engine_ini.changed:
             console.print(patch.engine_ini.summary())
         for warning in (
-            patch.uproject.warnings
+            uproject_warnings
             + patch.ini.warnings
             + (patch.engine_ini.warnings if patch.engine_ini else [])
         ):
@@ -1240,7 +1248,7 @@ def setup(
                 "changed": patch.uproject.changed,
                 "added": patch.uproject.added,
                 "updated": patch.uproject.updated,
-                "warnings": patch.uproject.warnings,
+                "warnings": uproject_warnings,
             },
             "ini": {
                 "changed": patch.ini.changed,
