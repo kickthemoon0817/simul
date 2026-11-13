@@ -8,7 +8,7 @@ from ....adapters import IsaacSocketClient, ScriptResult
 from ....adapters.isaac_socket_client import BridgeRequestDeliveredError
 from ....config import Settings, get_settings
 from ....logging import LoggerMixin
-from ....utils.paths import PathPolicy
+from ....utils.paths import PathPolicy, SandboxDenied, sandbox_error
 from ... import error_types
 from ...registration._helpers import apply_success_from_error
 from ...schemas.common import ErrorResponse
@@ -230,6 +230,74 @@ class IsaacScriptBase(LoggerMixin):
             The SandboxError payload, or None when the path may be used.
         """
         return self._path_policy.denial(path, write=write)
+
+    def _asset_value_checks(
+        self, values: Sequence[Any], *, write: bool = False
+    ) -> Dict[str, Dict[str, Any]]:
+        """Judge every string in ``values`` as a path, in case it lands in an asset.
+
+        Only Kit knows an attribute's type, so each candidate is checked here
+        against the file sandbox and the script applies the verdict
+        (``ASSET_SANDBOX_CORE``) when the attribute turns out to be
+        asset-valued (``asset`` / ``asset[]``).
+
+        Args:
+            values: The JSON values about to be written; a list value
+                contributes its items.
+            write: Judge the paths for writing.
+
+        Returns:
+            ``{string: {"path": authorized}}`` or ``{string: {"denial": envelope}}``
+            for each non-empty string among ``values`` and their list items.
+        """
+        checks: Dict[str, Dict[str, Any]] = {}
+        for value in values:
+            for item in value if isinstance(value, list) else [value]:
+                if isinstance(item, str) and item and item not in checks:
+                    checks[item] = self._path_verdict(item, write=write)
+        return checks
+
+    def _sandboxed_location(
+        self, name: str, value: Any
+    ) -> Tuple[Any, Optional[Dict[str, Any]]]:
+        """Pass a value bound for a file location through the write sandbox.
+
+        Used where the engine may read or write the location (a Carb key, an
+        OmniGraph input named like a file), so it is judged as a write, the
+        stricter of the two. Each non-empty string, alone or in a list, is
+        replaced by the path the sandbox resolved; anything else is left as is.
+
+        Args:
+            name: The key or attribute the value is for, named in a denial.
+            value: The JSON value about to be written.
+
+        Returns:
+            ``(value to write, None)``, or ``(value, SandboxError payload)``.
+        """
+        items = value if isinstance(value, list) else [value]
+        resolved = []
+        for item in items:
+            if isinstance(item, str) and item:
+                verdict = self._path_verdict(item, write=True)
+                if "denial" in verdict:
+                    denial = verdict["denial"]
+                    denial["error"] = (
+                        f"Refusing to write {name}: {item!r} names a file location outside "
+                        "the file sandbox (security.allowed_paths). Nothing was written."
+                    )
+                    return value, denial
+                item = verdict["path"]
+            resolved.append(item)
+        return (resolved if isinstance(value, list) else resolved[0]), None
+
+    def _path_verdict(self, path: str, *, write: bool = False) -> Dict[str, Any]:
+        """``{"path": authorized}`` when the sandbox admits ``path``, else ``{"denial": envelope}``."""
+        try:
+            return {"path": self._path_policy.authorize(path, write=write)}
+        except SandboxDenied as exc:
+            return {"denial": sandbox_error(exc.details)}
+        except Exception:  # noqa: BLE001 - a path the policy cannot judge is refused
+            return {"denial": sandbox_error({"path": path}, error=f"Refused by the file sandbox: {path}")}
 
     @staticmethod
     def _refusal(message: str, **details: Any) -> Dict[str, Any]:

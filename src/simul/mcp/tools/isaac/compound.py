@@ -148,6 +148,7 @@ class CompoundMixin:
             (
                 "prim",
                 f"_define_prim(stage, prim_path, {_pyval(prim_type)}, {{}})",
+                # No attributes, so ASSET_SANDBOX_CORE is never called: left out for size.
                 (COERCE_ATTRIBUTE_VALUE_CORE, DEFINE_PRIM_CORE),
             ),
         ]
