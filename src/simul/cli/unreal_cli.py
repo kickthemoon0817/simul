@@ -25,6 +25,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from simul.adapters.unreal_setup import (
+    GEOMETRY_SCRIPTING_RESTART_WARNING,
     LauncherNotFound,
     ensure_remote_control_config,
     is_loopback_bind,
@@ -550,34 +551,43 @@ def set_property(
 # ---------------------------------------------------------------------------
 @app.command()
 def search(
-    query: str = typer.Argument(..., help="Search query (name or class)"),
-    search_class: Optional[str] = typer.Option(None, "--class", "-c", help="Filter by asset class"),
-    package_path: Optional[str] = typer.Option(None, "--package", help="Filter by package path"),
-    limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
+    query: str = typer.Argument(..., help="Part of the asset name to match, ignoring case"),
+    search_class: Optional[str] = typer.Option(
+        None, "--class", "-c", help="Filter by asset class: a name (StaticMesh) or class path"
+    ),
+    package_path: Optional[str] = typer.Option(
+        None, "--package", help="Filter by content folder, subfolders included"
+    ),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max results (1-1000)"),
+    offset: int = typer.Option(0, "--offset", help="Matches to skip, for the next page"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Search the Unreal Asset Registry."""
+    """Search the Unreal Asset Registry (every mounted content root unless --package narrows it)."""
     session = _session(host, port)
     result = _run(session.search_assets(
         query=query,
         class_names=[search_class] if search_class else None,
         package_paths=[package_path] if package_path else None,
         max_results=limit,
+        offset=offset,
     ), session)
     if is_json_mode():
         emit(result)
         return
     assets = result.get("assets", [])
-    table = Table(title=f"Assets matching '{query}' ({len(assets)})")
+    total = result.get("total", len(assets))
+    table = Table(title=f"Assets matching '{query}' ({len(assets)} of {total})")
     table.add_column("Path", style="cyan")
     table.add_column("Class")
     for a in assets:
         if isinstance(a, dict):
-            table.add_row(a.get("path", "?"), a.get("class", "?"))
+            table.add_row(a.get("path", "?"), a.get("class_name", "?"))
         else:
             table.add_row(str(a), "")
     console.print(table)
+    if result.get("next_offset") is not None:
+        console.print(f"More matches: --offset {result['next_offset']}")
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +674,7 @@ def exec_script(
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Execute Python code inside Unreal Engine."""
+    """Execute Python code inside Unreal Engine, in a fresh namespace discarded when it ends."""
     from simul.adapters.unreal_runtime import UNREAL_EXEC_MODES
 
     if mode not in UNREAL_EXEC_MODES:
@@ -1055,7 +1065,7 @@ def setup(
     ``RemoteControl`` / ``PythonScriptPlugin`` in the .uproject and editing
     ``Config/DefaultRemoteControl.ini`` before every simul session.
 
-    What gets enabled (the only two plugins required by simul):
+    What gets enabled (the plugins simul's tools need):
 
       * ``RemoteControl``       — UE's HTTP/WebSocket API server (the thing
                                   simul talks to). Not the Marketplace
@@ -1064,6 +1074,10 @@ def setup(
       * ``PythonScriptPlugin``  — embedded Python interpreter for the
                                   remote ``exec`` endpoint. Required because
                                   ``bEnableRemotePythonExecution=True``.
+      * ``GeometryScripting``   — the GeometryScript library the mesh tools
+                                  (``*_unreal_mesh*``) run on. Prebuilt with
+                                  the engine; a running editor loads it only
+                                  after a restart.
 
     See ``docs/unreal-setup.md`` for the full disambiguation, including which
     similarly-named plugins (PixelStreaming, Concert, Remote Control Presets,
@@ -1189,12 +1203,23 @@ def setup(
         console.print(f"[red]config patch failed: {exc}[/red]")
         raise typer.Exit(1)
 
+    # An editor setup launches itself loads the plugins it just enabled; only one
+    # already running needs the restart.
+    uproject_warnings = [
+        warning
+        for warning in patch.uproject.warnings
+        if not (launch and warning == GEOMETRY_SCRIPTING_RESTART_WARNING)
+    ]
     if not is_json_mode():
         console.print(patch.uproject.summary())
         console.print(patch.ini.summary())
         if patch.engine_ini is not None and patch.engine_ini.changed:
             console.print(patch.engine_ini.summary())
-        for warning in patch.ini.warnings + (patch.engine_ini.warnings if patch.engine_ini else []):
+        for warning in (
+            uproject_warnings
+            + patch.ini.warnings
+            + (patch.engine_ini.warnings if patch.engine_ini else [])
+        ):
             console.print(f"[yellow]warning:[/yellow] {warning}")
 
     # Launch if requested.
@@ -1243,6 +1268,7 @@ def setup(
                 "changed": patch.uproject.changed,
                 "added": patch.uproject.added,
                 "updated": patch.uproject.updated,
+                "warnings": uproject_warnings,
             },
             "ini": {
                 "changed": patch.ini.changed,

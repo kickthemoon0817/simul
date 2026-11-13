@@ -104,10 +104,24 @@ def _noted(exc: Exception, *notes: str) -> Exception:
     ("exc", "expected"),
     [
         pytest.param(
+            # A transport failure is named by its class in the shared
+            # taxonomy, not by whichever library raised it.
             ConnectionResetError(54, "Connection reset by peer"),
             {
                 "error": "[Errno 54] Connection reset by peer",
-                "error_type": "ConnectionResetError",
+                "error_type": "ConnectionError",
+                "details": {"exception_type": "ConnectionResetError"},
+            },
+            id="transport-class",
+        ),
+        pytest.param(
+            # Python's name is no contract either: a KeyError is a lookup that
+            # found nothing, kept as the exception_type.
+            KeyError("stage"),
+            {
+                "error": "'stage'",
+                "error_type": "NotFoundError",
+                "details": {"exception_type": "KeyError"},
             },
             id="class-name",
         ),
@@ -124,9 +138,21 @@ def _noted(exc: Exception, *notes: str) -> Exception:
             BridgeRemoteError(
                 "ValueError: Attached window is not in Object Mode", "ValueError", {}
             ),
+            # The class Blender raised is the exception_type; a ValueError is
+            # a ValidationError in the shared taxonomy, on every backend.
             {
                 "error": "ValueError: Attached window is not in Object Mode",
-                "error_type": "ValueError",
+                "error_type": "ValidationError",
+                "details": {
+                    "exception_type": "ValueError",
+                    "errors": [
+                        {
+                            "field": None,
+                            "message": "ValueError: Attached window is not in Object Mode",
+                            "type": "value_error",
+                        }
+                    ],
+                },
             },
             id="class-raised-inside-blender",
         ),
@@ -134,13 +160,17 @@ def _noted(exc: Exception, *notes: str) -> Exception:
             _noted(RuntimeError("poll() failed"), "Failed to add rigid body to 'Cube'"),
             {
                 "error": "Failed to add rigid body to 'Cube': poll() failed",
-                "error_type": "RuntimeError",
+                "error_type": "EngineError",
+                "details": {"exception_type": "RuntimeError"},
             },
             id="note-as-context",
         ),
         pytest.param(
             TimeoutError(),
-            {"error": "TimeoutError", "error_type": "TimeoutError"},
+            {
+                "error": "TimeoutError",
+                "error_type": "TimeoutError",
+            },
             id="no-message",
         ),
     ],
@@ -169,6 +199,7 @@ def test_isaac_and_backend_tools_report_an_exception_identically(
     )
 
     assert isaac == backend == {"success": False, "details": None, **expected}
+    assert isaac["error_type"] not in ("ConnectionResetError", "ClientConnectorError", "Exception")
     assert (
         _records(instance, "isaac_tool")
         == _records(instance, "backend_tool")
@@ -218,11 +249,17 @@ def test_isaac_payloads_are_normalised_like_backend_payloads(
     )
     succeeded = _payload(asyncio.run(instance._exec_isaac("isaac_tool", clean())))
 
-    assert failed == {"success": False, "reason": "nothing selected"}
+    # A failure always carries an error_type and a message, here the tool's reason.
+    assert failed == {
+        "success": False,
+        "reason": "nothing selected",
+        "error_type": "EngineError",
+        "error": "nothing selected",
+    }
     assert succeeded == {"prims": [], "success": True}
     # An explicit success=false used to be recorded as a success when it had no error key.
     assert _records(instance, "isaac_tool") == [
-        {"success": False, "error": None},
+        {"success": False, "error": "nothing selected"},
         {"success": True, "error": None},
     ]
 
@@ -247,7 +284,7 @@ def test_a_payload_that_is_not_an_object_is_reported_not_raised(
     assert isaac == {
         "success": False,
         "error": "isaac_tool returned list, not a JSON object",
-        "error_type": "TypeError",
+        "error_type": "EngineError",
         "details": None,
     }
     assert backend["error"] == "backend_tool returned NoneType, not a JSON object"
@@ -293,7 +330,19 @@ def test_request_model_validates_inside_the_envelope(
     valid = run(name="Cube")
 
     assert invalid["error_type"] == "ValidationError"
-    assert invalid["details"] == {"input": {"name": ""}}
+    assert invalid["error"] == "name: String should have at least 1 character"
+    assert invalid["details"] == {
+        "errors": [
+            {
+                "field": "name",
+                "message": "String should have at least 1 character",
+                "type": "string_too_short",
+                "constraint": {"min_length": 1},
+                "input": "",
+            }
+        ],
+        "input": {"name": ""},
+    }
     assert valid == {"success": True, "error": None, "value": "Cube"}
     assert adapter.sessions_opened == 1, "invalid input never opens a session"
     assert received == [(adapter.session, _Request(name="Cube"))]
@@ -430,34 +479,59 @@ def test_admitted_isaac_calls_hold_the_instance_lock_and_heartbeat(
     assert beats == ["isaac_ok", "isaac_broken"]
 
 
-def test_a_cancelled_isaac_call_releases_the_instance_lock(
+def test_a_cancelled_isaac_call_holds_the_instance_until_the_engine_is_done(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Cancellation unwinds through the admission hook: the lock is freed, no heartbeat."""
+    """Cancelling the request does not stop Isaac Sim running the script.
+
+    The lock used to be released at once, so the next call was let in while
+    the engine was still serving the first. Now the cancelled call keeps the
+    instance until the engine call ends, is recorded as cancelled, and only
+    then passes the cancellation on.
+    """
     instance = _server(monkeypatch, tmp_path)
     lock = instance._get_instance_lock(instance._get_effective_instance_name())
     beats: List[str] = []
     monkeypatch.setattr(instance, "_heartbeat_active_binding", beats.append)
+    events: List[str] = []
 
-    async def scenario() -> bool:
+    async def scenario() -> None:
         started = asyncio.Event()
 
         async def long_step() -> Dict[str, Any]:
             started.set()
-            await asyncio.sleep(60)
+            await asyncio.sleep(0.3)
+            events.append("engine done")
+            return {"success": True}
+
+        async def next_call() -> Dict[str, Any]:
+            events.append("next call ran")
             return {"success": True}
 
         task = asyncio.ensure_future(instance._exec_isaac("isaac_step", long_step()))
         await started.wait()
-        held = lock.locked()
         task.cancel()
+        follower = asyncio.ensure_future(instance._exec_isaac("isaac_next", next_call()))
+        await asyncio.sleep(0.05)
+        assert lock.locked(), "the instance stays held while the engine runs"
         with pytest.raises(asyncio.CancelledError):
             await task
-        return held
+        await follower
 
-    assert asyncio.run(scenario()) is True, "the call ran under the lock"
+    asyncio.run(scenario())
+
+    assert events == ["engine done", "next call ran"]
     assert not lock.locked()
-    assert beats == []
+    assert beats == ["isaac_next"]
+    # The engine finished the step: the record keeps its outcome, and says the
+    # client cancelled a call that ran (it used to read as a failure).
+    (row,) = instance.usage_tracker.get_recent(tool_name="isaac_step")
+    assert (row["success"], row.get("error"), row["cancelled"], row["executed"]) == (
+        True,
+        None,
+        True,
+        True,
+    )
 
 
 def test_a_call_cancelled_while_queued_for_the_lock_closes_its_coroutine(
@@ -499,7 +573,10 @@ def test_a_call_cancelled_while_queued_for_the_lock_closes_its_coroutine(
     assert ran == []
     assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
     assert not lock.locked()
-    assert _records(instance, "isaac_tool") == []
+    # It never ran, but the cancellation is on record (it used to leave none).
+    assert _records(instance, "isaac_tool") == [
+        {"success": False, "error": "cancelled_before_start"}
+    ]
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         del coro
@@ -610,8 +687,8 @@ def test_lock_bypassing_isaac_tools_are_enveloped_too(
     assert interrupt == {
         "success": False,
         "error": "bridge reply carried no status",
-        "error_type": "RuntimeError",
-        "details": None,
+        "error_type": "EngineError",
+        "details": {"exception_type": "RuntimeError"},
     }
     assert _records(instance, "ping_isaac") == [{"success": True, "error": None}]
     assert _records(instance, "interrupt_isaac_script") == [

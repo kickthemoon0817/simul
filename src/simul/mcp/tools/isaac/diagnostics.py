@@ -3,6 +3,7 @@
 import textwrap
 from typing import Any, Dict, Optional
 
+from ... import error_types
 from ...schemas.common import ErrorResponse
 from ._shared import (
     PROTECTED_EXTENSIONS,
@@ -239,7 +240,7 @@ class DiagnosticsMixin:
         name="interrupt_isaac_script",
         description=(
             "Stop the script the Isaac Sim bridge is currently running, so a runaway "
-            "execute_isaac_script does not hold the instance for every agent. Reaches a "
+            "script does not hold the instance for every agent. Reaches a "
             "coroutine script or one suspended at an await; a synchronous script that never "
             "yields also blocks the bridge's event loop, so that one is stopped by the "
             "per-request timeout sent with every script instead. Requires the bridge "
@@ -278,7 +279,7 @@ class DiagnosticsMixin:
                     "only makes python_server reply early (the 5.x socket has "
                     "none): an overrunning script keeps running inside Kit."
                 ),
-                error_type="BridgeUnavailable",
+                error_type=error_types.BRIDGE_UNAVAILABLE,
             ).model_dump()
         try:
             response = await client.interrupt_bridge_script()
@@ -290,7 +291,7 @@ class DiagnosticsMixin:
                     "also blocks the bridge's event loop, so it cannot take this "
                     "request; its per-request timeout is what stops it."
                 ),
-                error_type=type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
         return self._bridge_response_envelope(response)
 

@@ -13,6 +13,7 @@ import importlib
 import json
 import logging
 import math
+import os
 import re
 import socket
 import tempfile
@@ -24,7 +25,12 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
-from ..utils.paths import PathPolicy
+from ..utils.asset_references import (
+    UncheckableReferences,
+    fbx_relative_file_names,
+    interchange_outside_references,
+)
+from ..utils.paths import PathPolicy, SandboxDenied
 from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
@@ -33,6 +39,7 @@ from ._unreal_errors import (
     CONNECTION_ERROR,
     NOT_FOUND_ERROR,
     TIMEOUT_ERROR,
+    VALIDATION_ERROR,
     UnrealConnectionError,
     UnrealError,
     UnrealTimeoutError,
@@ -41,16 +48,60 @@ from ._unreal_errors import (
     remote_control_message,
     script_not_found,
 )
+from ._unreal_mesh_scripts import (
+    BOOLEAN_ALIASES,
+    BOOLEAN_OPERATIONS,
+    COMPUTE_UV,
+    CONVERT,
+    CONVEX_DECOMPOSITION,
+    CONVEX_HULL,
+    EDGE_SELECTION_SYNTAX,
+    EDIT_TOPOLOGY,
+    FACE_SELECTION_SYNTAX,
+    GENERATE_PRIMITIVE,
+    HULL_OUTPUTS,
+    MAX_REMESH_TARGET_TRIANGLES,
+    MAX_RESULT_TRIANGLES,
+    MAX_SEGMENTS,
+    MESH_BOOLEAN,
+    MESH_COMMIT_MARGIN_S,
+    MESH_REFUSALS,
+    MESH_SCRIPT_TIMEOUT_S,
+    MIN_SEGMENTS,
+    PLANE_CUT,
+    PRIMITIVE_TYPES,
+    REMESH,
+    REMESH_OVERSHOOT,
+    SIMPLIFY,
+    STATIC_MESH_COLLISION,
+    SUBDIVIDE,
+    SUBDIVISION_SCHEMES,
+    TARGET_FORMATS,
+    TOPOLOGY_OPERATIONS,
+    UV_METHODS,
+    VALIDATE,
+    VALIDATION_CHECKS,
+    attachment_refusal,
+    is_loopback,
+    mesh_timeout_error,
+)
+from ._unreal_mesh_scripts import edge_selection as parse_edge_selection
+from ._unreal_mesh_scripts import face_selection as parse_face_selection
+from ._unreal_mesh_scripts import game_asset_path, invalid_choice, mesh_script, primitive_dimensions, refusal
 from ._unreal_procedural import new_generation, plan_scene
+from ._unreal_python import isolate, python_command
 from ._unreal_scripts import (
     ACTOR_COMPONENTS,
     ACTOR_EXISTS,
     ACTOR_HELPERS,
     ACTOR_INFO,
     ADD_COMPONENT,
+    ASSET_IMPORT,
+    ASSET_SEARCH,
     ASSIGN_MATERIAL,
     CREATE_MATERIAL_INSTANCE,
     DELETE_ACTOR,
+    EDITOR_RELATIVE_PATHS,
     EDITOR_WORLD,
     ENABLE_PHYSICS,
     ENGINE_METADATA,
@@ -66,6 +117,7 @@ from ._unreal_scripts import (
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
+    SAVE_ASSETS,
     SCENE_GRAPH,
     SCENE_SUMMARY,
     SET_ACTOR_PARENT,
@@ -131,6 +183,58 @@ PROJECT_CONTENT_ROOT = "/Game"
 #: Where ``create_material_instance`` files an instance of a parent outside
 #: ``/Game`` when no ``save_path`` is given.
 DEFAULT_MATERIAL_FOLDER = "/Game/Materials"
+
+#: File types ``import_asset`` imports through Interchange (UE 5.7's
+#: translators for them; USD has its own importer, ``import_usd``).
+ASSET_IMPORT_EXTENSIONS: Tuple[str, ...] = (".fbx", ".gltf", ".glb", ".obj")
+
+#: The boolean USD import options, by UsdStageImportOptions property name (UE 5.7).
+USD_IMPORT_BOOLEAN_OPTIONS: Tuple[str, ...] = (
+    "import_actors",
+    "import_geometry",
+    "import_materials",
+    "import_skeletal_animations",
+    "import_level_sequences",
+    "import_groom_assets",
+    "import_sparse_volume_textures",
+    "import_sounds",
+    "import_only_used_materials",
+    "use_prim_kinds_for_collapsing",
+    "merge_identical_material_slots",
+    "share_assets_for_identical_prims",
+    "prim_path_folder_structure",
+    "interpret_lods",
+)
+
+#: USD's model kinds and their EUsdDefaultKind bits (UE 5.7), for ``kinds_to_collapse``.
+USD_KINDS: Dict[str, int] = {"model": 1, "component": 2, "group": 4, "assembly": 8, "subcomponent": 16}
+
+#: EUsdCollisionType names (UE 5.7), for ``fallback_collision_type``: the
+#: collision of a mesh whose prim has no physics schema. ``none`` uses the
+#: render triangles as collision (no simple shapes).
+USD_COLLISION_TYPES: Tuple[str, ...] = (
+    "none",
+    "convex_decomposition",
+    "convex_hull",
+    "sphere",
+    "cube",
+    "mesh_simplification",
+    "capsule",
+    "custom_mesh",
+)
+
+#: ``up_axis`` values and their EUsdUpAxis names.
+_USD_UP_AXES: Dict[str, str] = {"y": "Y_AXIS", "z": "Z_AXIS"}
+
+#: Every option ``import_usd`` takes.
+USD_IMPORT_OPTIONS: Tuple[str, ...] = USD_IMPORT_BOOLEAN_OPTIONS + (
+    "kinds_to_collapse",
+    "fallback_collision_type",
+    "nanite_triangle_threshold",
+    "prims_to_import",
+    "meters_per_unit",
+    "up_axis",
+)
 
 # Characters Unreal does not allow in a folder name (INVALID_LONGPACKAGE_CHARACTERS,
 # UE 5.7); an object name's are _INVALID_OBJECT_NAME_CHARACTERS, below.
@@ -431,6 +535,48 @@ PASSPHRASE_REFUSED_ERROR = (
     "to the editor's passphrase"
 )
 
+#: What the attachment guard raises when the editor, map or viewport a session
+#: is attached to changed (``_unreal_attach_scripts`` ``verify`` and the
+#: active-viewport check ``_guard_attachment`` adds). It ran in the editor
+#: ahead of the tool's own script and came back as that script's traceback,
+#: typed ScriptError (or RuntimeError for a Remote Control call).
+_ATTACHMENT_REFUSAL = re.compile(
+    r"Unreal attachment changed \([a-z_]+\); run simul unreal attach again"
+    r"|Attached viewport is unavailable; run simul unreal attach again"
+    r"|This operation uses the active viewport; activate the attached viewport first"
+)
+
+#: The ``error_type`` of an attachment refusal: the editor is not in the state
+#: the attachment expects.
+ATTACHMENT_REFUSED = "InvalidState"
+
+
+def _attachment_refusal(failure: str) -> Optional[Dict[str, Any]]:
+    """The InvalidState envelope of an attachment guard refusal in ``failure``, or None."""
+    match = _ATTACHMENT_REFUSAL.search(failure)
+    if match is None:
+        return None
+    return {
+        "success": False,
+        "error_type": ATTACHMENT_REFUSED,
+        "error": match.group(0),
+        "details": {
+            "reason": "attachment_changed",
+            "hint": "Nothing was run. Run simul unreal attach again (or activate the attached viewport), then retry.",
+        },
+    }
+
+
+class UnrealAttachmentRefused(RuntimeError):
+    """The attached editor, map or viewport changed; named InvalidState in the envelope."""
+
+    error_type = ATTACHMENT_REFUSED
+
+    def __init__(self, envelope: Dict[str, Any]) -> None:
+        super().__init__(envelope["error"])
+        self.details = envelope["details"]
+
+
 #: ``ping`` ``error_type`` for a request that never left this machine. Its
 #: endpoint was not tried, so the failure says nothing about an editor there.
 PROBE_NOT_SENT = "ProbeNotSent"
@@ -581,6 +727,13 @@ def _batch_requests(operations: Any) -> Tuple[List[Dict[str, Any]], Optional[str
         fields["Verb"] = verb.upper()
         if "Body" in fields and not isinstance(fields["Body"], dict):
             return [], f"operation {index}'s Body must be a JSON object"
+        try:
+            runs_python = python_command(url.split("?", 1)[0], fields.get("Body")) is not None
+        except ValueError as exc:
+            return [], f"operation {index}: {exc}"
+        if runs_python:
+            # In a namespace of its own, as every other Python call.
+            fields["Body"] = isolate(fields["Body"])
         shaped.append(fields)
     given = [fields["RequestId"] for fields in shaped if fields.get("RequestId") is not None]
     if len(set(given)) != len(given):
@@ -600,12 +753,11 @@ def _batch_requests(operations: Any) -> Tuple[List[Dict[str, Any]], Optional[str
 
 
 def _is_python_call(path: str, body: Optional[Dict[str, Any]]) -> bool:
-    """Whether a request runs Python in the editor (``ExecutePythonCommandEx``)."""
-    return (
-        path == "/remote/object/call"
-        and body is not None
-        and body.get("functionName") == "ExecutePythonCommandEx"
-    )
+    """Whether a request runs Python source in the editor (``_unreal_python.python_command``)."""
+    try:
+        return python_command(path, body) is not None
+    except ValueError:
+        return False
 
 
 def _not_sent(exc: BaseException) -> Optional[str]:
@@ -867,6 +1019,91 @@ def _outside_project_refusal(path: str, action: str, hint: str) -> Dict[str, Any
     }
 
 
+#: An Unreal object path as Unreal's USD exporter writes one into an asset-valued
+#: attribute: ``/Engine``, ``/Game`` or ``/Script``, folders, then
+#: ``<Name>.<Name>`` (a package and its asset of the same name).
+_UNREAL_OBJECT_PATH = re.compile(r"^/(?:Engine|Game|Script)(?:/[A-Za-z0-9_ -]+)*/([A-Za-z0-9_-]+)\.\1$")
+
+#: Suffixes that make ``<Name>.<Name>`` a file name rather than an object path.
+_FILE_SUFFIXES = frozenset(
+    {"usd", "usda", "usdc", "usdz", "png", "jpg", "jpeg", "exr", "tga", "tif", "tiff", "bmp", "hdr", "dds",
+     "tx", "psd", "mdl", "mtlx", "abc", "vdb", "obj", "fbx", "gltf", "glb", "bin", "json", "txt", "uasset",
+     "umap", "wav", "mp4", "mov"}
+)
+
+
+def _usd_import_options(options: Any) -> Tuple[Dict[str, Any], List[str]]:
+    """The USD importer settings for ``options``, and what is wrong with them.
+
+    Returns:
+        ``properties`` (UsdStageImportOptions property values), plus
+        ``fallback_collision_type``, ``prims_to_import`` and ``stage``
+        ({meters_per_unit, up_axis as an EUsdUpAxis name}) when given; and
+        one message per option that Unreal 5.7 does not take as given. Lights
+        and cameras have no options in 5.7 (``import_lights`` and
+        ``import_cameras`` failed with "Failed to find property"): they are
+        imported as actors with ``import_actors``.
+    """
+    values: Dict[str, Any] = {"properties": {}}
+    problems: List[str] = []
+    if not isinstance(options, dict):
+        return values, [f"import_options must be an object, got {options!r}"]
+    for key, value in options.items():
+        if key in ("import_lights", "import_cameras"):
+            problems.append(
+                f"{key} is not a USD import option in Unreal 5.7: lights and cameras are imported as "
+                "actors, with import_actors"
+            )
+        elif key in USD_IMPORT_BOOLEAN_OPTIONS:
+            if type(value) is bool:
+                values["properties"][key] = value
+            else:
+                problems.append(f"{key} must be true or false, got {value!r}")
+        elif key == "kinds_to_collapse":
+            if isinstance(value, list) and all(isinstance(kind, str) and kind.lower() in USD_KINDS for kind in value):
+                values["properties"][key] = sum({USD_KINDS[kind.lower()] for kind in value})
+            else:
+                problems.append(
+                    f"kinds_to_collapse must be a list of USD kinds from {sorted(USD_KINDS)}, got {value!r}"
+                )
+        elif key == "fallback_collision_type":
+            if isinstance(value, str) and value.lower() in USD_COLLISION_TYPES:
+                values[key] = value.lower()
+            else:
+                problems.append(f"fallback_collision_type must be one of {list(USD_COLLISION_TYPES)}, got {value!r}")
+        elif key == "nanite_triangle_threshold":
+            if type(value) is int and 0 <= value <= 2**31 - 1:
+                values["properties"][key] = value
+            else:
+                problems.append(f"nanite_triangle_threshold must be an integer from 0 to 2147483647, got {value!r}")
+        elif key == "prims_to_import":
+            if (
+                isinstance(value, list)
+                and value
+                and all(isinstance(prim, str) and prim.startswith("/") for prim in value)
+            ):
+                values[key] = list(value)
+            else:
+                problems.append(
+                    f"prims_to_import must be a non-empty list of prim paths such as /Root/Chair, got {value!r}"
+                )
+        elif key not in ("meters_per_unit", "up_axis"):
+            problems.append(f"Unknown USD import option {key!r}; the options are {list(USD_IMPORT_OPTIONS)}")
+    if "meters_per_unit" in options or "up_axis" in options:
+        meters, axis = options.get("meters_per_unit"), options.get("up_axis")
+        if meters is None or axis is None:
+            problems.append(
+                "meters_per_unit and up_axis override the stage's own units and up axis together: give both"
+            )
+        elif isinstance(meters, bool) or not isinstance(meters, (int, float)) or not 0 < meters < math.inf:
+            problems.append(f"meters_per_unit must be a number above 0 (0.01 for centimeters), got {meters!r}")
+        elif not isinstance(axis, str) or axis.lower() not in _USD_UP_AXES:
+            problems.append(f"up_axis must be 'y' or 'z', got {axis!r}")
+        else:
+            values["stage"] = {"meters_per_unit": float(meters), "up_axis": _USD_UP_AXES[axis.lower()]}
+    return values, problems
+
+
 def _sanitized_object_name(name: str) -> str:
     """``name`` as Unreal names an asset after it (ObjectTools::SanitizeObjectName)."""
     return "".join("_" if char in _INVALID_OBJECT_NAME_CHARACTERS else char for char in name)
@@ -1018,7 +1255,17 @@ class UnrealRuntimeSession(LoggerMixin):
         Returns:
             Parsed JSON response as a dictionary.
         """
-        if self.settings.unreal.mode == "attached" and not _skip_attachment:
+        attached = self.settings.unreal.mode == "attached" and not _skip_attachment
+        try:
+            runs_python = python_command(path, body) is not None
+        except ValueError as exc:
+            raise UnrealError(str(exc), VALIDATION_ERROR) from exc
+        if runs_python:
+            # Every Python call, simul's and the caller's, runs in a namespace
+            # of its own that is dropped when it ends (_unreal_python), with
+            # the attachment check first in attached mode.
+            body = isolate(body or {}, self._attachment_guard() if attached else "")
+        elif attached:
             body = await self._guard_attachment(method, path, body)
         # Remote Control uses PUT even for arbitrary Python and actor mutations.
         # Once sent, a timeout cannot establish that the operation did not run.
@@ -1247,35 +1494,29 @@ class UnrealRuntimeSession(LoggerMixin):
             self._base_url = f"http://{self.host}:{self.port}"
         return self._attachment["target"]
 
+    def _attachment_guard(self) -> str:
+        """Source that raises unless the editor is still the attached one.
+
+        A Python call runs it first, in the same namespace and the same
+        execution as its code (``_unreal_python.isolate``).
+        """
+        from ._unreal_attach_scripts import EDITOR_STATE
+
+        target = self._load_attachment()
+        return EDITOR_STATE + f"_simul_editor.verify({target!r})\n"
+
     async def _guard_attachment(
         self,
         method: str,
         path: str,
         body: Optional[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        """Guard scripts in their execution call; preflight legacy HTTP operations."""
-        from ._unreal_attach_scripts import EDITOR_STATE
+        """Preflight a request that runs no Python against the saved attachment.
 
+        Python calls carry their check in the call itself (``_http_request``).
+        """
         target = self._load_attachment()
-        guard = EDITOR_STATE + f"_simul_editor.verify({target!r})\n"
-        is_python = (
-            path == "/remote/object/call"
-            and body is not None
-            and body.get("objectPath")
-            == "/Script/PythonScriptPlugin.Default__PythonScriptLibrary"
-            and body.get("functionName") == "ExecutePythonCommandEx"
-        )
-        if is_python:
-            parameters = dict(body.get("parameters", {}))
-            code = parameters.get("PythonCommand", "")
-            mode = parameters.get("ExecutionMode", "ExecuteFile")
-            if mode == "EvaluateStatement":
-                parameters["PythonCommand"] = f"(exec({guard!r}), eval({code!r}))[1]"
-            elif mode in {"ExecuteFile", "ExecuteStatement"}:
-                parameters["PythonCommand"] = f"exec({(guard + code)!r})"
-            else:
-                raise ValueError("Unsupported Unreal Python execution mode")
-            return {**body, "parameters": parameters}
+        guard = self._attachment_guard()
         if body and (
             body.get("functionName")
             in {"GetLevelViewportCameraInfo", "SetLevelViewportCameraInfo"}
@@ -1308,6 +1549,9 @@ class UnrealRuntimeSession(LoggerMixin):
         )
         result = self._parse_python_json(checked)
         if result.get("error") or result.get("verified") is not True:
+            refusal = _attachment_refusal(str(result.get("error", "")))
+            if refusal is not None:
+                raise UnrealAttachmentRefused(refusal)
             raise RuntimeError(
                 result.get("error", "Unreal attachment verification failed")
             )
@@ -1637,6 +1881,9 @@ class UnrealRuntimeSession(LoggerMixin):
             self.logger.info("Unreal refused the request (%s): %s", NOT_FOUND_ERROR, not_found)
             return {"success": False, "error_type": NOT_FOUND_ERROR, "error": not_found}
         if result.get("error"):
+            refusal = self._attached_refusal(result)
+            if refusal is not None:
+                return refusal
             error_type = result.get("error_type")
             if error_type == PIE_ACTIVE or error_type in expected_errors:
                 self.logger.info("Unreal refused the request (%s): %s", error_type, result["error"])
@@ -1644,6 +1891,19 @@ class UnrealRuntimeSession(LoggerMixin):
                 self.logger.log(failure_log_level, "Unreal tool script failed: %s", result["error"])
             return {"success": False, "error_type": "ScriptError", **result}
         return result
+
+    def _attached_refusal(self, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The InvalidState envelope when a failed script is the attachment guard's refusal.
+
+        Only in attached mode, where ``_guard_attachment`` runs the guard
+        ahead of every script; it is logged as a refusal.
+        """
+        if self.settings.unreal.mode != "attached" or result.get("error_type"):
+            return None
+        refusal = _attachment_refusal(str(result.get("error", "")))
+        if refusal is not None:
+            self.logger.info("Unreal refused the request (%s): %s", ATTACHMENT_REFUSED, refusal["error"])
+        return refusal
 
     async def _pie_active(self) -> bool:
         """Whether Play In Editor runs; False when the editor cannot say.
@@ -1682,29 +1942,44 @@ class UnrealRuntimeSession(LoggerMixin):
         )
         return await self._execute_json_script(script)
 
-    async def _run_mesh_script(
-        self, body: str, *, pie_action: Optional[str] = None, **actors: str
-    ) -> Dict[str, Any]:
-        """Run a GeometryScript body against actors resolved by path.
+    async def _run_mesh_script(self, body: str, **args: Any) -> Dict[str, Any]:
+        """Run one mesh tool's editor script and return its payload or typed error.
 
-        Each keyword binds a script variable to ``actor_at(path)`` from
-        ``ACTOR_HELPERS`` -- a lookup among loaded objects instead of a scan
-        over every level actor, which never loads a map. ``body`` is the mesh
-        op's block, indented one level; it is dedented here. A path that names
-        no live actor of the editor world raises SimulNotFound inside the
-        editor and comes back as an error envelope. With ``pie_action`` (a body that
-        spawns actors), the body runs only while Play In Editor is stopped
-        and the call is otherwise refused as PIEActive (``_outside_pie``).
+        The script is ``_unreal_mesh_scripts.mesh_script(body, args)``: the
+        tool's data, the shared mesh helpers and ``body``. It runs under an
+        HTTP timeout of at least ``MESH_SCRIPT_TIMEOUT_S``, since a
+        GeometryScript call blocks the editor until it returns and cannot be
+        cancelled, and commits its result only within that timeout less
+        ``MESH_COMMIT_MARGIN_S``: by the clock of this host for an editor on
+        it, by its own run time otherwise. So a timeout reported here leaves
+        the level as it was once the editor finishes. The script reports its
+        own refusals with an ``error_type``; the attachment guard's refusal,
+        which is raised before the script runs, comes back as
+        ``InvalidState`` instead of a traceback.
+
+        Args:
+            body: The tool body, from ``_unreal_mesh_scripts``.
+            **args: The tool's data, embedded with repr.
+
+        Returns:
+            The payload, or an error envelope.
+
+        Raises:
+            UnrealTimeoutError: The editor did not answer within the timeout.
         """
-        lookups = "".join(f"{name} = actor_at({path!r})\n" for name, path in actors.items())
-        operation = (
-            "subsys = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)\n"
-            + lookups
-            + textwrap.dedent(body)
-        )
-        if pie_action is not None:
-            operation = _outside_pie(operation, pie_action)
-        return await self._execute_json_script(ACTOR_HELPERS + operation)
+        timeout = max(self.timeout, MESH_SCRIPT_TIMEOUT_S)
+        budget = timeout - MESH_COMMIT_MARGIN_S
+        deadline = time.time() + budget if is_loopback(self.host) else None
+        script = mesh_script(body, args, budget_s=budget, deadline=deadline)
+        try:
+            result = await self._execute_json_script(script, expected_errors=MESH_REFUSALS, timeout=timeout)
+        except UnrealTimeoutError as exc:
+            raise mesh_timeout_error(exc, timeout, budget, same_clock=deadline is not None) from exc
+        stopped = attachment_refusal(result)
+        if stopped is not None:
+            self.logger.info("Unreal refused the request (%s): %s", stopped["error_type"], stopped["error"])
+            return stopped
+        return result
 
     @staticmethod
     def _script_execution_denied() -> Dict[str, Any]:
@@ -1791,7 +2066,8 @@ class UnrealRuntimeSession(LoggerMixin):
         raw = await self._execute_python(code, mode=mode)
         failure = self._python_failure(raw)
         if failure is not None:
-            return self._script_error(failure)
+            refusal = self._attached_refusal({"error": failure})
+            return refusal if refusal is not None else self._script_error(failure)
         info = [
             str(entry.get("Output", ""))
             for entry in raw.get("LogOutput") or []
@@ -2103,59 +2379,77 @@ class UnrealRuntimeSession(LoggerMixin):
         class_names: Optional[List[str]] = None,
         package_paths: Optional[List[str]] = None,
         max_results: int = 100,
+        offset: int = 0,
+        recursive_paths: bool = True,
+        include_subclasses: bool = True,
     ) -> Dict[str, Any]:
         """
-        Search the Unreal Asset Registry.
+        Search the Unreal Asset Registry, without loading any asset.
+
+        Searches every mounted content root (/Game, /Engine and each plugin's)
+        unless ``package_paths`` narrows it. A class is given by its short
+        name (StaticMesh) or its path (/Script/Engine.StaticMesh). The query
+        matches part of the asset name, ignoring case; redirectors are left
+        out. Matches are sorted by object path, so ``offset`` pages through
+        them. Remote Control's asset search, used before, matched no short
+        class name (and fired an engine ensure), ignored subfolders, searched
+        only /Game without a filter, could not say whether more matched and
+        gave no package path (observed on UE 5.7.4).
 
         Args:
-            query: Search query string.
-            class_names: Filter by UClass names.
-            package_paths: Package path prefixes to search within.
+            query: Part of the asset name to match, ignoring case; empty
+                matches every asset.
+            class_names: Asset classes, by short name or class path.
+            package_paths: Content folders to search, such as /Game/Props;
+                empty searches every mounted content root.
             max_results: Maximum number of results, from 1 to
                 ``MAX_ASSET_SEARCH_RESULTS`` (1000).
+            offset: How many matches to skip, for the next page.
+            recursive_paths: Include the subfolders of package_paths.
+            include_subclasses: Include assets of the classes' subclasses.
 
         Returns:
-            Dictionary with ``assets`` list, ``count``, ``truncated``, or a
-            ``ValidationError`` envelope, sent to no editor, when
-            ``max_results`` is out of range: Remote Control sizes its result
+            Dictionary with ``assets`` (each with name, path, class_name,
+            class_path, package_name, package_path and metadata, the registry
+            tags Unreal records for that kind of asset, such as Triangles,
+            LODs, NaniteEnabled and CollisionPrims, as the strings Unreal
+            stores), ``count``, ``total`` (every match), ``offset``,
+            ``next_offset`` (None on the last page), ``truncated`` (more
+            matches follow) and ``class_paths`` (the classes searched), or a
+            ``ValidationError`` envelope for an unknown class, a malformed
+            package path or an out-of-range ``max_results`` or ``offset``,
+            the last two sent to no editor: Remote Control sized its result
             array to the limit, and -1 crashed the editor.
         """
-        if (
-            isinstance(max_results, bool)
-            or not isinstance(max_results, int)
-            or not 1 <= max_results <= MAX_ASSET_SEARCH_RESULTS
+        problem = None
+        if isinstance(max_results, bool) or not isinstance(max_results, int) or not (
+            1 <= max_results <= MAX_ASSET_SEARCH_RESULTS
         ):
-            return {
-                "success": False,
-                "error_type": "ValidationError",
-                "error": f"max_results must be an integer from 1 to {MAX_ASSET_SEARCH_RESULTS}, got {max_results!r}",
-            }
-        body: Dict[str, Any] = {
-            "Query": query,
-            "Limit": max_results,
+            problem = f"max_results must be an integer from 1 to {MAX_ASSET_SEARCH_RESULTS}, got {max_results!r}"
+        elif isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            problem = f"offset must be an integer of at least 0, got {offset!r}"
+        folders: List[str] = []
+        for path in package_paths or []:
+            folder = path.strip().rstrip("/")
+            if not folder:
+                continue  # "/" is every content root
+            problem = problem or _content_folder_problem(folder)
+            folders.append(folder)
+        classes = [name.strip() for name in class_names or [] if name.strip()]
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
+        args = {
+            "query": query or "",
+            "class_names": classes,
+            "package_paths": folders,
+            "recursive_paths": bool(recursive_paths),
+            "include_subclasses": bool(include_subclasses),
+            "offset": offset,
+            "limit": max_results,
         }
-        if class_names:
-            body["Filter"] = {"ClassNames": class_names}
-        if package_paths:
-            body.setdefault("Filter", {})["PackagePaths"] = package_paths
-
-        data = await self._http_put("/remote/search/assets", body)
-        raw_assets: list = data.get("Assets", [])
-
-        assets: list = []
-        for asset in raw_assets[:max_results]:
-            assets.append({
-                "name": asset.get("Name", ""),
-                "path": asset.get("Path", ""),
-                "class_name": asset.get("Class", ""),
-                "package_path": asset.get("PackagePath", ""),
-            })
-
-        return {
-            "assets": assets,
-            "count": len(assets),
-            "truncated": len(raw_assets) > max_results,
-        }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + ASSET_SEARCH, expected_errors=("ValidationError",)
+        )
 
     async def describe_object(self, object_path: str) -> Dict[str, Any]:
         """
@@ -3393,6 +3687,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_path: str,
         material_path: str,
         slot_index: int = 0,
+        slot_name: str = "",
+        component_name: str = "",
     ) -> Dict[str, Any]:
         """
         Assign a material to a mesh component's material slot.
@@ -3409,17 +3705,24 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Args:
             actor_path: Target actor path.
             material_path: Material asset path to assign.
-            slot_index: Material slot index (default 0).
+            slot_index: Material slot index (default 0); unused when
+                ``slot_name`` is given.
+            slot_name: Material slot name, as the Details panel shows it;
+                empty uses ``slot_index``.
+            component_name: Mesh component to assign to, by name (such as
+                StaticMeshComponent0) or path; empty picks the actor's mesh
+                root component, else its only mesh component.
 
         Returns:
-            Dictionary with actor_path, component_path, material_path (the
-            assigned material's object path), slot_index and
+            Dictionary with actor_path, component_path, component_name,
+            material_path (the assigned material's object path), slot_index,
+            slot_name (the slot's name; None when the mesh names none) and
             previous_material_path (what the slot rendered with before). An
             error envelope when the actor is not in the level being edited
             (``Actor not found``), the material path names no material
-            (``NotFoundError``), the slot is out of range
-            (``ValidationError``) or the slot reads back a different material
-            (``MaterialNotApplied``).
+            (``NotFoundError``), the component or slot is not found or is
+            ambiguous, naming the ones the actor has (``ValidationError``), or
+            the slot reads back a different material (``MaterialNotApplied``).
         """
         if isinstance(slot_index, bool) or not isinstance(slot_index, int):
             return {
@@ -3427,10 +3730,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "error_type": "ValidationError",
                 "error": f"slot_index must be an integer, got {slot_index!r}",
             }
-        args = {"actor_path": actor_path, "material_path": material_path, "slot_index": slot_index}
+        args = {
+            "actor_path": actor_path,
+            "material_path": material_path,
+            "slot_index": slot_index,
+            "slot_name": (slot_name or "").strip(),
+            "component_name": (component_name or "").strip(),
+        }
         return await self._execute_json_script(
             f"args = {args!r}\n" + ASSIGN_MATERIAL,
-            expected_errors=("NotFoundError", "ValidationError"),
+            expected_errors=("NotFoundError", "ValidationError", "InvalidAssetType"),
         )
 
     async def set_light_params(
@@ -4017,6 +4326,186 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 },
             }
 
+    @staticmethod
+    def _names_unreal_content(entry: Dict[str, Any]) -> bool:
+        """Whether a path the composition check refused is an Unreal object path, which reads no file.
+
+        Unreal's USD exporter writes the source material of each mesh as an
+        asset-valued attribute holding a content path,
+        ``info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@``,
+        and its importer loads that object from the editor's content; it opens
+        no file by the name. Only such a value passes: an asset-valued
+        attribute (not a sublayer, reference, payload or clip) holding
+        ``/Engine``, ``/Game`` or ``/Script``, folders and
+        ``<Name>.<Name>``, where the suffix is no file extension
+        (``/Engine/x.usda`` stays a file), naming no file on disk.
+        """
+        if entry.get("kind") != "asset":
+            return False
+        match = _UNREAL_OBJECT_PATH.match(str(entry.get("asset_path", "")))
+        if match is None or match.group(1).lower() in _FILE_SUFFIXES:
+            return False
+        return not os.path.lexists(str(entry.get("location", "")))
+
+    def _check_usd_composition(self, usd_path: str) -> None:
+        """Refuse a USD file whose composition draws on files outside the sandbox.
+
+        Unreal's USD importer composes the stage with its own copy of pxr and
+        the default asset resolver, so a layer inside the sandbox could
+        sublayer, reference or pay load ``../outside/ref.usda``, or name an
+        outside texture, and the editor read it. ``CompositionSandbox``
+        walks the layers from the root the way composition finds them (every
+        variant, value clips and asset-valued attributes too) before the file
+        reaches the editor; a refused file is never opened. A file pxr cannot
+        open here is refused too, since nothing then vouches for what it
+        names; a file the simul host does not have is left to the editor to
+        report.
+
+        Raises:
+            SandboxDenied: With ``details.outside_sandbox`` (each path, its
+                kind and the layer naming it), ``references_outside`` (the
+                locations) and ``referenced_by``.
+        """
+        if not self._path_policy.enabled or not Path(usd_path).exists():
+            return
+        from ..usd import sandbox as usd_sandbox
+
+        try:
+            layer = usd_sandbox.Sdf.Layer.FindOrOpen(usd_path)
+        except Exception as exc:  # pxr's parse error (Tf.ErrorException)
+            layer, reason = None, str(exc).strip().splitlines()[-1:] or [type(exc).__name__]
+        else:
+            reason = ["pxr opened no layer"]
+        if layer is None:
+            details = self._path_policy.denial_details(usd_path)
+            details.update(
+                referenced_by=usd_path,
+                hint=(
+                    f"Could not open {Path(usd_path).name} to check the files its composition draws on "
+                    f"against the sandbox ({reason[0]}), so it is not imported"
+                ),
+            )
+            raise SandboxDenied(
+                usd_path,
+                details,
+                error_message=f"USD file {usd_path} could not be checked against the sandbox: {reason[0]}",
+            )
+        try:
+            usd_sandbox.CompositionSandbox(self._path_policy).check_layers(layer)
+        except SandboxDenied as exc:
+            entries = list(exc.details.get("outside_sandbox", []))
+            files = [entry for entry in entries if not self._names_unreal_content(entry)]
+            listed_all = exc.details.get("outside_count", len(entries)) == len(entries)
+            if not files and listed_all:
+                return  # only Unreal content paths, as in Unreal's own USD exports
+            if listed_all and len(files) < len(entries):
+                exc.details["outside_sandbox"] = files
+                exc.details["outside_count"] = len(files)
+                shown = ", ".join(entry["location"] for entry in files[:3])
+                more = f" and {len(files) - 3} more" if len(files) > 3 else ""
+                exc.error_message = (
+                    f"USD file {usd_path} draws on {len(files)} file(s) outside the sandbox: {shown}{more}"
+                )
+                exc.args = (exc.error_message,)
+            exc.details["referenced_by"] = usd_path
+            exc.details["references_outside"] = list(
+                dict.fromkeys(entry["location"] for entry in exc.details.get("outside_sandbox", []))
+            )[:20]
+            raise
+
+    async def _interchange_sources(self, file_path: str) -> List[str]:
+        """The files an Interchange import of ``file_path`` reads, every one held to the sandbox.
+
+        Interchange reads what the model names besides itself: a glTF's
+        buffers and images, an OBJ's MTL libraries and their textures, an
+        FBX's textures, and the UDIM tiles beside a texture named like one.
+        Each is found where Unreal 5.7's translators look for it
+        (``simul.utils.asset_references``); an FBX's relative texture names
+        are resolved in the editor, where its FBX SDK opens them. A file
+        missing on the simul host is left to the editor to report.
+
+        Returns:
+            ``file_path`` and the files inside the sandbox it reads, resolved:
+            the asset import script tells an earlier import's assets apart by
+            them.
+
+        Raises:
+            SandboxDenied: A referenced file outside the sandbox exists, with
+                ``details.references_outside`` and ``referenced_by``; or the
+                references cannot be listed (a binary FBX this cannot parse).
+        """
+        path = Path(file_path)
+        policy = self._path_policy
+        if not path.is_file():
+            return [file_path]
+        try:
+            relative = fbx_relative_file_names(path) if path.suffix.lower() == ".fbx" else []
+            opened: Dict[str, List[str]] = {}
+            if relative:
+                answer = await self._execute_json_script(
+                    f"args = {{'names': {relative!r}}}\n" + EDITOR_RELATIVE_PATHS
+                )
+                answered = answer.get("paths") if answer.get("success", True) else None
+                # Only absolute paths say where the editor opens a name; without one it stays unchecked.
+                opened = {
+                    name: [found for found in paths if isinstance(found, str) and os.path.isabs(found)]
+                    for name, paths in (answered or {}).items()
+                    if isinstance(paths, list)
+                }
+            outside, inside = interchange_outside_references(path, policy, opened.get)
+        except UncheckableReferences as exc:
+            if not policy.enabled:
+                return [file_path]
+            details = policy.denial_details(file_path)
+            details.update(
+                referenced_by=file_path,
+                hint=(
+                    f"Could not check the files {path.name} refers to against the sandbox ({exc}), "
+                    "so it is not imported"
+                ),
+            )
+            raise SandboxDenied(
+                file_path,
+                details,
+                error_message=f"{path.name} could not be checked against the sandbox: {exc}",
+            ) from exc
+        if outside:
+            details = policy.denial_details(outside[0])
+            details.update(
+                referenced_by=file_path,
+                references_outside=outside[:20],
+                hint=(
+                    f"{path.name} refers to files outside the sandbox, which Unreal's importer would read: "
+                    f"{', '.join(outside[:5])}. Copy them under an allowed root and point {path.name} at "
+                    "the copies, or widen security.allowed_paths"
+                ),
+            )
+            raise SandboxDenied(
+                outside[0],
+                details,
+                error_message=(
+                    f"{path.name} refers to {len(outside)} file(s) outside the sandbox, so it was not "
+                    f"imported: {', '.join(outside[:3])}"
+                ),
+            )
+        return [file_path] + [found for found in inside if found != file_path]
+
+    def _import_destination(self, destination_path: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """The content folder an import writes to, or the envelope refusing it.
+
+        Imports write only under the project's /Game folder, /Game itself
+        included.
+        """
+        destination = (destination_path or "").strip().rstrip("/")
+        problem = _content_folder_problem(destination)
+        if problem is not None:
+            return destination, {"success": False, "error_type": "ValidationError", "error": problem}
+        if not _in_project_content(destination):
+            return destination, _outside_project_refusal(
+                destination, "import into", "Pass a destination_path under /Game, such as /Game/Imports"
+            )
+        return destination, None
+
     async def import_usd(
         self,
         usd_path: str,
@@ -4032,53 +4521,60 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         ``replace_existing`` the import is refused when that folder already
         holds assets, and existing actors are kept (new ones are added beside
         them): Unreal's USD importer otherwise replaces both, an earlier
-        import's actors and customized assets included. The options are set
-        without saving them to the project's config, where the editor's own
-        import dialog would read them. The call waits
+        import's actors and customized assets included. Every option is set
+        on every import (to Unreal's default unless given) without saving it
+        to the project's config, where the editor's own import dialog would
+        read it. Every layer and asset the stage draws on must be inside the
+        sandbox (``_check_usd_composition``). The call waits
         ``unreal.import_export_timeout``.
 
         Args:
             usd_path: Path to the USD file on disk.
-            destination_path: Content browser destination.
-            import_options: Interchange pipeline options.
+            destination_path: Content folder under /Game, /Game included.
+            import_options: USDImporter options (see ``USD_IMPORT_OPTIONS``):
+                the booleans in ``USD_IMPORT_BOOLEAN_OPTIONS``,
+                kinds_to_collapse (USD kinds: model, component, group,
+                assembly, subcomponent), fallback_collision_type (one of
+                ``USD_COLLISION_TYPES``), nanite_triangle_threshold,
+                prims_to_import (prim paths) and meters_per_unit with up_axis
+                (y or z), given together, to override the stage's own.
             replace_existing: Replace the assets in the destination folder and
                 the level's actors from an earlier import of this file.
 
         Returns:
             Dict with imported_assets, actor_paths (actors added to the level),
-            removed_actor_paths (actors the import replaced) and warnings, or
-            an error envelope: ``InvalidState`` when the folder already holds
+            removed_actor_paths (actors the import replaced), warnings (the
+            warnings and errors the editor logged during the import, and
+            saved import settings that differ from Unreal's defaults) and
+            dirty_engine_packages (engine or plugin packages the editor
+            holds modified when it finishes), or an error envelope:
+            ``ValidationError`` for an option, value or folder Unreal does
+            not take, ``SandboxError`` for a folder
+            outside /Game, ``InvalidState`` when the folder already holds
             assets and ``replace_existing`` is false (nothing is imported),
             ``NotFoundError`` for a file the editor host does not have,
-            ``EngineError`` when the importer produced nothing, ``PIEActive``,
-            ``PluginUnavailable`` and ``TimeoutError``.
+            ``EngineError`` when the importer produced nothing (with the
+            logged reasons), ``PIEActive``, ``PluginUnavailable`` and
+            ``TimeoutError``.
 
         Raises:
-            SandboxDenied: If ``usd_path`` is outside the sandbox.
+            SandboxDenied: If ``usd_path``, or a layer or asset its
+                composition draws on, is outside the sandbox.
         """
 
         usd_path = self._path_policy.authorize(usd_path)
-        if not destination_path.startswith("/Game/") or ".." in destination_path.split(
-            "/"
-        ):
-            raise ValueError("destination_path must be a /Game/ content directory")
+        destination, refusal = self._import_destination(destination_path)
+        if refusal is not None:
+            return refusal
         if type(replace_existing) is not bool:
             raise ValueError("replace_existing must be true or false")
-        options = import_options or {}
-        allowed = {
-            "import_actors",
-            "import_geometry",
-            "import_materials",
-            "import_lights",
-            "import_cameras",
-        }
-        if set(options) - allowed or any(type(v) is not bool for v in options.values()):
-            raise ValueError(
-                f"import_options accepts boolean values for: {sorted(allowed)}"
-            )
+        options, problems = _usd_import_options(import_options or {})
+        if problems:
+            return {"success": False, "error_type": "ValidationError", "error": "; ".join(problems)}
+        self._check_usd_composition(usd_path)
         args = {
             "path": usd_path,
-            "destination": destination_path.rstrip("/"),
+            "destination": destination,
             "name": _sanitized_object_name(Path(usd_path).stem),
             "options": options,
             "replace": replace_existing,
@@ -4094,6 +4590,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_paths: List[str],
         output_path: str,
         export_options: Optional[Dict[str, Any]] = None,
+        overwrite: bool = False,
     ) -> Dict[str, Any]:
         """
         Export selected actors with the optional USDImporter plugin.
@@ -4102,21 +4599,33 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         is refused without loading that map. The actors exported are read
         back from the written stage: Unreal's exporter leaves out what it does
         not export (editor helpers such as WorldSettings or PlayerStart)
-        without an error, and an export that wrote none of them fails. The
-        call waits ``unreal.import_export_timeout``, since the first USD
-        export of an editor session loads the USD Python modules (25-40 s).
+        without an error, and an export that wrote none of them fails. Unreal
+        also writes a file per mesh and material, into ``<output name>_assets``
+        beside the output, and with export_sublayers a layer per sublevel and
+        MaterialOverrides beside it; every file written is reported. The call
+        waits ``unreal.import_export_timeout``, since the first USD export of
+        an editor session loads the USD Python modules (25-40 s).
 
         Args:
             actor_paths: Actor paths to export.
             output_path: Output USD file path.
             export_options: Export pipeline options.
+            overwrite: Replace the files the export writes; otherwise the
+                export is refused when the output, a file in its asset
+                folder, or (with export_sublayers) a sublevel layer or
+                MaterialOverrides exists.
 
         Returns:
             Dict with output_path, actors_exported (the actors the stage has a
             prim for), exported_prims (each one's actor_path and prim_path),
-            skipped_actors (the actors it has none for) and file_size_bytes,
-            or an error envelope: ``EngineError`` when Unreal exported nothing
-            or failed, ``PIEActive``, ``PluginUnavailable`` and
+            skipped_actors (the actors it has none for), file_size_bytes,
+            written_files (every file the export created or changed under the
+            output's folder), overwritten_files (those that existed before)
+            and warnings (DynamicMeshActors, which Unreal writes as empty
+            Xforms), or an error envelope: ``InvalidState`` when a file it
+            would write exists and ``overwrite`` is false (with
+            ``details.existing_files``), ``EngineError`` when Unreal exported
+            nothing or failed, ``PIEActive``, ``PluginUnavailable`` and
             ``TimeoutError``.
 
         Raises:
@@ -4128,17 +4637,156 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             raise ValueError("At least one actor path is required")
         if Path(output_path).suffix.lower() not in {".usd", ".usda", ".usdc"}:
             raise ValueError("Output must have a .usd, .usda or .usdc extension")
+        if type(overwrite) is not bool:
+            raise ValueError("overwrite must be true or false")
         options = export_options or {}
         allowed = {"export_actor_folders", "export_sublayers"}
         if set(options) - allowed or any(type(v) is not bool for v in options.values()):
             raise ValueError(
                 f"export_options accepts boolean values for: {sorted(allowed)}"
             )
-        args = {"path": output_path, "actors": actor_paths, "options": options}
+        args = {"path": output_path, "actors": actor_paths, "options": options, "overwrite": overwrite}
         return await self._run_import_export(
             f"args = {args!r}\n" + USD_EXPORT,
             f"the export to {output_path}",
-            expected_errors=("PluginUnavailable",),
+            expected_errors=("PluginUnavailable", "InvalidState"),
+        )
+
+    async def import_asset(
+        self,
+        file_path: str,
+        destination_path: str = "/Game/Imports",
+        replace_existing: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Import an FBX, glTF, GLB or OBJ file as assets through Interchange.
+
+        Uses Unreal's Interchange importer with the project's default content
+        pipelines, as the Content Browser's Import does: meshes, materials
+        and textures are created and saved under ``destination_path``, and no
+        actor is placed. Every file the model names must be inside the
+        sandbox too (``_interchange_sources``). Without ``replace_existing``
+        an asset that already exists is kept (Interchange skips it), and a
+        file whose every asset exists imports nothing (``InvalidState``).
+        With it, Interchange reimports the asset named after the file and
+        keeps the other assets an earlier import of the file made, which are
+        reported. The call waits ``unreal.import_export_timeout``.
+
+        Args:
+            file_path: Path of the file on disk; must be inside the sandbox.
+            destination_path: Content folder under /Game, /Game included.
+            replace_existing: Reimport the asset named after the file.
+
+        Returns:
+            Dict with imported_assets, replaced_assets (those that existed
+            before), kept_assets (existing assets left as they were),
+            warnings (what the editor logged during the import, and the
+            assets a reimport kept) and dirty_engine_packages (engine or
+            plugin packages the editor holds modified when it finishes), or
+            an error envelope:
+            ``ValidationError`` for an unsupported file type or a
+            malformed folder, ``SandboxError`` for a folder outside /Game,
+            ``InvalidState`` when every asset exists and ``replace_existing``
+            is false, ``NotFoundError`` for a file the editor host does not
+            have, ``EngineError`` when Unreal imported nothing (with the
+            logged reasons), ``PIEActive`` and ``TimeoutError``.
+
+        Raises:
+            SandboxDenied: If ``file_path``, or a file it names that exists,
+                is outside the sandbox, or its references cannot be listed.
+        """
+        file_path = self._path_policy.authorize(file_path)
+        suffix = Path(file_path).suffix.lower()
+        if suffix not in ASSET_IMPORT_EXTENSIONS:
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": (
+                    f"{Path(file_path).name} is not a file this tool imports: pass one of "
+                    f"{', '.join(ASSET_IMPORT_EXTENSIONS)} (USD has import_unreal_usd)"
+                ),
+            }
+        destination, refusal = self._import_destination(destination_path)
+        if refusal is not None:
+            return refusal
+        if type(replace_existing) is not bool:
+            raise ValueError("replace_existing must be true or false")
+        sources = await self._interchange_sources(file_path)
+        args = {"path": file_path, "destination": destination, "replace": replace_existing, "sources": sources}
+        return await self._run_import_export(
+            f"args = {args!r}\n" + ASSET_IMPORT,
+            f"the import of {file_path}",
+            expected_errors=("NotFoundError", "InvalidState"),
+        )
+
+    async def save_assets(
+        self,
+        asset_paths: Optional[List[str]] = None,
+        save_level: bool = False,
+        all_dirty: bool = False,
+        allow_engine_content: bool = False,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Save modified assets and the level being edited.
+
+        Saves only packages that are modified: the named assets', the level's
+        (its map package and, in a World Partition level, its actors' and
+        objects' packages) with ``save_level``, or every modified package
+        with ``all_dirty``. Packages outside /Game (engine or plugin content,
+        shared by every project using it) are skipped unless
+        ``allow_engine_content``, and ones never saved (under /Temp) are
+        skipped. Refused while Play In Editor runs, when the editor saves
+        nothing. In attached mode it runs, like every tool, only while the
+        attached map is the one being edited. The call waits
+        ``unreal.import_export_timeout``.
+
+        Args:
+            asset_paths: Asset paths whose packages to save.
+            save_level: Save the level being edited.
+            all_dirty: Save every modified package.
+            allow_engine_content: Also save packages outside /Game.
+            dry_run: Report what would be saved and save nothing.
+
+        Returns:
+            Dict with saved, failed and would_save (package names), skipped
+            (each package left unsaved and why), level_package and dry_run,
+            or an error envelope: ``ValidationError`` when nothing is asked,
+            ``SandboxError`` for a named asset outside /Game without
+            ``allow_engine_content``, ``InvalidState`` for a level never
+            saved, ``EngineError`` when a package did not save (``failed``),
+            ``PIEActive`` and ``TimeoutError``.
+        """
+        flags = {
+            "save_level": save_level,
+            "all_dirty": all_dirty,
+            "allow_engine_content": allow_engine_content,
+            "dry_run": dry_run,
+        }
+        for name, value in flags.items():
+            if type(value) is not bool:
+                raise ValueError(f"{name} must be true or false")
+        paths = [path.strip() for path in asset_paths or [] if path.strip()]
+        if not paths and not save_level and not all_dirty:
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": "Nothing to save: pass asset_paths, save_level=true or all_dirty=true",
+            }
+        for path in paths:
+            package = path.split(".", 1)[0]
+            problem = _content_folder_problem(package)
+            if problem is not None:
+                return {"success": False, "error_type": "ValidationError", "error": problem}
+            if not allow_engine_content and not _in_project_content(package):
+                return _outside_project_refusal(
+                    package, "save", "Pass allow_engine_content=true to save the shared asset"
+                )
+        args = {"asset_paths": paths, **flags}
+        return await self._run_import_export(
+            f"args = {args!r}\n" + SAVE_ASSETS,
+            "the save",
+            expected_errors=("InvalidState",),
         )
 
     async def convert_to_simready(
@@ -4570,6 +5218,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
     # ------------------------------------------------------------------
     # Phase 8: Geometry & Modeling (GeometryScript)
+    #
+    # The scripts are in _unreal_mesh_scripts, which says what they share:
+    # the GeometryScripting check, actor_at lookups, a GeometryScriptDebug
+    # check after every call, edits on a copy swapped in inside one
+    # transaction, world-space inputs, and the PIE refusal. Each method
+    # checks its arguments first and refuses bad ones before the editor is
+    # asked.
     # ------------------------------------------------------------------
 
     async def generate_mesh_primitive(
@@ -4581,107 +5236,52 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         actor_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Create a parametric mesh primitive via GeometryScript.
+        Create a parametric mesh primitive as a new DynamicMeshActor.
+
+        Every primitive is centred on the actor, in Unreal's axes (X forward,
+        Y right, Z up), with quad polygroups so Catmull-Clark can subdivide
+        it. The spawn and its mesh are one undoable transaction.
 
         Args:
-            primitive_type: box, sphere, cylinder, cone, torus, capsule.
-            dimensions: Type-specific dimensions.
-            segments: Tessellation segments.
+            primitive_type: box, sphere, cylinder, cone, capsule or torus.
+            dimensions: In cm, by type (defaults in brackets): box width (X,
+                100), depth (Y, 100), height (Z, 100); sphere radius (50);
+                cylinder radius (50), height (Z, 100); cone base_radius (50),
+                top_radius (0), height (Z, 100); capsule radius (30), length
+                (the straight part along Z, 75; the capsule is length + 2 x
+                radius tall); torus major_radius (50, to the tube's centre),
+                minor_radius (20, the tube's), around Z. Other names are
+                refused.
+            segments: Steps around the shape (3 to 512): a sphere's
+                longitude and latitude steps, a cylinder's, cone's or
+                capsule's sides, a torus's steps around its axis (half as
+                many around the tube). A 512-segment sphere has 522,240
+                triangles.
             location: Spawn location [x, y, z] in cm.
             actor_label: Optional label for the actor.
 
         Returns:
-            Dict with actor_path, primitive_type, triangle/vertex counts.
+            Dict with actor_path, primitive_type, the dimensions and segments
+            used, triangle/vertex counts, the mesh's local bounds and
+            warnings, or an error envelope.
         """
-        if dimensions is None:
-            dimensions = {}
-        if location is None:
-            location = [0.0, 0.0, 0.0]
-        label = actor_label or f"DynMesh_{primitive_type}"
-        seg = max(segments, 4)
-        d = {key: float(value) for key, value in dimensions.items()}
-
-        # Build the append call depending on primitive_type
-        ptype = primitive_type.lower()
-        if ptype == "box":
-            w = d.get("width", 100.0)
-            h = d.get("height", 100.0)
-            dp = d.get("depth", 100.0)
-            append_line = (
-                f"gs_prim.append_box(mesh, opts, xf, {w}, {h}, {dp},"
-                f" 1, 1, 1, origin)"
-            )
-        elif ptype == "sphere":
-            r = d.get("radius", 50.0)
-            append_line = (
-                f"gs_prim.append_sphere_lat_long(mesh, opts, xf,"
-                f" {r}, {seg}, {seg}, origin)"
-            )
-        elif ptype == "cylinder":
-            r = d.get("radius", 50.0)
-            h = d.get("height", 100.0)
-            append_line = (
-                f"gs_prim.append_cylinder(mesh, opts, xf,"
-                f" {r}, {h}, {seg}, 1, True, origin)"
-            )
-        elif ptype == "cone":
-            r = d.get("base_radius", 50.0)
-            h = d.get("height", 100.0)
-            append_line = (
-                f"gs_prim.append_cone(mesh, opts, xf,"
-                f" {r}, 0.0, {h}, {seg}, 1, True, origin)"
-            )
-        elif ptype == "capsule":
-            r = d.get("radius", 50.0)
-            h = d.get("hemisphere_height", 50.0)
-            append_line = (
-                f"gs_prim.append_capsule(mesh, opts, xf,"
-                f" {r}, {h}, {h}, {seg}, {max(seg // 2, 4)}, origin)"
-            )
-        elif ptype == "torus":
-            inner = d.get("inner_radius", 20.0)
-            outer = d.get("outer_radius", 50.0)
-            append_line = (
-                f"gs_prim.append_torus(mesh, opts, xf,"
-                f" {inner}, {outer}, {seg}, {seg}, origin)"
-            )
-        else:
-            return {
-                "success": False,
-                "error": f"Unsupported primitive type: {primitive_type}",
-            }
-
-        lx, ly, lz = (float(value) for value in location)
-        code = (
-            "import unreal, json\n"
-            "gs_prim = unreal.GeometryScript_Primitives\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "mesh = unreal.DynamicMesh()\n"
-            "opts = unreal.GeometryScriptPrimitiveOptions()\n"
-            "opts.polygroup_mode = "
-            "unreal.GeometryScriptPrimitivePolygroupMode.PER_FACE\n"
-            "xf = unreal.Transform()\n"
-            "origin = unreal.GeometryScriptPrimitiveOriginMode.CENTER\n"
-            f"{append_line}\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            f"actor = subsys.spawn_actor_from_class("
-            f"unreal.DynamicMeshActor, "
-            f"unreal.Vector({lx}, {ly}, {lz}))\n"
-            f"actor.set_actor_label({label!r})\n"
-            "comp = actor.dynamic_mesh_component\n"
-            "comp.set_dynamic_mesh(mesh)\n"
-            "tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "verts = gs_q.get_vertex_count(mesh)\n"
-            "print(json.dumps({"
-            "'actor_path': actor.get_path_name(),"
-            f"'primitive_type': {ptype!r},"
-            "'triangle_count': tris,"
-            "'vertex_count': verts"
-            "}))\n"
+        kind = primitive_type.lower()
+        problem = invalid_choice("primitive_type", kind, PRIMITIVE_TYPES, "UNKNOWN_PRIMITIVE")
+        if problem is None and not MIN_SEGMENTS <= int(segments) <= MAX_SEGMENTS:
+            problem = refusal("INVALID_SEGMENTS", f"segments must be {MIN_SEGMENTS} to {MAX_SEGMENTS}, not {segments}")
+        if problem is not None:
+            return problem
+        resolved, problem = primitive_dimensions(kind, dict(dimensions or {}))
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            GENERATE_PRIMITIVE,
+            primitive_type=kind,
+            dimensions=resolved,
+            segments=int(segments),
+            location=[float(value) for value in (location or [0.0, 0.0, 0.0])],
+            label=actor_label or f"DynMesh_{kind}",
         )
-        result = await self._execute_python(_outside_pie(code, "spawn actors"))
-        return self._parse_python_json(result)
 
     async def apply_mesh_boolean(
         self,
@@ -4690,142 +5290,143 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         operation: str,
     ) -> Dict[str, Any]:
         """
-        Apply boolean operation between two meshes via GeometryScript.
+        Apply a boolean between two DynamicMeshActors' meshes, in place.
+
+        Both meshes take part at their actors' world transforms (location,
+        rotation, scale), and the result replaces the target's mesh in its
+        own local space. The tool actor is left as it was.
 
         Args:
             target_mesh_path: Target mesh actor (modified in-place).
             tool_mesh_path: Tool mesh actor (operand).
-            operation: union, subtract, or intersect.
+            operation: union, subtract (alias difference) or intersect
+                (alias intersection).
 
         Returns:
-            Dict with target_mesh_path, operation, result triangle/vertex counts.
+            Dict with target and tool paths, operation (canonical) and
+            requested_operation, previous and result triangle counts, result
+            vertex count, previous and result volume (cm3, null for an open
+            mesh), result_components and warnings.
         """
-        op_map = {
-            "union": "UNION",
-            "subtract": "SUBTRACT",
-            "intersect": "INTERSECTION",
-        }
-        ue_op = op_map.get(operation.lower(), "UNION")
-        code = (
-            "    gs_bool = unreal.GeometryScript_MeshBooleans\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    t_mesh = target_actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    tool_mesh = tool_actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    bool_opts = unreal.GeometryScriptMeshBooleanOptions()\n"
-            "    gs_bool.apply_mesh_boolean(\n"
-            "        t_mesh, unreal.Transform(),\n"
-            "        tool_mesh, unreal.Transform(),\n"
-            f"        unreal.GeometryScriptBooleanOperation.{ue_op},"
-            " bool_opts)\n"
-            "    target_actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(t_mesh)\n"
-            "    verts = gs_q.get_vertex_count(t_mesh)\n"
-            "    print(json.dumps({"
-            f"'target_mesh_path': {target_mesh_path!r},"
-            f"'operation': {operation!r},"
-            "'result_triangle_count': tris,"
-            "'result_vertex_count': verts"
-            "}))\n"
+        requested = operation.lower()
+        canonical = BOOLEAN_ALIASES.get(requested, requested)
+        problem = invalid_choice(
+            "operation", canonical, tuple(BOOLEAN_OPERATIONS) + tuple(BOOLEAN_ALIASES), "UNKNOWN_OPERATION"
         )
-        return await self._run_mesh_script(code, target_actor=target_mesh_path, tool_actor=tool_mesh_path)
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            MESH_BOOLEAN,
+            target=target_mesh_path,
+            tool=tool_mesh_path,
+            operation=canonical,
+            requested_operation=requested,
+        )
 
     async def compute_convex_hull(
         self,
         mesh_path: str,
+        max_faces: int = 250,
+        output: str = "actor",
+        save: bool = False,
     ) -> Dict[str, Any]:
         """
-        Compute convex hull envelope of a mesh.
+        Compute the convex hull of a mesh as simple collision.
 
         Args:
-            mesh_path: Source mesh actor path.
+            mesh_path: A DynamicMeshActor, a StaticMeshActor or a StaticMesh
+                asset (its first LOD is read).
+            max_faces: Simplify the hull to at most this many triangles; 0
+                keeps every face of the exact hull.
+            output: 'actor' (a new DynamicMeshActor at the source's transform
+                whose mesh and simple collision are the hull), 'collision'
+                (the hull replaces the source's simple collision: a
+                StaticMesh source's asset, which every actor using it shares
+                and which must be under /Game) or 'both'.
+            save: Save the StaticMesh asset whose collision was set (its
+                package only).
 
         Returns:
-            Dict with hull actor path, vertex/triangle counts.
+            Dict with source_kind, output, hull_actor_path (null for
+            'collision'), hull vertex/triangle counts, max_faces, the source
+            triangle count, hull_volume, source_volume and volume_ratio (null
+            for an open source), collision (each actor or asset given the
+            hull, its collision shape count and the file saved) and warnings.
         """
-        code = (
-            "    gs_c = unreal.GeometryScript_Containment\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = src.dynamic_mesh_component.get_dynamic_mesh()\n"
-            "    hull_mesh = unreal.DynamicMesh()\n"
-            "    sel = unreal.GeometryScriptMeshSelection()\n"
-            "    opts = unreal.GeometryScriptConvexHullOptions()\n"
-            "    gs_c.compute_mesh_convex_hull("
-            "mesh, hull_mesh, sel, opts)\n"
-            "    hull_actor = subsys.spawn_actor_from_class("
-            "unreal.DynamicMeshActor, src.get_actor_location())\n"
-            "    hull_actor.set_actor_label("
-            "src.get_actor_label() + '_Hull')\n"
-            "    hull_actor.dynamic_mesh_component"
-            ".set_dynamic_mesh(hull_mesh)\n"
-            "    h_tris = gs_q.get_num_triangle_i_ds(hull_mesh)\n"
-            "    h_verts = gs_q.get_vertex_count(hull_mesh)\n"
-            "    s_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            "'hull_actor_path': hull_actor.get_path_name(),"
-            "'hull_vertex_count': h_verts,"
-            "'hull_triangle_count': h_tris,"
-            "'source_triangle_count': s_tris"
-            "}))\n"
+        problem = invalid_choice("output", output.lower(), HULL_OUTPUTS, "UNKNOWN_OUTPUT")
+        if problem is None and not 0 <= int(max_faces) <= 10_000:
+            problem = refusal("INVALID_MAX_FACES", f"max_faces must be 0 to 10000, not {max_faces}")
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            CONVEX_HULL, mesh=mesh_path, max_faces=int(max_faces), output=output.lower(), save=bool(save)
         )
-        return await self._run_mesh_script(code, pie_action="spawn actors", src=mesh_path)
 
     async def decompose_convex_hull(
         self,
         mesh_path: str,
-        max_hulls: int = 16,
+        max_hulls: int = 8,
         max_vertices_per_hull: int = 32,
-        min_cluster_size: int = 256,
-        resolution: int = 100000,
+        error_tolerance: float = 0.0,
+        min_part_thickness: float = 0.1,
+        output: str = "actor",
+        save: bool = False,
     ) -> Dict[str, Any]:
         """
-        V-HACD convex decomposition for collision geometry.
+        Decompose a mesh into convex hulls, as simple collision.
+
+        Uses GeometryScript's convex decomposition (Unreal's own, the one
+        its collision generation uses; not V-HACD), with sphere, box and
+        capsule detection off so the result is always hulls.
 
         Args:
-            mesh_path: Source mesh actor path.
-            max_hulls: Maximum convex pieces.
-            max_vertices_per_hull: Max vertices per hull.
-            min_cluster_size: Minimum cluster size for V-HACD.
-            resolution: Voxelization resolution.
+            mesh_path: A DynamicMeshActor, a StaticMeshActor or a StaticMesh
+                asset (its first LOD is read).
+            max_hulls: Most convex pieces (1 to 64).
+            max_vertices_per_hull: Each piece is simplified to at most this
+                many vertices (4 to 256; 2 x this - 4 triangles).
+            error_tolerance: Stop adding pieces once the volume error is below
+                this, in cm; 0 uses max_hulls pieces.
+            min_part_thickness: Pieces thinner than this (cm) are merged into
+                their neighbours.
+            output: 'actor' (a new DynamicMeshActor at the source's transform
+                whose mesh and simple collision are the pieces), 'collision'
+                (the pieces replace the source's simple collision: a
+                StaticMesh source's asset, which must be under /Game) or
+                'both'.
+            save: Save the StaticMesh asset whose collision was set (its
+                package only).
 
         Returns:
-            Dict with hull_count, triangle/vertex counts for combined hull.
+            Dict with source_kind, output, decomp_actor_path (null for
+            'collision'),
+            hull_count, hulls (per piece: index, vertex/triangle counts,
+            volume, local bounds), the limits used, the largest piece's
+            vertex count, totals, hulls_volume, source_volume, volume_ratio,
+            collision and warnings.
         """
-        # GeometryScriptConvexDecompositionOptions has:
-        # num_hulls, error_tolerance, search_factor,
-        # simplify_to_face_count, min_part_thickness
-        code = (
-            "    gs_c = unreal.GeometryScript_Containment\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = src.dynamic_mesh_component.get_dynamic_mesh()\n"
-            "    decomp_mesh = unreal.DynamicMesh()\n"
-            "    opts = unreal.GeometryScriptConvexDecompositionOptions()\n"
-            f"    opts.num_hulls = {max_hulls}\n"
-            f"    opts.simplify_to_face_count = {max_vertices_per_hull}\n"
-            "    gs_c.compute_mesh_convex_decomposition("
-            "mesh, decomp_mesh, opts)\n"
-            "    d_actor = subsys.spawn_actor_from_class("
-            "unreal.DynamicMeshActor, src.get_actor_location())\n"
-            "    d_actor.set_actor_label("
-            "src.get_actor_label() + '_Decomp')\n"
-            "    d_actor.dynamic_mesh_component"
-            ".set_dynamic_mesh(decomp_mesh)\n"
-            "    d_tris = gs_q.get_num_triangle_i_ds(decomp_mesh)\n"
-            "    d_verts = gs_q.get_vertex_count(decomp_mesh)\n"
-            "    n_comp = gs_q.get_num_connected_components("
-            "decomp_mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            "'hull_count': n_comp,"
-            "'decomp_actor_path': d_actor.get_path_name(),"
-            "'total_triangles': d_tris,"
-            "'total_vertices': d_verts"
-            "}))\n"
+        problem = invalid_choice("output", output.lower(), HULL_OUTPUTS, "UNKNOWN_OUTPUT")
+        for name, value, low, high in (
+            ("max_hulls", max_hulls, 1, 64),
+            ("max_vertices_per_hull", max_vertices_per_hull, 4, 256),
+        ):
+            if problem is None and not low <= int(value) <= high:
+                problem = refusal("INVALID_LIMIT", f"{name} must be {low} to {high}, not {value}")
+        for name, number in (("error_tolerance", error_tolerance), ("min_part_thickness", min_part_thickness)):
+            if problem is None and not (math.isfinite(float(number)) and float(number) >= 0):
+                problem = refusal("INVALID_LIMIT", f"{name} must be 0 cm or more, not {number}")
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            CONVEX_DECOMPOSITION,
+            mesh=mesh_path,
+            max_hulls=int(max_hulls),
+            max_vertices_per_hull=int(max_vertices_per_hull),
+            error_tolerance=float(error_tolerance),
+            min_part_thickness=float(min_part_thickness),
+            output=output.lower(),
+            save=bool(save),
         )
-        return await self._run_mesh_script(code, pie_action="spawn actors", src=mesh_path)
 
     async def edit_mesh_topology(
         self,
@@ -4835,87 +5436,86 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         edge_selection: Optional[str] = None,
         distance: Optional[float] = None,
         offset: Optional[float] = None,
-        scale: Optional[List[float]] = None,
         count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Edit mesh topology (extrude, bevel, inset, loop cut, scale_faces).
+        Extrude or inset selected faces, or bevel edges, of a DynamicMeshActor's mesh.
+
+        Selections are in the mesh's local space (before the actor's
+        transform).
 
         Args:
             mesh_path: Mesh actor path.
-            operation: extrude_faces, bevel_edges, inset_faces,
-                loop_cut, scale_faces.
-            face_selection: Face selection filter (unused in current impl).
-            edge_selection: Edge selection filter (unused in current impl).
-            distance: Extrude/bevel distance.
-            offset: Inset offset.
-            scale: Scale factors [x, y, z] (unused in current impl).
-            count: Subdivision count for bevel.
+            operation: extrude_faces (moves the selected faces along their
+                average normal by distance, building side walls), inset_faces
+                (insets each face of the selection by offset) or bevel_edges.
+            face_selection: The faces extrude_faces and inset_faces change
+                (required) and, for bevel_edges, a region whose border edges
+                are bevelled: 'all', 'normal:x,y,z[,max_angle_deg]'
+                (triangles facing that way, within 15 degrees by default) or
+                'box:min_x,min_y,min_z,max_x,max_y,max_z' (triangles inside).
+            edge_selection: The edges bevel_edges bevels when no
+                face_selection is given: 'polygroup' (every polygroup edge,
+                a primitive's face edges) or 'sharp[:min_angle_deg]' (20
+                degrees by default).
+            distance: Extrude distance in cm (20 by default; negative pushes
+                inward), or bevel distance (5 by default).
+            offset: Inset distance in cm (5 by default).
+            count: Bevel subdivisions, 0 to 16 (0 by default: one flat face
+                per bevelled edge).
 
         Returns:
-            Dict with mesh_path, operation, result triangle/vertex counts.
+            Dict with mesh_path, operation, the selections, faces_affected
+            and edges_affected (null where the operation selects none of
+            them), the distance, offset or subdivisions used, previous and
+            result triangle counts, result vertex count, result_volume and
+            warnings.
         """
-        dist = distance if distance is not None else 20.0
-        ofs = offset if offset is not None else 5.0
-        subdivs = count if count is not None else 1
         op = operation.lower()
-
-        # Build the operation-specific Python block
-        if op == "extrude_faces":
-            op_block = (
-                "    ext_opts = unreal"
-                ".GeometryScriptMeshLinearExtrudeOptions()\n"
-                f"    ext_opts.distance = {dist}\n"
-                "    sel = unreal.GeometryScriptMeshSelection()\n"
-                "    gs_mod.apply_mesh_linear_extrude_faces("
-                "mesh, ext_opts, sel)\n"
+        problem = invalid_choice("operation", op, TOPOLOGY_OPERATIONS, "UNKNOWN_OPERATION")
+        if problem is not None:
+            return problem
+        faces = edges = None
+        if face_selection:
+            faces, problem = parse_face_selection(face_selection)
+        elif op != "bevel_edges":
+            problem = refusal(
+                "SELECTION_REQUIRED",
+                f"{op} needs a face_selection: {FACE_SELECTION_SYNTAX}",
             )
-        elif op == "bevel_edges":
-            op_block = (
-                "    bev_opts = unreal"
-                ".GeometryScriptMeshBevelSelectionOptions()\n"
-                f"    bev_opts.bevel_distance = {dist}\n"
-                f"    bev_opts.subdivisions = {subdivs}\n"
-                "    sel = unreal.GeometryScriptMeshSelection()\n"
-                "    gs_mod.apply_mesh_bevel_selection(mesh, sel,\n"
-                "        unreal.GeometryScriptMeshBevelSelectionMode"
-                ".TRIANGLE_AREA, bev_opts)\n"
-            )
-        elif op == "inset_faces":
-            op_block = (
-                "    ins_opts = unreal"
-                ".GeometryScriptMeshInsetOutsetFacesOptions()\n"
-                f"    ins_opts.distance = {ofs}\n"
-                "    sel = unreal.GeometryScriptMeshSelection()\n"
-                "    gs_mod.apply_mesh_inset_outset_faces("
-                "mesh, ins_opts, sel)\n"
-            )
+        elif edge_selection:
+            edges, problem = parse_edge_selection(edge_selection)
         else:
-            return {
-                "success": False,
-                "error": f"Unsupported topology operation: {operation}",
-            }
-
-        code = (
-            "    gs_mod = unreal.GeometryScript_MeshModeling\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            + op_block
-            + "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            f"'operation': {operation!r},"
-            "'result_triangle_count': tris,"
-            "'result_vertex_count': verts,"
-            "'previous_triangle_count': before_tris"
-            "}))\n"
+            problem = refusal(
+                "SELECTION_REQUIRED",
+                f"bevel_edges needs an edge_selection ({EDGE_SELECTION_SYNTAX}) or a face_selection",
+            )
+        if problem is None and edge_selection and face_selection:
+            problem = refusal("SELECTION_CONFLICT", "Give face_selection or edge_selection, not both")
+        if problem is None and op != "bevel_edges" and edge_selection:
+            problem = refusal("SELECTION_CONFLICT", f"{op} changes faces; edge_selection applies to bevel_edges")
+        default_distance = 5.0 if op == "bevel_edges" else 20.0
+        moved = float(distance) if distance is not None else default_distance
+        inset = float(offset) if offset is not None else 5.0
+        subdivisions = int(count) if count is not None else 0
+        if problem is None and (not math.isfinite(moved) or moved == 0 or (op == "bevel_edges" and moved < 0)):
+            problem = refusal("INVALID_DISTANCE", f"distance must be a non-zero number of cm, not {distance}")
+        if problem is None and not (math.isfinite(inset) and inset > 0):
+            problem = refusal("INVALID_DISTANCE", f"offset must be above 0 cm, not {offset}")
+        if problem is None and not 0 <= subdivisions <= 16:
+            problem = refusal("INVALID_COUNT", f"count must be 0 to 16, not {count}")
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            EDIT_TOPOLOGY,
+            mesh=mesh_path,
+            operation=op,
+            faces=faces,
+            edges=edges,
+            distance=moved,
+            offset=inset,
+            subdivisions=subdivisions,
         )
-        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def subdivide_mesh(
         self,
@@ -4924,52 +5524,29 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         scheme: str = "catmull_clark",
     ) -> Dict[str, Any]:
         """
-        Catmull-Clark or uniform tessellation subdivision.
+        Subdivide a DynamicMeshActor's mesh.
+
+        A result over ``MAX_RESULT_TRIANGLES`` triangles is refused before
+        anything runs (``RESULT_TOO_LARGE``).
 
         Args:
             mesh_path: Mesh actor path.
-            level: Subdivision level (1-4).
-            scheme: catmull_clark, loop, or uniform.
+            level: Subdivision level, 1 to 4.
+            scheme: catmull_clark (OpenSubdiv over the polygroups, which must
+                form quads), loop (OpenSubdiv over the triangles) or uniform
+                (splits each triangle into (level + 1)^2).
 
         Returns:
-            Dict with mesh_path, level, scheme, result triangle/vertex counts.
+            Dict with mesh_path, level, scheme, previous and result triangle
+            counts, result vertex count and warnings.
         """
-        lvl = max(1, min(level, 4))
-        sch = scheme.lower()
-
-        if sch == "catmull_clark":
-            subdiv_block = (
-                "    gl = unreal.GeometryScriptGroupLayer()\n"
-                "    unreal.GeometryScript_OpenSubdiv"
-                f".apply_polygroup_catmull_clark_sub_d(mesh, {lvl}, gl)\n"
-            )
-        else:
-            # uniform tessellation for loop / uniform / bilinear
-            subdiv_block = (
-                "    unreal.GeometryScript_MeshSubdivide"
-                f".apply_uniform_tessellation(mesh, {lvl})\n"
-            )
-
-        code = (
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            + subdiv_block
-            + "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            f"'level': {lvl},"
-            f"'scheme': {scheme!r},"
-            "'result_triangle_count': tris,"
-            "'result_vertex_count': verts,"
-            "'previous_triangle_count': before_tris"
-            "}))\n"
-        )
-        return await self._run_mesh_script(code, actor=mesh_path)
+        chosen = scheme.lower()
+        problem = invalid_choice("scheme", chosen, SUBDIVISION_SCHEMES, "UNKNOWN_SCHEME")
+        if problem is None and not 1 <= int(level) <= 4:
+            problem = refusal("INVALID_LEVEL", f"level must be 1 to 4, not {level}")
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(SUBDIVIDE, mesh=mesh_path, level=int(level), scheme=chosen)
 
     async def simplify_mesh(
         self,
@@ -4979,54 +5556,55 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         max_error: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Simplify/decimate a mesh.
+        Simplify a DynamicMeshActor's mesh.
+
+        Give at most one target; with none, half the triangles are kept. A
+        target that would not remove a triangle is refused.
 
         Args:
             mesh_path: Mesh actor path.
-            target_triangle_count: Target triangle count.
-            target_percentage: Target percentage (0.0-1.0).
-            max_error: Max geometric error tolerance.
+            target_triangle_count: Triangles to keep (4 or more).
+            target_percentage: Fraction of the triangles to keep, above 0
+                and below 1 (0.25 keeps a quarter).
+            max_error: Simplify as far as the surface stays within this many
+                cm of the original.
 
         Returns:
-            Dict with original/result triangles, reduction ratio.
+            Dict with method (triangle_count or tolerance),
+            target_triangle_count and tolerance (the max_error used; a
+            payload key ending in _error would read as a failure),
+            original/result triangles, result vertex count,
+            reduction ratio and warnings.
         """
-        # Determine target count: explicit, or derived from percentage
-        target_line = ""
-        if target_triangle_count is not None:
-            target_line = f"    target_count = {target_triangle_count}\n"
-        elif target_percentage is not None:
-            target_line = (
-                f"    target_count = max(1, int(before_tris"
-                f" * {target_percentage}))\n"
+        given = [name for name, value in (
+            ("target_triangle_count", target_triangle_count),
+            ("target_percentage", target_percentage),
+            ("max_error", max_error),
+        ) if value is not None]
+        problem = None
+        if len(given) > 1:
+            problem = refusal("CONFLICTING_TARGETS", f"Give one of {', '.join(given)}, not several")
+        elif target_triangle_count is not None and int(target_triangle_count) < 4:
+            problem = refusal(
+                "INVALID_TARGET", f"target_triangle_count must be 4 or more, not {target_triangle_count}"
             )
-        else:
-            target_line = "    target_count = max(1, before_tris // 2)\n"
-
-        code = (
-            "    gs_s = unreal.GeometryScript_MeshSimplification\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            + target_line
-            + "    opts = unreal.GeometryScriptSimplifyMeshOptions()\n"
-            "    gs_s.apply_simplify_to_triangle_count("
-            "mesh, target_count, opts)\n"
-            "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    ratio = round(1.0 - tris / before_tris, 4)"
-            " if before_tris > 0 else 0.0\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            "'original_triangles': before_tris,"
-            "'result_triangles': tris,"
-            "'result_vertex_count': verts,"
-            "'reduction_ratio': ratio"
-            "}))\n"
+        elif target_percentage is not None and not 0 < float(target_percentage) < 1:
+            problem = refusal(
+                "INVALID_TARGET",
+                f"target_percentage is the fraction to keep, above 0 and below 1 (0.25 keeps a quarter), "
+                f"not {target_percentage}",
+            )
+        elif max_error is not None and not (math.isfinite(float(max_error)) and float(max_error) > 0):
+            problem = refusal("INVALID_TARGET", f"max_error must be above 0 cm, not {max_error}")
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            SIMPLIFY,
+            mesh=mesh_path,
+            target_triangle_count=int(target_triangle_count) if target_triangle_count is not None else None,
+            target_percentage=float(target_percentage) if target_percentage is not None else None,
+            max_error=float(max_error) if max_error is not None else None,
         )
-        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def cut_mesh_plane(
         self,
@@ -5035,54 +5613,54 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         plane_normal: List[float],
         fill_holes: bool = True,
         keep_both_sides: bool = False,
+        space: str = "world",
     ) -> Dict[str, Any]:
         """
-        Cut/slice a mesh along an arbitrary plane.
+        Cut a DynamicMeshActor's mesh with a plane.
+
+        The half the normal points into is removed, or, with
+        keep_both_sides, placed in a new DynamicMeshActor at the same
+        transform, in the same undoable transaction. A plane that misses
+        the mesh is refused with nothing changed.
 
         Args:
             mesh_path: Mesh actor path.
-            plane_origin: Plane origin [x, y, z] in cm.
-            plane_normal: Plane normal [x, y, z].
-            fill_holes: Fill cut holes with faces.
-            keep_both_sides: Keep both halves (unused — UE plane cut
-                keeps one side and optionally fills).
+            plane_origin: A point on the plane [x, y, z] in cm.
+            plane_normal: The plane's normal [x, y, z].
+            fill_holes: Close the cut with new faces.
+            keep_both_sides: Keep the removed half as a second actor.
+            space: 'world' (the default: the plane as placed in the level)
+                or 'local' (the mesh's own space).
 
         Returns:
-            Dict with mesh_path, result triangle/vertex counts.
+            Dict with mesh_path, space, the plane in the mesh's local space,
+            pieces (the cut actor, then the second one), their triangle
+            counts, removed_triangle_count (the removed half, null when kept),
+            cut_faces_added (triangles the hole fill added to the kept half),
+            previous and result triangle counts, result vertex count and
+            warnings.
         """
-        ox, oy, oz = plane_origin[0], plane_origin[1], plane_origin[2]
-        nx, ny, nz = plane_normal[0], plane_normal[1], plane_normal[2]
-        fill_py = "True" if fill_holes else "False"
-        code = (
-            "    gs_bool = unreal.GeometryScript_MeshBooleans\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    cut_frame = unreal.Transform()\n"
-            f"    cut_frame.translation = "
-            f"unreal.Vector({ox}, {oy}, {oz})\n"
-            # Build rotation from normal — use MathLibrary.make_rot_from_z
-            f"    normal = unreal.Vector({nx}, {ny}, {nz})\n"
-            "    rot = unreal.MathLibrary.make_rot_from_z(normal)\n"
-            "    cut_frame.rotation = rot.quaternion()\n"
-            "    cut_opts = unreal"
-            ".GeometryScriptMeshPlaneCutOptions()\n"
-            f"    cut_opts.fill_holes = {fill_py}\n"
-            "    gs_bool.apply_mesh_plane_cut("
-            "mesh, cut_frame, cut_opts)\n"
-            "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            "'result_triangle_count': tris,"
-            "'result_vertex_count': verts,"
-            "'previous_triangle_count': before_tris"
-            "}))\n"
+        chosen = space.lower()
+        problem = invalid_choice("space", chosen, ("world", "local"), "UNKNOWN_SPACE")
+        origin = [float(value) for value in plane_origin]
+        normal = [float(value) for value in plane_normal]
+        if problem is None and (len(origin) != 3 or len(normal) != 3):
+            problem = refusal("INVALID_PLANE", "plane_origin and plane_normal each need three numbers")
+        if problem is None and not all(math.isfinite(value) for value in origin + normal):
+            problem = refusal("INVALID_PLANE", "plane_origin and plane_normal must be finite numbers")
+        if problem is None and math.hypot(*normal) == 0:
+            problem = refusal("INVALID_PLANE", "plane_normal must not be zero")
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            PLANE_CUT,
+            mesh=mesh_path,
+            origin=origin,
+            normal=normal,
+            space=chosen,
+            fill_holes=bool(fill_holes),
+            keep_both_sides=bool(keep_both_sides),
         )
-        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def validate_mesh(
         self,
@@ -5090,147 +5668,137 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         checks: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Validate mesh geometry using GeometryScript query functions.
+        Check a mesh.
+
+        Reads only, so it also runs while Play In Editor runs (a StaticMesh
+        asset path excepted: Unreal loads no assets then). No check finds
+        self-intersections.
 
         Args:
-            mesh_path: Mesh actor path.
-            checks: Checks to run (currently all checks always run).
+            mesh_path: A DynamicMeshActor, a StaticMeshActor or a StaticMesh
+                asset (its first LOD is read).
+            checks: The checks to run; all of them when empty: closed (no
+                open border edges), manifold (no bowtie vertices),
+                degenerate_triangles (none with an area under 0.001 cm2 or an
+                edge under 0.0001 cm), orientation (a closed mesh encloses a
+                positive volume, so its faces point out), compact (no ID
+                gaps), normals (a normals attribute), uvs (a UV channel, and
+                every triangle has UVs in channel 0).
 
         Returns:
-            Dict with is_valid, triangle/vertex counts, border/component
-            info.
+            Dict with source_kind, is_valid (every check run passed), checks (per check:
+            passed, count where it counts something, detail), issues, the
+            triangle/vertex counts, connected_components, uv_channels, local
+            bounds, surface_area, volume (null for an open mesh) and
+            warnings.
         """
-        code = (
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            # UFUNCTIONs with out-params (e.g. GetNumOpenBorderLoops'
-            # bAmbiguousTopologyFound) come back as (count, *outs) tuples.
-            "    def _count(r):\n"
-            "        return r[0] if isinstance(r, tuple) else r\n"
-            "    tris = _count(gs_q.get_num_triangle_i_ds(mesh))\n"
-            "    verts = _count(gs_q.get_vertex_count(mesh))\n"
-            "    open_edges = _count("
-            "gs_q.get_num_open_border_edges(mesh))\n"
-            "    open_loops = _count("
-            "gs_q.get_num_open_border_loops(mesh))\n"
-            "    components = _count("
-            "gs_q.get_num_connected_components(mesh))\n"
-            "    has_normals = gs_q.get_has_triangle_normals(mesh)\n"
-            "    has_gaps = gs_q.get_has_triangle_id_gaps(mesh)\n"
-            "    is_watertight = (open_edges == 0)\n"
-            "    is_valid = is_watertight and not has_gaps\n"
-            "    issues = []\n"
-            "    if open_edges > 0:\n"
-            "        issues.append("
-            "f'Non-watertight: {open_edges} open border edges')\n"
-            "    if open_loops > 0:\n"
-            "        issues.append("
-            "f'{open_loops} open border loops')\n"
-            "    if has_gaps:\n"
-            "        issues.append('Triangle ID gaps detected')\n"
-            "    if not has_normals:\n"
-            "        issues.append('Missing triangle normals')\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            "'is_valid': is_valid,"
-            "'triangle_count': tris,"
-            "'vertex_count': verts,"
-            "'open_border_edges': open_edges,"
-            "'open_border_loops': open_loops,"
-            "'connected_components': components,"
-            "'has_normals': has_normals,"
-            "'issues': issues"
-            "}))\n"
-        )
-        return await self._run_mesh_script(code, actor=mesh_path)
+        names = [name.lower() for name in checks] if checks else list(VALIDATION_CHECKS)
+        unknown = sorted(set(names) - set(VALIDATION_CHECKS))
+        if unknown:
+            return refusal(
+                "UNKNOWN_CHECK",
+                f"Unknown checks {', '.join(unknown)}; use any of: {', '.join(VALIDATION_CHECKS)}",
+                choices=list(VALIDATION_CHECKS),
+            )
+        ordered = [name for name in VALIDATION_CHECKS if name in names]
+        return await self._run_mesh_script(VALIDATE, mesh=mesh_path, checks=ordered)
 
     async def convert_mesh_format(
         self,
         mesh_path: str,
         target_format: str,
-        tessellation_options: Optional[Dict[str, Any]] = None,
+        asset_path: Optional[str] = None,
+        overwrite: bool = False,
+        save: bool = True,
+        replace_actor: bool = False,
+        collision: str = "auto",
+        nanite: bool = False,
+        location: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         """
-        Convert between StaticMesh and DynamicMesh via GeometryScript.
+        Convert between a StaticMesh and an editable DynamicMeshActor.
+
+        ``dynamic_mesh`` places a DynamicMeshActor copy of a StaticMesh (an
+        asset, at ``location``, or a StaticMeshActor's, at its transform),
+        with its materials, for the other mesh tools to edit. ``static_mesh``
+        writes a DynamicMeshActor's mesh into a StaticMesh asset under /Game,
+        with the component's materials and simple collision, so the result can
+        be saved, placed and exported. Creating or overwriting an asset, with
+        its materials and collision, is not undoable (Unreal does not transact
+        asset creation); placing or replacing actors is, in one transaction.
 
         Args:
-            mesh_path: Source mesh actor/asset path.
-            target_format: 'static_mesh' or 'dynamic_mesh'.
-            tessellation_options: Unused (reserved for future CAD support).
+            mesh_path: The source: a StaticMesh asset or StaticMeshActor for
+                dynamic_mesh, a DynamicMeshActor for static_mesh.
+            target_format: dynamic_mesh or static_mesh.
+            asset_path: static_mesh: the asset to write, /Game/<folders>/<name>
+                (default /Game/Generated/SM_<actor label>). Paths outside /Game
+                (/Engine, plugin content) are refused.
+            overwrite: static_mesh: replace the mesh of an existing StaticMesh
+                at asset_path (its references are kept); without it an
+                existing asset is refused.
+            save: static_mesh: save the asset's package (only that package).
+            replace_actor: Replace the source actor with the result in the
+                level, at its transform: a StaticMeshActor for static_mesh, a
+                DynamicMeshActor (from a StaticMeshActor) for dynamic_mesh.
+            collision: static_mesh: the asset's simple collision. auto copies
+                the component's when it has any, else computes one convex
+                hull; component copies it; convex_hull computes one; none
+                leaves none.
+            nanite: static_mesh: enable Nanite on the asset; false leaves an
+                overwritten asset's Nanite setting as it was.
+            location: dynamic_mesh from an asset: where to place the actor
+                [x, y, z] in cm (the world origin by default).
 
         Returns:
-            Dict with source/result paths, formats, triangle count.
+            Dict with source_path, source_format (static_mesh_asset,
+            static_mesh_actor or dynamic_mesh_actor), result_path (the actor
+            placed, or the asset written), target_format, placed_actor_path,
+            removed_actor_path, asset (for static_mesh: asset_path,
+            overwritten, saved_file, collision, collision_shape_count,
+            material_slots, nanite (read back from the asset), the asset's
+            triangle and vertex counts), hint (without replace_actor: the
+            DynamicMeshActor stays, and Unreal's USD exporter writes it as an
+            empty Xform),
+            the mesh's triangle/vertex counts and warnings.
         """
-        fmt = target_format.lower()
-        if fmt == "static_mesh":
-            # DynamicMeshActor → new StaticMesh asset
-            code = (
-                "    gs_a = unreal.GeometryScript_AssetUtils\n"
-                "    gs_q = unreal.GeometryScript_MeshQueries\n"
-                "    mesh = actor.dynamic_mesh_component"
-                ".get_dynamic_mesh()\n"
-                "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-                "    # Create a transient StaticMesh asset\n"
-                "    pkg_name = '/Game/Generated/' + "
-                "actor.get_actor_label()\n"
-                "    sm = unreal.EditorAssetLibrary"
-                ".does_asset_exist(pkg_name)\n"
-                "    # For now report conversion info\n"
-                "    print(json.dumps({"
-                f"'source_path': {mesh_path!r},"
-                "'target_format': 'static_mesh',"
-                "'triangle_count': tris,"
-                "'note': 'copy_mesh_to_static_mesh requires "
-                "an existing StaticMesh asset target'"
-                "}))\n"
-            )
-            return await self._run_mesh_script(code, actor=mesh_path)
-        elif fmt == "dynamic_mesh":
-            # StaticMesh asset → DynamicMeshActor in the level
-            code = (
-                "import unreal, json\n"
-                "gs_a = unreal.GeometryScript_AssetUtils\n"
-                "gs_q = unreal.GeometryScript_MeshQueries\n"
-                "subsys = unreal.get_editor_subsystem("
-                "unreal.EditorActorSubsystem)\n"
-                f"sm_asset = unreal.EditorAssetLibrary"
-                f".load_asset({mesh_path!r})\n"
-                "if sm_asset is None:\n"
-                "    print(json.dumps({'error': "
-                f"{('Asset not found: ' + mesh_path)!r}"
-                "}))\n"
-                "else:\n"
-                "    dyn_mesh = unreal.DynamicMesh()\n"
-                "    asset_opts = unreal"
-                ".GeometryScriptCopyMeshFromAssetOptions()\n"
-                "    gs_a.copy_mesh_from_static_mesh("
-                "sm_asset, dyn_mesh, asset_opts)\n"
-                "    actor = subsys.spawn_actor_from_class("
-                "unreal.DynamicMeshActor, unreal.Vector())\n"
-                "    actor.set_actor_label("
-                "sm_asset.get_name() + '_Dynamic')\n"
-                "    actor.dynamic_mesh_component"
-                ".set_dynamic_mesh(dyn_mesh)\n"
-                "    tris = gs_q.get_num_triangle_i_ds(dyn_mesh)\n"
-                "    verts = gs_q.get_vertex_count(dyn_mesh)\n"
-                "    print(json.dumps({"
-                f"'source_path': {mesh_path!r},"
-                "'result_path': actor.get_path_name(),"
-                "'target_format': 'dynamic_mesh',"
-                "'triangle_count': tris,"
-                "'vertex_count': verts"
-                "}))\n"
-            )
+        target = target_format.lower()
+        chosen = collision.lower()
+        problem = invalid_choice("target_format", target, TARGET_FORMATS, "UNKNOWN_FORMAT") or invalid_choice(
+            "collision", chosen, STATIC_MESH_COLLISION, "UNKNOWN_COLLISION"
+        )
+        if problem is not None:
+            return problem
+        package = None
+        if target == "dynamic_mesh":
+            given = [name for name, value, default in (
+                ("asset_path", asset_path, None), ("overwrite", overwrite, False), ("save", save, True),
+                ("collision", chosen, "auto"), ("nanite", nanite, False),
+            ) if value != default]
+            if given:
+                return refusal(
+                    "OPTION_NOT_APPLICABLE",
+                    f"{', '.join(given)} {'applies' if len(given) == 1 else 'apply'} to target_format static_mesh",
+                )
         else:
-            return {
-                "success": False,
-                "error": f"Unsupported target format: {target_format}",
-            }
-
-        # Only dynamic_mesh gets here; it spawns the DynamicMeshActor.
-        result = await self._execute_python(_outside_pie(code, "spawn actors"))
-        return self._parse_python_json(result)
+            if location is not None:
+                return refusal("OPTION_NOT_APPLICABLE", "location applies to target_format dynamic_mesh")
+            if asset_path:
+                package, problem = game_asset_path(asset_path)
+                if problem is not None:
+                    return problem
+        return await self._run_mesh_script(
+            CONVERT,
+            mesh=mesh_path,
+            target_format=target,
+            asset_path=package,
+            overwrite=bool(overwrite),
+            save=bool(save),
+            replace_actor=bool(replace_actor),
+            collision=chosen,
+            nanite=bool(nanite),
+            location=[float(value) for value in (location or [0.0, 0.0, 0.0])],
+        )
 
     async def remesh_mesh(
         self,
@@ -5241,121 +5809,115 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         smoothing_iterations: int = 3,
     ) -> Dict[str, Any]:
         """
-        Remesh for clean topology using GeometryScript_Remeshing.
+        Uniformly remesh a DynamicMeshActor's mesh for evenly sized triangles.
+
+        Give at most one target; with none, the triangle count is kept. The
+        remesher makes up to ``REMESH_OVERSHOOT`` times the triangles a
+        target asks for, so a target predicted over ``MAX_RESULT_TRIANGLES``
+        is refused before anything runs (``RESULT_TOO_LARGE``), as is a
+        result over it.
 
         Args:
             mesh_path: Mesh actor path.
-            mode: 'uniform' (only mode currently supported).
+            mode: 'uniform', the only mode GeometryScript offers.
             target_edge_length: Target edge length in cm.
-            target_triangle_count: Target triangle count.
-            smoothing_iterations: Smoothing passes (remesh_iterations).
+            target_triangle_count: Target triangle count, 4 to
+                ``MAX_REMESH_TARGET_TRIANGLES``.
+            smoothing_iterations: Remesh passes (1 to 50); more passes give
+                more even triangles and take longer.
 
         Returns:
-            Dict with original/result triangles, vertex count.
+            Dict with mode, target_type and the target used, passes,
+            original/result triangles, result vertex count,
+            average_edge_length (the mean length of the result's triangle
+            edges, in cm) and warnings.
         """
-        edge_len = target_edge_length if target_edge_length else 5.0
-        tri_count = target_triangle_count if target_triangle_count else 0
-        iters = max(1, smoothing_iterations)
-
-        # Build target_type — use GeometryScriptUniformRemeshTargetType enum
-        if target_triangle_count is not None:
-            target_block = (
-                f"    uni_opts.target_triangle_count = {tri_count}\n"
-                "    uni_opts.target_type = unreal"
-                ".GeometryScriptUniformRemeshTargetType"
-                ".TRIANGLE_COUNT\n"
+        problem = invalid_choice("mode", mode.lower(), ("uniform",), "UNKNOWN_MODE")
+        if problem is None and target_edge_length is not None and target_triangle_count is not None:
+            problem = refusal("CONFLICTING_TARGETS", "Give target_edge_length or target_triangle_count, not both")
+        if problem is None and target_edge_length is not None and not (
+            math.isfinite(float(target_edge_length)) and float(target_edge_length) > 0
+        ):
+            problem = refusal("INVALID_TARGET", f"target_edge_length must be above 0 cm, not {target_edge_length}")
+        if problem is None and target_triangle_count is not None and not (
+            4 <= int(target_triangle_count) <= MAX_REMESH_TARGET_TRIANGLES
+        ):
+            problem = refusal(
+                "INVALID_TARGET",
+                f"target_triangle_count must be 4 to {MAX_REMESH_TARGET_TRIANGLES}, not {target_triangle_count}: "
+                f"the remesher makes up to {REMESH_OVERSHOOT:g} times the target, and a result over "
+                f"{MAX_RESULT_TRIANGLES} triangles is refused",
             )
-        else:
-            target_block = (
-                f"    uni_opts.target_edge_length = {edge_len}\n"
-                "    uni_opts.target_type = unreal"
-                ".GeometryScriptUniformRemeshTargetType"
-                ".TARGET_EDGE_LENGTH\n"
-            )
-
-        code = (
-            "    gs_r = unreal.GeometryScript_Remeshing\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    remesh_opts = unreal"
-            ".GeometryScriptRemeshOptions()\n"
-            f"    remesh_opts.remesh_iterations = {iters}\n"
-            "    uni_opts = unreal"
-            ".GeometryScriptUniformRemeshOptions()\n"
-            + target_block
-            + "    gs_r.apply_uniform_remesh("
-            "mesh, remesh_opts, uni_opts)\n"
-            "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            f"'mode': {mode!r},"
-            "'original_triangles': before_tris,"
-            "'result_triangles': tris,"
-            "'result_vertex_count': verts"
-            "}))\n"
+        if problem is None and not 1 <= int(smoothing_iterations) <= 50:
+            problem = refusal("INVALID_PASSES", f"smoothing_iterations must be 1 to 50, not {smoothing_iterations}")
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            REMESH,
+            mesh=mesh_path,
+            target_edge_length=float(target_edge_length) if target_edge_length is not None else None,
+            target_triangle_count=int(target_triangle_count) if target_triangle_count is not None else None,
+            passes=int(smoothing_iterations),
         )
-        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def compute_mesh_uv(
         self,
         mesh_path: str,
-        method: str = "auto_uv",
+        method: str = "auto",
         uv_channel: int = 0,
         island_padding: float = 2.0,
+        texture_resolution: int = 1024,
     ) -> Dict[str, Any]:
         """
-        Generate UV coordinates using GeometryScript_UVs.
+        Generate UVs for a DynamicMeshActor's mesh, unwrapped and packed.
+
+        XAtlas unwraps meshes of at most ``XATLAS_MAX_TRIANGLES`` triangles:
+        it crashed the editor on larger ones. ``auto`` picks XAtlas up to that
+        size and PatchBuilder above it; ``xatlas`` on a larger mesh is
+        refused (``MESH_TOO_LARGE_FOR_XATLAS``) with nothing changed.
 
         Args:
             mesh_path: Mesh actor path.
-            method: 'xatlas' or 'patch_builder' (default xatlas).
-            uv_channel: UV set index.
-            island_padding: Unused (reserved for future option support).
+            method: 'auto' (default; 'auto_uv' is the same), 'xatlas' or
+                'patch_builder'.
+            uv_channel: UV channel index (0 to 7); it must exist on the mesh.
+            island_padding: Gap between packed islands, in texels of a
+                texture_resolution-wide texture (above 0).
+            texture_resolution: Texture width the padding is measured in
+                (64 to 8192).
 
         Returns:
-            Dict with method, uv_channel, triangle/vertex counts.
+            Dict with method (the one that ran), requested_method,
+            uv_channel, island_padding (the padding packed, which differs
+            when the packing resolution was clamped to 16-4096),
+            texture_resolution, packing_resolution, island_count,
+            coverage_ratio (the UV area of the triangles over the area of
+            the unit UV square, or of the UV bounds when they extend past
+            it), triangle/vertex counts and warnings.
         """
-        m = method.lower()
-        if m in ("patch_builder", "patchbuilder"):
-            uv_block = (
-                "    uv_opts = unreal"
-                ".GeometryScriptPatchBuilderOptions()\n"
-                f"    gs_uv.auto_generate_patch_builder_mesh_u_vs("
-                f"mesh, {uv_channel}, uv_opts)\n"
+        requested = method.lower()
+        requested = {"auto_uv": "auto", "patchbuilder": "patch_builder"}.get(requested, requested)
+        problem = invalid_choice("method", requested, UV_METHODS, "UNKNOWN_UV_METHOD")
+        if problem is None and not 0 <= int(uv_channel) <= 7:
+            problem = refusal("INVALID_UV_CHANNEL", f"uv_channel must be 0 to 7, not {uv_channel}")
+        if problem is None and not (math.isfinite(float(island_padding)) and 0 < float(island_padding) <= 64):
+            problem = refusal(
+                "INVALID_PADDING", f"island_padding must be above 0 and at most 64 texels, not {island_padding}"
             )
-            method_label = "patch_builder"
-        else:
-            # Default to XAtlas for auto_uv, xatlas, atlas_pack, etc.
-            uv_block = (
-                "    uv_opts = unreal"
-                ".GeometryScriptXAtlasOptions()\n"
-                f"    gs_uv.auto_generate_x_atlas_mesh_u_vs("
-                f"mesh, {uv_channel}, uv_opts)\n"
+        if problem is None and not 64 <= int(texture_resolution) <= 8192:
+            problem = refusal(
+                "INVALID_RESOLUTION", f"texture_resolution must be 64 to 8192, not {texture_resolution}"
             )
-            method_label = "xatlas"
-
-        code = (
-            "    gs_uv = unreal.GeometryScript_UVs\n"
-            "    gs_q = unreal.GeometryScript_MeshQueries\n"
-            "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n" + uv_block + "    actor.dynamic_mesh_component"
-            ".notify_mesh_modified()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    print(json.dumps({"
-            f"'mesh_path': {mesh_path!r},"
-            f"'method': {method_label!r},"
-            f"'uv_channel': {uv_channel},"
-            "'triangle_count': tris,"
-            "'vertex_count': verts"
-            "}))\n"
+        if problem is not None:
+            return problem
+        return await self._run_mesh_script(
+            COMPUTE_UV,
+            mesh=mesh_path,
+            method=requested,
+            uv_channel=int(uv_channel),
+            island_padding=float(island_padding),
+            texture_resolution=int(texture_resolution),
         )
-        return await self._run_mesh_script(code, actor=mesh_path)
 
     # ------------------------------------------------------------------
     # Internal helpers

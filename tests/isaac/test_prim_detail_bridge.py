@@ -284,5 +284,5 @@ def test_unknown_aspects_are_rejected_before_any_transport() -> None:
 
     result = asyncio.run(tools.get_isaac_prim_detail("/World/Cube", aspects=["nonsense"]))
 
-    assert result["error_type"] == "ValueError"
+    assert result["error_type"] == "ValidationError"
     tools._client.bridge_request.assert_not_called()

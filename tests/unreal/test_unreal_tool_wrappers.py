@@ -94,6 +94,8 @@ def _sample(name: str, annotation: Any) -> Any:
     if name == "agent_control":
         return "inspect"
     origin = get_origin(annotation)
+    if origin is typing.Literal:
+        return get_args(annotation)[0]
     if origin is typing.Union:
         return _sample(name, next(arg for arg in get_args(annotation) if arg is not type(None)))
     if origin in (list, List):

@@ -78,14 +78,16 @@ def test_output_with_no_json_object_still_fails_to_parse() -> None:
     result = _run_json("Traceback-free garbage\nmore garbage")
 
     assert result["success"] is False
-    assert result["error_type"] == "JSONDecodeError"
+    assert result["error_type"] == "EngineError"
+    assert result["details"]["exception_type"] == "JSONDecodeError"
 
 
 def test_a_json_value_that_is_not_an_object_is_a_parse_failure_not_a_crash() -> None:
     result = _run_json("[1, 2, 3]")
 
     assert result["success"] is False
-    assert result["error_type"] == "JSONDecodeError"
+    assert result["error_type"] == "EngineError"
+    assert result["details"]["exception_type"] == "JSONDecodeError"
 
 
 def test_extraction_prefers_the_last_object_line() -> None:

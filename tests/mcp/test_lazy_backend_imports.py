@@ -58,6 +58,7 @@ BACKEND_MODULES: Dict[str, Tuple[str, ...]] = {
         "PIL",
         "simul.adapters.unreal_runtime",
         "simul.adapters.unreal_connection",
+        "simul.adapters._unreal_mesh_scripts",
         "simul.mcp.registration._reg_unreal",
         "simul.mcp.registration._unreal_tools",
         "simul.mcp.schemas.unreal",

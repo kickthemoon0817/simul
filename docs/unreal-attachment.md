@@ -179,7 +179,10 @@ and `attach`; a changed target is never accepted automatically. Reattaching or
 detaching takes effect on the next tool session without restarting the MCP server.
 
 Named controls and Python-backed tools check identity inside the same editor Python
-execution as their operation. Legacy Remote Control calls check immediately before
+execution as their operation, first, in the call's own namespace, which is discarded
+with the call (every simul Python call runs in one; see
+[tools.md](tools.md#unreal-engine)). Its runner lives in a second small in-memory
+module, refreshed on every call. Legacy Remote Control calls check immediately before
 dispatch in a separate request: attachment is not an editor lock, so avoid replacing
 maps concurrently with those calls. Viewport config keys can be reused by Unreal
 layouts; reattach after reorganizing level-editor windows. An explicit arbitrary

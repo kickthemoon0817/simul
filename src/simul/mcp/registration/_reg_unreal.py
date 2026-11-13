@@ -15,6 +15,7 @@ first.
 from __future__ import annotations
 
 import inspect
+import json
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -30,6 +31,9 @@ from typing import (
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, Field, create_model, model_validator
 
+from ...utils.errors import exception_message
+from .. import error_types
+from ._constraints import constrain, from_request_model
 from ._helpers import describe_params
 from ._unreal_tools import REQUIRED, ToolParam, UnrealTool, surface_tools
 
@@ -47,6 +51,29 @@ class InvalidToolInput(Exception):
     exception passes through unchanged, so the envelope's ValidationError
     payload carries the check's message as written.
     """
+
+
+class InvalidArgument(ValueError):
+    """A parameter's text did not convert (malformed JSON, a list of numbers that is not).
+
+    Reported as a ``ValidationError`` whose ``details.errors`` names the field,
+    like a value the request model refuses.
+    """
+
+    error_type = error_types.VALIDATION_ERROR
+
+    def __init__(self, field: str, exc: Exception) -> None:
+        reason = exception_message(exc)
+        super().__init__(f"{field}: {reason}")
+        self.details = {
+            "errors": [
+                {
+                    "field": field,
+                    "message": reason,
+                    "type": "json_invalid" if isinstance(exc, json.JSONDecodeError) else "value_error",
+                }
+            ]
+        }
 
 
 def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
@@ -102,7 +129,10 @@ def build_tool_wrapper(
         An async callable named after the tool.
     """
     request_model = spec.request or request_model_for(spec)
-    annotations = {param.name: _described(param, documented.get(param.name)) for param in spec.params}
+    annotations = {
+        param.name: _described(param, documented.get(param.name), _advertised(spec, param))
+        for param in spec.params
+    }
     signature = inspect.Signature(
         [
             inspect.Parameter(
@@ -161,7 +191,12 @@ def session_arguments(spec: UnrealTool, request: Any) -> Dict[str, Any]:
     arguments: Dict[str, Any] = {}
     for param in spec.params:
         value = getattr(request, param.name)
-        arguments[param.target or param.name] = value if param.convert is None else param.convert(value)
+        if param.convert is not None:
+            try:
+                value = param.convert(value)
+            except (TypeError, ValueError) as exc:
+                raise InvalidArgument(param.name, exc) from exc
+        arguments[param.target or param.name] = value
     return arguments
 
 
@@ -198,9 +233,20 @@ def _enforce(check: Callable[[Any], Optional[str]]) -> Callable[[Any], Any]:
     return validate
 
 
-def _described(param: ToolParam, documented: Optional[str]) -> Any:
+def _advertised(spec: UnrealTool, param: ToolParam) -> Any:
+    """The parameter's annotation with the bounds and choices its tool states.
+
+    From ``PARAM_CONSTRAINTS``, and from the declaration's own request model
+    when it has one, so the input schema says what the call will refuse.
+    """
+    annotation = from_request_model(spec.request, param.name, param.annotation)
+    return constrain(spec.name, param.name, annotation)
+
+
+def _described(param: ToolParam, documented: Optional[str], annotation: Any = None) -> Any:
     """The parameter's annotation, carrying its schema description when it has one."""
+    annotation = param.annotation if annotation is None else annotation
     text = param.description or documented
     if not text:
-        return param.annotation
-    return Annotated[param.annotation, Field(description=text)]
+        return annotation
+    return Annotated[annotation, Field(description=text)]

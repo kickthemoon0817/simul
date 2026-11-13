@@ -640,7 +640,7 @@ class OmniGraphMixin:
             ``applied`` were still set.
         """
         if not values:
-            return ErrorResponse(error="values is empty; nothing to set", error_type="ValueError").model_dump()
+            return ErrorResponse(error="values is empty; nothing to set", error_type="ValidationError").model_dump()
         guard = not self.settings.security.allow_script_execution
         script_attributes = sorted(name for name in values if is_script_attribute(name))
         if guard and script_attributes:

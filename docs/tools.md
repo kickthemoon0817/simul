@@ -8,9 +8,11 @@ selected (`--backends`), on `--unreal-tools` / `--blender-tools`, and on
 simul tools            # add --json for descriptions and input schemas
 ```
 
-Every tool returns a JSON object. Failures carry `success: false` and an
-error type such as `NotRunning`, `RefusedOperation` or
-`UnsupportedOperation`.
+Every tool returns a JSON object. A failure is sent with MCP `isError: true`
+and carries `success: false`, an `error_type` and an `error` message; see
+[Errors](#errors) for the types. Parameter bounds and choices are in each
+tool's input schema (`minimum`, `maximum`, `enum`), and a value outside them
+is refused with `ValidationError` before the tool runs.
 
 Results are strict JSON: a non-finite float is sent as the string
 `"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token. Each result
@@ -505,6 +507,10 @@ Notes:
   Python Scripting Component (`OmniScriptingAPI` / `omni:scripting:scripts`),
   and imports with unloaded payloads, are refused. See
   [configuration.md](configuration.md#script-execution).
+- `ping_isaac` does not wait for a call already running on the instance and
+  reports `busy` when one is. A call the client cancels keeps the instance
+  until Isaac Sim has finished it (the bridge is asked to interrupt it first);
+  see [isaac-sim.md](isaac-sim.md#transports).
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or
@@ -540,7 +546,7 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 |---|---|
 | Engine and scene | `get_unreal_engine_info`, `get_unreal_loaded_map`, `summarize_unreal_scene`, `query_unreal_scene_graph`, `analyze_unreal_scene_for_robotics`, `get_unreal_viewport_info` |
 | Actors | `list_unreal_actors`, `get_unreal_actor_info`, `list_unreal_actor_components`, `describe_unreal_object`, `get_unreal_actor_by_semantic_label`, `get_unreal_actor_thumbnail`, `spawn_unreal_actor`, `delete_unreal_actor`, `set_unreal_actor_transform`, `set_unreal_actor_property`, `set_unreal_actor_visibility`, `set_unreal_actor_parent`, `add_unreal_component`, `focus_unreal_on_actor` |
-| Assets | `search_unreal_assets` |
+| Assets | `search_unreal_assets`, `import_unreal_asset`, `save_unreal_assets` |
 | Camera, lights, rendering | `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
 | Materials | `get_unreal_material_info`, `assign_unreal_material`, `create_unreal_material_instance`, `set_unreal_material_params` |
 | Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `apply_unreal_force`, `control_unreal_simulation`, `get_unreal_simulation_status` |
@@ -790,13 +796,36 @@ Behaviour worth knowing:
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
   `get_unreal_interchange_info` reports whether the plugin is available.
-  Import options accept booleans `import_actors`, `import_geometry`,
-  `import_materials`, `import_lights`, `import_cameras`; export options accept
-  booleans `export_actor_folders`, `export_sublayers`.
+  Export options accept booleans `export_actor_folders`, `export_sublayers`.
+  - `import_unreal_usd` options are Unreal 5.7's USD importer settings:
+    booleans `import_actors`, `import_geometry`, `import_materials`,
+    `import_skeletal_animations`, `import_level_sequences`,
+    `import_groom_assets`, `import_sparse_volume_textures`, `import_sounds`,
+    `import_only_used_materials`, `use_prim_kinds_for_collapsing`,
+    `merge_identical_material_slots`, `share_assets_for_identical_prims`,
+    `prim_path_folder_structure`, `interpret_lods`; `kinds_to_collapse` (a
+    list of USD kinds: `model`, `component`, `group`, `assembly`,
+    `subcomponent`); `fallback_collision_type` (`none`, `convex_decomposition`,
+    `convex_hull`, `sphere`, `cube`, `mesh_simplification`, `capsule`,
+    `custom_mesh`); `nanite_triangle_threshold`; `prims_to_import` (prim
+    paths); and `meters_per_unit` with `up_axis` (`y` or `z`), given together,
+    to override the stage's own units and up axis. An option left out takes
+    Unreal's default, whatever the project's saved settings say. By default
+    the importer merges the meshes under a prim of a collapsing kind into one
+    (three exported StaticMeshActors came back as one `SM_Root`); pass
+    `use_prim_kinds_for_collapsing` false for a mesh per prim. The default
+    fallback collision, `none`, uses the render triangles as collision, so a
+    mesh has no simple shapes; `convex_hull` gives each a hull. Earlier simul
+    versions documented `import_lights` and `import_cameras`, which 5.7 does
+    not have ("Failed to find property"): lights and cameras are imported as
+    actors with `import_actors`. Any other name or a malformed value is a
+    `ValidationError` before anything runs.
   - `import_unreal_usd` files the assets under
     `<destination_path>/<file name>` (the name as Unreal names assets: `my
     robot.usda` becomes `my_robot`) and spawns the actors in the level being
-    edited. Without `replace_existing` (the default) an import into a folder
+    edited. `destination_path` is a folder under `/Game`, `/Game` itself
+    included; another content root is a `SandboxError`. Without
+    `replace_existing` (the default) an import into a folder
     that already holds assets is refused with `InvalidState` and nothing is
     imported, and existing actors are kept: the new ones are added beside
     them. Unreal's USD importer otherwise replaces both, whatever
@@ -805,26 +834,79 @@ Behaviour worth knowing:
     deleted the earlier import's actors. With `replace_existing` true the
     folder's assets and the level's actors from an earlier import of the file
     (the top-level actor named after the file) are replaced;
-    `removed_actor_paths` lists the actors that went.
+    `removed_actor_paths` lists the actors that went, and `actor_paths` lists
+    each new actor once. `warnings` holds the warnings and errors the editor
+    logged during the import (read back from its log file; they can include a
+    line from other editor activity at the same time), and a file the
+    importer cannot read fails with `EngineError` carrying those lines. The
+    log file is the one this editor writes, found by a marker line the script
+    logs first: a second editor of the same project writes
+    `<Project>_2.log`, and the lines used to come from `<Project>.log`, the
+    other editor's.
+  - The USD file's composition must stay inside the sandbox, as in the
+    headless USD tools: before the file reaches the editor, simul walks its
+    layers with `simul.usd.sandbox.CompositionSandbox` (every sublayer,
+    reference, payload, value clip and asset-valued attribute such as a
+    texture, in every variant). A stage inside the sandbox whose
+    `references = @../../outside/ref.usda@` names a file outside it used to
+    import that file's prims; it is now refused with `SandboxError`, whose
+    `details.outside_sandbox` names each path, its kind and the layer that
+    authors it, and `details.references_outside` the locations. A file pxr
+    cannot open on the simul host is refused too, since nothing then vouches
+    for what it names. An Unreal content path that Unreal's own exporter
+    writes into an asset-valued attribute
+    (`info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@`)
+    is not a file: the importer loads that object from the editor's content.
+    Only that shape passes: an asset-valued attribute (not a sublayer,
+    reference, payload or clip) whose value is under `/Engine`, `/Game` or
+    `/Script` and ends in `<Name>.<Name>` with no file extension, naming no
+    file on disk. `@/Engine/x.usda@`, a relative path and another content
+    root (a plugin's) are refused like any path outside the sandbox.
+  - An import can leave engine or plugin packages modified in memory: on UE
+    5.7.4 Interchange set `bUsedWithNanite` on its shared parent material
+    `/InterchangeAssets/Materials/PBRSurfaceMaterial_MR`. Unreal does that on
+    a later editor frame, up to several imports after the one whose mesh
+    needed it, so each import lists in `dirty_engine_packages`, with a
+    warning, every package outside `/Game` the editor holds modified when it
+    finishes, whichever call left it so. Python can neither clear that flag
+    nor save one package of it safely: simul saves none of them
+    (`save_unreal_assets` skips them, and its `dry_run` lists them too), but
+    the editor's **Save All** would write them into the engine install.
+    Discard them when the editor asks, or restart it. `import_unreal_asset`
+    reports the same.
   - The import options are set without saving them. Unreal's
     UsdStageImportOptions saves its settings to the project's
     `Saved/Config/<Platform>Editor/EditorPerProjectUserSettings.ini` whenever
     a change is notified, and earlier simul versions notified it, so one
     import with `import_actors` false left `bImportActors=False` there for
     every later import and the editor's own **Import into Level** dialog.
-    simul now sets `import_actors`, `import_geometry` and `import_materials`
-    on every import (true unless given) and, when the project's saved
-    settings differ from Unreal's defaults, says so in `warnings` and leaves
-    them alone: nothing tells a value simul wrote from one the user chose.
-    Reset them in the editor's USD import dialog.
+    simul now sets every option above on every import and, when the
+    project's saved settings differ from Unreal's defaults, says so in
+    `warnings` and leaves them alone: nothing tells a value simul wrote from
+    one the user chose. Reset them in the editor's USD import dialog.
   - `export_unreal_usd` exports actors of the level being edited; a path in
     another map is refused without loading it. `actors_exported` counts the
     actors the written stage has a prim for, read back from the file
     (`exported_prims` gives each one's prim), since Unreal's exporter leaves
     out editor helpers such as WorldSettings or PlayerStart without an error;
     they are listed in `skipped_actors`, and an export that wrote none of the
-    actors fails with `EngineError`. Mesh and material files are written next
-    to the output file.
+    actors fails with `EngineError`. Unreal writes a file per mesh and
+    material into the export's asset folder, `<output name>_assets` beside
+    the output, so two exports into one folder keep their meshes apart; with
+    `export_sublayers` it also writes a layer per sublevel and
+    `MaterialOverrides` beside the output. Without `overwrite` the export is
+    refused with `InvalidState`, listing `details.existing_files`, when any
+    of them exists: the output, a file in its asset folder, or a sublevel
+    layer or `MaterialOverrides`. The gate used to cover the output alone, and
+    the mesh files beside it were replaced. `written_files` lists every file
+    the export created or changed under the output's folder and
+    `overwritten_files` those that existed before. With `overwrite`, a file
+    whose content would not change is left as it is (Unreal skips identical
+    files), so it is not in `written_files`. Unreal's exporter writes a
+    DynamicMeshActor as an empty Xform, without its mesh; `warnings` names
+    them, and `convert_unreal_mesh_format` with `target_format`
+    `static_mesh` and `replace_actor` true makes them StaticMeshActors, which
+    export with their geometry.
   - Both wait `unreal.import_export_timeout` (default 300 s,
     `UNREAL__IMPORT_EXPORT_TIMEOUT`) instead of `unreal.timeout`: the first
     USD export of an editor session loads Unreal's USD Python modules and
@@ -836,13 +918,64 @@ Behaviour worth knowing:
     Control runs its scripts in. The export's AssetExportTask used to keep
     the editor world referenced there, and the next level load failed the
     editor's world leak check and took the editor down.
+- `import_unreal_asset` imports an FBX, glTF, GLB or OBJ file through
+  Unreal's Interchange importer with the project's default content pipelines,
+  as the Content Browser's **Import** does: the meshes, materials and textures
+  are created and saved under `destination_path` (a `/Game` folder; glTF files
+  get a folder of their own), and no actor is placed. The file must be inside
+  the sandbox, like a USD file, and so must every file it names, which
+  Interchange reads too: a glTF's buffers and images, an OBJ's MTL libraries
+  and their textures, an FBX's textures, and the other UDIM tiles of a
+  texture named like one (`wood.1001.png`). Each is looked for where Unreal
+  5.7's translators look (`simul.utils.asset_references`, shared with the
+  Blender import): an OBJ's textures are joined to the OBJ's folder even when
+  the MTL is elsewhere, glTF URIs are URL-decoded, an FBX texture is tried as
+  its stored name (a relative one where the editor opens it) and joined to
+  the FBX's folder, and `..` is judged both as Unreal collapses it and as the
+  file system follows it. A referenced file outside the sandbox that exists
+  refuses the import with `SandboxError`, naming it in
+  `details.references_outside` (and the model in `referenced_by`), before
+  the editor reads anything; one that does not exist reads nothing and
+  passes. A binary FBX simul cannot parse is refused, since nothing then
+  vouches for its textures. Without `replace_existing` an asset that already
+  exists is kept (`kept_assets`), and a file whose every asset exists imports
+  nothing (`InvalidState`, listing the meshes, materials and textures in
+  `details.existing_assets`). With it, Unreal reimports the asset named after
+  the file and keeps the other assets an earlier import of the file made, as
+  they were, even when their source changed (a 32 px texture redrawn at 48
+  px stayed 32 px): the reimported asset is in `replaced_assets`, the ones
+  kept in `kept_assets`, with a warning. Delete them, or import into another
+  folder, to import them anew. An earlier import's assets are told apart by
+  the files their import data names. `warnings` holds what the editor logged,
+  `dirty_engine_packages` the engine or plugin packages the import left
+  modified, and a file Unreal cannot read fails with `EngineError` and its
+  logged reasons. It waits `unreal.import_export_timeout`. USD files go
+  through `import_unreal_usd`.
+- `save_unreal_assets` saves modified packages to disk: the packages of
+  `asset_paths`, the level being edited with `save_level` (its map package
+  and, in a World Partition level, its actors' and objects' packages), or
+  every modified package with `all_dirty`. Only modified packages are written.
+  Packages outside `/Game` (engine or plugin content, which importers and edits
+  can leave modified) are skipped unless `allow_engine_content`, as are ones
+  never saved (under `/Temp`); `skipped` says why for each. `dry_run` lists
+  what would be saved. A package still modified afterwards is in `failed`,
+  and the call fails with `EngineError`. A level never saved is
+  `InvalidState`: save it once in the editor to give it a file. In attached
+  mode it runs, like every tool, only while the attached map is open.
 - `assign_unreal_material` assigns the material in one undoable transaction
   that records the component first, which marks the level dirty (in a World
   Partition level, the actor's package), so saving keeps the assignment and
   Undo reverts it; the slot is read back, and `previous_material_path` is what
   it rendered with before. The actor must be in the level being edited: a path
-  in another map is refused without loading that map, as is a map path given
-  as the material.
+  in another map is refused without loading that map. A material path that
+  names something other than a material (a level, which is never loaded, or
+  a mesh) is an `InvalidAssetType`, as in `create_unreal_material_instance`,
+  and one that names nothing a `NotFoundError`. `component_name` picks the mesh component by name (or
+  path); without it the actor's mesh root component is used, else its only
+  mesh component, and an actor with several is a `ValidationError` naming
+  them. `slot_name` picks the material slot by the name the Details panel
+  shows; an unknown component or slot is a `ValidationError` listing the
+  actor's components or the component's slots.
 - `create_unreal_material_instance` writes under the project's `/Game` folder:
   `save_path`, else next to a parent in `/Game`, else `/Game/Materials`. It
   used to save an instance of an `/Engine` parent into the engine install
@@ -852,10 +985,37 @@ Behaviour worth knowing:
   `set_unreal_material_params` refuses an instance outside `/Game` the same
   way. A folder with an empty, `.` or `..` name, or with characters Unreal
   does not allow, is a `ValidationError`: Unreal does not resolve `..` and
-  turned `/Game/../Engine` into a folder named `__`.
-- `search_unreal_assets` returns at most `max_results` assets, from 1 to 1000:
-  Remote Control sizes its result array to the limit it is sent, and -1
-  crashed the editor.
+  turned `/Game/../Engine` into a folder named `__`. A missing parent is a
+  `NotFoundError`, a parent that is no material (a StaticMesh, a level, which
+  is never loaded) an `InvalidAssetType`, a name already taken an
+  `InvalidState`, and an instance Unreal created but did not save an
+  `EngineError` naming it.
+- `search_unreal_assets` reads the editor's asset registry, loading nothing,
+  in or out of Play In Editor. Without `package_paths` it searches every
+  mounted content root (`/Game`, `/Engine` and each plugin's); with them, their
+  subfolders too unless `recursive_paths` is false. `class_names` take a
+  class's name (`StaticMesh`, `Material`, `Texture2D`) or its path
+  (`/Script/Engine.StaticMesh`), with subclasses unless `include_subclasses`
+  is false; an unknown name is a `ValidationError`. The query matches part of
+  the asset name, ignoring case, and redirectors are left out. Matches are
+  sorted by object path; `total` counts them, `truncated` says more follow and
+  `next_offset` is the `offset` of the next page. Each asset has its
+  `class_path`, `package_name`, `package_path` and `metadata`: the registry
+  tags Unreal records for its kind, as the strings it stores (`Triangles`,
+  `Vertices`, `LODs`, `NaniteEnabled`, `CollisionPrims` for a mesh;
+  `Dimensions` and `Format` for a texture; `MaterialDomain`, `BlendMode` or
+  `Parent` for a material). Remote Control's search, used before, matched no
+  short class name, searched only `/Game` and no subfolders, and could not
+  tell whether more matched. `max_results` is 1 to 1000: Remote Control sized
+  its result array to the limit it was sent, and -1 crashed the editor.
+- `get_unreal_interchange_info` lists Interchange's formats for each kind of
+  translator (`supported_formats_by_kind`: assets, scenes, actors) and the
+  project's pipeline stacks, content and scene, with each stack's pipeline
+  assets (`pipelines`, `default_pipeline_stacks`).
+- In attached mode a tool run after the attached editor, map or viewport
+  changed fails with `InvalidState` and `details.reason`
+  `"attachment_changed"`, having run nothing; run `simul unreal attach` again.
+  It used to come back as the tool's own traceback.
 - SimReady conversion and validation are not implemented for Unreal. Those
   tools return `UnsupportedOperation` without changing files.
 - `analyze_unreal_scene_for_robotics` classifies the actors loaded in the
@@ -949,10 +1109,10 @@ Behaviour worth knowing:
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:
   - `spawn_unreal_actor`, `delete_unreal_actor`,
-    `generate_unreal_procedural_scene`, the mesh tools that create an actor
-    (`generate_unreal_mesh_primitive`, `compute_unreal_convex_hull`,
-    `decompose_unreal_convex_hull`, `convert_unreal_mesh_format` to
-    `dynamic_mesh`), `import_unreal_usd`, `export_unreal_usd` and, in attached
+    `generate_unreal_procedural_scene`, every mesh tool except
+    `validate_unreal_mesh` (they create actors or replace meshes, see below),
+    `import_unreal_usd`, `export_unreal_usd`, `import_unreal_asset`,
+    `save_unreal_assets` (the editor saves nothing during PIE) and, in attached
     mode, every `control_unreal_ui` action except `inspect` and `clear_cursor`
     return `error_type: "PIEActive"`, with `details.hint` naming the way out:
     `control_unreal_simulation` with action `stop` (CLI: `simul unreal sim stop`).
@@ -990,12 +1150,210 @@ Behaviour worth knowing:
     starts) the camera stays where it was put; when a Play session in the
     level viewport stops, Unreal replaces the editor camera, by default with
     the game camera's last view.
+- The mesh tools (`generate_unreal_mesh_primitive`, `validate_unreal_mesh`
+  and the other `*_unreal_mesh*` and `*_unreal_convex_hull` tools) run
+  GeometryScript in the editor:
+  - They need the GeometryScripting plugin, which `simul unreal setup` enables
+    (restart an editor that was already running). Without it every mesh tool
+    returns `error_type: "UnsupportedOperation"` with `details.code:
+    "GEOMETRY_SCRIPTING_DISABLED"` and a hint naming setup.
+  - They take the path of an actor in the level open in the editor, found
+    without loading a map, or of an asset. A path that names nothing is
+    `NotFoundError`. `validate_unreal_mesh`, `compute_unreal_convex_hull` and
+    `decompose_unreal_convex_hull` read a DynamicMeshActor, a StaticMeshActor
+    or a StaticMesh asset (its first LOD, copied into a transient
+    DynamicMesh; the reply's `source_kind` says which). The tools that edit a
+    mesh in place take a DynamicMeshActor only: a StaticMeshActor
+    (`details.code: "STATIC_MESH_ACTOR"`) or a StaticMesh asset path
+    (`"STATIC_MESH_ASSET"`) is a `ValidationError` whose `details.hint` names
+    `convert_unreal_mesh_format`; any other actor is `"NO_DYNAMIC_MESH"`.
+  - `convert_unreal_mesh_format` moves meshes between the two kinds.
+    `dynamic_mesh` places a DynamicMeshActor copy of a StaticMesh asset (at
+    `location`) or of a StaticMeshActor (at its transform), with its
+    materials; `replace_actor` removes the StaticMeshActor in the same
+    transaction. `static_mesh` writes a DynamicMeshActor's mesh into a
+    StaticMesh asset: `asset_path` (default `/Game/Generated/SM_<label>`, the
+    label's ASCII letters and digits joined by underscores) must
+    be under `/Game` (anything else, `/Engine` or a plugin's content, is
+    `SandboxError` `"OUTSIDE_GAME_CONTENT"`); an existing StaticMesh is
+    refused (`"ASSET_EXISTS"`) unless `overwrite`, which replaces its mesh and
+    keeps its references; the component's materials go to its slots; its
+    simple collision is the component's, a convex hull or none (`collision`,
+    `auto` by default); `nanite` enables Nanite; `save` (default true) saves
+    that asset's package and nothing else, and the reply names the `.uasset`
+    written. With Nanite the asset's `triangle_count` and `vertex_count` are the
+    mesh written, which Nanite renders, and `fallback_triangle_count` and
+    `fallback_vertex_count` its fallback mesh (LOD 0: 316 triangles for a
+    1,920-triangle sphere). `replace_actor` swaps the DynamicMeshActor for a
+    StaticMeshActor at its transform, in one undoable transaction. Writing the
+    asset, new or overwritten, with its materials and collision, is not
+    undoable: Unreal records no undo step for a new asset, so simul records
+    none for the rest of the write either (its collision used to be an Undo
+    step of its own, and one Undo dropped it from the asset). Unreal's USD exporter
+    writes a DynamicMeshActor as an empty Xform, without its mesh, so convert
+    with `replace_actor` before exporting a mesh made with these tools; the
+    reply's `hint` says so when the DynamicMeshActor was left in place.
+  - A hull or decomposition with `output` `collision` or `both` on a
+    StaticMesh source sets the StaticMesh asset's simple collision (every
+    actor using it shares it), only for an asset under `/Game`, in one
+    undoable transaction; `save` saves that asset. Undo restores the asset's
+    collision, but Unreal does not rebuild the physics of the actors already
+    placed with it: until the level is reloaded they keep colliding with the
+    hull (a line trace still hits it). Save before such an edit, or set the
+    collision again rather than undo it.
+  - Every GeometryScript call is checked after it returns. GeometryScript
+    reports most failures that way and otherwise leaves the mesh as it was
+    (Catmull-Clark on a mesh without quad polygroups returned with the
+    triangle count unchanged). An error fails the tool with `EngineError`,
+    `details.code: "GEOMETRY_SCRIPT_FAILED"` and GeometryScript's messages in
+    `details.messages`, and nothing is changed; warnings come back in
+    `warnings`.
+  - An edit runs on a copy of the mesh, and the copy replaces the component's
+    mesh in one transaction, so a failed edit changes nothing, one Undo
+    reverts one edit and the level is marked dirty for Save. A tool that
+    creates an actor spawns it, with its mesh, in one transaction too.
+  - Undo and Redo of a mesh edit restore which mesh the DynamicMeshComponent
+    holds, not what Unreal does when a mesh is set (UE 5.7.4): the component
+    stops listening to the mesh it got back, so an in-place edit of that mesh
+    outside simul (a Blueprint, Python GeometryScript, Modeling Mode) no longer
+    updates its bounds or what it draws, and its physics keeps the simple
+    collision it had before the Undo or Redo (a trace against a hull that Redo
+    put back misses). Every mesh tool repairs both on each DynamicMeshActor it
+    touches, `validate_unreal_mesh` included: it rebuilds the collision, and
+    where an Undo or Redo left the actor's package dirty (or in a level never
+    saved) it sets the component's mesh again, which binds it (and renames the
+    mesh object). A clean level is left alone, so a level saved right after an
+    Undo keeps the stale binding until it is reloaded or edited.
+  - Each in-place edit keeps the mesh it replaced alive for Undo: a full copy
+    that the editor's undo buffer limit (256 MB by default) does not count, so
+    it is freed only when the edit leaves the undo history. A hundred edits of
+    a 32,256-triangle mesh added about 370 MB to the editor; one UV unwrap of a
+    1M-triangle mesh about 760 MB.
+  - A mesh tool leaves at most 2,000,000 triangles in a mesh it makes or
+    edits. A larger result is refused with `details.code: "RESULT_TOO_LARGE"`
+    (`details.predicted` says whether it was predicted or measured) and
+    nothing is changed: before anything runs when the size is known up front
+    (a subdivision, a remesh, which makes up to 1.6 times its target, a UV
+    unwrap or topology edit of a mesh already over the cap, a primitive with
+    more than 512 segments), otherwise when the operation has run and before
+    its result replaces anything.
+  - `compute_unreal_mesh_uv` unwraps with XAtlas only up to 20,000 triangles:
+    XAtlas crashed the editor on a 130,048- and a 318,400-triangle mesh, and
+    took 28.6 s for 32,256 (UE 5.7.4). Method `auto`, the default, uses
+    PatchBuilder above that size (29 s for 318,400 triangles) and the reply's
+    `method` names the one that ran; `xatlas` on a larger mesh is refused with
+    `details.code: "MESH_TOO_LARGE_FOR_XATLAS"`. A `uv_channel` the mesh does
+    not have is refused (`"UV_CHANNEL_MISSING"`).
+  - Positions are where the actors are in the level. `apply_unreal_mesh_boolean`
+    combines both meshes at their actors' world transforms (location,
+    rotation, scale) and writes the result in the target's local space.
+    `cut_unreal_mesh_plane` takes its plane in world space unless `space` is
+    `local`, removes the half the normal points into (or keeps it as a second
+    actor with `keep_both_sides`), reports the plane in the mesh's space, and
+    refuses a plane that misses the mesh (`"PLANE_MISSES_MESH"`). The hull,
+    decomposition and cut actors take the source's whole transform. Face
+    selections of `edit_unreal_mesh_topology` (`normal:x,y,z[,angle]`,
+    `box:...`, `all`) are in the mesh's local space.
+  - `compute_unreal_convex_hull` and `decompose_unreal_convex_hull` produce
+    simple collision: `output` `actor` (default) spawns a DynamicMeshActor
+    whose mesh and simple collision are the hull or pieces, `collision`
+    replaces the source's simple collision, `both` does both, in one
+    transaction (Undo restores the collision Unreal uses, the component's
+    BodySetup included). Unreal rebuilds the physics of neither: after an Undo
+    or Redo a line trace still meets the shapes from before it (Redo of a hull
+    put the shape back, and traces missed it) until a mesh tool next touches
+    the actor, which rebuilds its collision. The hull is simplified to `max_faces` triangles
+    (250; 0 keeps the exact hull, 84,064 triangles for a 130,048-triangle
+    sphere). The decomposition is Unreal's own (GeometryScript's collision
+    generation, not V-HACD), with its sphere, box and capsule detection off:
+    left on, a sphere or capsule source came back as "Hull Computation Failed"
+    and a 100 cm cube. `max_vertices_per_hull` limits each piece (as 2V - 4
+    triangles); `error_tolerance` and `min_part_thickness` are passed on;
+    `volume_ratio` says how much of a closed source the pieces cover.
+  - `generate_unreal_mesh_primitive` takes each type's dimensions by name in
+    Unreal's axes (box `width` X, `depth` Y, `height` Z; capsule `radius` and
+    `length`, its straight part; torus `major_radius`, `minor_radius`), refuses
+    unknown names and sizes that are not above 0, and gives primitives quad
+    polygroups, so Catmull-Clark subdivides them. `segments` is 3 to 512.
+  - Options are implemented or refused, never ignored: `subdivide_unreal_mesh`
+    runs Catmull-Clark, Loop or uniform tessellation (levels 1 to 4; a result
+    over 2,000,000 triangles is refused); `simplify_unreal_mesh` takes one of a
+    triangle count, a fraction below 1 or `max_error` (a tolerance in cm);
+    `remesh_unreal_mesh` is uniform only and keeps the triangle count by
+    default; `compute_unreal_mesh_uv` packs islands `island_padding` texels
+    apart at `texture_resolution`; `edit_unreal_mesh_topology` needs a
+    selection and reports `faces_affected` and `edges_affected`.
+  - `validate_unreal_mesh` runs the checks named in `checks` (all by
+    default): `closed`, `manifold` (bowtie vertices), `degenerate_triangles`,
+    `orientation` (a closed mesh encloses a positive volume), `compact`,
+    `normals` and `uvs`, each with `passed`, `count` and `detail`. It does not
+    look for self-intersections.
+  - A mesh script runs under an HTTP timeout of at least 300 s, whatever
+    `UNREAL__TIMEOUT` says, since a GeometryScript call cannot be cancelled.
+    The slowest operations on a 2M-triangle mesh took 83 to 109 s (a
+    PatchBuilder unwrap, a convex hull, a simplification; UE 5.7.4, Apple
+    M-series). A script commits its result only within that timeout less 10
+    s: one that finishes later discards its result, so a `TimeoutError`
+    (`details.code: "MESH_TIME_BUDGET"`) leaves the level as it was once the
+    editor finishes, though the editor stays busy until then. For an editor on
+    this machine the limit runs on this machine's clock, so it holds however
+    long the call waited in the editor's queue; for a remote editor it is the
+    script's own run time, and a call that first waited behind another script
+    may still commit late.
+  - In attached mode, a call the attachment guard refuses (the editor shows
+    another map or instance) is `error_type: "InvalidState"`, `details.code:
+    "ATTACHMENT_CHANGED"`.
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.
-- `execute_unreal_script` runs the code you send in the editor's persistent
-  Python console namespace through `PythonScriptLibrary.ExecutePythonCommandEx`,
-  in or out of PIE. On UE 5.7 avoid one engine hazard in that code: Unreal wraps
+- Every Python call simul makes runs in a namespace of its own, and that
+  namespace is cleared when the call ends, whether it returns or raises. This
+  covers its own tools, `execute_unreal_script`, `simul unreal exec`, and
+  `batch_unreal_operations` calls to `ExecutePythonCommandEx` or
+  `ExecutePythonCommand`. (`call_unreal_actor_function` takes only actors of
+  the level open in the editor, so it never reaches the Python library.)
+  - **Why it matters.** UE 5.7 runs all literal Python in one dict that every
+    call and the editor's own Python console share, and `FileExecutionScope`
+    applies only to `.py` files. A name a script leaves there keeps its object
+    alive for Unreal's garbage collector.
+  - **The crash it prevents.** When the editor changes maps it releases
+    Python's hold on the old world and the objects inside it, but not on the
+    world's package or on objects outside it. A kept
+    `pkg = world.get_outermost()` therefore made the next `new_blank_map` or
+    map load abort the editor with "World Memory Leaks: Old Package ... not
+    cleaned up by GC", losing unsaved work.
+  - **`py` console commands are refused.** An `ExecuteConsoleCommand` whose
+    command is `py <code>`, or has a line or `|`-separated part that is one,
+    would run the code in that shared dict, past the per-call namespace. simul
+    refuses it with a `ValidationError` before anything is sent; run the code
+    with `execute_unreal_script` instead.
+  - **What remains.** Anything a script stores outside its namespace stays
+    alive for the editor's lifetime. A package or world kept that way, or an
+    object that refers to one, still aborts the editor at the next map change
+    as above. Places that keep things include a module attribute, an entry in
+    `sys.modules`, a registered callback or what its closure holds, and a
+    `unreal.uclass` type. An editor that ran an older simul keeps what those
+    calls bound until it restarts.
+- `execute_unreal_script` runs the code you send through
+  `PythonScriptLibrary.ExecutePythonCommandEx`, in or out of PIE.
+  - **A fresh namespace per call.** Each call starts with what a fresh
+    `__main__` holds (`__builtins__`, `__doc__`, `__spec__` and the rest) and
+    `unreal` imported. Nothing carries over between calls, so pass values back
+    in as code. A callback the script registers must import what it uses
+    inside itself, because the script's names are gone once it returns.
+  - **Mode behaviour is unchanged.** `ExecuteStatement` prints an expression's
+    value as the console does, but no longer keeps it in `builtins._`. A
+    `sys.displayhook` the script installs itself stays installed.
+  - **Code mentioning `.py` now runs.** Code that names a `.py` file followed
+    by a space (`print('see my.py first')`) runs as code; Unreal used to take
+    it for the path of a file to run.
+  - **A byte-order mark is skipped**, as Unreal skipped it, so a file saved as
+    "UTF-8 with BOM" runs.
+  - **A traceback starts with two frames of simul's.** The command's
+    (`File "<string>", line 1`) and the runner's (`File "<simul runner>"`)
+    come before the script's own frames, which keep the script's line numbers.
+
+  On UE 5.7 avoid one engine hazard in that code: Unreal wraps
   each static-library function
   (`unreal.MaterialEditingLibrary.get_scalar_parameter_names`,
   `unreal.EditorAssetLibrary.*`, `unreal.SystemLibrary.*`, every `*Library` /
@@ -1008,7 +1366,25 @@ Behaviour worth knowing:
   that built the cycle can return cleanly and the crash land minutes later. Call
   these functions inline (`unreal.MaterialEditingLibrary.get_scalar_parameter_names(mat)`)
   and don't stash them in a dict, list, closure or object that forms a cycle; a
-  reference that is dropped or stays reachable is safe. Module functions
+  reference that is dropped or stays reachable is safe.
+  - **Top-level aliases are safe.** An alias bound at the top level
+    (`names = unreal.MaterialEditingLibrary.get_scalar_parameter_names`) is
+    dropped when the call's namespace is cleared, even alongside functions
+    that use it.
+  - **Classes the call leaves are kept safe.** A class is always in a cycle,
+    so a class the script defines becomes garbage when the call ends. simul
+    keeps the library functions held by the classes the call's namespace
+    still reaches when it ends: bound to a name or not (appended to a list in
+    a loop, made with `type()`, the class of an object there). That covers
+    their attributes, the containers there, and their methods' default
+    arguments and closures. The class is collected without them, and the
+    next call lets go of each one nothing else holds any more.
+  - **Other cycles are not.** A cycle holding such a function that the
+    namespace no longer reaches when the call ends still crashes the editor's
+    next garbage collection: a class defined and dropped inside a function,
+    or one a loop rebinds the same name over without keeping it.
+
+  Module functions
   (`unreal.load_asset`) and the common `unreal.Object` accessors
   (`actor.get_name`, `actor.get_editor_property`) are a different, in-bounds
   wrapper and are safe, and simul's own tools call the library functions inline,
@@ -1028,7 +1404,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
 | Materials and lights | `get_blender_material_info`, `assign_blender_material`, `uv_unwrap_blender_mesh`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`, `get_blender_rigid_body_world`, `set_blender_rigid_body_world` |
-| Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `delete_blender_keyframe`, `get_blender_keyframes`, `get_blender_object_trajectory` |
+| Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `insert_blender_keyframes`, `delete_blender_keyframe`, `get_blender_keyframes`, `set_blender_pose_bone_transform`, `get_blender_object_trajectory`, `get_blender_trajectories` |
 | Camera and viewport | `get_blender_camera_info`, `set_blender_camera_view`, `get_blender_viewport_info`, `focus_blender_on_object`, `capture_blender_viewport`, `capture_blender_viewport_sequence` |
 | UI and attachment | `control_blender_ui`, `attach_blender_window` |
 | SimReady | `get_simready_metadata`, `apply_simready_metadata`, `setup_simready_hierarchy`, `validate_simready_compliance`, `export_simready_usd` |
@@ -1425,6 +1801,152 @@ Behaviour worth knowing:
   collection, are not followed, so a camera that only they need is composed
   as well. An add-on built before this report answers without
   `pose_source` and `warning`, and the server returns them as `null`.
+- `play_blender_animation` takes `play`, `reverse`, `pause` or `stop`, and
+  repeating a call changes nothing more (`screen.animation_play` on its own
+  toggles playback, so a second `play` used to stop it). `play` and `reverse`
+  start playback in that direction or turn it around; `pause` stops on the
+  current frame; `stop` stops and returns to the frame playback started from,
+  as Esc does in Blender, also after the tool turned it around. The reply
+  reports `is_playing`, `direction`, `changed` (false when playback already ran
+  that way, or was already stopped) and the current `frame`. Blender does not
+  report which way playback runs, so playback that the user or a script
+  started is restarted in the requested direction. Playback needs Blender's
+  event loop: in background mode (`blender -b`, the `bpy` module) `play` and
+  `reverse` are refused rather than reported as playing on a frame that never
+  moves; step frames with `set_blender_frame` or sample them with
+  `get_blender_object_trajectory`.
+- `get_blender_frame` reports `fps` as Blender plays it, `render.fps /
+  render.fps_base` (29.97 for NTSC's 30 / 1.001), and `fps_base` itself.
+  `set_blender_frame_range` takes a one-frame range (start equal to end).
+  Frames Blender would clamp are refused instead: a scene range outside
+  0..1048574, or a current frame outside -1048574..1048574.
+- `insert_blender_keyframe` keys the property's current value, as Blender's I
+  key does, unless `value` gives one: one number for one channel (`index` 0 or
+  more, or a property that is not an array), else one per element. A given
+  value is keyed through the property, so NLA remapping applies, and each
+  keyed channel then shows what its F-curve gives at the current frame (the
+  keyed value on that frame, or where the key is the channel's only one).
+  Left to itself, a GUI Blender 5.0.1 showed a first key at once and a later
+  one only at the next frame change, and background Blender neither. Only the
+  keyed channels are written: every other channel keeps its value, an
+  unkeyed edit included, as Blender's own keying leaves it. On an object with
+  NLA tracks, which Blender blends with the action only on a frame change,
+  the keyed channels keep their values until then and `warning` says so; a
+  muted or driven channel keeps its value too. `interpolation`
+  sets the key's interpolation (otherwise Blender's choice: the previous key's
+  on a curve with two keys or more, else its preference, Bezier by default)
+  and `keyframe_type` its key type. The reply's `keyframes` give each keyed
+  channel's value, interpolation and type as Blender stored them, and
+  `value_source` says which value was keyed.
+- `insert_blender_keyframes` keys many frames in one call: per entry of
+  `channels` a `data_path`, an `index` (-1 for every element), `frames` and a
+  value per frame, up to 10 000 keys (frames times elements) a call. Each value
+  is keyed as `insert_blender_keyframe` keys a given one: the keyed channels
+  then show what their F-curves give at the current frame, and every other
+  channel keeps its value, an unkeyed edit included (on an object with NLA
+  tracks the keyed channels keep theirs too, and `warning` says so). The same
+  `interpolation` and `keyframe_type` go to every key. Every entry is checked
+  before anything is keyed: a channel keyed twice on one frame, or on two
+  frames within 0.01 of each other, which Blender keeps as one key (on Blender
+  5.0.1 a key at 11.005 replaced the one at 11), is refused, and so is an
+  F-curve Blender keys nothing on: locked, sampled, or under an F-modifier, not
+  muted or invalid, that overrides its keys (all but Cycles, Stepped, Noise and
+  an additive Generator; on Blender 5.0.1 a LIMITS modifier did). Should Blender
+  still refuse a key part way (an NLA setup it cannot remap a key onto), the
+  keys that went in stay, the reply is a `KeyframesPartlyInserted` error whose
+  `details` give the keys inserted and the one refused, and in attached mode
+  the call is one undo step. On Blender 5.0.1 it inserted 6 000 keys (a 6-DOF
+  arm over 1 000 frames) in 0.09 s, which took some 13 000 calls of 55 ms one
+  key at a time.
+- `get_blender_keyframes` lists the keyed channels a page at a time: each
+  channel's data path, array index, the pose bone it animates (`bone_name`),
+  its key count and `frame_range` (in float frames, since a key can sit between
+  frames). `include_keys` adds every key: frame, value, interpolation and key
+  type, the handles and their types for a Bezier key, and the easing of an
+  eased one. `bone_name` keeps one pose bone's channels, and `data_path` one
+  property's (the bone's, with `bone_name`: `rotation_quaternion`, or its full
+  path, `pose.bones["Bone"].rotation_quaternion`). A page holds what fits in one
+  reply, up to `limit` channels; `next_offset` (and, with `include_keys`,
+  `next_key_offset`, as a long channel can run over several pages) is what the
+  next call passes as `offset` and `key_offset`, and `truncation` says so. They
+  are null on the last page. An 80-bone rig's 800 channels came back as 301,
+  with a hint naming parameters the tool did not have; they now come in four
+  pages.
+- `set_blender_pose_bone_transform` sets a pose bone's own location, rotation
+  and scale: its pose relative to the rest position, before constraints, as the
+  bone's Transform panel in Pose Mode shows it. The rotation is written in the
+  bone's `rotation_mode`, which is kept: `rotation_euler` takes XYZ Euler
+  angles and `rotation_quaternion` a quaternion (w, x, y, z), either converted
+  to that mode (a new bone's is QUATERNION, where Blender ignores
+  `rotation_euler`). The reply gives the transform as stored, the rotation as
+  XYZ Euler angles and as a quaternion, and `world_head` and `world_tail`, where
+  Blender evaluates the bone afterwards. Channels the bone locks
+  (`lock_location`, `lock_rotation`, `lock_scale`) are written all the same, as
+  `set_blender_object_transform` writes an object's: the locks only stop
+  Blender's interactive transform tools. Key it with `insert_blender_keyframe`
+  or `insert_blender_keyframes` on `pose.bones["Bone"].<property>`.
+- `get_blender_object_trajectory` is not read-only: each sample is a frame
+  change, so frame-change handlers run, and an unbaked rigid-body world is
+  stepped on from the last frame its memory cache holds, which fills the
+  cache. The frame and subframe current before the call are set again
+  afterwards. `step` is at least 1 and `start_frame` not after `end_frame`.
+  `time` counts seconds from the scene's `frame_start` (`time_origin_frame`) at
+  `fps / fps_base`, and `velocity` is the world location change since the
+  sample before, per second (null for the first sample of the request). Each
+  point gives the world `location`, `rotation_euler` in `euler_order` (the
+  target's Euler order, XYZ for a quaternion or axis-angle one), each sample
+  the equivalent nearest the previous one, so it stays continuous while the
+  target turns less than half a turn between samples, `rotation_quaternion`
+  (w, x, y, z, its sign kept continuous) and `local_rotation`, the target's own
+  rotation channels as its `rotation_mode` stores them, unwrapped: a joint
+  keyed from 0 to 6 pi reads 6 pi there. The world rotation is the one nearest the world matrix, as
+  `get_blender_object_info` reports it: a turned child of a parent with
+  non-uniform scale has a sheared matrix, from which a plain Euler or
+  quaternion read takes another rotation (0.190 rad for a child turned 30
+  degrees under a parent scaled 3 on X). `fields` picks which of these a sample
+  reports (fewer fit more samples a page). Values are the float32 Blender holds,
+  written in their shortest form (0.1, not 0.10000000149011612).
+- `bone_name` samples a pose bone of the armature instead: its world matrix is
+  the armature's times the bone's pose matrix, and its location the bone's head.
+  A bone's name passed as `object_name` fails with the armature to pass.
+  `get_blender_trajectories` samples up to 32 objects and bones in one pass,
+  setting each frame once for all of them, with the same samples, paging and
+  side effects.
+- A trajectory comes a page at a time. A page holds the samples that fit in
+  one reply, measured as they are written, up to `limit`; `next_offset` (null on
+  the last page) is the next call's `offset`, and the pages join into exactly
+  what one long reply would hold, velocities at their edges included. A
+  1 000-frame trajectory came back as frames 1-199 before; it is now 9 pages of
+  about 120 samples with every field, or 2 with `fields: ["location"]` (596 a
+  page). 32 targets with every field fit 3 frames a page. A page holds at
+  least one sample of every target, so targets whose names and one sample
+  each are more than a reply holds are refused: before any frame is set when
+  even the narrowest samples would not fit, else once the first sample is
+  measured. `details.targets_that_fit` counts how many of them, in order, fit
+  with samples as wide as the requested fields make them, so that many fit
+  every page. The server writes each non-ASCII character as a 6-byte escape:
+  32 bones of an armature named with 127 accented letters made a page the
+  server cut, dropping a target and skipping samples.
+- For an unbaked rigid-body world, frames its memory cache already holds are
+  read, not simulated again: the walk jumps to the cache's last frame and steps
+  on from there (`simulated_frames` counts the frames it stepped). What the
+  cache holds is read from its English info text; anything else (outdated,
+  frames skipped, a translated interface) walks from the cache start. A page
+  ends before a sample whose simulation would pass 200 000 bodies times frames
+  (or `max_simulated_frames` when given), so each call does at most that much
+  and the next page goes on. A request whose first sample alone needs more is
+  refused before any frame is set, with what it would cost: bake first
+  (`bake_blender_simulation`), sample fewer frames, or pass
+  `max_simulated_frames` to go ahead. On Blender 5.0.1 on an M-series Mac a
+  body-frame took about 35 microseconds headless and 61 in a GUI Blender, so the
+  bound is some 12 s there, inside the 30 s an attached call waits by default
+  (`BLENDER__CONNECTION_TIMEOUT`); a confirmed walk that takes longer keeps
+  running in Blender after the call times out, and a later call reads what it
+  cached. A 2-point request on 1 000 unbaked bodies over 1 000 frames took 29 s
+  unasked; it is now refused at once, takes 35 s headless once confirmed, and
+  0.01 s when repeated. Samples past the cache end come with a `warning`:
+  Blender simulates nothing later and holds the bodies at their last cached
+  pose.
 - `export_blender_file` writes `file_path` exactly. The path must end in the
   format's extension (`.obj`, `.fbx`, `.glb`/`.gltf`, `.usd`/`.usda`/`.usdc`/`.usdz`,
   `.stl`, `.ply`); anything else is refused before Blender runs, as Blender's glTF
@@ -1749,7 +2271,151 @@ Behaviour worth knowing:
 
 | Tool | Purpose |
 |---|---|
-| `get_tool_usage_stats` | Per-tool call counts, success rates and durations from the persistent usage log. Clearing it is operator-only: `simul stats --reset` |
+| `get_tool_usage_stats` | Per-tool call counts, success rates and durations for the calling MCP session; `scope="server"` counts every session's calls. The recent call log (`include_recent`, `limit` 1 to 200) is always the caller's own, because records carry parameters, file paths and agent labels. Operators read every session with `simul stats`; clearing it is operator-only: `simul stats --reset` |
+
+## Errors
+
+Every failed call has the same shape, on every backend and whichever layer
+refused it (the MCP input schema, a request model, the tool, the engine):
+
+```json
+{"success": false, "error_type": "ValidationError", "error": "width: Input should be less than or equal to 3840",
+ "details": {"errors": [{"field": "width", "message": "...", "type": "less_than_equal"}], "input": {"width": 5000}}}
+```
+
+and it is sent with `isError: true`. `error_type` is always one of the names
+below (`simul.mcp.error_types`): seven classes that mean the same on every
+backend, and domain types where a backend says more than a class would.
+Nothing else reaches a client. A library's or Python's exception name
+(`ClientConnectorError`, `ConnectionResetError`, `KeyError`) is mapped onto
+its family and kept in `details.exception_type`: a name with `Timeout` in it
+is a `TimeoutError`; `Connection*` and `BrokenPipeError` a `ConnectionError`;
+`*NotFound*`, `FileNotFoundError`, `KeyError` and `LookupError` a
+`NotFoundError`; `ValueError`, `TypeError`, `JSONDecodeError`, `Invalid*` and
+`*ValidationError` a `ValidationError`; `PermissionError` a
+`PermissionDenied`; anything else (`OSError`, `RuntimeError`, `ImportError`,
+`ModuleNotFoundError`) an `EngineError`.
+
+An exception raised by code running inside Isaac Sim is the engine's,
+whatever its name: a tool's own script that raises (a `TypeError` from a
+changed Kit API, an `OSError` from a full disk, a `ModuleNotFoundError` for a
+removed `omni.isaac.*` module) is an `EngineError`, and an agent's
+`execute_isaac_script` that raises is a `ScriptError`, both naming it in
+`details.exception_type`. Only the transports' own failures keep a class of
+their own: the bridge's refusals (`StageUnavailable` is `InvalidState`,
+`UnsafeExecutionDisabled` is `ScriptExecutionDisabled`, `PrimNotFound` is
+`NotFoundError`, `RequestTimeout` is `TimeoutError`), an empty reply
+(`ConnectionError`), a reply that is not JSON (`BridgeProtocolError`) and a
+script the bridge stopped at its timeout (`TimeoutError`).
+
+| `error_type` | Meaning | What to do |
+|---|---|---|
+| `ValidationError` | The arguments do not fit the tool: wrong type, missing or unexpected argument, out of bounds, not among the choices. `details.errors` lists each field; `details.code` names the check when a tool has several (USD's `InvalidPrimPath`, `InvalidAttribute`) | Fix the call |
+| `NotFoundError` | What the call names (prim, actor, object, material, stage, instance, tool, file) does not exist | Check the name |
+| `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
+| `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
+| `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a non-domain exception, a reply that does not parse or does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
+| `InstanceBusy` | The Isaac instance is serving another call | Retry shortly |
+| `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
+
+Domain types of the server:
+
+| `error_type` | Meaning |
+|---|---|
+| `RateLimitError` | The agent spent its rate-limit budget; `retry_after_seconds` says when to retry. `release_isaac_instance` is never refused |
+| `InstanceClaimed` | Another agent holds a live claim on the Isaac instance (claims enforced) |
+| `ClaimStoreError` | The claim records could not be read or saved (check `$SIMUL_HOME/sessions`) |
+| `SessionRequired` | The tool keeps per-client state and the request has no client identity |
+| `PermissionDenied` | The caller may not act on what it named: another agent's claim, a file the process may not read or write |
+| `ScriptExecutionDisabled` | `security.allow_script_execution` is off; the arbitrary-code tools (`execute_isaac_script`, ...) answer this instead of an unknown-tool error |
+| `PayloadTooLarge` | A script, request or reply is larger than the transport accepts |
+
+Domain types of the engines:
+
+| `error_type` | Meaning |
+|---|---|
+| `RefusedOperation` | The tool refuses an operation that would damage the application or unsaved work without an override flag |
+| `AuthenticationError` | The engine refused the credentials (python_server token, Remote Control passphrase) |
+| `UnsupportedOperation` | The backend or its mode cannot do this (`attach_blender_window` outside attached mode) |
+| `InvalidState` | Not possible in the current state (nothing claimed to release, a folder that already holds the import) |
+| `ScriptError` | An agent's script raised inside the engine, whatever it raised (an `OSError` or a `ConnectionRefusedError` of its own included); `details.exception_type` names it, `details.traceback` says where |
+| `EmptyOutput` | The engine's script printed nothing where the tool expected its reply |
+| `InvalidAssetType` | The asset is not of the kind the tool needs |
+| `UnsupportedFormat` | The file format is not one the tool reads or writes |
+| `CaptureError` | A viewport capture failed |
+| `ViewportUnavailable` | There is no viewport to read or drive (a headless editor) |
+| `UiUnavailable` | The editor UI the tool drives is not available |
+| `SimulationNotRunning` | The answer needs a running simulation (play or step once) |
+| `ValidationFailed` | An asset check ran and found errors |
+| `SimReadyValidationFailed` | A SimReady export was stopped by the validation it runs first |
+| `PIEActive` | Unreal is in Play-In-Editor |
+| `SpawnError` | Unreal could not spawn the actor from the class or asset given |
+| `PluginUnavailable` | The optional Unreal plugin the tool needs is not enabled |
+| `IncompatibleBody` | The Unreal body cannot simulate as asked; `details.problems` says why |
+| `EditorExited` | The Unreal editor exited while `simul unreal setup` waited for it |
+| `BridgeUnavailable` | The Isaac Sim bridge extension the tool needs is not configured |
+| `BridgeProtocolError` | A transport (Isaac Sim's bridge or stock socket, Blender's bridge) answered outside its protocol: another version, a reply that is not JSON, malformed or unmatched; the request may have run |
+| `ResponseEncodingError` | Blender's bridge could not encode the result; the operation may have run |
+| `AttachmentError`, `AttachmentStale`, `AttachmentTargetChanged` | The attached Blender window could not be used, its process went away, or it loaded another file |
+| `UnsavedChangesError` | Blender refuses to replace a file with unsaved changes without the flag |
+| `KeyframesPartlyInserted` | Blender refused a key part way through a batch; the keys before it stay, and `details` gives how many went in and the one refused |
+| `LoadError` | A headless USD file could not be opened; `details.reason` says why |
+| `StageBusy` | A headless USD stage is serving a call that cannot run beside this one; retry shortly |
+| `ComputationError` | A headless USD computation failed |
+| `LogFileNotFound` | `simul logs` found no log file |
+| `*NotApplied` | The read-back family (`TransformNotApplied`, `MaterialNotApplied`, `RenderSettingNotApplied`, ...): the engine took the request, but what it reads back afterwards is not what was asked. The payload keeps the values read back, with `details.expected` and `details.actual` where the tool reports them. Match the family by the suffix |
+
+Each entry of a `ValidationError`'s `details.errors` has the `field` (a dotted
+path for a nested model's field, `metadata.physics.mass`), the `message` and
+pydantic's `type`, and when they apply the `constraint` that failed
+(`{"le": 3840}`, `{"min_length": 3}`, `{"expected": "'DomeLight', ... or
+'CylinderLight'"}`), the `input` given and a `suggestion`: the closest valid
+choice, or the closest argument name for an unexpected one. A bpy enum
+refusal (`enum "BOXX" not found in ('BOX', 'SPHERE')`) gets the same
+`constraint`, `input` and `suggestion`.
+
+`details.input` (and each error's `input`) echoes the arguments bounded: a
+string longer than 256 characters by its size, a list or mapping by its first
+16 entries and a count of the rest (`"<19984 more items, 20000 in all>"`), at
+most 64 values per argument. A value whose name has a word that names a
+secret is echoed as `***`: an argument, a mapping key or a settings path, at
+any depth (`token`, `password`, `passphrase`, `passwd`, `pwd`, `secret`, `key`,
+`api_key`, `auth`, `authorization`, `credential`, `cookie`, `bearer`, `jwt`,
+`pin`; `access_key`, `apiKey`, `/persistent/auth_token`, but not `author` or
+`keyframe`). `error` and each `details.errors` message are cut at 2 000
+characters (`"... <38042 more characters>"`), so a message that quotes a long
+argument stays small too.
+
+Arguments that do not fit the input schema are refused before the tool runs,
+but through the same envelope as every other failure: the call spends a
+rate-limit token and is recorded in the usage log and the audit log. A call to
+a tool that is not registered is a `NotFoundError`, recorded and rate limited
+under `<unknown tool>` with the name it gave in the record's parameters. The
+audit row of every call states the envelope's outcome, `error_type` included
+(see [Audit log](configuration.md#audit-log)).
+
+A call the client cancels may still have run: cancelling the request does not
+stop the engine. Its usage and audit rows say `cancelled` and `executed`:
+`false` (it never started), `true` (Isaac: the server waited for the engine,
+and the row keeps the engine's outcome) or `"unknown"` (Unreal, Blender: the
+request had been sent). Check the scene before repeating a cancelled call.
+
+## Annotations
+
+Every tool's `readOnlyHint`, `destructiveHint` and `idempotentHint` follow one
+rule on every backend, pinned for all tools by
+`tests/mcp/test_tool_annotation_table.py`:
+
+- **read-only**: changes nothing, a capture that only returns the image
+  included (`capture_blender_viewport`);
+- **destructive**: overwrites or deletes existing state or files, or runs
+  arbitrary code (`capture_isaac_viewport` deletes the oldest captures in its
+  directory, so it is destructive; `capture_unreal_viewport` writes a new
+  screenshot and is only additive);
+- **idempotent**: repeating the call with the same arguments changes nothing
+  more (a set, a delete, a save or export to the same path, a focus); a
+  create, a step, a capture that writes a new file or an edit that compounds
+  (simplify, subdivide) is not.
 
 ## MCP resources
 

@@ -799,7 +799,7 @@ class PrimEditMixin:
         if mode not in DELETE_MODES:
             return ErrorResponse(
                 error=f"Invalid mode {mode!r}. Must be one of: {', '.join(DELETE_MODES)}",
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         normalized = prim_path.rstrip("/") or STAGE_ROOT_PATH
         if normalized == STAGE_ROOT_PATH:
