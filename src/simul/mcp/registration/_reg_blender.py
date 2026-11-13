@@ -32,6 +32,7 @@ import typing
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
     Callable,
     Coroutine,
@@ -45,7 +46,7 @@ from typing import (
 )
 
 from fastmcp.tools import ToolResult
-from pydantic import BaseModel, StrictInt
+from pydantic import BaseModel, Field, StrictInt
 
 from ...adapters.blender_runtime import BlenderRuntimeSession
 from ...tool_surfaces import THIN_BLENDER_TOOLS
@@ -591,13 +592,17 @@ def _attach(server: "SimulMCPServer", request: Any) -> Dict[str, Any]:
     try:
         return attachments.attach(request.instance_id, request.window_id)
     except (ValueError, RuntimeError) as exc:
-        # List the candidates so the agent can choose without a shell.
+        # List the candidates so the agent can choose without a shell; the
+        # refusal may have listed them already.
         fields = error_types.exception_fields(exc)
+        details = dict(fields["details"] or {})
+        if "instances" not in details:
+            details["instances"] = attachments.instances()
         return {
             "success": False,
             "error": str(exc),
             "error_type": fields["error_type"],
-            "details": {**(fields["details"] or {}), "instances": attachments.instances()},
+            "details": details,
         }
 
 
@@ -815,6 +820,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         request=BlenderSearchObjectsRequest,
         response=BlenderSearchObjectsResponse,
         added_params=("offset",),
+        # The regex guard's own work grows with the pattern.
+        params={"name_pattern": Param(Optional[Annotated[str, Field(max_length=512)]])},
     ),
     BlenderTool(
         name="summarize_blender_scene",

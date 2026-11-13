@@ -80,7 +80,9 @@ from ..schemas.unreal import (
     UnrealListActorComponentsResponse,
     UnrealListActorsResponse,
     UnrealListInstancesResponse,
+    UnrealListSimulationActorsResponse,
     UnrealLoadedMapResponse,
+    UnrealPhysicsStateResponse,
     UnrealPingResponse,
     UnrealQuerySceneGraphResponse,
     UnrealRemeshMeshResponse,
@@ -97,6 +99,7 @@ from ..schemas.unreal import (
     UnrealSetMaterialParamsResponse,
     UnrealSetPhysicsParamsResponse,
     UnrealSetRenderSettingsResponse,
+    UnrealSetupPhysicsBulkResponse,
     UnrealSimplifyMeshResponse,
     UnrealSpawnActorResponse,
     UnrealSubdivideMeshResponse,
@@ -239,6 +242,26 @@ def _optional_json(value: str) -> Any:
     return json.loads(value) if value else None
 
 
+def _scene_parameters(value: str) -> Optional[Dict[str, Any]]:
+    """``generate_unreal_procedural_scene``'s parameters: a JSON object; an empty string means none.
+
+    Raises:
+        ValueError: The text is not JSON, or not an object; the call reports it
+            as a ValidationError on ``parameters`` that says a JSON object is
+            expected, which json's own error ("Expecting value: line 1 column 1")
+            did not.
+    """
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f'must be a JSON object such as {{"seed": 7}}; it is not JSON: {exc}') from None
+    if not isinstance(parsed, dict):
+        raise ValueError(f"must be a JSON object, got {type(parsed).__name__}")
+    return parsed
+
+
 def _three_numbers(value: Any) -> Optional[List[float]]:
     """A vector given as a JSON array of 3 numbers or as text, "x,y,z" or "[x, y, z]".
 
@@ -280,10 +303,27 @@ _Vector3 = Union[str, List[float]]
 # Rules, argument builders and usage records of particular tools
 # ---------------------------------------------------------------------------
 
-#: Ends the description of the mesh tool that creates a mesh from nothing.
-_MESH_CREATE_NOTE = (
+def _one_simplify_target(request: Any) -> Optional[str]:
+    """simplify_unreal_mesh takes at most one of its targets."""
+    given = [name for name in ("target_triangle_count", "target_percentage", "max_error")
+             if getattr(request, name) is not None]
+    return f"Give one of {', '.join(given)}, not several" if len(given) > 1 else None
+
+
+def _one_remesh_target(request: Any) -> Optional[str]:
+    """remesh_unreal_mesh takes an edge length or a triangle count, not both."""
+    if request.target_edge_length is not None and request.target_triangle_count is not None:
+        return "Give target_edge_length or target_triangle_count, not both"
+    return None
+
+
+#: Ends the description of the mesh tools that read any mesh source.
+_MESH_SOURCE_NOTE = (
     " Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs."
 )
+
+#: Ends the description of the mesh tool that creates a mesh from nothing.
+_MESH_CREATE_NOTE = _MESH_SOURCE_NOTE
 
 #: Ends the description of every mesh tool that changes or creates a mesh from another.
 _MESH_EDIT_NOTE = (
@@ -1336,8 +1376,14 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="set_unreal_light_params",
         description=(
-            "Set light component parameters (intensity, color, temperature, shadows); "
-            "a parameter left out keeps its current value."
+            "Set a light's parameters (intensity, sRGB color, temperature, attenuation, shadows) in one "
+            "undoable editor transaction and read them back; a parameter left out keeps its current "
+            "value, and with none the light is only read. Works on point, spot, rect and directional "
+            "lights and a SkyLight's intensity, color and shadows. Intensity is in the light's unit, "
+            "returned as intensity_unit: lux for a directional light, the light's Intensity Units "
+            "(candelas by default, or lumens, ev, nits, unitless) for a point, spot or rect light, a "
+            "multiplier for a SkyLight. Values are range-checked before anything is written, and when "
+            "Unreal stores one differently every value is put back, so a failed call changes nothing."
         ),
         response=UnrealSetLightParamsResponse,
         read_only=False,
@@ -1379,18 +1425,40 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="control_unreal_simulation",
         description=(
-            "Control Play-In-Editor: start, stop, pause or resume. Exact frame stepping is unsupported. "
-            "While PIE runs, Unreal's editor spawns and deletes no actors, so those tools return "
-            "PIEActive until it stops; level reads keep working and report pie_active."
+            "Start, stop, pause or resume the editor's simulation. start begins Simulate In Editor (the "
+            "level runs and its physics steps, no player) or, with mode play, a Play session that spawns "
+            "the player's pawn. Exact frame stepping is unsupported (step is refused). While either "
+            "runs, Unreal's editor spawns and deletes no actors, so those tools return PIEActive until "
+            "it stops; level reads keep working and report pie_active. apply_unreal_force, "
+            "get_unreal_physics_state and list_unreal_simulation_actors act on and read the simulation's "
+            "copies of the actors; physics and collision edits given an editor path change the editor "
+            "world, which the running simulation does not see."
         ),
         response=UnrealControlSimulationResponse,
         read_only=False,
         method="control_simulation",
-        params=(ToolParam("action", str),),
+        params=(
+            ToolParam(
+                "action",
+                Literal["start", "stop", "pause", "resume", "step"],
+                description="start, stop, pause or resume; step is refused (UnsupportedOperation).",
+            ),
+            ToolParam(
+                "mode",
+                Literal["simulate", "play"],
+                "simulate",
+                description=(
+                    "For start: simulate (Simulate In Editor: physics runs, no player, the viewport keeps "
+                    "the editor camera) or play (a Play session in the level viewport: the game mode "
+                    "possesses a pawn, and when it stops Unreal puts the game camera's view in the "
+                    "viewport). Ignored by the other actions."
+                ),
+            ),
+        ),
     ),
     UnrealTool(
         name="get_unreal_simulation_status",
-        description="Get current Play-In-Editor simulation status (playing, paused, stopped).",
+        description="Get the editor's simulation status (Play or Simulate In Editor: playing, paused, stopped).",
         response=UnrealGetSimulationStatusResponse,
         read_only=True,
         idempotent=True,
@@ -1474,7 +1542,16 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="apply_unreal_force",
-        description="Apply a force or impulse to an actor's physics body.",
+        description=(
+            "Apply a force or impulse to an actor's body in the running simulation (start it with "
+            "control_unreal_simulation; the editor world's bodies never move, so the call is refused "
+            "without one). Editor and simulation paths are both accepted. Units are Unreal's: force in "
+            "kg cm/s^2 and impulse in kg cm/s (1 N or 1 N s is 100), or N and N s with units si; the "
+            "application point is a world location in cm, fixed in the world while the body moves. An "
+            "impulse changes the velocity at once by impulse / mass; a force acts for one physics step "
+            "unless duration keeps it on for that many seconds of physics time, in step with gravity. "
+            "Returns the copy acted on, its mass and the expected change of velocity."
+        ),
         response=UnrealApplyForceResponse,
         read_only=False,
         method="apply_force",
@@ -1487,6 +1564,23 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("location_x", Optional[float], None),
             ToolParam("location_y", Optional[float], None),
             ToolParam("location_z", Optional[float], None),
+            ToolParam(
+                "duration",
+                float,
+                0.0,
+                description=(
+                    "Seconds of physics time a force keeps acting, 0 to 600: every frame the body gets, as "
+                    "an impulse, the force's momentum over the physics time that frame simulated (the frame "
+                    "time, at most Unreal's physics step limit, 1/30 s by default), so it keeps pace with "
+                    "gravity; paused time adds nothing. 0 acts for one physics step. Not for an impulse."
+                ),
+            ),
+            ToolParam(
+                "units",
+                Literal["unreal", "si"],
+                "unreal",
+                description="unreal: kg cm/s^2 (force), kg cm/s (impulse); si: N, N s.",
+            ),
         ),
     ),
     UnrealTool(
@@ -1508,6 +1602,167 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("linear_damping", Optional[float], None),
             ToolParam("angular_damping", Optional[float], None),
             ToolParam("enable_gravity", Optional[bool], None),
+        ),
+    ),
+    UnrealTool(
+        name="setup_unreal_physics_bulk",
+        description=(
+            "Set up physics on many editor actors in one call and one undoable transaction: the "
+            "actor_paths plus every actor with tag, in the outliner folder and matching actor_filter (each "
+            "that is given), at most 1000. Each is "
+            "made simulated, kinematic or not physical as enable_unreal_physics does, after an optional "
+            "collision preset (PhysicsActor makes props physics-ready) and with optional mass, damping "
+            "and gravity. Every actor is checked first, and one that cannot be set up, or does not take "
+            "the setup once written, refuses the call with every actor put back as it was, unless "
+            "skip_failures sets up the rest (a call that sets up none fails). Use it instead of one "
+            "call per actor, which runs into the rate limit."
+        ),
+        response=UnrealSetupPhysicsBulkResponse,
+        read_only=False,
+        idempotent=True,
+        destructive=True,
+        method="setup_physics_bulk",
+        params=(
+            ToolParam(
+                "actor_paths",
+                str,
+                "",
+                description="Comma-separated editor actor paths (empty: none, select by tag or folder).",
+                convert=_name_list,
+            ),
+            ToolParam(
+                "tag",
+                str,
+                "",
+                description="Also every editor actor with this actor tag, such as a procedural scene's tag.",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "folder",
+                str,
+                "",
+                description=(
+                    "Also every editor actor in this outliner folder or one under it, such as "
+                    "Simul/Room_5_7ee55bcd; with tag, only actors with both."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "actor_filter",
+                str,
+                "",
+                description=(
+                    "Also every editor actor whose label or path contains this text, ignoring case; with tag or "
+                    "folder, only actors matching those too (a procedural scene's tag with _Box_ picks its "
+                    "props, not its floor and walls)."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam("enable", bool, True, description="As enable_unreal_physics: false turns physics off."),
+            ToolParam("kinematic", bool, False, description="As enable_unreal_physics: kinematic, not simulated."),
+            ToolParam("make_movable", bool, True, description="As enable_unreal_physics."),
+            ToolParam("allow_detach", bool, False, description="As enable_unreal_physics."),
+            ToolParam(
+                "collision_preset",
+                str,
+                "",
+                description="Collision preset set first, such as PhysicsActor; empty keeps each actor's collision.",
+                convert=_optional_text,
+            ),
+            ToolParam("mass", Optional[float], None, description="Mass override in kg, 0.001 to 1e9."),
+            ToolParam("linear_damping", Optional[float], None, description="Linear damping, 0 to 1e6."),
+            ToolParam("angular_damping", Optional[float], None, description="Angular damping, 0 to 1e6."),
+            ToolParam("enable_gravity", Optional[bool], None, description="Whether gravity affects the bodies."),
+            ToolParam(
+                "skip_failures",
+                bool,
+                False,
+                description="Set up the actors that can be and list the rest, instead of refusing the call.",
+            ),
+        ),
+    ),
+    UnrealTool(
+        name="get_unreal_physics_state",
+        description=(
+            "Read bodies' live physics state: location, rotation, linear and angular velocity, awake "
+            "or asleep, mass and center of mass. While a simulation runs each actor is read through "
+            "its copy there (the editor world's actors stay where they were placed), otherwise in the "
+            "editor world; world picks one. Editor and simulation paths are both accepted, and each "
+            "body lists both. Paged: total counts every body, next_offset starts the next page."
+        ),
+        response=UnrealPhysicsStateResponse,
+        read_only=True,
+        idempotent=True,
+        method="get_physics_state",
+        params=(
+            ToolParam(
+                "actor_paths",
+                str,
+                "",
+                description=(
+                    "Comma-separated actor paths (editor or simulation paths); empty when tag_filter is given."
+                ),
+                convert=_name_list,
+            ),
+            ToolParam(
+                "tag_filter",
+                str,
+                "",
+                description="Also read every actor with this actor tag in the world read (empty: none).",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "world",
+                Literal["auto", "simulation", "editor"],
+                "auto",
+                description=(
+                    "auto: the running simulation while one runs, else the editor world; simulation "
+                    "(refused when none runs); editor."
+                ),
+            ),
+            ToolParam(
+                "max_results",
+                int,
+                100,
+                description="Most bodies on this page, 1 to 1000; a page also stops before 30,000 characters.",
+            ),
+            ToolParam("offset", int, 0, description="Bodies to skip: the previous page's next_offset."),
+        ),
+    ),
+    UnrealTool(
+        name="list_unreal_simulation_actors",
+        description=(
+            "List the running simulation's actors with their simulation and editor paths (null editor "
+            "path for an actor the simulation spawned, such as the player's pawn) and whether they "
+            "simulate physics, a page at a time (total, next_offset). Refused when no simulation runs."
+        ),
+        response=UnrealListSimulationActorsResponse,
+        read_only=True,
+        idempotent=True,
+        method="list_simulation_actors",
+        params=(
+            ToolParam(
+                "class_filter",
+                str,
+                "",
+                description="Only actors of this class, by name or path (empty: any).",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "tag_filter",
+                str,
+                "",
+                description="Only actors with this actor tag (empty: any).",
+                convert=_optional_text,
+            ),
+            ToolParam("simulating_only", bool, False, description="Only actors with a body that simulates physics."),
+            ToolParam(
+                "max_results",
+                int,
+                200,
+                description="Most actors on this page, 1 to 5000; a page also stops before 30,000 characters.",
+            ),
+            ToolParam("offset", int, 0, description="Actors to skip: the previous page's next_offset."),
         ),
     ),
     # -- USD and SimReady ----------------------------------------------------------
@@ -1735,9 +1990,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Classify level actors for robotics from their collision setup: floor-like surfaces a "
             "robot can stand on, small Movable objects it can grasp, and collision counts and "
-            "problems (static meshes with physics collision but no simple shapes). Uses the "
-            "bounding box of each actor's collision-enabled components; the thresholds come "
-            "back as criteria."
+            "problems (static meshes with physics collision but no simple shapes). Measures each "
+            "actor by the oriented box of its physics-collision components, so rotated pieces keep "
+            "their size and tilt, and each instance of an instanced mesh (ISM, HISM, foliage) by "
+            "itself; the thresholds come back as criteria. Both lists are paged together (max_results "
+            "each from offset; totals counts every match, next_offset starts the next page), and the "
+            "pages after the first read the first page's scan, so a large level is scanned once."
         ),
         response=UnrealAnalyzeSceneForRoboticsResponse,
         read_only=True,
@@ -1763,6 +2021,21 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "empty or null analyzes every actor."
                 ),
             ),
+            ToolParam(
+                "max_results",
+                int,
+                50,
+                description=(
+                    "Most entries per category on this page, 1 to 500; a page is cut further, the same "
+                    "for both lists, to fit the response budget."
+                ),
+            ),
+            ToolParam(
+                "offset",
+                int,
+                0,
+                description="Entries of each category to skip: the previous page's next_offset.",
+            ),
         ),
     ),
     UnrealTool(
@@ -1771,7 +2044,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside "
             "the bounds, in one undoable transaction; the same arguments give the same layout. Returns "
             "the spawned actor paths and the tag and outliner folder that group them, both unique to "
-            "the call."
+            "the call. physics_props makes the props physics-ready: Movable, PhysicsActor collision, "
+            "simulating, so they fall and can be pushed once the simulation starts."
         ),
         response=UnrealGenerateProceduralSceneResponse,
         read_only=False,
@@ -1793,7 +2067,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "props (one per 16 m2 of free floor). outdoor: trees (one per 20 m2), rocks (one "
                     "per 10 m2). Props are Movable boxes; everything else is Static."
                 ),
-                convert=_optional_json,
+                convert=_scene_parameters,
             ),
             ToolParam(
                 "bounds_min",
@@ -1808,6 +2082,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 "",
                 description="Maximum corner as comma-separated x,y,z in cm; empty is 1000,1000,500.",
                 convert=_optional_floats,
+            ),
+            ToolParam(
+                "physics_props",
+                bool,
+                False,
+                description=(
+                    "Make the props physics-ready: Movable, PhysicsActor collision and simulating physics. "
+                    "False leaves them Movable with BlockAll collision, not simulating."
+                ),
             ),
         ),
     ),
@@ -1831,19 +2114,35 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     # -- Geometry and modeling (GeometryScript) --------------------------------------
     # Each needs the GeometryScripting plugin (simul unreal setup enables it) and
-    # takes DynamicMeshActor paths; see _unreal_mesh_scripts.
+    # takes DynamicMeshActor paths; see _unreal_mesh_scripts. A tool that replaces
+    # a mesh or a collision is destructive; none is idempotent (repeating an edit
+    # edits again, repeating a creation creates another actor).
     UnrealTool(
         name="generate_unreal_mesh_primitive",
         description=(
-            "Create a parametric mesh primitive (box, sphere, cylinder, cone or capsule) as a new "
-            "DynamicMeshActor; the spawn is one undoable transaction." + _MESH_CREATE_NOTE
+            "Create a parametric mesh primitive as a new DynamicMeshActor, centred on location, in "
+            "Unreal's axes (X forward, Y right, Z up); the spawn is one undoable transaction. "
+            "Dimensions in cm: box width (X), depth (Y), height (Z); sphere radius; cylinder radius, "
+            "height; cone base_radius, top_radius, height; capsule radius, length (its straight part); "
+            "torus major_radius, minor_radius." + _MESH_CREATE_NOTE
         ),
         response=UnrealGenerateMeshPrimitiveResponse,
         read_only=False,
         method="generate_mesh_primitive",
         params=(
-            ToolParam("primitive_type", Literal["box", "sphere", "cylinder", "cone", "capsule"]),
-            ToolParam("dimensions", str, "{}", convert=_optional_json),
+            ToolParam("primitive_type", Literal["box", "sphere", "cylinder", "cone", "capsule", "torus"]),
+            ToolParam(
+                "dimensions",
+                str,
+                "{}",
+                description=(
+                    'JSON object of the type\'s dimensions in cm, each above 0, e.g. {"width": 200, '
+                    '"depth": 100, "height": 50}; missing ones take their defaults (box 100 each; sphere '
+                    "radius 50; cylinder radius 50, height 100; cone base_radius 50, top_radius 0, height "
+                    "100; capsule radius 30, length 75; torus major_radius 50, minor_radius 20)."
+                ),
+                convert=_optional_json,
+            ),
             ToolParam("segments", Annotated[int, Field(ge=MIN_SEGMENTS, le=MAX_SEGMENTS)], 32),
             ToolParam("location", _Vector3, "", convert=_three_numbers),
             ToolParam("actor_label", Optional[str], None),
@@ -1852,8 +2151,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="apply_unreal_mesh_boolean",
         description=(
-            "Apply a boolean (union, subtract, intersect) of a tool DynamicMeshActor's mesh to a target "
-            "DynamicMeshActor's mesh, in place and undoable." + _MESH_EDIT_NOTE
+            "Apply a boolean of a tool DynamicMeshActor's mesh to a target DynamicMeshActor's mesh, in "
+            "place and undoable: both meshes take part where they are in the level (their world "
+            "transforms), and the result replaces the target's mesh. The tool actor is left as it was."
+            + _MESH_EDIT_NOTE
         ),
         response=UnrealApplyMeshBooleanResponse,
         read_only=False,
@@ -1862,25 +2163,42 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         params=(
             ToolParam("target_mesh_path", str),
             ToolParam("tool_mesh_path", str),
-            ToolParam("operation", str),
+            ToolParam(
+                "operation",
+                Literal["union", "subtract", "intersect", "difference", "intersection"],
+                description="union, subtract (or difference) or intersect (or intersection).",
+            ),
         ),
     ),
     UnrealTool(
         name="compute_unreal_convex_hull",
         description=(
-            "Compute the convex hull of a DynamicMeshActor's mesh as a new DynamicMeshActor (one "
-            "undoable spawn), with the hull's and the source's volume." + _MESH_EDIT_NOTE
+            "Compute the convex hull of a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset, "
+            "simplified to max_faces triangles, as simple collision: on a new DynamicMeshActor at the "
+            "source's transform whose mesh is the hull (output 'actor'), on the source itself "
+            "('collision': a StaticMesh's asset, under /Game, saved with save) or both; one undoable "
+            "transaction." + _MESH_SOURCE_NOTE
         ),
         response=UnrealComputeConvexHullResponse,
         read_only=False,
+        destructive=True,
         method="compute_convex_hull",
-        params=(ToolParam("mesh_path", str),),
+        params=(
+            ToolParam("mesh_path", str),
+            ToolParam("max_faces", Annotated[int, Field(ge=0, le=10000)], 250),
+            ToolParam("output", Literal["actor", "collision", "both"], "actor"),
+            ToolParam("save", bool, False),
+        ),
     ),
     UnrealTool(
         name="decompose_unreal_convex_hull",
         description=(
-            "Decompose a DynamicMeshActor's mesh into convex pieces, placed together in one new "
-            "DynamicMeshActor (one undoable spawn), and report each piece." + _MESH_EDIT_NOTE
+            "Decompose a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset into convex hulls "
+            "with Unreal's own convex decomposition (GeometryScript's, not V-HACD), as simple collision: "
+            "on a new DynamicMeshActor at the source's transform holding the pieces (output 'actor'), on "
+            "the source itself ('collision': a StaticMesh's asset, under /Game, saved with save) or both; "
+            "one undoable transaction. Reports each piece and how much of the source's volume they cover."
+            + _MESH_SOURCE_NOTE
         ),
         response=UnrealDecomposeConvexHullResponse,
         read_only=False,
@@ -1888,17 +2206,20 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         method="decompose_convex_hull",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("max_hulls", int, 16),
-            ToolParam("max_vertices_per_hull", int, 32),
-            ToolParam("min_cluster_size", int, 256),
-            ToolParam("resolution", int, 100000),
+            ToolParam("max_hulls", Annotated[int, Field(ge=1, le=64)], 8),
+            ToolParam("max_vertices_per_hull", Annotated[int, Field(ge=4, le=256)], 32),
+            ToolParam("error_tolerance", Annotated[float, Field(ge=0)], 0.0),
+            ToolParam("min_part_thickness", Annotated[float, Field(ge=0)], 0.1),
+            ToolParam("output", Literal["actor", "collision", "both"], "actor"),
+            ToolParam("save", bool, False),
         ),
     ),
     UnrealTool(
         name="edit_unreal_mesh_topology",
         description=(
-            "Extrude, bevel or inset the faces of a DynamicMeshActor's mesh, in place and undoable."
-            + _MESH_EDIT_NOTE
+            "Extrude or inset selected faces, or bevel edges, of a DynamicMeshActor's mesh, in place and "
+            "undoable. Faces are selected by direction ('normal:0,0,1') or by a box, in the mesh's local "
+            "space; bevel takes 'polygroup' or 'sharp' edges, or a face region's border." + _MESH_EDIT_NOTE
         ),
         response=UnrealEditMeshTopologyResponse,
         read_only=False,
@@ -1906,21 +2227,20 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         method="edit_mesh_topology",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("operation", Literal["extrude_faces", "bevel_edges", "inset_faces"]),
+            ToolParam("operation", Literal["extrude_faces", "inset_faces", "bevel_edges"]),
             ToolParam("face_selection", Optional[str], None),
             ToolParam("edge_selection", Optional[str], None),
             ToolParam("distance", Optional[float], None),
-            ToolParam("offset", Optional[float], None),
-            ToolParam("scale", str, "", convert=_optional_floats),
-            ToolParam("count", Optional[int], None),
+            ToolParam("offset", Optional[Annotated[float, Field(gt=0)]], None),
+            ToolParam("count", Optional[Annotated[int, Field(ge=0, le=16)]], None),
         ),
     ),
     UnrealTool(
         name="subdivide_unreal_mesh",
         description=(
-            "Subdivide a DynamicMeshActor's mesh, in place and undoable: Catmull-Clark (needs quad "
-            f"polygroups) or uniform tessellation. A result over {MAX_RESULT_TRIANGLES:,} triangles is "
-            "refused before anything runs." + _MESH_EDIT_NOTE
+            "Subdivide a DynamicMeshActor's mesh, in place and undoable: Catmull-Clark over quad "
+            "polygroups, Loop over triangles, or uniform tessellation. A result over "
+            f"{MAX_RESULT_TRIANGLES:,} triangles is refused before anything runs." + _MESH_EDIT_NOTE
         ),
         response=UnrealSubdivideMeshResponse,
         read_only=False,
@@ -1928,15 +2248,16 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         method="subdivide_mesh",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("level", int, 2),
-            ToolParam("scheme", str, "catmull_clark"),
+            ToolParam("level", Annotated[int, Field(ge=1, le=4)], 2),
+            ToolParam("scheme", Literal["catmull_clark", "loop", "uniform"], "catmull_clark"),
         ),
     ),
     UnrealTool(
         name="simplify_unreal_mesh",
         description=(
-            "Simplify a DynamicMeshActor's mesh to a triangle count or a fraction of its triangles, in "
-            "place and undoable." + _MESH_EDIT_NOTE
+            "Simplify a DynamicMeshActor's mesh, in place and undoable, to a triangle count, a fraction of "
+            "its triangles, or as far as it stays within max_error cm of the original; one target at most, "
+            "half the triangles by default." + _MESH_EDIT_NOTE
         ),
         response=UnrealSimplifyMeshResponse,
         read_only=False,
@@ -1944,16 +2265,18 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         method="simplify_mesh",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("target_triangle_count", Optional[int], None),
-            ToolParam("target_percentage", Optional[float], None),
-            ToolParam("max_error", Optional[float], None),
+            ToolParam("target_triangle_count", Optional[Annotated[int, Field(ge=4)]], None),
+            ToolParam("target_percentage", Optional[Annotated[float, Field(gt=0, lt=1)]], None),
+            ToolParam("max_error", Optional[Annotated[float, Field(gt=0)]], None),
         ),
+        check=_one_simplify_target,
     ),
     UnrealTool(
         name="cut_unreal_mesh_plane",
         description=(
-            "Cut a DynamicMeshActor's mesh with a plane given in the mesh's local space, keeping one "
-            "side, in place and undoable." + _MESH_EDIT_NOTE
+            "Cut a DynamicMeshActor's mesh with a plane, given in world space by default: the half the "
+            "normal points into is removed, or kept as a second DynamicMeshActor with keep_both_sides, "
+            "in one undoable transaction. A plane that misses the mesh changes nothing." + _MESH_EDIT_NOTE
         ),
         response=UnrealCutMeshPlaneResponse,
         read_only=False,
@@ -1965,30 +2288,52 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("plane_normal", _Vector3, convert=_required_three_numbers),
             ToolParam("fill_holes", bool, True),
             ToolParam("keep_both_sides", bool, False),
+            ToolParam("space", Literal["world", "local"], "world"),
         ),
     ),
     UnrealTool(
         name="validate_unreal_mesh",
         description=(
-            "Check a DynamicMeshActor's mesh: watertight (no open border edges), compact (no "
-            "triangle ID gaps) and with normals, with the counts behind each. Reads only, also while "
-            "PIE runs. Needs the GeometryScripting plugin, which simul unreal setup enables."
+            "Check the mesh of a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset: closed (no open "
+            "border edges), manifold (no bowtie "
+            "vertices), degenerate_triangles, orientation (a closed mesh's faces point out), compact (no ID "
+            "gaps), normals and uvs, each with its count and detail. It does not look for "
+            "self-intersections. Reads only, also while PIE runs. Needs the GeometryScripting plugin, "
+            "which simul unreal setup enables."
         ),
         response=UnrealValidateMeshResponse,
         read_only=True,
         idempotent=True,
         method="validate_mesh",
         params=(
-            ToolParam("mesh_path", str),
-            ToolParam("checks", str, "", convert=_name_list),
+            ToolParam(
+                "mesh_path",
+                str,
+            ),
+            ToolParam(
+                "checks",
+                str,
+                "",
+                description=(
+                    "Comma-separated checks to run (closed, manifold, degenerate_triangles, orientation, "
+                    "compact, normals, uvs); empty runs all."
+                ),
+                convert=_name_list,
+            ),
         ),
     ),
     UnrealTool(
         name="convert_unreal_mesh_format",
         description=(
-            "Place an editable DynamicMeshActor copy of a StaticMesh asset at the world origin (one "
-            "undoable spawn), for the other mesh tools to edit; target_format 'dynamic_mesh'. "
-            "'static_mesh' (back to an asset) is not implemented yet and is refused. Needs the "
+            "Convert between StaticMeshes and editable DynamicMeshActors. dynamic_mesh places a "
+            "DynamicMeshActor copy of a StaticMesh asset (at location) or of a StaticMeshActor (at its "
+            "transform), with its materials, for the other mesh tools to edit. static_mesh writes a "
+            "DynamicMeshActor's mesh, materials and simple collision into a StaticMesh asset under /Game "
+            "(refusing /Engine and plugin content and, without overwrite, an existing asset) and saves "
+            "only that asset; writing the asset is not undoable. replace_actor swaps the source actor for "
+            "the result in one undoable step. Unreal's USD exporter "
+            "writes DynamicMeshActors as empty Xforms, so convert (with replace_actor) before exporting a "
+            "mesh made with these tools. Needs the "
             "GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs."
         ),
         response=UnrealConvertMeshFormatResponse,
@@ -1996,19 +2341,32 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         destructive=True,
         method="convert_mesh_format",
         params=(
-            ToolParam("mesh_path", str, description="StaticMesh asset path, such as /Game/Meshes/SM_Crate."),
-            ToolParam("target_format", str),
-            ToolParam("tessellation_options", str, "{}", convert=_optional_json),
+            ToolParam(
+                "mesh_path",
+                str,
+                description=(
+                    "dynamic_mesh: a StaticMesh asset (/Game/Meshes/SM_Crate) or a StaticMeshActor; "
+                    "static_mesh: a DynamicMeshActor."
+                ),
+            ),
+            ToolParam("target_format", Literal["dynamic_mesh", "static_mesh"]),
+            ToolParam("asset_path", Optional[str], None),
+            ToolParam("overwrite", bool, False),
+            ToolParam("save", bool, True),
+            ToolParam("replace_actor", bool, False),
+            ToolParam("collision", Literal["auto", "component", "convex_hull", "none"], "auto"),
+            ToolParam("nanite", bool, False),
+            ToolParam("location", _Vector3, "", convert=_three_numbers),
         ),
     ),
     UnrealTool(
         name="remesh_unreal_mesh",
         description=(
-            "Uniformly remesh a DynamicMeshActor's mesh to a target edge length or triangle count, in "
-            "place and undoable; reports the result's mean edge length. The remesher makes up to "
-            f"{REMESH_OVERSHOOT:g} times the target, so a target_triangle_count over "
-            f"{MAX_REMESH_TARGET_TRIANGLES:,}, or an edge length predicted to make over "
-            f"{MAX_RESULT_TRIANGLES:,} triangles, is refused."
+            "Uniformly remesh a DynamicMeshActor's mesh, in place and undoable, to a target edge length or "
+            "triangle count (by default its own triangle count), for evenly sized triangles; reports the "
+            f"result's mean edge length. The remesher makes up to {REMESH_OVERSHOOT:g} times the target, so "
+            f"a target_triangle_count over {MAX_REMESH_TARGET_TRIANGLES:,}, or a target predicted to make "
+            f"over {MAX_RESULT_TRIANGLES:,} triangles, is refused."
             + _MESH_EDIT_NOTE
         ),
         response=UnrealRemeshMeshResponse,
@@ -2017,24 +2375,25 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         method="remesh_mesh",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("mode", str, "uniform"),
-            ToolParam("target_edge_length", Optional[float], None),
+            ToolParam("mode", Literal["uniform"], "uniform"),
+            ToolParam("target_edge_length", Optional[Annotated[float, Field(gt=0)]], None),
             ToolParam(
                 "target_triangle_count",
                 Optional[Annotated[int, Field(ge=4, le=MAX_REMESH_TARGET_TRIANGLES)]],
                 None,
                 description=f"Target triangle count, 4 to {MAX_REMESH_TARGET_TRIANGLES:,}.",
             ),
-            ToolParam("smoothing_iterations", int, 3),
+            ToolParam("smoothing_iterations", Annotated[int, Field(ge=1, le=50)], 3),
         ),
+        check=_one_remesh_target,
     ),
     UnrealTool(
         name="compute_unreal_mesh_uv",
         description=(
-            "Generate UVs for a DynamicMeshActor's mesh with XAtlas or PatchBuilder, in place and "
-            f"undoable. Method 'auto' uses XAtlas up to {XATLAS_MAX_TRIANGLES:,} triangles and "
-            "PatchBuilder above that; 'xatlas' on a larger mesh is refused, since XAtlas crashed the "
-            "editor on larger meshes." + _MESH_EDIT_NOTE
+            "Generate UVs for a DynamicMeshActor's mesh with XAtlas or PatchBuilder and pack them with "
+            "island_padding texels between islands, in place and undoable. Method 'auto' uses XAtlas up to "
+            f"{XATLAS_MAX_TRIANGLES:,} triangles and PatchBuilder above that; 'xatlas' on a larger mesh "
+            "is refused, since XAtlas crashed the editor on larger meshes." + _MESH_EDIT_NOTE
         ),
         response=UnrealComputeMeshUvResponse,
         read_only=False,
@@ -2044,12 +2403,18 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("mesh_path", str),
             ToolParam(
                 "method",
-                str,
+                Literal["auto", "auto_uv", "xatlas", "patch_builder"],
                 "auto",
                 description="auto, xatlas or patch_builder; the reply's method names the one that ran.",
             ),
-            ToolParam("uv_channel", int, 0, description="UV channel to write; it must exist on the mesh."),
-            ToolParam("island_padding", float, 2.0),
+            ToolParam(
+                "uv_channel",
+                Annotated[int, Field(ge=0, le=7)],
+                0,
+                description="UV channel to write; it must exist on the mesh.",
+            ),
+            ToolParam("island_padding", Annotated[float, Field(gt=0, le=64)], 2.0),
+            ToolParam("texture_resolution", Annotated[int, Field(ge=64, le=8192)], 1024),
         ),
     ),
 )

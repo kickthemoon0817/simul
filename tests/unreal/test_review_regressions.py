@@ -166,7 +166,7 @@ async def test_render_setting_cannot_be_used_as_console_dispatch(name, value):
     [
         ("compute_convex_hull", {}),
         ("decompose_convex_hull", {}),
-        ("edit_mesh_topology", {"operation": "extrude_faces"}),
+        ("edit_mesh_topology", {"operation": "extrude_faces", "face_selection": "all"}),
         ("subdivide_mesh", {}),
         ("simplify_mesh", {}),
         ("cut_mesh_plane", {"plane_origin": [0, 0, 0], "plane_normal": [0, 0, 1]}),
@@ -206,10 +206,8 @@ async def test_generated_mesh_paths_are_data_not_python(method, kwargs):
 async def test_mesh_dimension_strings_cannot_inject_python():
     session = UnrealRuntimeSession()
     session._execute_python = AsyncMock()
-    with pytest.raises(ValueError):
-        await session.generate_mesh_primitive(
-            "box", dimensions={"width": "1); review_injected();#"}
-        )
+    refused = await session.generate_mesh_primitive("box", dimensions={"width": "1); review_injected();#"})
+    assert (refused["error_type"], refused["details"]["code"]) == ("ValidationError", "INVALID_DIMENSION")
     session._execute_python.assert_not_called()
 
 
@@ -221,7 +219,6 @@ class Vector:
 class PrimitiveComponent:
     def __init__(self):
         self.mobility = SimpleNamespace(name="MOVABLE")
-        self.physics = False
         self.events = []
 
     def get_name(self):
@@ -229,15 +226,6 @@ class PrimitiveComponent:
 
     def get_class(self):
         return SimpleNamespace(get_name=lambda: "StaticMeshComponent")
-
-    def set_simulate_physics(self, value):
-        self.physics = value
-
-    def is_simulating_physics(self):
-        return self.physics
-
-    def add_impulse_at_location(self, force, location):
-        self.events.append(("impulse", force.z, location.x))
 
 
 class MeshComponent(PrimitiveComponent):
@@ -413,16 +401,10 @@ async def test_missing_actor_is_error_and_cannot_focus_origin(script_session, mo
 
 @pytest.mark.asyncio
 async def test_component_operations_and_missing_component(script_session):
-    """The physics and collision tools themselves are covered against a fuller
-    fake editor in tests/unreal/test_physics_tools.py."""
+    """The physics, collision and force tools themselves are covered against a
+    fuller fake editor in tests/unreal/test_physics_tools.py and
+    tests/unreal/test_simulation_tools.py."""
     session, actor, _ = script_session
-    component = actor.root_component
-    component.physics = True
-    result = await session.apply_force(
-        actor.path, force_z=7, is_impulse=True, location_x=4, location_y=5, location_z=6
-    )
-    assert result["force_applied"] is True
-    assert ("impulse", 7, 4) in component.events
     # assign_material has its own fake editor: tests/unreal/test_asset_tools.py.
     actor.root_component = None
     for result in (
@@ -444,7 +426,7 @@ async def test_simulation_lifecycle_and_query_errors(script_session, monkeypatch
         ("stop", "stopped"),
     ]:
         assert (await session.control_simulation(action))["state"] == state
-    assert (await session.control_simulation("pause"))["error_type"] == "InvalidState"
+    assert (await session.control_simulation("pause"))["error_type"] == "SimulationNotRunning"
     assert (await session.control_simulation("step"))[
         "error_type"
     ] == "UnsupportedOperation"

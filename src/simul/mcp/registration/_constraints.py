@@ -82,6 +82,17 @@ UNREAL_MAX_ASPECT_RATIO = 16384.0
 UNREAL_MAX_PAGE = 5000
 UNREAL_MAX_SCENE_DEPTH = 64
 UNREAL_MIN_FOV_DEGREES = 0.001
+#: Longest force ``apply_force`` keeps on (``FORCE_MAX_DURATION_S``, seconds of
+#: physics time) and the largest physics-state page (``PHYSICS_STATE_MAX_RESULTS``).
+UNREAL_FORCE_MAX_DURATION_S = 600.0
+UNREAL_PHYSICS_STATE_MAX_RESULTS = 1000
+#: The robotics analysis's largest page per category (``ROBOTICS_MAX_RESULTS``),
+#: and a light's intensity and temperature ranges (``LIGHT_MAX_INTENSITY``,
+#: ``LIGHT_MIN_TEMPERATURE_K``, ``LIGHT_MAX_TEMPERATURE_K``).
+UNREAL_ROBOTICS_MAX_RESULTS = 500
+UNREAL_LIGHT_MAX_INTENSITY = 1e9
+UNREAL_LIGHT_MIN_TEMPERATURE_K = 1000.0
+UNREAL_LIGHT_MAX_TEMPERATURE_K = 15000.0
 
 PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     # -- Isaac Sim -------------------------------------------------------------
@@ -214,7 +225,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         "scene_type": Choices(("room", "corridor", "warehouse", "outdoor"), enforced=False),
     },
     "apply_unreal_mesh_boolean": {
-        "operation": Choices(("union", "subtract", "intersect"), enforced=False),
+        "operation": Choices(("union", "subtract", "intersect", "difference", "intersection"), enforced=False),
     },
     "subdivide_unreal_mesh": {
         "level": Bounds(ge=1, le=4),
@@ -225,9 +236,23 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     "control_unreal_simulation": {
         "action": Choices(("start", "stop", "pause", "resume", "step")),
     },
+    "apply_unreal_force": {"duration": Bounds(ge=0.0, le=UNREAL_FORCE_MAX_DURATION_S)},
+    "get_unreal_physics_state": {
+        "max_results": Bounds(ge=1, le=UNREAL_PHYSICS_STATE_MAX_RESULTS),
+        "offset": _OFFSET,
+    },
+    "list_unreal_simulation_actors": {"max_results": Bounds(ge=1, le=UNREAL_MAX_PAGE), "offset": _OFFSET},
+    "analyze_unreal_scene_for_robotics": {
+        "max_results": Bounds(ge=1, le=UNREAL_ROBOTICS_MAX_RESULTS),
+        "offset": _OFFSET,
+    },
+    "set_unreal_light_params": {
+        "intensity": Bounds(ge=0.0, le=UNREAL_LIGHT_MAX_INTENSITY),
+        "temperature": Bounds(ge=UNREAL_LIGHT_MIN_TEMPERATURE_K, le=UNREAL_LIGHT_MAX_TEMPERATURE_K),
+    },
     # The editor also takes aliases (patchbuilder, auto_uv; any case), so the
     # canonical names are advertised without refusing the rest.
-    "compute_unreal_mesh_uv": {"method": Choices(("auto", "xatlas", "patch_builder"), enforced=False)},
+    "compute_unreal_mesh_uv": {"method": Choices(("auto", "auto_uv", "xatlas", "patch_builder"), enforced=False)},
     "convert_unreal_mesh_format": {
         "target_format": Choices(("static_mesh", "dynamic_mesh"), enforced=False),
     },
