@@ -30,6 +30,33 @@ PYTHON_SERVER_TOKEN_HEADER = "# isaacsim-python-server-token:"
 AUTH_ERROR_NAME = "AuthenticationError"
 AUTH_ERROR_MESSAGE = "Missing or invalid bridge auth token"
 
+#: Reply to a python_server JSON envelope on the raw-code path.
+ENVELOPE_ERROR_NAME = "UnsupportedProtocol"
+ENVELOPE_ERROR_MESSAGE = (
+    "This is the khemoo.simul bridge port: it takes length-prefixed bridge requests or raw "
+    "Python source, not the JSON envelope of isaacsim.code_editor.python_server, which it "
+    "would run as a dict literal that does nothing. Point the stock-socket client at "
+    "python_server's port (8226 by default) or use the bridge transport."
+)
+
+
+def is_python_server_envelope(source: str) -> bool:
+    """Return whether ``source`` is a python_server request envelope, not Python.
+
+    The envelope is a JSON object with ``code`` or ``introspect``
+    (``{"code", "timeout", "auth_token"}``, or the flavour probe
+    ``{"introspect": "status"}``).
+    """
+    text = source.lstrip()
+    if not text.startswith("{"):
+        return False
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and bool({"code", "introspect"} & set(parsed))
+
+
 #: Mode of the optional Unix socket: owner only. connect(2) needs write
 #: permission on the inode, so 0600 keeps every other local user out. A
 #: container whose bridge runs as root and whose host user must connect opts
@@ -451,7 +478,18 @@ class BridgeServerLifecycle:
                 header, _, code = code.partition("\n")
                 presented = header[len(PYTHON_SERVER_TOKEN_HEADER):].strip()
 
-            if not self._is_authorized(presented):
+            if is_python_server_envelope(code):
+                # Run as Python, the envelope is a dict literal: nothing runs,
+                # the output is empty and its timeout is ignored, so the client
+                # would read a no-op as success. Say what this port is instead.
+                result = {
+                    "status": "error",
+                    "output": "",
+                    "ename": ENVELOPE_ERROR_NAME,
+                    "evalue": ENVELOPE_ERROR_MESSAGE,
+                    "traceback": [f"{ENVELOPE_ERROR_NAME}: {ENVELOPE_ERROR_MESSAGE}"],
+                }
+            elif not self._is_authorized(presented):
                 result = {
                     "status": "error",
                     "output": "",

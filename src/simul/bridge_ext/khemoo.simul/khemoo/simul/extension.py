@@ -119,7 +119,9 @@ def check_bridge_auth_token(get_setting: Callable[[str], Any], presented: str) -
     """Return whether ``presented`` may use the bridge under the current settings.
 
     Fails closed: with auth required and no token configured anywhere every
-    request is rejected, rather than the bridge silently running open.
+    request is rejected, rather than the bridge silently running open. A
+    stateless check: the bridge itself goes through :class:`BridgeAuthLatch`,
+    which a later settings change cannot loosen.
     """
     if not bridge_auth_required(get_setting):
         return True
@@ -127,6 +129,55 @@ def check_bridge_auth_token(get_setting: Callable[[str], Any], presented: str) -
     if not expected or not presented:
         return False
     return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+
+
+class BridgeAuthLatch:
+    """The bridge's auth state, which settings can tighten but never loosen.
+
+    The auth settings live in Carb, which any code in Kit (and simul's
+    ``set_isaac_carb_settings``) can write; ``set(path, dict)`` even replaces a
+    whole subtree. Read per request, as before, a write that cleared
+    ``require_auth`` or emptied the token reopened the bridge to every local
+    process. Now the first time auth is seen required (at bridge start or any
+    later request) it stays required until the bridge restarts, and the first
+    token seen while it is required is the only one accepted.
+
+    The token cannot simply be read once at start: python_server generates it
+    during its own startup, which may run after the bridge's. Until a token
+    appears every request is rejected (fail closed), never accepted.
+    """
+
+    def __init__(self, get_setting: Callable[[str], Any]) -> None:
+        self._get_setting = get_setting
+        self._required = False
+        self._token = ""
+
+    def refresh(self) -> None:
+        """Latch whatever the settings now require; never relax what is latched."""
+        try:
+            if not self._required and bridge_auth_required(self._get_setting):
+                self._required = True
+            if self._required and not self._token:
+                self._token = resolve_bridge_auth_token(self._get_setting)
+        except Exception as exc:
+            # Unreadable settings cannot relax anything; they only stop the
+            # latch from tightening this time.
+            logger.warning("Could not read the bridge auth settings: %s", exc)
+
+    @property
+    def required(self) -> bool:
+        """Whether a token is required, after latching the current settings."""
+        self.refresh()
+        return self._required
+
+    def check(self, presented: str) -> bool:
+        """Return whether ``presented`` may use the bridge; constant-time compare."""
+        self.refresh()
+        if not self._required:
+            return True
+        if not self._token or not presented:
+            return False
+        return hmac.compare_digest(presented.encode("utf-8"), self._token.encode("utf-8"))
 
 
 def parse_socket_mode(value: Any) -> int:
@@ -169,6 +220,16 @@ class IsaacMCPServerExtension(_extension_base()):
         self._socket_mode = DEFAULT_SOCKET_MODE
         self._loop_thread_ident: int | None = None
         self._ui_builder: BridgeUIBuilder | None = None
+        # Lives as long as the extension, across bridge restarts, so no
+        # sequence of settings writes and restarts can loosen it.
+        self._auth_latch = BridgeAuthLatch(self._read_setting)
+
+    @staticmethod
+    def _read_setting(key: str) -> Any:
+        """Read one Carb setting; None outside Kit."""
+        if carb is None:
+            return None
+        return carb.settings.get_settings().get(key)
 
     def on_startup(self, ext_id: str) -> None:
         """Start the bridge server from Kit settings."""
@@ -178,6 +239,9 @@ class IsaacMCPServerExtension(_extension_base()):
         self._ext_id = ext_id
         self._globals = {**globals()}
         self._reload_settings_from_kit()
+        # Snapshot at start: what the launch configured is latched before
+        # any request (or settings write) can arrive.
+        self._auth_latch.refresh()
         self._ui_builder = BridgeUIBuilder(
             title="Simul Bridge",
             get_state_fn=self.get_runtime_state,
@@ -346,23 +410,22 @@ class IsaacMCPServerExtension(_extension_base()):
         )
         self._socket_mode = parse_socket_mode(settings.get(BRIDGE_SOCKET_MODE_SETTING))
 
-    @staticmethod
-    def _auth_required() -> bool:
-        """Return whether the bridge currently requires a token."""
+    def _auth_required(self) -> bool:
+        """Return whether the bridge requires a token (latched, see BridgeAuthLatch)."""
         if carb is None:
             return False
-        return bridge_auth_required(carb.settings.get_settings().get)
+        return self._auth_latch.required
 
-    @staticmethod
-    def _check_auth_token(presented: str) -> bool:
-        """Authenticate one request against the live Carb settings.
+    def _check_auth_token(self, presented: str) -> bool:
+        """Authenticate one request through the latch.
 
-        Read per request rather than cached at start: python_server generates
-        its token during its own startup, which may run after the bridge's.
+        The latch re-reads the settings on every request so a token
+        python_server generates after the bridge started is picked up, but
+        a later write that clears require_auth or the token changes nothing.
         """
         if carb is None:
             return False
-        return check_bridge_auth_token(carb.settings.get_settings().get, presented)
+        return self._auth_latch.check(presented)
 
     def _schedule_task(self, coro: asyncio.Future) -> None:
         """Schedule a bridge lifecycle task on Kit's event loop."""

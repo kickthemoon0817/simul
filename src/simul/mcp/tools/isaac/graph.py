@@ -31,9 +31,14 @@ from .._meta import tool_meta
 # (. : _ -) and camelCase boundaries, and a word matches a hint when it starts
 # with it. So codeStr (code|str), augmentationScript and scriptnode match,
 # while usdTimecode (usd|timecode), robot_description (robot|description)
-# and omniscripting do not. Over Isaac Sim's shipped node types this flags
-# exactly the five code-running types in the deny-list and their code inputs
-# (tests/isaac/data/shipped_node_types.json pins it).
+# and the extension omni.usd.schema.omniscripting do not. For node types (last
+# segment) and attributes a word that contains "script" elsewhere also
+# matches, English words such as description cut out first: an all-lowercase
+# third-party runpythonscript is one word the split cannot break. Over Isaac
+# Sim's shipped node types this flags exactly the five code-running types in
+# the deny-list and their code inputs (tests/isaac/data/shipped_node_types.json
+# pins it). Python Scripting Components (OmniScriptingAPI) are prims, not
+# node types; SCRIPT_GUARD_CORE checks them Kit side.
 # ---------------------------------------------------------------------------
 
 # Kept for callers that import the single hint.
@@ -59,6 +64,16 @@ SCRIPT_CAPABLE_NODE_TYPES: frozenset[str] = frozenset(
 # WarpKernel's inputs:codeStr / codeFile / codeProvider.
 CODE_ATTRIBUTE_HINTS: tuple[str, ...] = ("script", "code")
 
+# The Python Scripting Component (omni.kit.scripting on Isaac Sim 5.x,
+# omni.behavior.scripting on 6.0): a prim with the OmniScriptingAPI schema
+# lists Python files in omni:scripting:scripts, and Kit imports them. Once a
+# script-free stage has been opened Kit allows scripts, and every later USD
+# change that adds such a prim loads its scripts with no prompt (5.x
+# script_manager.py _open_stage / _pending_sync_task_handler; 6.0.1's
+# behavior_utils.add_behavior_script writes the same attribute).
+SCRIPTING_API_SCHEMA = "OmniScriptingAPI"
+SCRIPTING_ATTRIBUTE_NAMESPACE = "omni:scripting:"
+
 # Extensions that run Python attached to the stage, besides any whose name has
 # a word starting with one of SCRIPT_CAPABLE_NODE_HINTS. omni.warp ships
 # WarpKernel; its library, omni.warp.core, does not run stage code.
@@ -71,11 +86,33 @@ SCRIPT_EXTENSIONS: frozenset[str] = frozenset(
 SCRIPT_GUARD_TYPES: tuple[str, ...] = tuple(sorted(name.lower() for name in SCRIPT_CAPABLE_NODE_TYPES))
 SCRIPT_GUARD_SEGMENTS: tuple[str, ...] = tuple(sorted({name.rsplit(".", 1)[-1] for name in SCRIPT_GUARD_TYPES}))
 SCRIPT_GUARD_HINTS = SCRIPT_CAPABLE_NODE_HINTS
+# English words that contain "script" without naming code. A word that
+# contains "script" anywhere else (an all-lowercase third-party name such as
+# acme.nodes.runpythonscript, which the camelCase split leaves as one word)
+# counts as a script word; these do not.
+SCRIPT_GUARD_ENGLISH: tuple[str, ...] = (
+    "conscript",
+    "description",
+    "descriptions",
+    "descriptor",
+    "descriptors",
+    "inscription",
+    "manuscript",
+    "nondescript",
+    "postscript",
+    "prescription",
+    "subscript",
+    "subscripts",
+    "superscript",
+    "transcript",
+    "transcription",
+    "transcripts",
+)
 _GUARD_WORD_PATTERN = r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+"
 _GUARD_WORD = re.compile(_GUARD_WORD_PATTERN)
 
 
-# The three functions below run both here and inside Kit: script_guard_source()
+# The four functions below run both here and inside Kit: script_guard_source()
 # embeds their source, so they may use only re, _GUARD_WORD and the
 # SCRIPT_GUARD_* constants.
 def _guard_words(text: Any) -> list[str]:
@@ -88,6 +125,22 @@ def _guard_has_word(text: Any, prefixes: Any) -> bool:
     return any(word.startswith(prefix) for word in _guard_words(text) for prefix in prefixes)
 
 
+def _guard_buries_word(text: Any, needles: Any) -> bool:
+    """Return True when a word of ``text`` contains a needle outside English words.
+
+    Catches names the word split cannot: all-lowercase runs such as
+    ``runpythonscript`` stay one word, and its "script" is not at the start.
+    The English words in ``SCRIPT_GUARD_ENGLISH`` are cut out first, so
+    ``robotdescription`` is not a match.
+    """
+    for word in _guard_words(text):
+        for english in sorted(SCRIPT_GUARD_ENGLISH, key=len, reverse=True):
+            word = word.replace(english, " ")
+        if any(needle in word for needle in needles):
+            return True
+    return False
+
+
 def _script_capable_type(type_name: Any) -> bool:
     """Return True for a code-running node type (deny-list or a script word)."""
     lowered = str(type_name or "").strip().lower()
@@ -95,6 +148,7 @@ def _script_capable_type(type_name: Any) -> bool:
         lowered in SCRIPT_GUARD_TYPES
         or lowered.rsplit(".", 1)[-1] in SCRIPT_GUARD_SEGMENTS
         or _guard_has_word(type_name, SCRIPT_GUARD_HINTS)
+        or _guard_buries_word(str(type_name or "").rsplit(".", 1)[-1], SCRIPT_GUARD_HINTS)
     )
 
 
@@ -123,10 +177,18 @@ def is_script_attribute(name: str) -> bool:
             the prim path is matched.
 
     Returns:
-        Whether a word of the name starts with "script" or "code"
-        (``inputs:usdTimecode`` does not).
+        Whether the name is in the Python Scripting Component's
+        ``omni:scripting:`` namespace, a word of it starts with "script" or
+        "code" (``inputs:usdTimecode`` does not), or an all-lowercase word
+        hides "script" (``inputs:pythonscript``). A hidden "code" is not
+        matched (``timecode``, ``barcode``, ``encode`` would be).
     """
-    return _guard_has_word(str(name or "").rsplit(".", 1)[-1], CODE_ATTRIBUTE_HINTS)
+    attribute = str(name or "").rsplit(".", 1)[-1]
+    return (
+        attribute.startswith(SCRIPTING_ATTRIBUTE_NAMESPACE)
+        or _guard_has_word(attribute, CODE_ATTRIBUTE_HINTS)
+        or _guard_buries_word(attribute, SCRIPT_CAPABLE_NODE_HINTS)
+    )
 
 
 def is_script_extension(extension_id: str) -> bool:
@@ -161,8 +223,10 @@ def extension_bare_name(extension_id: str) -> str:
 
 
 # Kit-side prim checks, for generated scripts that see prims rather than
-# names. Defines _script_capable_prim(prim) and
-# _script_capable_prims_under(prim, limit) on top of the shared functions.
+# names. Defines _script_capable_prim(prim) (an OmniGraph code node),
+# _scripting_component_prim(prim) (a Python Scripting Component),
+# _script_capable_prims_under(prim, limit) (either, in a subtree) and
+# _unloaded_payload_prims_under(prim, limit) on top of the shared functions.
 # Inactive prims and instance proxies are included: activating one later must
 # not slip a code node past the check.
 SCRIPT_GUARD_CORE = """\
@@ -170,12 +234,48 @@ SCRIPT_GUARD_CORE = """\
         attr = prim.GetAttribute("node:type")
         return bool(attr and attr.IsValid() and _script_capable_type(attr.Get()))
 
+    def _scripting_component_prim(prim):
+        # OmniScriptingAPI applied, or anything authored in its
+        # omni:scripting namespace: Kit imports the files it lists. The
+        # apiSchemas metadata is read as well as GetAppliedSchemas(), which
+        # drops a schema name whose plugin is not registered.
+        names = set()
+        try:
+            names.update(prim.GetAppliedSchemas())
+        except Exception:
+            pass
+        try:
+            listop = prim.GetMetadata("apiSchemas")
+            if listop is not None:
+                names.update(listop.GetAppliedItems())
+        except Exception:
+            pass
+        if any(str(name).split(":", 1)[0] == SCRIPTING_API_SCHEMA for name in names):
+            return True
+        try:
+            return bool(prim.GetAuthoredPropertiesInNamespace(SCRIPTING_ATTRIBUTE_NAMESPACE.rstrip(":")))
+        except Exception:
+            return False
+
     def _script_capable_prims_under(prim, limit=20):
         from pxr import Usd
         found = []
         predicate = Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)
         for candidate in Usd.PrimRange(prim, predicate):
-            if _script_capable_prim(candidate):
+            if _script_capable_prim(candidate) or _scripting_component_prim(candidate):
+                found.append(str(candidate.GetPath()))
+                if len(found) >= limit:
+                    break
+        return found
+
+    def _unloaded_payload_prims_under(prim, limit=20):
+        # A payload that is not loaded composes nothing, so the checks above
+        # cannot see what it would bring in when someone loads it.
+        from pxr import Usd
+        found = []
+        predicate = Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)
+        for candidate in Usd.PrimRange(prim, predicate):
+            if candidate.HasAuthoredPayloads() and not candidate.IsLoaded():
                 found.append(str(candidate.GetPath()))
                 if len(found) >= limit:
                     break
@@ -189,15 +289,16 @@ def script_guard_source() -> str:
     Embed it in a generated script (``_compose_script`` fragment) to check
     prims inside Kit with the same functions ``is_script_capable_node_type``
     runs here. It defines ``_script_capable_type(type_name)``,
-    ``_script_capable_prim(prim)`` and ``_script_capable_prims_under(prim,
-    limit=20)``.
+    ``_script_capable_prim(prim)``, ``_scripting_component_prim(prim)``,
+    ``_script_capable_prims_under(prim, limit=20)`` and
+    ``_unloaded_payload_prims_under(prim, limit=20)``.
 
     Returns:
         Python source defining the guard functions.
     """
     shared = "\n\n".join(
         inspect.getsource(function)
-        for function in (_guard_words, _guard_has_word, _script_capable_type)
+        for function in (_guard_words, _guard_has_word, _guard_buries_word, _script_capable_type)
     )
     return (
         "import re\n"
@@ -205,6 +306,9 @@ def script_guard_source() -> str:
         f"SCRIPT_GUARD_TYPES = {_pyval(SCRIPT_GUARD_TYPES)}\n"
         f"SCRIPT_GUARD_SEGMENTS = {_pyval(SCRIPT_GUARD_SEGMENTS)}\n"
         f"SCRIPT_GUARD_HINTS = {_pyval(SCRIPT_GUARD_HINTS)}\n"
+        f"SCRIPT_GUARD_ENGLISH = {_pyval(SCRIPT_GUARD_ENGLISH)}\n"
+        f"SCRIPTING_API_SCHEMA = {_pyval(SCRIPTING_API_SCHEMA)}\n"
+        f"SCRIPTING_ATTRIBUTE_NAMESPACE = {_pyval(SCRIPTING_ATTRIBUTE_NAMESPACE)}\n"
         f"_GUARD_WORD = re.compile({_pyval(_GUARD_WORD_PATTERN)})\n\n"
         + shared
         + "\n\n"

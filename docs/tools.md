@@ -393,6 +393,17 @@ Notes:
   Refusals are typed: `error_type` is `NotFoundError`, `ValidationError` or
   `InvalidState`, and `details.code` names the case (`INSTANCE_PROXY`,
   `DEFINED_ELSEWHERE`, `DESTINATION_EXISTS`, `UNKNOWN_PRIM_TYPE`, ...).
+  Every other Isaac tool's script failures are typed by the condition as well:
+  - no open stage is `InvalidState`;
+  - a prim, root path, graph, camera or extension that isn't there is
+    `NotFoundError`;
+  - a prim of the wrong kind or missing an API is `ValidationError`;
+  - no viewport is `ViewportUnavailable`;
+  - a missing capability (PhysX scene query) is `UnsupportedOperation`;
+  - anything else Kit reports is `EngineError`.
+
+  A bridge script stopped at its timeout is `TimeoutError`, and a script too
+  large for the 5.1 stock socket is `PayloadTooLarge`.
 - The listings (`list_isaac_prims`, `search_isaac_prims`, `get_isaac_subtree`,
   `query_isaac_typed_prims`) descend into instanceable prims by default,
   where Isaac assets keep their meshes and colliders; entries there carry
@@ -508,10 +519,20 @@ Notes:
 - `get_isaac_logs` reads this instance's log (Kit's `/log/file`). When Kit
   does not name it, the tool falls back to the newest Kit log and warns that
   it may be another process's.
-- `set_isaac_carb_settings` refuses the transport namespaces (bridge,
-  python_server, 5.x VS Code). It refuses `/persistent/` keys, which Kit saves
-  for later sessions, unless `allow_persistent=true`. `get_isaac_carb_settings`
-  reads `auth_token` values back as `***`.
+- `set_isaac_carb_settings` refuses any write that reaches the transport
+  namespaces (bridge, python_server, 5.x VS Code). That covers a key inside
+  one, the namespace itself, and an ancestor such as `/exts` or `/`, because
+  Carb's `set(path, dict)` replaces the whole subtree. Dict values are checked
+  key by key, and `.`/`..` segments are refused. With script execution off it
+  also refuses `/app/scripting`. It refuses `/persistent` keys, which Kit
+  saves for later sessions, unless `allow_persistent=true`.
+  `get_isaac_carb_settings` reads `auth_token` values back as `***`, and
+  `get_isaac_logs` redacts the python_server token that 6.0.1 logs at Info
+  level (`redacted_lines` counts the lines).
+- With script execution off, imports, references and duplicates that carry a
+  Python Scripting Component (`OmniScriptingAPI` / `omni:scripting:scripts`),
+  and imports with unloaded payloads, are refused. See
+  [configuration.md](configuration.md#script-execution).
 - `ping_isaac` does not wait for a call already running on the instance and
   reports `busy` when one is. A call the client cancels keeps the instance
   until Isaac Sim has finished it (the bridge is asked to interrupt it first);

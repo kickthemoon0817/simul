@@ -2,7 +2,7 @@
 
 import json
 import textwrap
-from typing import Annotated, Any, List
+from typing import Annotated, Any, List, Optional
 
 from pydantic import BeforeValidator
 
@@ -32,6 +32,74 @@ PROTECTED_CARB_SETTING_PREFIXES: tuple[str, ...] = (
 # (Isaac Sim's .kit files set settings.persistent = true) and apply to every
 # later session, not just this one.
 PERSISTENT_CARB_SETTING_PREFIX = "/persistent/"
+
+# The same namespaces as Carb paths. A write is refused when its key is one of
+# these, lies inside one, or is an ancestor of one (/exts, /, ...): Carb's
+# set(path, dict) replaces the whole subtree at path, so a write to /exts or
+# to /exts/khemoo.simul itself clears every key beneath it, the bridge's
+# require_auth and auth_token included.
+PROTECTED_CARB_NAMESPACES: tuple[str, ...] = tuple(
+    prefix.rstrip("/") for prefix in PROTECTED_CARB_SETTING_PREFIXES
+)
+PERSISTENT_CARB_NAMESPACE = PERSISTENT_CARB_SETTING_PREFIX.rstrip("/")
+
+# Settings of the Python Scripting Component (omni.kit.scripting on 5.x,
+# omni.behavior.scripting on 6.0), refused while script execution is off.
+# /app/scripting/ignoreWarningDialog=true makes Kit run the scripts attached
+# to an opened stage without asking (5.x script_manager.py _open_stage; Isaac
+# Sim 6.0.1's behaviors.py sets it "to enable behavior scripts").
+SCRIPTING_CARB_NAMESPACES: tuple[str, ...] = ("/app/scripting",)
+
+
+def normalize_carb_path(key: str) -> Optional[str]:
+    """Return a Carb key as an absolute path with empty segments dropped.
+
+    Args:
+        key: A settings key as a caller wrote it (``exts/a//b/``).
+
+    Returns:
+        ``/exts/a/b``, ``/`` for the root, or None when a segment is ``.`` or
+        ``..``, which Carb would not resolve the way a reader expects.
+    """
+    segments = [segment for segment in str(key).split("/") if segment]
+    if any(segment in (".", "..") for segment in segments):
+        return None
+    return "/" + "/".join(segments)
+
+
+def carb_write_paths(key: str, value: Any) -> Optional[List[str]]:
+    """List every Carb path a ``set(key, value)`` writes.
+
+    A dict value writes a subtree: each of its keys, recursively, below
+    ``key``. The key itself is listed too, since the subtree replaces
+    whatever was there.
+
+    Returns:
+        The normalized paths, or None when any of them is malformed.
+    """
+    root = normalize_carb_path(key)
+    if root is None:
+        return None
+    paths = [root]
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            child = carb_write_paths(root.rstrip("/") + "/" + str(child_key), child_value)
+            if child is None:
+                return None
+            paths.extend(child)
+    return paths
+
+
+def carb_path_touches(path: str, namespace: str) -> bool:
+    """Whether writing ``path`` changes something in ``namespace``.
+
+    True when ``path`` is the namespace, lies inside it, or is an ancestor of
+    it (a subtree write there replaces the namespace).
+    """
+    if path == "/":
+        return True
+    return path == namespace or path.startswith(namespace + "/") or namespace.startswith(path + "/")
+
 
 # Prim paths whose removal empties the scene rather than editing it.
 STAGE_ROOT_PATH = "/"

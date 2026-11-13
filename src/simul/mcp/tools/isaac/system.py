@@ -1,12 +1,16 @@
 """Extension management tools for Isaac Sim."""
 
 import textwrap
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ._shared import (
-    PERSISTENT_CARB_SETTING_PREFIX,
+    PERSISTENT_CARB_NAMESPACE,
+    PROTECTED_CARB_NAMESPACES,
     PROTECTED_CARB_SETTING_PREFIXES,
+    SCRIPTING_CARB_NAMESPACES,
     _pyval,
+    carb_path_touches,
+    carb_write_paths,
 )
 from .graph import _script_execution_refusal, is_script_extension
 from .._meta import tool_meta
@@ -251,9 +255,12 @@ class SystemMixin:
             "Write one or more Carbonite (carb) settings by key path. Takes a dict of "
             'key-value pairs (e.g. {"/rtx/fog/enabled": true, "/rtx/fog/fogEndDist": '
             "200.0}). Returns the verified new values after applying. Changes take effect "
-            "immediately in the renderer. Keys under /exts/khemoo.simul/, "
-            "/exts/isaacsim.code_editor.python_server/ and /exts/isaacsim.code_editor.vscode/ "
-            "configure the MCP transport and are refused. Keys under /persistent/ are saved "
+            "immediately in the renderer. A write that touches the namespaces configuring "
+            "the MCP transport (/exts/khemoo.simul/, /exts/isaacsim.code_editor.python_server/, "
+            "/exts/isaacsim.code_editor.vscode/) is refused: a key inside one, the namespace "
+            "itself, or an ancestor such as /exts or / (a dict value replaces the whole "
+            "subtree). With script execution disabled, /app/scripting (the Python Scripting "
+            "Component's settings) is refused the same way. Keys under /persistent/ are saved "
             "to the user's Kit configuration and outlive this session, so they are refused "
             "unless allow_persistent=true."
         ),
@@ -267,6 +274,12 @@ class SystemMixin:
         """
         Write one or more Carbonite settings by key path.
 
+        Carb's ``set(path, dict)`` replaces the subtree at ``path``, so every
+        path a write reaches is checked, a dict value's keys included: one
+        that is a protected namespace, lies inside it or is an ancestor of it
+        is refused. Keys with ``.`` or ``..`` segments are refused as
+        ambiguous; empty segments (``a//b``) are collapsed before checking.
+
         Args:
             settings: Dict mapping key paths to values
                       (e.g. {"/rtx/fog/enabled": true, "/rtx/fog/fogEndDist": 200.0}).
@@ -278,28 +291,59 @@ class SystemMixin:
         Returns:
             Dict with applied settings and their verified new values (plus a
             warning naming any persistent keys written), or a
-            RefusedOperation error when any key configures the MCP transport
-            or is persistent without allow_persistent.
+            RefusedOperation error when any key touches the MCP transport's
+            settings, is malformed or is persistent without allow_persistent,
+            or a ScriptExecutionDisabled error for /app/scripting while
+            script execution is off.
         """
-        def _normalized(key: str) -> str:
-            return "/" + key.lstrip("/")
+        written: Dict[str, List[str]] = {}
+        malformed = []
+        for key, value in settings.items():
+            paths = carb_write_paths(key, value)
+            if paths is None:
+                malformed.append(key)
+            else:
+                written[key] = paths
+        if malformed:
+            return self._refusal(
+                "Refusing to write settings with '.' or '..' path segments: "
+                + ", ".join(sorted(malformed))
+                + ". No settings were applied.",
+                refused_keys=sorted(malformed),
+            )
 
-        protected_keys = sorted(
-            key for key in settings if _normalized(key).startswith(PROTECTED_CARB_SETTING_PREFIXES)
-        )
+        def _touching(namespaces: Tuple[str, ...]) -> List[str]:
+            return sorted(
+                key
+                for key, paths in written.items()
+                if any(carb_path_touches(path, namespace) for path in paths for namespace in namespaces)
+            )
+
+        protected_keys = _touching(PROTECTED_CARB_NAMESPACES)
         if protected_keys:
             return self._refusal(
                 "Refusing to write transport settings: "
                 + ", ".join(protected_keys)
-                + ". Keys under "
-                + ", ".join(PROTECTED_CARB_SETTING_PREFIXES)
-                + " configure the socket simul is speaking through. No settings were applied.",
+                + ". Keys in, or above, "
+                + ", ".join(PROTECTED_CARB_NAMESPACES)
+                + " configure the socket simul is speaking through (a write to an ancestor "
+                "replaces the whole subtree). No settings were applied.",
                 refused_keys=protected_keys,
                 protected_prefixes=list(PROTECTED_CARB_SETTING_PREFIXES),
+                protected_namespaces=list(PROTECTED_CARB_NAMESPACES),
             )
-        persistent_keys = sorted(
-            key for key in settings if _normalized(key).startswith(PERSISTENT_CARB_SETTING_PREFIX)
-        )
+        if not self.settings.security.allow_script_execution:
+            scripting_keys = _touching(SCRIPTING_CARB_NAMESPACES)
+            if scripting_keys:
+                return _script_execution_refusal(
+                    "Refusing to write " + ", ".join(scripting_keys)
+                    + ": /app/scripting decides whether Kit runs the Python scripts attached "
+                    "to a stage (ignoreWarningDialog runs them without asking). No settings "
+                    "were applied.",
+                    refused_keys=scripting_keys,
+                    protected_namespaces=list(SCRIPTING_CARB_NAMESPACES),
+                )
+        persistent_keys = _touching((PERSISTENT_CARB_NAMESPACE,))
         if persistent_keys and not allow_persistent:
             return self._refusal(
                 "Refusing to write persistent settings without allow_persistent=true: "

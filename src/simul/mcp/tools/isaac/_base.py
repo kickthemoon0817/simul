@@ -1,6 +1,7 @@
 """Transport and policy machinery every Isaac tool mixin builds on."""
 
 import json
+import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ....adapters import IsaacSocketClient, ScriptResult
@@ -17,6 +18,45 @@ from ._shared import (
     SCRIPT_ANNOTATIONS,
     logger,
 )
+
+#: Types for the failures simul's own scripts print as ``{"error": ...}``
+#: without an ``error_type``, by the fixed wording those scripts use; the
+#: first pattern that matches the start of the message wins. Anything else
+#: ("Failed to ...", an exception's text) stays ``EngineError``.
+SCRIPT_FAILURE_PATTERNS: Tuple[Tuple["re.Pattern[str]", str], ...] = (
+    (re.compile(r"No stage is (?:currently )?open"), error_types.INVALID_STATE),
+    (re.compile(r"No (?:active )?viewport"), error_types.VIEWPORT_UNAVAILABLE),
+    (re.compile(r"Refusing "), error_types.REFUSED_OPERATION),
+    (re.compile(r"Viewport capture (?:failed|error)"), error_types.CAPTURE_ERROR),
+    (re.compile(r"[\w ]{0,60}\bnot available\b"), error_types.UNSUPPORTED_OPERATION),
+    (
+        re.compile(r"[\w ]{0,60}\bnot found\b|No [\w ]{1,60}\b(?:found|on the stage)\b"),
+        error_types.NOT_FOUND_ERROR,
+    ),
+    (re.compile(r"[\w ]{0,60}\balready (?:exists|applied)\b"), error_types.INVALID_STATE),
+    (
+        re.compile(r"Invalid |Not a valid |Prim (?:is not|is inside|does not have) |[\w ]{0,60} must be "),
+        error_types.VALIDATION_ERROR,
+    ),
+)
+
+
+def script_failure_type(message: Any) -> str:
+    """Return the vocabulary type of an untyped failure a tool script printed.
+
+    Args:
+        message: The script's ``error`` value.
+
+    Returns:
+        The type of the first ``SCRIPT_FAILURE_PATTERNS`` entry matching the
+        start of the message, else ``EngineError``.
+    """
+    text = str(message or "").strip()
+    for pattern, error_type in SCRIPT_FAILURE_PATTERNS:
+        if pattern.match(text):
+            return error_type
+    return error_types.ENGINE_ERROR
+
 
 #: How much of the stdout that was not the tool's JSON a reply carries back.
 FOREIGN_OUTPUT_REPORT_CHARS = 2000
@@ -399,6 +439,8 @@ class IsaacScriptBase(LoggerMixin):
             _note_foreign_output(data, other_output)
         if notes and data.get("error") is None:
             merge_annotations(data, notes)
+        if data.get("error") is not None and not data.get("error_type") and data.get("success") is not True:
+            data["error_type"] = script_failure_type(data["error"])
         # A script that sets `success` itself is trusted; otherwise `error`
         # or any `*_error` key marks the call failed, so a partial result
         # (`syntheticdata_error` beside a valid listing) is not reported green.
