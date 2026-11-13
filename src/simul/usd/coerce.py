@@ -15,6 +15,11 @@ Conventions:
 
 - numbers widen to the target's numeric type (``45`` into a ``float``); an
   integer type refuses a fraction and checks its range;
+- a ``float``, ``double`` or ``half`` (alone or in a vector, quaternion or
+  matrix) also takes the strings ``"Infinity"``, ``"-Infinity"`` and
+  ``"NaN"``, as the read tools report non-finite values, and refuses a finite
+  number its precision cannot hold (``1e39`` for a ``float``) rather than
+  storing infinity;
 - vectors are lists of their dimension (``[x, y, z]``);
 - quaternions are ``[w, x, y, z]``, real part first, as ``Gf.Quat*`` stores
   them and as the tools report rotations;
@@ -26,6 +31,7 @@ Conventions:
 from __future__ import annotations
 
 import math
+import struct
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ._pxr import Sdf, UsdGeom
@@ -38,6 +44,11 @@ _INT_RANGES: Dict[str, Tuple[int, int]] = {
     "unsigned long long": (0, 2**64 - 1),
 }
 _FLOAT_TYPES = frozenset({"pxr_half::half", "float", "double"})
+# struct format of each floating-point precision, to find finite values that
+# overflow it; a double holds any finite JSON number.
+_PACK_FORMATS: Dict[str, str] = {"pxr_half::half": "<e", "float": "<f", "half": "<e"}
+# The strings the read tools write for non-finite floats (simul.usd.values).
+NON_FINITE: Dict[str, float] = {"Infinity": math.inf, "-Infinity": -math.inf, "NaN": math.nan}
 
 
 class ValueProblem(ValueError):
@@ -87,29 +98,83 @@ def parse_type_name(text: Any) -> Sdf.ValueTypeName:
     )
 
 
+def _real(value: Any, precision: str, type_name: Any) -> float:
+    """Convert a JSON number, or a non-finite string, to a float ``precision`` can hold.
+
+    Args:
+        value: A number, or ``"Infinity"`` / ``"-Infinity"`` / ``"NaN"``.
+        precision: ``float``, ``double`` or ``half`` (the scalar's C++ type,
+            or the precision of a vector, quaternion or matrix).
+        type_name: The target type, for messages.
+
+    Raises:
+        ValueProblem: Not a number, or a finite number that overflows
+            ``precision``.
+    """
+    if isinstance(value, str) and value in NON_FINITE:
+        return NON_FINITE[value]
+    if not _is_number(value):
+        raise ValueProblem(f"{type_name} takes a number{_non_finite_hint(value)}, not {_shape(value)}")
+    try:
+        number = float(value)
+    except OverflowError:
+        raise ValueProblem(f"{value} is too large for {type_name}") from None
+    pack = _PACK_FORMATS.get(precision)
+    if pack is not None and math.isfinite(number):
+        try:
+            struct.pack(pack, number)
+        except OverflowError:
+            limit = 65504.0 if pack == "<e" else 3.4028234663852886e38
+            raise ValueProblem(
+                f"{value!r} is out of range for {type_name} (largest finite magnitude {limit:g}); "
+                'pass "Infinity" or "-Infinity" for an unbounded value'
+            ) from None
+    return number
+
+
+def _non_finite_hint(value: Any) -> str:
+    """Name the accepted spellings when ``value`` is another spelling of infinity or NaN."""
+    if isinstance(value, str) and value.strip().lower().lstrip("+-") in ("inf", "infinity", "nan"):
+        return ' (non-finite values are spelled exactly "Infinity", "-Infinity" or "NaN")'
+    return ""
+
+
 def _number(value: Any, cpp_type: str, type_name: Any) -> Any:
+    if cpp_type not in _INT_RANGES:
+        return _real(value, cpp_type, type_name)
     if not _is_number(value):
         raise ValueProblem(f"{type_name} takes a number, not {_shape(value)}")
-    if cpp_type in _INT_RANGES:
-        if isinstance(value, float):
-            if not value.is_integer():
-                raise ValueProblem(f"{type_name} takes an integer, not {value!r}")
-            value = int(value)
-        low, high = _INT_RANGES[cpp_type]
-        if not low <= value <= high:
-            raise ValueProblem(f"{value} is out of range for {type_name} ({low} to {high})")
-        return int(value)
-    return float(value)
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueProblem(f"{type_name} takes an integer, not {value!r}")
+        value = int(value)
+    low, high = _INT_RANGES[cpp_type]
+    if not low <= value <= high:
+        raise ValueProblem(f"{value} is out of range for {type_name} ({low} to {high})")
+    return int(value)
 
 
-def _numbers(value: Any, count: int, what: str, integers: bool = False) -> List[Any]:
-    if not isinstance(value, (list, tuple)) or len(value) != count or not all(_is_number(v) for v in value):
+def _numbers(
+    value: Any, count: int, what: str, integers: bool = False, precision: str = "double", type_name: Any = None
+) -> List[Any]:
+    """Convert a list of ``count`` numbers: integers (int32) or reals of ``precision``."""
+    if not isinstance(value, (list, tuple)) or len(value) != count:
         raise ValueProblem(f"{what}, not {_shape(value)}")
     if integers:
-        if not all(float(v).is_integer() for v in value):
+        if not all(_is_number(v) for v in value):
+            raise ValueProblem(f"{what}, not {_shape(value)}")
+        if not all(isinstance(v, int) or float(v).is_integer() for v in value):
             raise ValueProblem(f"{what} (integers), not {_shape(value)} with fractions")
-        return [int(v) for v in value]
-    return [float(v) for v in value]
+        return [_number(v, "int", type_name or what) for v in value]
+    if not all(_is_number(v) or (isinstance(v, str) and v in NON_FINITE) for v in value):
+        hint = next((_non_finite_hint(v) for v in value if _non_finite_hint(v)), "")
+        raise ValueProblem(f"{what}{hint}, not {_shape(value)}")
+    return [_real(v, precision, type_name or what) for v in value]
+
+
+def _precision(cpp_type: str) -> str:
+    """The precision of a Gf vector, quaternion or matrix type: its last letter (d, f, h)."""
+    return {"d": "double", "f": "float", "h": "half"}.get(cpp_type[-1:], "double")
 
 
 def _scalar_converter(scalar: Sdf.ValueTypeName) -> Optional[Callable[[Any], Any]]:
@@ -145,14 +210,15 @@ def _scalar_converter(scalar: Sdf.ValueTypeName) -> Optional[Callable[[Any], Any
     if cpp_type in ("GfTimeCode", "SdfTimeCode"):
         default_type = type(scalar.defaultValue)
         return lambda value: default_type(_number(value, "double", scalar))
+    precision = _precision(cpp_type)
     if cpp_type.startswith("GfVec") and python_class is not None:
         dimension = int(python_class.dimension)
         integers = cpp_type.endswith("i")
         what = f"{scalar} takes {dimension} {'integers' if integers else 'numbers'} [{', '.join('xyzw'[:dimension])}]"
-        return lambda value: python_class(*_numbers(value, dimension, what, integers))
+        return lambda value: python_class(*_numbers(value, dimension, what, integers, precision, scalar))
     if cpp_type.startswith("GfQuat") and python_class is not None:
         what = f"{scalar} takes a quaternion as 4 numbers [w, x, y, z], real part first"
-        return lambda value: python_class(*_numbers(value, 4, what))
+        return lambda value: python_class(*_numbers(value, 4, what, False, precision, scalar))
     if cpp_type.startswith("GfMatrix") and python_class is not None:
         rows, columns = python_class.dimension
 
@@ -161,9 +227,9 @@ def _scalar_converter(scalar: Sdf.ValueTypeName) -> Optional[Callable[[Any], Any
             if isinstance(value, (list, tuple)) and len(value) == rows and all(
                 isinstance(row, (list, tuple)) for row in value
             ):
-                flat = [item for row in value for item in _numbers(row, columns, what)]
+                flat = [item for row in value for item in _numbers(row, columns, what, False, precision, scalar)]
             else:
-                flat = _numbers(value, rows * columns, what)
+                flat = _numbers(value, rows * columns, what, False, precision, scalar)
             return python_class(*flat)
 
         return to_matrix
@@ -346,6 +412,7 @@ def is_finite_time(value: Any) -> bool:
 
 __all__ = [
     "INVERT_PREFIX",
+    "NON_FINITE",
     "RESET_XFORM_STACK",
     "ValueProblem",
     "coerce",

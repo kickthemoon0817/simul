@@ -10,6 +10,7 @@ stage as it was. Stage state is read through pxr, not ``get_prim_info``.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 from pathlib import Path
 from typing import Any, Dict
@@ -253,3 +254,96 @@ def test_read_and_edit_tools_report_lookup_mistakes_alike(
     assert read["error_type"] == edit["error_type"] == error_type
     assert read["error"].startswith(prefix)
     assert edit["error"].startswith(prefix)
+
+
+def test_relationship_name_is_refused_on_the_wire(driver: _Driver, loaded: Dict[str, Any]) -> None:
+    payload = driver.call(
+        "update_prim_attributes",
+        {"stage_id": loaded["id"], "prim_path": "/World/Box", "attributes": {"material:binding": "/World/Box"}},
+    )
+
+    assert payload["success"] is False
+    assert (payload["error_type"], payload["details"]["code"]) == (
+        "UnsupportedOperation",
+        "RelationshipNotEditable",
+    )
+    assert payload["details"]["problems"][0]["code"] == "RelationshipNotEditable"
+    assert _unchanged(loaded)
+
+
+def test_schema_attribute_warning_reaches_the_wire(driver: _Driver, loaded: Dict[str, Any]) -> None:
+    payload = driver.call(
+        "update_prim_attributes",
+        {"stage_id": loaded["id"], "prim_path": "/World/Box", "attributes": {"physics:mass": 5}},
+    )
+
+    assert payload["success"] is True
+    assert payload["created_attributes"] == {"physics:mass": "float"}
+    (warning,) = payload["warnings"]
+    assert warning["code"] == "SchemaNotApplied" and "PhysicsMassAPI" in warning["message"]
+    assert warning["location"] == {"prim_path": "/World/Box", "property_path": "/World/Box.physics:mass"}
+
+
+def _real_pxr_error() -> Exception:
+    """A Tf.ErrorException as pxr raises it, with its C++ function and source path."""
+    from pxr import UsdShade
+
+    stage = Usd.Stage.CreateInMemory()
+    prim = stage.DefinePrim("/Box", "Cube")
+    prim.CreateAttribute("material:binding", Sdf.ValueTypeNames.String).Set("/Mat")
+    try:
+        UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+    except Exception as exc:  # Tf.ErrorException
+        return exc
+    raise AssertionError("pxr resolved a material:binding attribute")
+
+
+def _raise(error: Exception) -> Any:
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise error
+
+    return fail
+
+
+@pytest.mark.parametrize(
+    "tool, arguments, module, function",
+    [
+        ("get_prim_info", {"prim_path": "/World/Box"}, "simul.usd.reader", "describe_prim"),
+        ("get_prim_subtree", {"root_path": "/World"}, "simul.usd.search", "list_subtree"),
+    ],
+)
+def test_pxr_error_text_is_stripped_from_read_envelopes(
+    driver: _Driver,
+    loaded: Dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tool: str,
+    arguments: Dict[str, Any],
+    module: str,
+    function: str,
+) -> None:
+    error = _real_pxr_error()
+    assert "pxrInternal" in str(error)
+    # The module the tool imports at call time, whatever an earlier test did to the package.
+    monkeypatch.setattr(importlib.import_module(module), function, _raise(error))
+
+    payload = driver.call(tool, {"stage_id": loaded["id"], **arguments})
+
+    assert payload["success"] is False
+    assert payload["error_type"] == "EngineError"
+    assert payload["details"]["exception_type"] == "ErrorException"
+    assert payload["error"].startswith(f"{tool} failed in pxr: ")
+    assert payload["error"].endswith("</Box.material:binding> is not a relationship")
+    assert "pxrInternal" not in payload["error"] and "Error in" not in payload["error"]
+
+
+def test_validate_strips_pxr_error_text(
+    driver: _Driver, scene_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registration = importlib.import_module("simul.mcp.registration._reg_usd")
+    monkeypatch.setattr(registration, "run_validation", _raise(_real_pxr_error()))
+
+    payload = driver.call("validate_usd_file", {"file_path": str(scene_file)})
+
+    assert payload["error_type"] == "EngineError"
+    assert payload["error"].startswith("validate_usd_file failed in pxr: ")
+    assert "pxrInternal" not in payload["error"]

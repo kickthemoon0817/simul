@@ -14,11 +14,12 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Union
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ._pxr import Gf, Pcp, Sdf, Usd, UsdGeom, UsdShade
+from ._pxr import Gf, Pcp, Sdf, Usd, UsdGeom
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import Timer, monitor_performance
 from .bbox import describe_bounds
+from .pxr_errors import bound_material_path, relationship_targets
 from .search import count_prims, traversal_predicate
 from .timecode import resolve_time_code, time_code_value
 from .values import DEFAULT_ARRAY_PREVIEW, describe_attribute, to_json
@@ -227,15 +228,21 @@ def describe_metadata(prim: Usd.Prim) -> Dict[str, Any]:
     return metadata
 
 
-def describe_relationships(prim: Usd.Prim) -> Dict[str, Dict[str, Any]]:
-    """Map each relationship to its targets and whether they are authored."""
-    return {
-        rel.GetName(): {
-            "targets": [target.pathString for target in rel.GetTargets()],
-            "authored": bool(rel.HasAuthoredTargets()),
-        }
-        for rel in prim.GetRelationships()
-    }
+def describe_relationships(
+    prim: Usd.Prim, problems: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Dict[str, Any]]:
+    """Map each relationship to its targets and whether they are authored.
+
+    A relationship pxr cannot compose (a layer authors it as an attribute)
+    is left out, with a warning in ``problems``.
+    """
+    problems = [] if problems is None else problems
+    relationships: Dict[str, Dict[str, Any]] = {}
+    for rel in prim.GetRelationships():
+        targets = relationship_targets(rel, problems)
+        if targets is not None:
+            relationships[rel.GetName()] = {"targets": targets, "authored": bool(rel.HasAuthoredTargets())}
+    return relationships
 
 
 def _local_transform(prim: Usd.Prim, time: Usd.TimeCode) -> Optional[Dict[str, List[float]]]:
@@ -254,9 +261,9 @@ def _local_transform(prim: Usd.Prim, time: Usd.TimeCode) -> Optional[Dict[str, L
     }
 
 
-def _bound_material(prim: Usd.Prim) -> List[str]:
-    material, _relationship = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
-    return [str(material.GetPath())] if material else []
+def _bound_material(prim: Usd.Prim, problems: List[Dict[str, Any]]) -> List[str]:
+    material = bound_material_path(prim, problems=problems)
+    return [material] if material else []
 
 
 def describe_prim(
@@ -279,9 +286,12 @@ def describe_prim(
             whose name matches one are listed. None lists them all.
 
     Returns:
-        The fields of the ``PrimInfo`` response.
+        The fields of the ``PrimInfo`` response. ``warnings`` lists the
+        properties pxr could not read (a relationship or material binding
+        authored as an attribute); the rest of the prim is still described.
     """
     time = resolve_time_code(time_code)
+    problems: List[Dict[str, Any]] = []
     patterns = list(attribute_filter) if attribute_filter is not None else None
     attributes = prim.GetAttributes()
     listed = [
@@ -322,12 +332,13 @@ def describe_prim(
         "transform": _local_transform(prim, time),
         "children_count": len(children),
         "children_types": children_types,
-        "material_bindings": _bound_material(prim),
+        "material_bindings": _bound_material(prim, problems),
         "attribute_count": len(attributes),
         "attributes": {attr.GetName(): describe_attribute(attr, time, array_preview) for attr in listed},
-        "relationships": describe_relationships(prim),
+        "relationships": describe_relationships(prim, problems),
         "metadata": describe_metadata(prim),
         "time_code": time_code_value(time),
+        "warnings": problems,
     }
     if prim.IsInstance():
         info["prototype"] = prim.GetPrototype().GetPath().pathString
@@ -553,8 +564,7 @@ class USDReader(LoggerMixin):
                 for attr in prim.GetAttributes()
             },
             relationships={
-                rel.GetName(): [target.pathString for target in rel.GetTargets()]
-                for rel in prim.GetRelationships()
+                name: entry["targets"] for name, entry in describe_relationships(prim).items()
             },
             metadata=describe_metadata(prim),
             children=[child.GetName() for child in _children(prim)],

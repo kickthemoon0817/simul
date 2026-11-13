@@ -54,6 +54,7 @@ from ..schemas.usd import (
     USDValidateRequest,
 )
 from ...logging import get_logger
+from ...usd.pxr_errors import PxrError, is_pxr_error
 from ...usd.sandbox import CompositionSandbox
 from ...usd.validation import WARNING, composition_issues, url_scheme
 from ...usd.validation import validate_usd_file as run_validation
@@ -84,6 +85,20 @@ def _edit_error(tool_name: str, exc: "USDEditError") -> Dict[str, Any]:
     return ErrorResponse(
         error=exc.message, error_type=exc.error_type, details=exc.details or None
     ).model_dump()
+
+
+def _pxr_errors_cleaned(tool_name: str, work: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+    """Run ``work``, turning a pxr error into a ``PxrError`` that carries pxr's reason only.
+
+    pxr's own text names C++ functions and the paths of the machine that built
+    it; the envelope reports the reason, as ``EngineError``.
+    """
+    try:
+        return work()
+    except Exception as exc:
+        if is_pxr_error(exc):
+            raise PxrError(tool_name, exc) from exc
+        raise
 
 
 def _at(result: Dict[str, Any]) -> str:
@@ -140,11 +155,14 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             owner = request_owner()
             acting_for = getattr(session, "acting_for", None)
 
-            def run() -> Dict[str, Any]:
+            def act() -> Dict[str, Any]:
                 if acting_for is None:
                     return work(session)
                 with acting_for(owner):
                     return work(session)
+
+            def run() -> Dict[str, Any]:
+                return _pxr_errors_cleaned(tool_name, act)
 
             return await scheduler.run(tool_name, run, stage_key=stage_id, writes=writes)
 
@@ -317,7 +335,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 return input_data
             target = usd_target(input_data.file_path)
             # Touches no loaded stage: it waits only for a running edit.
-            return await scheduler.run("validate_usd_file", lambda: _validate(target))
+            return await scheduler.run(
+                "validate_usd_file", lambda: _pxr_errors_cleaned("validate_usd_file", lambda: _validate(target))
+            )
 
         return await server._exec_backend(
             "validate_usd_file",
@@ -342,7 +362,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "rows, and a non-finite float the string \"Infinity\", "
             "\"-Infinity\" or \"NaN\". An array attribute carries its length "
             "and its first array_preview elements, so a large mesh stays small; "
-            "use get_mesh_info for geometry statistics."
+            "use get_mesh_info for geometry statistics. A property pxr cannot read "
+            "(a material:binding or physics:body0 authored as an attribute) is left "
+            "out and named in warnings instead of failing the call."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -427,7 +449,11 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "are lists, quaternions [w, x, y, z], matrices lists of rows, assets path "
             "strings); xformOp:<type> entries create transform ops and add them to "
             "xformOpOrder; attribute_types names the type of a new custom attribute. "
-            "The attribute keys active, instanceable and kind set prim metadata."
+            "The attribute keys active, instanceable and kind set prim metadata. "
+            "Relationship names the type does not define (material:binding, "
+            "skel:skeleton) are refused (RelationshipNotEditable); an attribute of an "
+            "API schema the type lacks takes the schema's type with a SchemaNotApplied "
+            "warning."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=False, destructive=True
@@ -504,6 +530,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 changed=result["changed"],
                 created_attributes=result["created_attributes"] or None,
                 time_code=result["time_code"],
+                warnings=result.get("warnings") or None,
             ).model_dump()
 
         return await server._exec_backend(
@@ -530,9 +557,17 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "changed and the error lists each rejected key with its reason. Values take "
             "the attribute's type (JSON numbers widen, vectors are lists, quaternions "
             "[w, x, y, z], matrices lists of rows, assets path strings); a new "
-            "xformOp:<type> creates the transform op and adds it to xformOpOrder. An "
-            "animated attribute needs time_code, since a default value is hidden by its "
-            "time samples. Refuses instance proxies (prims inside an instanceable prim)."
+            "xformOp:<type> creates the transform op and adds it to xformOpOrder. "
+            'Floats also take "Infinity", "-Infinity" and "NaN"; a finite value the '
+            "type cannot hold is refused. A relationship the prim does not already "
+            "have (material:binding, physics:body0, skel:skeleton) is refused with "
+            "UnsupportedOperation (RelationshipNotEditable), never written as an "
+            "attribute. An attribute of an API schema the prim lacks (physics:mass, "
+            "drive:angular:physics:stiffness) takes the schema's type and returns a "
+            "SchemaNotApplied warning naming the API to apply. An animated attribute "
+            "needs time_code, since a default value is hidden by its time samples; a "
+            "sample is refused where a weaker layer or value clips hold the animation. "
+            "Refuses instance proxies (prims inside an instanceable prim)."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False, destructive=True
@@ -561,7 +596,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 an existing attribute keeps its type
             time_code: Write the values as time samples at this time code; required
                 for attributes that already have time samples, refused for uniform
-                attributes, relationships and metadata
+                attributes, relationships, metadata and attributes animated by a weaker
+                layer or value clips
 
         Returns:
             Action confirmation or error
@@ -597,6 +633,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 changed=result["changed"],
                 created_attributes=result["created_attributes"] or None,
                 time_code=result["time_code"],
+                warnings=result.get("warnings") or None,
             ).model_dump()
 
         return await server._exec_backend(
@@ -696,7 +733,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "materialBind geometry subset, and its physics material. Computed with "
             "numpy, so a million-vertex mesh takes well under a second. time_code "
             "reads a deforming mesh's points; points_time_samples says whether it "
-            "deforms."
+            "deforms. A material binding pxr cannot resolve is reported as none and "
+            "named in warnings."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
