@@ -128,6 +128,10 @@ def test_the_table_uses_the_unreal_runtime_constants() -> None:
     assert _constraints.UNREAL_FORCE_MAX_DURATION_S == unreal_runtime.FORCE_MAX_DURATION_S
     assert _constraints.UNREAL_PHYSICS_STATE_MAX_RESULTS == unreal_runtime.PHYSICS_STATE_MAX_RESULTS
     assert _constraints.UNREAL_MAX_PAGE == unreal_runtime.SIMULATION_ACTORS_MAX_RESULTS
+    assert _constraints.UNREAL_ROBOTICS_MAX_RESULTS == unreal_runtime.ROBOTICS_MAX_RESULTS
+    assert _constraints.UNREAL_LIGHT_MAX_INTENSITY == unreal_runtime.LIGHT_MAX_INTENSITY
+    assert _constraints.UNREAL_LIGHT_MIN_TEMPERATURE_K == unreal_runtime.LIGHT_MIN_TEMPERATURE_K
+    assert _constraints.UNREAL_LIGHT_MAX_TEMPERATURE_K == unreal_runtime.LIGHT_MAX_TEMPERATURE_K
 
 
 def _isaac_clamps() -> Iterator[Tuple[str, str, int, Any]]:

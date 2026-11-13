@@ -7,7 +7,7 @@ alone:
 ``ConnectionError``
     Nothing answered at the Remote Control endpoint: no editor is listening,
     or the editor closed the connection without answering (it crashed or is
-    shutting down).
+    shutting down, or the answer was lost: a change may then have run).
 ``TimeoutError``
     The editor did not answer in time. A mutation or script may still be
     running in the editor, and Remote Control cannot cancel it, so check the
@@ -98,6 +98,13 @@ class UnrealTimeoutError(UnrealError, TimeoutError):
     """The editor did not answer in time; still a ``TimeoutError`` to ``except`` clauses."""
 
 
+class UnrealValidationError(UnrealError, ValueError):
+    """A request refused before anything was sent; still a ``ValueError`` to ``except`` clauses."""
+
+    def __init__(self, message: str, *, details: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(message, VALIDATION_ERROR, details=details)
+
+
 class UnrealConnectionError(UnrealError, ConnectionError):
     """Nothing answered at the endpoint; still a ``ConnectionError`` to ``except`` clauses.
 
@@ -130,6 +137,44 @@ _NOT_FOUND_WORDING = re.compile(
 
 # "Can't resolve object: <path> while saving or garbage collecting."
 _BUSY_WORDING = re.compile(r"while saving or garbage collecting", re.IGNORECASE)
+
+
+# One error body as Remote Control prints it, raw: FString::Printf of
+# ``{ "errorMessage": "%s" }`` with the message unescaped
+# (WebRemoteControlInternalUtils::CreateUTF8ErrorMessage).
+_PRINTED_ERROR = re.compile(r'\{ "errorMessage": "(.*?)" \}', re.DOTALL)
+
+
+def parse_remote_control_json(text: str) -> Any:
+    """A Remote Control answer's JSON, read the way Remote Control writes it.
+
+    A batch answer embeds each part's body verbatim (HandleBatchRequest,
+    InvokeWrappedRequest), and an error body is printed with its message
+    unescaped, so one message with a line break, a quote or a backslash in it
+    makes the whole answer invalid JSON. Such a message (a protected
+    property's refusal spans two lines) is read as the text it is.
+
+    Args:
+        text: The answer's body.
+
+    Returns:
+        The parsed value.
+
+    Raises:
+        ValueError: The text is not JSON even with the printed messages
+            read as text.
+    """
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    try:
+        # Control characters (a raw line break) inside strings.
+        return json.loads(text, strict=False)
+    except ValueError:
+        pass
+    repaired = _PRINTED_ERROR.sub(lambda m: json.dumps({"errorMessage": m.group(1)}), text)
+    return json.loads(repaired, strict=False)
 
 
 def remote_control_message(body: str) -> str:

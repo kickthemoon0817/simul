@@ -99,6 +99,7 @@ from ..schemas.unreal import (
     UnrealSetMaterialParamsResponse,
     UnrealSetPhysicsParamsResponse,
     UnrealSetRenderSettingsResponse,
+    UnrealSetupPhysicsBulkResponse,
     UnrealSimplifyMeshResponse,
     UnrealSpawnActorResponse,
     UnrealSubdivideMeshResponse,
@@ -239,6 +240,26 @@ def _optional_floats(value: str) -> Optional[List[float]]:
 def _optional_json(value: str) -> Any:
     """JSON text; an empty string means none."""
     return json.loads(value) if value else None
+
+
+def _scene_parameters(value: str) -> Optional[Dict[str, Any]]:
+    """``generate_unreal_procedural_scene``'s parameters: a JSON object; an empty string means none.
+
+    Raises:
+        ValueError: The text is not JSON, or not an object; the call reports it
+            as a ValidationError on ``parameters`` that says a JSON object is
+            expected, which json's own error ("Expecting value: line 1 column 1")
+            did not.
+    """
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f'must be a JSON object such as {{"seed": 7}}; it is not JSON: {exc}') from None
+    if not isinstance(parsed, dict):
+        raise ValueError(f"must be a JSON object, got {type(parsed).__name__}")
+    return parsed
 
 
 def _three_numbers(value: Any) -> Optional[List[float]]:
@@ -638,7 +659,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 description="Keep actors with this actor tag, ignoring case (empty string = no filter).",
                 convert=_optional_text,
             ),
-            ToolParam("max_results", int, 200, description="Most actors in the page, 1 to 5000."),
+            ToolParam(
+                "max_results",
+                Optional[int],
+                None,
+                description=(
+                    "Most actors in the page, 1 to 5000. Default: the unreal.max_actors setting "
+                    "(UNREAL__MAX_ACTORS, 200)."
+                ),
+            ),
             ToolParam("offset", int, 0, description="Matching actors to skip: the previous page's next_offset."),
             ToolParam(
                 "label_filter",
@@ -848,18 +877,31 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="get_unreal_actor_thumbnail",
         description=(
-            "Get a thumbnail image for an Unreal asset. The image arrives as an "
-            "MCP image content block, followed by a JSON block with asset_path, "
-            "format, width, height and image_attached=true."
+            "Get the thumbnail Unreal stores for an asset (mesh, material, texture, Blueprint), or "
+            "for an actor or component in the editor world the thumbnail of its Blueprint or mesh. "
+            "It is scaled down to fit width x height, keeping its proportions; Unreal stores "
+            "256 x 256, the largest returned. The image arrives as an MCP image content block, "
+            "followed by a JSON block with asset_path, thumbnail_of, format, width, height and "
+            "image_attached=true. An asset without a stored thumbnail is NotFoundError."
         ),
         response=UnrealGetThumbnailResponse,
         read_only=True,
         idempotent=True,
         method="get_actor_thumbnail",
         params=(
-            ToolParam("asset_path", str, description="Full asset path."),
-            ToolParam("width", int, 256, description="Thumbnail width in pixels."),
-            ToolParam("height", int, 256, description="Thumbnail height in pixels."),
+            ToolParam("asset_path", str, description="Asset path, or an actor's or component's path."),
+            ToolParam(
+                "width",
+                Annotated[int, Field(ge=1, le=1024)],
+                256,
+                description="Largest width wanted, 1 to 1024 pixels.",
+            ),
+            ToolParam(
+                "height",
+                Annotated[int, Field(ge=1, le=1024)],
+                256,
+                description="Largest height wanted, 1 to 1024 pixels.",
+            ),
         ),
     ),
     UnrealTool(
@@ -1037,7 +1079,20 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_actor_property",
-        description="Set a property on an Unreal actor by name and JSON value.",
+        description=(
+            "Set a property of an actor, or of one of its components, in the level open in the "
+            "editor by Unreal's property name (Tags, bHidden) and a JSON value. An array, set or map "
+            "is replaced whole ([] empties it), struct arrays and setters included, and takes a JSON "
+            "array (an object for a map); the write is one undo step even beside concurrent calls, "
+            "marks the level changed and is compared once Unreal has finished it. The reply has "
+            "value, previous_value and applied. A value Unreal does not keep (a mesh path that loads "
+            "nothing, more materials than slots, an unknown enum name) fails with PropertyNotApplied, "
+            "details.expected and details.actual, and the previous value is put back (restored), "
+            "leaving no undo step; so is a write Unreal refuses, with its error_type. An actor "
+            "that is gone, of another map or of Play In Editor is NotFoundError; an asset, class "
+            "default object or component template, or a container value of another shape, is "
+            "ValidationError (details.code); nothing is written."
+        ),
         response=UnrealSetActorPropertyResponse,
         read_only=False,
         idempotent=True,
@@ -1054,7 +1109,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="call_unreal_actor_function",
         description=(
             "Call a BlueprintCallable UFUNCTION on an actor of the level open in the editor, as one undo step that "
-            "records the actor and its root component first."
+            "records the actor and its root component first. return_value is the function's ReturnValue as JSON; "
+            "outputs holds everything Remote Control returned, out parameters included."
         ),
         response=UnrealCallActorFunctionResponse,
         read_only=False,
@@ -1320,8 +1376,14 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="set_unreal_light_params",
         description=(
-            "Set light component parameters (intensity, color, temperature, shadows); "
-            "a parameter left out keeps its current value."
+            "Set a light's parameters (intensity, sRGB color, temperature, attenuation, shadows) in one "
+            "undoable editor transaction and read them back; a parameter left out keeps its current "
+            "value, and with none the light is only read. Works on point, spot, rect and directional "
+            "lights and a SkyLight's intensity, color and shadows. Intensity is in the light's unit, "
+            "returned as intensity_unit: lux for a directional light, the light's Intensity Units "
+            "(candelas by default, or lumens, ev, nits, unitless) for a point, spot or rect light, a "
+            "multiplier for a SkyLight. Values are range-checked before anything is written, and when "
+            "Unreal stores one differently every value is put back, so a failed call changes nothing."
         ),
         response=UnrealSetLightParamsResponse,
         read_only=False,
@@ -1540,6 +1602,83 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("linear_damping", Optional[float], None),
             ToolParam("angular_damping", Optional[float], None),
             ToolParam("enable_gravity", Optional[bool], None),
+        ),
+    ),
+    UnrealTool(
+        name="setup_unreal_physics_bulk",
+        description=(
+            "Set up physics on many editor actors in one call and one undoable transaction: the "
+            "actor_paths plus every actor with tag, in the outliner folder and matching actor_filter (each "
+            "that is given), at most 1000. Each is "
+            "made simulated, kinematic or not physical as enable_unreal_physics does, after an optional "
+            "collision preset (PhysicsActor makes props physics-ready) and with optional mass, damping "
+            "and gravity. Every actor is checked first, and one that cannot be set up, or does not take "
+            "the setup once written, refuses the call with every actor put back as it was, unless "
+            "skip_failures sets up the rest (a call that sets up none fails). Use it instead of one "
+            "call per actor, which runs into the rate limit."
+        ),
+        response=UnrealSetupPhysicsBulkResponse,
+        read_only=False,
+        idempotent=True,
+        destructive=True,
+        method="setup_physics_bulk",
+        params=(
+            ToolParam(
+                "actor_paths",
+                str,
+                "",
+                description="Comma-separated editor actor paths (empty: none, select by tag or folder).",
+                convert=_name_list,
+            ),
+            ToolParam(
+                "tag",
+                str,
+                "",
+                description="Also every editor actor with this actor tag, such as a procedural scene's tag.",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "folder",
+                str,
+                "",
+                description=(
+                    "Also every editor actor in this outliner folder or one under it, such as "
+                    "Simul/Room_5_7ee55bcd; with tag, only actors with both."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "actor_filter",
+                str,
+                "",
+                description=(
+                    "Also every editor actor whose label or path contains this text, ignoring case; with tag or "
+                    "folder, only actors matching those too (a procedural scene's tag with _Box_ picks its "
+                    "props, not its floor and walls)."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam("enable", bool, True, description="As enable_unreal_physics: false turns physics off."),
+            ToolParam("kinematic", bool, False, description="As enable_unreal_physics: kinematic, not simulated."),
+            ToolParam("make_movable", bool, True, description="As enable_unreal_physics."),
+            ToolParam("allow_detach", bool, False, description="As enable_unreal_physics."),
+            ToolParam(
+                "collision_preset",
+                str,
+                "",
+                description="Collision preset set first, such as PhysicsActor; empty keeps each actor's collision.",
+                convert=_optional_text,
+            ),
+            ToolParam("mass", Optional[float], None, description="Mass override in kg, 0.001 to 1e9."),
+            ToolParam("linear_damping", Optional[float], None, description="Linear damping, 0 to 1e6."),
+            ToolParam("angular_damping", Optional[float], None, description="Angular damping, 0 to 1e6."),
+            ToolParam("enable_gravity", Optional[bool], None, description="Whether gravity affects the bodies."),
+            ToolParam(
+                "skip_failures",
+                bool,
+                False,
+                description="Set up the actors that can be and list the rest, instead of refusing the call.",
+            ),
         ),
     ),
     UnrealTool(
@@ -1851,9 +1990,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Classify level actors for robotics from their collision setup: floor-like surfaces a "
             "robot can stand on, small Movable objects it can grasp, and collision counts and "
-            "problems (static meshes with physics collision but no simple shapes). Uses the "
-            "bounding box of each actor's collision-enabled components; the thresholds come "
-            "back as criteria."
+            "problems (static meshes with physics collision but no simple shapes). Measures each "
+            "actor by the oriented box of its physics-collision components, so rotated pieces keep "
+            "their size and tilt, and each instance of an instanced mesh (ISM, HISM, foliage) by "
+            "itself; the thresholds come back as criteria. Both lists are paged together (max_results "
+            "each from offset; totals counts every match, next_offset starts the next page), and the "
+            "pages after the first read the first page's scan, so a large level is scanned once."
         ),
         response=UnrealAnalyzeSceneForRoboticsResponse,
         read_only=True,
@@ -1879,6 +2021,21 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "empty or null analyzes every actor."
                 ),
             ),
+            ToolParam(
+                "max_results",
+                int,
+                50,
+                description=(
+                    "Most entries per category on this page, 1 to 500; a page is cut further, the same "
+                    "for both lists, to fit the response budget."
+                ),
+            ),
+            ToolParam(
+                "offset",
+                int,
+                0,
+                description="Entries of each category to skip: the previous page's next_offset.",
+            ),
         ),
     ),
     UnrealTool(
@@ -1887,7 +2044,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside "
             "the bounds, in one undoable transaction; the same arguments give the same layout. Returns "
             "the spawned actor paths and the tag and outliner folder that group them, both unique to "
-            "the call."
+            "the call. physics_props makes the props physics-ready: Movable, PhysicsActor collision, "
+            "simulating, so they fall and can be pushed once the simulation starts."
         ),
         response=UnrealGenerateProceduralSceneResponse,
         read_only=False,
@@ -1909,7 +2067,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "props (one per 16 m2 of free floor). outdoor: trees (one per 20 m2), rocks (one "
                     "per 10 m2). Props are Movable boxes; everything else is Static."
                 ),
-                convert=_optional_json,
+                convert=_scene_parameters,
             ),
             ToolParam(
                 "bounds_min",
@@ -1924,6 +2082,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 "",
                 description="Maximum corner as comma-separated x,y,z in cm; empty is 1000,1000,500.",
                 convert=_optional_floats,
+            ),
+            ToolParam(
+                "physics_props",
+                bool,
+                False,
+                description=(
+                    "Make the props physics-ready: Movable, PhysicsActor collision and simulating physics. "
+                    "False leaves them Movable with BlockAll collision, not simulating."
+                ),
             ),
         ),
     ),

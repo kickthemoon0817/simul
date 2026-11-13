@@ -15,14 +15,29 @@ tool's input schema (`minimum`, `maximum`, `enum`), and a value outside them
 is refused with `ValidationError` before the tool runs.
 
 Results are strict JSON: a non-finite float is sent as the string
-`"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token. Each result
-is held to a 40 KB budget by trimming its largest top-level list, with
-`truncated` and a `truncation` notice. When that list is a page, its
-`next_offset` (and a `count` or `returned` that counted the page) are
-rewritten to match the items kept, so following `next_offset` skips
-nothing. Above a 400 KB hard limit the field carrying the excess is cut at
-any depth: a string becomes a `truncated_field` marker, and a list or
-mapping keeps its prefix and is named in `truncated_fields`.
+`"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token.
+
+Each result is held to a 40 KB budget, and a cut is always reported (`truncated`
+plus a notice).
+
+- **Paged tools.** A paged tool (one that takes an `offset` and returns
+  `next_offset`) has its page cut as a page. Every list the offset pages is
+  cut to the same number of entries, never fewer than one. Its `next_offset`
+  (and a `count` or `returned` that counted the page) is rewritten to continue
+  right after what was kept, and the `truncation` notice names the tool's own
+  offset and page-size parameters. Following `next_offset` therefore reaches
+  every entry once and always moves forward.
+- **Oversized entries.** An entry too large on its own is sent compacted to its
+  identifying and small fields (`truncated_item`, `dropped_keys`), so the next
+  page starts after it.
+- **Other lists.** Any other list cut to fit is listed in `truncated_fields` (or
+  in `truncation` when the tool does not page), with `next_offset: "unchanged"`
+  whenever the result is paged: its dropped entries will not come back on a
+  later page. The paged lists of each tool are declared in
+  `simul.mcp.paged_results`.
+- **Hard limit.** Above 400 KB, the field carrying the excess is cut at any
+  depth. A string becomes a `truncated_field` marker, and a list or mapping
+  keeps its prefix and is named in `truncated_fields`.
 
 ## Headless USD
 
@@ -384,6 +399,17 @@ Notes:
   Refusals are typed: `error_type` is `NotFoundError`, `ValidationError` or
   `InvalidState`, and `details.code` names the case (`INSTANCE_PROXY`,
   `DEFINED_ELSEWHERE`, `DESTINATION_EXISTS`, `UNKNOWN_PRIM_TYPE`, ...).
+  Every other Isaac tool's script failures are typed by the condition as well:
+  - no open stage is `InvalidState`;
+  - a prim, root path, graph, camera or extension that isn't there is
+    `NotFoundError`;
+  - a prim of the wrong kind or missing an API is `ValidationError`;
+  - no viewport is `ViewportUnavailable`;
+  - a missing capability (PhysX scene query) is `UnsupportedOperation`;
+  - anything else Kit reports is `EngineError`.
+
+  A bridge script stopped at its timeout is `TimeoutError`, and a script too
+  large for the 5.1 stock socket is `PayloadTooLarge`.
 - The listings (`list_isaac_prims`, `search_isaac_prims`, `get_isaac_subtree`,
   `query_isaac_typed_prims`) descend into instanceable prims by default,
   where Isaac assets keep their meshes and colliders; entries there carry
@@ -510,10 +536,20 @@ Notes:
 - `get_isaac_logs` reads this instance's log (Kit's `/log/file`). When Kit
   does not name it, the tool falls back to the newest Kit log and warns that
   it may be another process's.
-- `set_isaac_carb_settings` refuses the transport namespaces (bridge,
-  python_server, 5.x VS Code). It refuses `/persistent/` keys, which Kit saves
-  for later sessions, unless `allow_persistent=true`. `get_isaac_carb_settings`
-  reads `auth_token` values back as `***`.
+- `set_isaac_carb_settings` refuses any write that reaches the transport
+  namespaces (bridge, python_server, 5.x VS Code). That covers a key inside
+  one, the namespace itself, and an ancestor such as `/exts` or `/`, because
+  Carb's `set(path, dict)` replaces the whole subtree. Dict values are checked
+  key by key, and `.`/`..` segments are refused. With script execution off it
+  also refuses `/app/scripting`. It refuses `/persistent` keys, which Kit
+  saves for later sessions, unless `allow_persistent=true`.
+  `get_isaac_carb_settings` reads `auth_token` values back as `***`, and
+  `get_isaac_logs` redacts the python_server token that 6.0.1 logs at Info
+  level (`redacted_lines` counts the lines).
+- With script execution off, imports, references and duplicates that carry a
+  Python Scripting Component (`OmniScriptingAPI` / `omni:scripting:scripts`),
+  and imports with unloaded payloads, are refused. See
+  [configuration.md](configuration.md#script-execution).
 - `ping_isaac` does not wait for a call already running on the instance and
   reports `busy` when one is. A call the client cancels keeps the instance
   until Isaac Sim has finished it (the bridge is asked to interrupt it first);
@@ -556,7 +592,7 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 | Assets | `search_unreal_assets`, `import_unreal_asset`, `save_unreal_assets` |
 | Camera, lights, rendering | `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
 | Materials | `get_unreal_material_info`, `assign_unreal_material`, `create_unreal_material_instance`, `set_unreal_material_params` |
-| Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `apply_unreal_force`, `get_unreal_physics_state`, `list_unreal_simulation_actors`, `control_unreal_simulation`, `get_unreal_simulation_status` |
+| Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `setup_unreal_physics_bulk`, `apply_unreal_force`, `get_unreal_physics_state`, `list_unreal_simulation_actors`, `control_unreal_simulation`, `get_unreal_simulation_status` |
 | Mesh operations | `generate_unreal_mesh_primitive`, `generate_unreal_procedural_scene`, `validate_unreal_mesh`, `simplify_unreal_mesh`, `remesh_unreal_mesh`, `subdivide_unreal_mesh`, `edit_unreal_mesh_topology`, `apply_unreal_mesh_boolean`, `cut_unreal_mesh_plane`, `compute_unreal_convex_hull`, `decompose_unreal_convex_hull`, `compute_unreal_mesh_uv`, `convert_unreal_mesh_format` |
 | USD interchange | `get_unreal_interchange_info`, `import_unreal_usd`, `export_unreal_usd` |
 | SimReady | `validate_simready_asset`, `convert_to_simready` |
@@ -601,6 +637,8 @@ Behaviour worth knowing:
   backends share:
   - `ConnectionError`: nothing answered at the Remote Control endpoint, or
     the editor closed the connection without answering (it may have crashed).
+    For a change, whether it ran is then unknown: check the editor's state
+    before retrying. `ping_unreal` reports one with this type too.
   - `TimeoutError`: no answer within `UNREAL__TIMEOUT`. A script or a change
     may still be running in the editor, and Remote Control cannot cancel it,
     so check the editor's state before retrying.
@@ -737,6 +775,96 @@ Behaviour worth knowing:
   `ValidationError` and the camera does not move. The reply is the camera
   read back, location and rotation, also for a group left unchanged; a camera
   that reads back other than what was set is a `CameraNotApplied`.
+- `set_unreal_actor_property` edits an actor in the level open in the editor,
+  or one of its components, by Unreal's property name (`Tags`, `bHidden`).
+  - **Target.** The target is resolved as the other actor tools resolve it,
+    among loaded objects only, and nothing is written for a refusal:
+    - an actor that is gone, of another map, loaded or not, or of the running
+      Play In Editor world is `NotFoundError`, as above;
+    - an asset, a class default object or a component of one, and a component
+      template are `ValidationError`, with `details.code`
+      `not_an_actor_or_component`, `class_default_object` or
+      `component_template`.
+  - **Containers.** An array, set or map is replaced whole, so `[]` empties
+    it. That includes struct arrays and properties Remote Control writes
+    through a setter, such as a MaterialBillboard's `Elements`. Remote
+    Control's own write only adds to a container: by index, or appended for a
+    setter. So the editor's Python API empties the container first, and a
+    container Python cannot replace is refused (`container_not_replaceable`).
+    The new contents must be a JSON array for an array or set and a JSON
+    object for a map, or the call is refused before anything is emptied
+    (`value_not_a_list`, `value_not_an_object`): Remote Control wrote what it
+    could of another shape, `5` into `Tags` as `['None']`.
+  - **The write.** Remote Control does the write, converting structs, enums by
+    name and objects by path. The whole write is one Remote Control batch, so
+    no editor tick and no other request runs between its parts: the undo
+    transaction opens and records the target and the components attached
+    below it, the container is emptied, Remote Control writes, a function call
+    makes Remote Control finish the write (Unreal's `PostEditChangeProperty`
+    runs only on the next call), and the editor compares what it holds with
+    what was written, then keeps the write or puts the previous value back.
+    The transaction closes inside the batch, so two calls at once are two
+    undo steps and one undo reverts exactly one of them. A write that stays
+    is one undo step and marks the level changed. Remote Control's own write
+    of a property with a setter (a light's `Intensity`, `Mobility`,
+    `StaticMesh`, `RelativeLocation`) records nothing: it used to leave no
+    undo step, so the next undo reverted the edit before it, and a save of
+    the changed packages skipped it. A setter that changes objects other than
+    its target and the components attached below it (its actor's other
+    components, other actors) records only those two. `value` is what Unreal
+    kept, for example materials trimmed to the mesh's slots.
+  - **A value that does not stick.** A value Unreal does not keep fails with
+    `PropertyNotApplied`, with `details.expected` and `details.actual`.
+    Examples are an object path that loads nothing (written as None), more
+    materials than slots, or an enum name Unreal does not have. The previous
+    value is then put back through the editor's Python API in the same
+    transaction, which is cancelled, so the call leaves no undo step;
+    `restored` says whether it held. A write Remote Control refuses (an
+    `EditConst` or protected property) is put back the same way and fails
+    with Remote Control's error type, `ValidationError`, and `restored`. The
+    level stays marked changed after a put-back: Unreal marks it while it
+    writes, and offers no way to clear a map package's flag. When the
+    editor's Python cannot read the property, nothing can be put back, and a
+    value that does not stick is reported with `restored: false`.
+  - **A lost answer.** When the batch's answer is lost, the call fails with
+    `ConnectionError`: the batch may have run, kept or put back, in the
+    editor. The reply's `value` is the property read again afterwards.
+  - **The reply.** It has `value`, `previous_value` and `applied`. `applied`
+    is `null`, with a `warning`, when Unreal will not read the property back,
+    or when the two values cannot be compared (an enum written as a number). A
+    struct written in part is compared on the fields given.
+- `describe_unreal_object` reads every property's current `value` in one more
+  request. `readable` is false, and `value` null, for the properties Remote
+  Control does not read: delegates, and protected properties without a getter.
+- `get_unreal_actor_thumbnail` returns the thumbnail Unreal stores, at most at
+  its stored size (256 x 256). It is scaled down to fit `width` x `height`
+  (1 to 1024), keeping its proportions.
+  - For an actor or component path, the tool shows the actor's Blueprint, or
+    else its static or skeletal mesh, and names that asset in `thumbnail_of`.
+  - An actor with neither, such as a light, and an asset without a stored
+    thumbnail (Unreal answers those with a class icon) fail with
+    `NotFoundError`.
+- `summarize_unreal_scene` counts by class, subclasses included:
+  - `lights`: Light actors (directional, point, spot, rect) and SkyLights.
+  - `cameras`: CameraActors, CineCameraActors included.
+  - `static_meshes`: StaticMeshActors.
+
+  A LightmassImportanceVolume or CameraBlockingVolume is neither a light nor a
+  camera.
+- `ping_unreal` and `unreal_health_check` tell a busy editor from a down one.
+  An editor that accepts the connection but does not answer in time is
+  running a script, loading or compiling. It is reported with `busy: true` and
+  `error_type: InstanceBusy`, still `reachable: false`, and
+  `list_unreal_instances` lists it with that reason. Both probe Remote Control
+  with `UNREAL__PING_TIMEOUT` (3 s by default), so a busy editor is reported
+  within that time; `unreal_health_check` retries only a refused connection,
+  from an editor still starting up, and gives its metadata script the full
+  `UNREAL__TIMEOUT`.
+- `call_unreal_actor_function` returns `return_value` as JSON (the function's
+  `ReturnValue`) and `outputs`, everything Remote Control returned, out
+  parameters included.
+- `list_unreal_actors` lists at most `max_results` actors, by default the
+  `unreal.max_actors` setting (`UNREAL__MAX_ACTORS`, 200).
 - Actor inspection, physics, materials and simulation start/stop/pause/resume
   use editor Python APIs. `control_unreal_simulation` `start` begins Simulate
   In Editor by default (`mode: "simulate"`: the level runs and its physics
@@ -854,9 +982,10 @@ Behaviour worth knowing:
     detached in the same transaction, so Undo reattaches it, and the reply
     names the parent in `detached_from`.
   - `set_unreal_physics_params` takes a mass from 0.001 kg (Unreal's least)
-    to 1e9 kg and damping from 0 to 1e6, and reads every value back
-    (`applied`, `params_set`; `PhysicsParamsNotApplied` names one that reads
-    back different). A Static body keeps the values but has no mass
+    to 1e9 kg and damping from 0 to 1e6 (else a `ValidationError` with
+    `details.code: OUT_OF_RANGE`), and reads every value back (`applied`,
+    `params_set`; `PhysicsParamsNotApplied` names one that reads back
+    different, with `details.expected` and `details.actual`). A Static body keeps the values but has no mass
     (`mass_kg` 0) and never simulates until it is Movable; the `warning`
     says so. With no parameter it only reads the body.
   - `set_unreal_collision` checks a preset before writing (an unknown one
@@ -866,6 +995,31 @@ Behaviour worth knowing:
     simulation and after the map reloaded.
   - A path in a running simulation's world (`UEDPIE_<n>_<map>`) edits that
     play copy, which is neither undoable nor saved (`world: "simulation"`).
+  - `setup_unreal_physics_bulk` does the same for many editor actors in one
+    call and one undoable transaction: the `actor_paths`, plus every actor
+    with `tag`, in the outliner `folder` (or one under it) and whose label or
+    path contains `actor_filter`, each that is given, at most 1000. Each actor
+    is made simulated, kinematic or not physical as `enable_unreal_physics`
+    makes it, after an optional `collision_preset` (PhysicsActor makes props
+    physics-ready) and with optional mass, damping and gravity. Every actor
+    is checked first, the preset's collision standing in for its own: one
+    that cannot be set up refuses the call with nothing changed
+    (`IncompatibleBody`, the actors and reasons in `details.failed`), unless
+    `skip_failures` sets up the rest. An actor can still not take the setup
+    once it is written (it reads back not simulating); the call then puts
+    every actor it wrote back as it was, mobility, preset, collision and body
+    values included, cancels the transaction and fails with
+    `PhysicsNotApplied` (`details.expected` the setup asked for,
+    `details.actual` what each such actor read back). With `skip_failures`
+    only that actor is put back. A call that sets up no actor fails
+    (`IncompatibleBody`, `details.code: NOTHING_SET_UP`), as do one that
+    matches none (`NO_MATCH`), more than 1000 (`TOO_MANY_ACTORS`) and an
+    unknown preset (`UNKNOWN_PRESET`, as from `set_unreal_collision`). The
+    reply counts the actors matched, set up and failed and lists the first 50
+    of each. A procedural scene's
+    tag also selects its floor and walls; add `actor_filter: "_Box_"` for its
+    props. Setting up props one call at a time ran into the rate limit (126
+    bodies took 116 s); one call set up 200 in under 2 s.
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
   `get_unreal_interchange_info` reports whether the plugin is available.
@@ -1092,14 +1246,51 @@ Behaviour worth knowing:
 - SimReady conversion and validation are not implemented for Unreal. Those
   tools return `UnsupportedOperation` without changing files.
 - `analyze_unreal_scene_for_robotics` classifies the actors loaded in the
-  editor world by the bounding box of their collision-enabled components:
-  traversable floor-like surfaces (physics collision, at least 1 m² in plan, no
-  thicker than a quarter of the shorter side, tilted at most 15°), graspable
-  objects (Movable, physics collision, fitting in a 60 cm cube) and the
+  editor world by the oriented box of their physics-collision components: a
+  single component's box rotated and scaled with it (a static mesh's bounds,
+  a box, sphere or capsule's extent), several components' boxes in the
+  actor's frame, and a component of another kind, such as a landscape
+  heightfield, by its world-axis bounds. It finds traversable floor-like
+  surfaces (physics collision, a top face of at least 1 m², no thicker than a
+  quarter of its shorter side, tilted at most 15°), graspable objects
+  (Movable, physics collision, a box fitting in a 60 cm cube) and the
   collision setup of their static meshes (simple shapes, convex hulls, render
   triangles used as simple collision, physics collision without any simple
-  shape). A landscape section counts whole, hills included. The thresholds
-  come back as `criteria`.
+  shape). A surface's top face is the box face across its thinnest side,
+  facing up, so `tilt_degrees` is that face's tilt, `area_m2` its area and
+  `normal` its upward normal: a plank yawed 45° keeps its own 2000 × 50 cm, a
+  slab pitched 14° is a floor, and one turned upside down is still one. A
+  landscape section counts whole, hills included. Sizes are along each box's
+  own axes. The thresholds come back as `criteria`.
+  - An instanced static mesh component (ISM, HISM, a foliage type) is
+    measured one instance at a time, each by its mesh's box in that
+    instance's transform, so a floor of instanced tiles is one surface a
+    tile and each instanced box on a shelf a graspable object; such an entry
+    adds `component_path` and `instance_index`, and `mass_kg` is null, since
+    instances share their component's body. A component with more than 1000
+    instances is one entry by its world-axis bounds, with the count in
+    `instances`. Such a component used to be measured as one mesh at the
+    component's own transform, where no instance need be drawn, so a floor
+    of instanced tiles read as a single tile.
+  - The two lists are paged together: surfaces largest first, graspable
+    objects by path, each cut to `max_results` (default 50, at most 500) from
+    `offset`. `totals` counts every match, `returned` this page's, and
+    `next_offset` (null on the last page) starts the next page, which `hint`
+    names. A page that would exceed 32 KB holds fewer per category, the same
+    number for both, so it stays within the response budget. A 5,000-actor
+    level used to return 494,853 bytes, which the server cut to no surfaces
+    and every graspable object; its first page is now 22 KB.
+  - The first page (`offset` 0) scans the level, and the pages after it read
+    that scan, so paging through a large level measures it once instead of
+    once a page; the scan is kept up to 10 minutes, and the reply gives
+    `scanned_at` (Unix time on the editor host) and `snapshot_age_s`. A
+    later page whose scan has expired, or that was never made, scans again.
+    Ask for `offset` 0 to see changes made since.
+  - An `offset` or `max_results` out of range is refused by the input schema
+    (`ValidationError`, the field in `details.errors`), and `analysis_types`
+    names other than `traversability`, `graspability` and
+    `collision_complexity` by the tool (`ValidationError`, `details.code:
+    UNKNOWN_ANALYSIS`).
 - `generate_unreal_procedural_scene` builds a room, corridor, warehouse or
   outdoor scene from Engine basic shapes inside the bounds. The layout is
   planned before anything is spawned, so one that does not fit fails without
@@ -1116,7 +1307,38 @@ Behaviour worth knowing:
   transaction is cancelled. The actors are filed in their folder only once all
   have spawned, because Unreal keeps an outliner folder, empty, after its
   actors go and its Python API cannot delete one; a failed call therefore
-  leaves no folder behind. Props are Movable boxes; everything else is Static.
+  leaves no folder behind. Props are Movable boxes with the mesh's BlockAll
+  collision, not simulating; with `physics_props` they are made physics-ready
+  (PhysicsActor collision, simulating), so they fall and take forces once the
+  simulation starts, and the reply counts them in `physics_props`.
+  Everything else is Static. `parameters` must be a JSON object; anything
+  else is a `ValidationError` on `parameters` (`details.errors`).
+- `set_unreal_light_params` writes a point, spot, rect or directional light,
+  or a SkyLight's intensity, color and shadows, in one undoable transaction,
+  and reads every value back into `applied` and `current`; with no parameter
+  it only reads the light, and an actor that is not there is a
+  `NotFoundError`. Values are checked before anything is written, each a
+  `ValidationError`: intensity from 0 to 1e9 (1e30 lux was stored, and 1e39
+  overflowed Unreal's 32-bit float) and temperature 1000 to 15000 K (the
+  range Unreal's blackbody color covers; it clamps others) in the input
+  schema, the field named in `details.errors`; and, by the tool with a
+  `details.code`, attenuation radius above 0 (`OUT_OF_RANGE`), a color that
+  is not three channels between 0 and 1 (`NOT_A_COLOR`, `OUT_OF_RANGE`), a
+  value the light's class lacks (a directional light's attenuation radius,
+  a SkyLight's temperature;
+  `PROPERTY_NOT_ON_LIGHT`), and an actor with no light component, or
+  several and none at its root (`NOT_A_LIGHT`; it used to fail with a
+  Python traceback). A value Unreal still stores differently fails the call
+  (`LightParamsNotApplied`, `details.expected` and `details.actual`) and
+  puts every value of the call back, the ones it took too, and cancels the
+  transaction, so a failed call changes nothing (`applied` empty,
+  `params_set` 0). Intensity is in the light's unit, returned as
+  `intensity_unit`: `lux` for a directional light, the light's Intensity
+  Units for a point, spot or rect light (`candelas` by default, or
+  `lumens`, `ev`, `nits`, `unitless`), and `scale` (a multiplier) for a
+  SkyLight. `color` is sRGB, each channel 0 to 1 as the
+  color picker shows it, stored as the 8-bit color Unreal keeps
+  (channel × 255, rounded).
 - `get_unreal_material_info` reads a Material or Material Instance through
   editor scripting, in or out of Play In Editor: each scalar, vector and
   texture parameter with its value (a Material's default; for an instance,

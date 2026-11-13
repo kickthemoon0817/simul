@@ -513,7 +513,7 @@
      "arguments": {
       "class_filter": null,
       "tag_filter": null,
-      "max_results": 200,
+      "max_results": null,
       "offset": 0,
       "label_filter": null,
       "include_subclasses": false
@@ -2790,6 +2790,116 @@
    ]
   },
   {
+   "tool": "setup_unreal_physics_bulk",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "setup_unreal_physics_bulk",
+     "label": "Unreal",
+     "response_model": "UnrealSetupPhysicsBulkResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "setup_physics_bulk",
+     "arguments": {
+      "actor_paths": null,
+      "tag": null,
+      "folder": null,
+      "actor_filter": null,
+      "enable": true,
+      "kinematic": false,
+      "make_movable": true,
+      "allow_detach": false,
+      "collision_preset": null,
+      "mass": null,
+      "linear_damping": null,
+      "angular_damping": null,
+      "enable_gravity": null,
+      "skip_failures": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "setup_physics_bulk"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "setup_unreal_physics_bulk",
+   "case": "every argument",
+   "arguments": {
+    "actor_paths": "/Game/Maps/Test.Test:PersistentLevel.Chair_0, /Game/Maps/Test.Test:PersistentLevel.Table_0",
+    "tag": "props",
+    "folder": "Simul/Room_5",
+    "actor_filter": "_Box_",
+    "enable": false,
+    "kinematic": true,
+    "make_movable": false,
+    "allow_detach": true,
+    "collision_preset": "PhysicsActor",
+    "mass": 3.5,
+    "linear_damping": 0.3,
+    "angular_damping": 0.4,
+    "enable_gravity": false,
+    "skip_failures": true
+   },
+   "envelope": [
+    {
+     "tool": "setup_unreal_physics_bulk",
+     "label": "Unreal",
+     "response_model": "UnrealSetupPhysicsBulkResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "setup_physics_bulk",
+     "arguments": {
+      "actor_paths": [
+       "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+      ],
+      "tag": "props",
+      "folder": "Simul/Room_5",
+      "actor_filter": "_Box_",
+      "enable": false,
+      "kinematic": true,
+      "make_movable": false,
+      "allow_detach": true,
+      "collision_preset": "PhysicsActor",
+      "mass": 3.5,
+      "linear_damping": 0.3,
+      "angular_damping": 0.4,
+      "enable_gravity": false,
+      "skip_failures": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "setup_physics_bulk"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
    "tool": "get_unreal_physics_state",
    "case": "required",
    "arguments": {},
@@ -3459,7 +3569,9 @@
      "method": "analyze_scene_for_robotics",
      "arguments": {
       "analysis_types": null,
-      "actor_filter": null
+      "actor_filter": null,
+      "max_results": 50,
+      "offset": 0
      }
     }
    ],
@@ -3481,7 +3593,9 @@
    "case": "every argument",
    "arguments": {
     "analysis_types": "traversability, ,graspability",
-    "actor_filter": "Prop"
+    "actor_filter": "Prop",
+    "max_results": 20,
+    "offset": 40
    },
    "envelope": [
     {
@@ -3499,7 +3613,9 @@
        "traversability",
        "graspability"
       ],
-      "actor_filter": "Prop"
+      "actor_filter": "Prop",
+      "max_results": 20,
+      "offset": 40
      }
     }
    ],
@@ -3537,7 +3653,8 @@
       "scene_type": "warehouse",
       "parameters": {},
       "bounds_min": null,
-      "bounds_max": null
+      "bounds_max": null,
+      "physics_props": false
      }
     }
    ],
@@ -3561,7 +3678,8 @@
     "scene_type": "warehouse",
     "parameters": "{\"rows\": 3}",
     "bounds_min": "-100,-100,0",
-    "bounds_max": "100, 100, 50"
+    "bounds_max": "100, 100, 50",
+    "physics_props": true
    },
    "envelope": [
     {
@@ -3588,7 +3706,8 @@
        100.0,
        100.0,
        50.0
-      ]
+      ],
+      "physics_props": true
      }
     }
    ],

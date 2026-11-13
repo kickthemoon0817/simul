@@ -520,7 +520,10 @@ class UnrealConfig(BaseModel):
     )
     max_actors: int = Field(
         default=200,
-        description="Default maximum actors returned from Unreal tools",
+        description=(
+            "Default max_results of list_unreal_actors and simul unreal list-actors. "
+            "Env: UNREAL__MAX_ACTORS."
+        ),
         ge=1,
         le=5000,
     )

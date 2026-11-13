@@ -375,11 +375,18 @@
       "type": "string"
      },
      "max_results": {
-      "default": 200,
-      "description": "Most actors in the page, 1 to 5000.",
-      "maximum": 5000,
-      "minimum": 1,
-      "type": "integer"
+      "anyOf": [
+       {
+        "maximum": 5000,
+        "minimum": 1,
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Most actors in the page, 1 to 5000. Default: the unreal.max_actors setting (UNREAL__MAX_ACTORS, 200)."
      },
      "offset": {
       "default": 0,
@@ -693,23 +700,27 @@
   {
    "name": "get_unreal_actor_thumbnail",
    "title": "Get Unreal Actor Thumbnail",
-   "description": "Get a thumbnail image for an Unreal asset. The image arrives as an MCP image content block, followed by a JSON block with asset_path, format, width, height and image_attached=true.",
+   "description": "Get the thumbnail Unreal stores for an asset (mesh, material, texture, Blueprint), or for an actor or component in the editor world the thumbnail of its Blueprint or mesh. It is scaled down to fit width x height, keeping its proportions; Unreal stores 256 x 256, the largest returned. The image arrives as an MCP image content block, followed by a JSON block with asset_path, thumbnail_of, format, width, height and image_attached=true. An asset without a stored thumbnail is NotFoundError.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "asset_path": {
-      "description": "Full asset path.",
+      "description": "Asset path, or an actor's or component's path.",
       "type": "string"
      },
      "width": {
       "default": 256,
-      "description": "Thumbnail width in pixels.",
+      "description": "Largest width wanted, 1 to 1024 pixels.",
+      "maximum": 1024,
+      "minimum": 1,
       "type": "integer"
      },
      "height": {
       "default": 256,
-      "description": "Thumbnail height in pixels.",
+      "description": "Largest height wanted, 1 to 1024 pixels.",
+      "maximum": 1024,
+      "minimum": 1,
       "type": "integer"
      }
     },
@@ -1121,26 +1132,26 @@
   {
    "name": "set_unreal_actor_property",
    "title": "Set Unreal Actor Property",
-   "description": "Set a property on an Unreal actor by name and JSON value.",
+   "description": "Set a property of an actor, or of one of its components, in the level open in the editor by Unreal's property name (Tags, bHidden) and a JSON value. An array, set or map is replaced whole ([] empties it), struct arrays and setters included, and takes a JSON array (an object for a map); the write is one undo step even beside concurrent calls, marks the level changed and is compared once Unreal has finished it. The reply has value, previous_value and applied. A value Unreal does not keep (a mesh path that loads nothing, more materials than slots, an unknown enum name) fails with PropertyNotApplied, details.expected and details.actual, and the previous value is put back (restored), leaving no undo step; so is a write Unreal refuses, with its error_type. An actor that is gone, of another map or of Play In Editor is NotFoundError; an asset, class default object or component template, or a container value of another shape, is ValidationError (details.code); nothing is written.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
-      "description": "Full actor path.",
+      "description": "Full path of the actor or component.",
       "type": "string"
      },
      "property_name": {
-      "description": "Property name to set.",
+      "description": "Property name, as Unreal names it (Tags, bHidden).",
       "type": "string"
      },
      "property_value": {
-      "description": "Property value as JSON string.",
+      "description": "The value as JSON text; text that is not JSON is taken as a string.",
       "type": "string"
      },
      "generate_transaction": {
       "default": true,
-      "description": "Whether to generate an undo transaction.",
+      "description": "Whether the write can be undone.",
       "type": "boolean"
      }
     },
@@ -1169,7 +1180,7 @@
   {
    "name": "call_unreal_actor_function",
    "title": "Call Unreal Actor Function",
-   "description": "Call a BlueprintCallable UFUNCTION on an actor of the level open in the editor, as one undo step that records the actor and its root component first.",
+   "description": "Call a BlueprintCallable UFUNCTION on an actor of the level open in the editor, as one undo step that records the actor and its root component first. return_value is the function's ReturnValue as JSON; outputs holds everything Remote Control returned, out parameters included.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1548,7 +1559,7 @@
   {
    "name": "set_unreal_light_params",
    "title": "Set Unreal Light Params",
-   "description": "Set light component parameters (intensity, color, temperature, shadows); a parameter left out keeps its current value.",
+   "description": "Set a light's parameters (intensity, sRGB color, temperature, attenuation, shadows) in one undoable editor transaction and read them back; a parameter left out keeps its current value, and with none the light is only read. Works on point, spot, rect and directional lights and a SkyLight's intensity, color and shadows. Intensity is in the light's unit, returned as intensity_unit: lux for a directional light, the light's Intensity Units (candelas by default, or lumens, ev, nits, unitless) for a point, spot or rect light, a multiplier for a SkyLight. Values are range-checked before anything is written, and when Unreal stores one differently every value is put back, so a failed call changes nothing.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1560,6 +1571,8 @@
      "intensity": {
       "anyOf": [
        {
+        "maximum": 1000000000.0,
+        "minimum": 0.0,
         "type": "number"
        },
        {
@@ -1567,7 +1580,7 @@
        }
       ],
       "default": null,
-      "description": "Light intensity."
+      "description": "Light intensity, 0 to 1e9, in the light's unit."
      },
      "color": {
       "anyOf": [
@@ -1586,11 +1599,13 @@
        }
       ],
       "default": null,
-      "description": "Light color as [r, g, b], each channel 0-1; None keeps the current color."
+      "description": "Light color as sRGB [r, g, b], each channel 0-1; None keeps the current color."
      },
      "temperature": {
       "anyOf": [
        {
+        "maximum": 15000.0,
+        "minimum": 1000.0,
         "type": "number"
        },
        {
@@ -1598,7 +1613,7 @@
        }
       ],
       "default": null,
-      "description": "Color temperature in Kelvin."
+      "description": "Color temperature in Kelvin, 1000 to 15000, the range Unreal's blackbody color covers (it clamps others); applies with use_temperature."
      },
      "use_temperature": {
       "anyOf": [
@@ -1622,7 +1637,7 @@
        }
       ],
       "default": null,
-      "description": "Light attenuation radius in cm (point and spot lights only)."
+      "description": "Light attenuation radius in cm, more than 0 (point, spot and rect lights only)."
      },
      "cast_shadows": {
       "anyOf": [
@@ -2041,6 +2056,130 @@
     "required": [
      "actor_path"
     ]
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "setup_unreal_physics_bulk",
+   "title": "Setup Unreal Physics Bulk",
+   "description": "Set up physics on many editor actors in one call and one undoable transaction: the actor_paths plus every actor with tag, in the outliner folder and matching actor_filter (each that is given), at most 1000. Each is made simulated, kinematic or not physical as enable_unreal_physics does, after an optional collision preset (PhysicsActor makes props physics-ready) and with optional mass, damping and gravity. Every actor is checked first, and one that cannot be set up, or does not take the setup once written, refuses the call with every actor put back as it was, unless skip_failures sets up the rest (a call that sets up none fails). Use it instead of one call per actor, which runs into the rate limit.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "actor_paths": {
+      "default": "",
+      "description": "Comma-separated editor actor paths (empty: none, select by tag or folder).",
+      "type": "string"
+     },
+     "tag": {
+      "default": "",
+      "description": "Also every editor actor with this actor tag, such as a procedural scene's tag.",
+      "type": "string"
+     },
+     "folder": {
+      "default": "",
+      "description": "Also every editor actor in this outliner folder or one under it, such as Simul/Room_5_7ee55bcd; with tag, only actors with both.",
+      "type": "string"
+     },
+     "actor_filter": {
+      "default": "",
+      "description": "Also every editor actor whose label or path contains this text, ignoring case; with tag or folder, only actors matching those too (a procedural scene's tag with _Box_ picks its props, not its floor and walls).",
+      "type": "string"
+     },
+     "enable": {
+      "default": true,
+      "description": "As enable_unreal_physics: false turns physics off.",
+      "type": "boolean"
+     },
+     "kinematic": {
+      "default": false,
+      "description": "As enable_unreal_physics: kinematic, not simulated.",
+      "type": "boolean"
+     },
+     "make_movable": {
+      "default": true,
+      "description": "As enable_unreal_physics.",
+      "type": "boolean"
+     },
+     "allow_detach": {
+      "default": false,
+      "description": "As enable_unreal_physics.",
+      "type": "boolean"
+     },
+     "collision_preset": {
+      "default": "",
+      "description": "Collision preset set first, such as PhysicsActor; empty keeps each actor's collision.",
+      "type": "string"
+     },
+     "mass": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Mass override in kg, 0.001 to 1e9."
+     },
+     "linear_damping": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Linear damping, 0 to 1e6."
+     },
+     "angular_damping": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Angular damping, 0 to 1e6."
+     },
+     "enable_gravity": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Whether gravity affects the bodies."
+     },
+     "skip_failures": {
+      "default": false,
+      "description": "Set up the actors that can be and list the rest, instead of refusing the call.",
+      "type": "boolean"
+     }
+    }
    },
    "execution": null,
    "outputSchema": null,
@@ -2525,7 +2664,7 @@
   {
    "name": "analyze_unreal_scene_for_robotics",
    "title": "Analyze Unreal Scene For Robotics",
-   "description": "Classify level actors for robotics from their collision setup: floor-like surfaces a robot can stand on, small Movable objects it can grasp, and collision counts and problems (static meshes with physics collision but no simple shapes). Uses the bounding box of each actor's collision-enabled components; the thresholds come back as criteria.",
+   "description": "Classify level actors for robotics from their collision setup: floor-like surfaces a robot can stand on, small Movable objects it can grasp, and collision counts and problems (static meshes with physics collision but no simple shapes). Measures each actor by the oriented box of its physics-collision components, so rotated pieces keep their size and tilt, and each instance of an instanced mesh (ISM, HISM, foliage) by itself; the thresholds come back as criteria. Both lists are paged together (max_results each from offset; totals counts every match, next_offset starts the next page), and the pages after the first read the first page's scan, so a large level is scanned once.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2546,6 +2685,19 @@
       ],
       "default": null,
       "description": "Only analyze actors whose label or object path contains this text, ignoring case; empty or null analyzes every actor."
+     },
+     "max_results": {
+      "default": 50,
+      "description": "Most entries per category on this page, 1 to 500; a page is cut further, the same for both lists, to fit the response budget.",
+      "maximum": 500,
+      "minimum": 1,
+      "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Entries of each category to skip: the previous page's next_offset.",
+      "minimum": 0,
+      "type": "integer"
      }
     }
    },
@@ -2568,7 +2720,7 @@
   {
    "name": "generate_unreal_procedural_scene",
    "title": "Generate Unreal Procedural Scene",
-   "description": "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside the bounds, in one undoable transaction; the same arguments give the same layout. Returns the spawned actor paths and the tag and outliner folder that group them, both unique to the call.",
+   "description": "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside the bounds, in one undoable transaction; the same arguments give the same layout. Returns the spawned actor paths and the tag and outliner folder that group them, both unique to the call. physics_props makes the props physics-ready: Movable, PhysicsActor collision, simulating, so they fall and can be pushed once the simulation starts.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2597,6 +2749,11 @@
       "default": "",
       "description": "Maximum corner as comma-separated x,y,z in cm; empty is 1000,1000,500.",
       "type": "string"
+     },
+     "physics_props": {
+      "default": false,
+      "description": "Make the props physics-ready: Movable, PhysicsActor collision and simulating physics. False leaves them Movable with BlockAll collision, not simulating.",
+      "type": "boolean"
      }
     },
     "required": [
@@ -3566,6 +3723,7 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
    "get_unreal_physics_state",
    "list_unreal_simulation_actors",
    "import_unreal_usd",
@@ -3632,6 +3790,7 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
    "get_unreal_physics_state",
    "list_unreal_simulation_actors",
    "import_unreal_usd",
@@ -3696,6 +3855,7 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
    "get_unreal_physics_state",
    "list_unreal_simulation_actors",
    "import_unreal_usd",
@@ -3759,6 +3919,7 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
    "get_unreal_physics_state",
    "list_unreal_simulation_actors",
    "import_unreal_usd",

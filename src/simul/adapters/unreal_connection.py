@@ -193,7 +193,9 @@ async def discover_instances(
         ``success``, ``error``, ``instances`` (sorted by port),
         ``active_instance``, ``total_discovered`` (reachable instances) and
         ``warnings``. A scan leaves out ports where nothing answered, except
-        the active endpoint; ``port`` and ``scan=False`` always report the
+        the active endpoint and an editor too busy to answer (``ping``'s
+        ``busy``), which is listed unreachable with the reason in ``error``;
+        ``port`` and ``scan=False`` always report the
         endpoint they probed. A port left out because its probe never left
         this machine (``ping``'s ``ProbeNotSent``) is named in ``warnings``.
     """
@@ -234,7 +236,9 @@ async def discover_instances(
     not_sent: dict[str, list[int]] = {}
     for record, ping in probes:
         is_active = (record["host"], record["port"]) == active
-        if not (record["reachable"] or is_active or report_all):
+        # A busy editor (it accepted the connection, but Remote Control did
+        # not answer in time) is there, so it is listed with ping's reason.
+        if not (record["reachable"] or ping.get("busy") or is_active or report_all):
             if ping.get("error_type") == PROBE_NOT_SENT:
                 not_sent.setdefault(record["error"], []).append(record["port"])
             continue
