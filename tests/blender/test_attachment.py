@@ -145,7 +145,8 @@ def test_document_change_during_attach_does_not_publish(
 def test_no_bridge_never_creates_an_embedded_scene(settings: Settings) -> None:
     with pytest.raises(RuntimeError, match="No matching GUI"):
         BlenderAttachments(settings).attach()
-    with pytest.raises(RuntimeError, match="No Blender window attached"):
+    # Nothing to connect to: a ConnectionError, not a RuntimeError.
+    with pytest.raises(ConnectionError, match="No Blender window attached"):
         BlenderConnection(settings).create_object("CUBE")
 
 
@@ -498,10 +499,27 @@ def test_attach_blender_window_tool_attaches_and_lists_candidates_when_ambiguous
     info["windows"].append({**info["windows"][0], "window_id": "second"})
     payload = json.loads(asyncio.run(tool.func()).content[0].text)
     assert payload["success"] is False
-    assert payload["error_type"] == "ValueError"
+    # Raised as ValueError by the attachment; ValidationError in the shared taxonomy.
+    assert payload["error_type"] == "ValidationError"
+    assert payload["details"]["exception_type"] == "ValueError"
     assert {w["window_id"] for w in payload["details"]["instances"][0]["windows"]} == {"window", "second"}
     payload = json.loads(asyncio.run(tool.func(window_id="second")).content[0].text)
     assert payload["success"] is True and payload["window"]["window_id"] == "second"
+
+
+def test_attach_blender_window_with_no_bridge_is_a_connection_error(
+    settings: Settings, fake_fastmcp: Any
+) -> None:
+    """A bare RuntimeError read as EngineError; nothing answered, so it is a ConnectionError."""
+    server = SimulMCPServer(settings, backends={"blender"})
+    tool = next(t for t in server.mcp.tools if t.name == "attach_blender_window")
+
+    payload = json.loads(asyncio.run(tool.func()).content[0].text)
+
+    assert payload["success"] is False
+    assert payload["error_type"] == "ConnectionError"
+    assert payload["details"] == {"instances": []}
+    assert "No matching GUI Blender bridge" in payload["error"]
 
 
 def test_attach_blender_window_tool_requires_attached_mode(
@@ -604,6 +622,48 @@ def test_addon_bundles_the_error_message_helper(tmp_path: Path) -> None:
         check=True,
     )
     assert completed.stdout.strip() == "Failed to add rigid body: poll() failed"
+
+
+def test_addon_bundles_the_shared_import_reference_readers(tmp_path: Path) -> None:
+    """blender_runtime's import sandbox reads references with utils/asset_references.py, shared with Unreal.
+
+    An interpreter without simul (and without bpy) imports the bundled
+    runtime, so the readers come from the add-on's own copy and refuse an
+    OBJ whose MTL names a file outside the sandbox.
+    """
+    import subprocess
+    import sys
+    import zipfile
+
+    addon = BlenderAttachments.build_addon(tmp_path / "addon.zip")
+    with zipfile.ZipFile(addon) as archive:
+        assert "simul_blender_bridge/utils/asset_references.py" in archive.namelist()
+        archive.extractall(tmp_path / "addons")
+    sbx, outside = tmp_path / "sbx", tmp_path / "outside"
+    sbx.mkdir()
+    outside.mkdir()
+    (outside / "secret.png").write_bytes(b"\x89PNG")
+    (sbx / "cube.obj").write_text("mtllib cube.mtl\n")
+    (sbx / "cube.mtl").write_text("newmtl M\nmap_Kd ../outside/secret.png\n")
+    probe = (
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+        "from simul_blender_bridge.adapters import blender_runtime as runtime; "
+        "inside = lambda path: Path(path).resolve().is_relative_to(Path(sys.argv[2]).resolve()); "
+        "reads = runtime._obj_reads(Path(sys.argv[2]) / 'cube.obj'); "
+        "print(runtime.outside_references.__module__); "
+        "print(runtime.outside_references(reads, type('P', (), {'is_allowed': staticmethod(inside), "
+        "'resolve': staticmethod(lambda path: Path(path).resolve())})()))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(tmp_path / "addons"), str(sbx)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert completed.stdout.splitlines() == [
+        "simul_blender_bridge.utils.asset_references",
+        str([str((outside / "secret.png").resolve())]),
+    ]
 
 
 def test_addon_bundles_the_regex_guard(tmp_path: Path) -> None:

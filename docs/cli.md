@@ -190,7 +190,7 @@ mode.
 | `instances [--no-scan]`, `attach [--viewport KEY]`, `status`, `detach` | Discover editors (the `list_unreal_instances` payload) and select an existing editor, map and level viewport. See [unreal-attachment.md](unreal-attachment.md) |
 | `control ACTION [...]` | Named editor controls on the attached editor (`inspect`, `select_actor`, `set_property`, `move_cursor`, ...) |
 | `health`, `info`, `scene`, `map` | Inspection |
-| `list-actors [--class] [--subclasses] [--tag] [--label] [-n] [--offset]`, `actor-info`, `search`, `scene-graph [--root] [--depth] [--components] [--class] [--offset]` | Scene queries, one page at a time (`next_offset` in the JSON) |
+| `list-actors [--class] [--subclasses] [--tag] [--label] [-n] [--offset]`, `actor-info`, `search [--class] [--package] [-n] [--offset]`, `scene-graph [--root] [--depth] [--components] [--class] [--offset]` | Scene and asset queries, one page at a time (`next_offset` in the JSON) |
 | `spawn PATH [--location x,y,z] [--rotation p,y,r] [--label]` (an Actor class path or an asset path), `delete`, `set-transform ACTOR [--location x,y,z] [--rotation p,y,r] [--scale x,y,z]` (an option left out keeps its value), `set-property`, `set-visibility` | Edit actors |
 | `sim ACTION`, `sim-status` | Play-In-Editor: `start`, `stop`, `pause`, `resume`, `step` |
 | `capture [OUTPUT] [--width] [--height] [--format png\|jpeg]` | Viewport screenshot |
@@ -214,6 +214,10 @@ simul unreal capture viewport.png --width 1920
 Captures move from the editor to disk in bounded chunks, so files larger than
 the MCP inline limit still arrive. `--format jpeg` converts the downloaded PNG
 locally.
+
+`exec` runs its code as `execute_unreal_script` does, in a fresh namespace
+that is discarded when the call ends; see
+[tools.md](tools.md#unreal-engine).
 
 ## `simul blender`
 

@@ -545,7 +545,7 @@ class SceneInspectionMixin:
             return ErrorResponse(
                 error="query is required: a prim type name for search_type='type' "
                 "or a name substring for search_type='name'",
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
         max_results = max(1, min(max_results, 1000))
         offset = max(0, offset)

@@ -24,11 +24,20 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 from dataclasses import KW_ONLY, dataclass
-from typing import Annotated, Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple, Type
+from typing import Annotated, Any, Awaitable, Callable, Dict, List, Literal, Mapping, Optional, Tuple, Type, Union
 
 from pydantic import BaseModel, Field
 
+from ...adapters._unreal_mesh_scripts import (
+    MAX_REMESH_TARGET_TRIANGLES,
+    MAX_RESULT_TRIANGLES,
+    MAX_SEGMENTS,
+    MIN_SEGMENTS,
+    REMESH_OVERSHOOT,
+    XATLAS_MAX_TRIANGLES,
+)
 from ...config import Settings
 from ...tool_surfaces import THIN_UNREAL_TOOLS
 from ..schemas.unreal import (
@@ -66,6 +75,7 @@ from ..schemas.unreal import (
     UnrealGetSimulationStatusResponse,
     UnrealGetThumbnailResponse,
     UnrealHealthCheckResponse,
+    UnrealImportAssetResponse,
     UnrealImportUsdResponse,
     UnrealListActorComponentsResponse,
     UnrealListActorsResponse,
@@ -74,6 +84,7 @@ from ..schemas.unreal import (
     UnrealPingResponse,
     UnrealQuerySceneGraphResponse,
     UnrealRemeshMeshResponse,
+    UnrealSaveAssetsResponse,
     UnrealSceneSummaryResponse,
     UnrealSearchAssetsResponse,
     UnrealSetActorParentResponse,
@@ -228,9 +239,74 @@ def _optional_json(value: str) -> Any:
     return json.loads(value) if value else None
 
 
+def _three_numbers(value: Any) -> Optional[List[float]]:
+    """A vector given as a JSON array of 3 numbers or as text, "x,y,z" or "[x, y, z]".
+
+    An empty string or array means none. Anything else raises ValueError,
+    which the call reports as a ValidationError naming the parameter.
+    """
+    items = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            items = json.loads(text) if text.startswith("[") else text.split(",")
+        except ValueError:
+            items = None
+    elif not value:
+        return None
+    try:
+        numbers = [float(item) for item in items]
+    except (TypeError, ValueError):
+        numbers = []
+    if len(numbers) != 3 or not all(math.isfinite(number) for number in numbers):
+        raise ValueError(f"expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z', not {value!r}")
+    return numbers
+
+
+def _required_three_numbers(value: Any) -> List[float]:
+    numbers = _three_numbers(value)
+    if numbers is None:
+        raise ValueError("expected 3 numbers, as a JSON array [x, y, z] or as text 'x,y,z'")
+    return numbers
+
+
+#: A point or direction: a JSON array of 3 numbers, or the same as text.
+_Vector3 = Union[str, List[float]]
+
+
 # ---------------------------------------------------------------------------
 # Rules, argument builders and usage records of particular tools
 # ---------------------------------------------------------------------------
+
+def _one_simplify_target(request: Any) -> Optional[str]:
+    """simplify_unreal_mesh takes at most one of its targets."""
+    given = [name for name in ("target_triangle_count", "target_percentage", "max_error")
+             if getattr(request, name) is not None]
+    return f"Give one of {', '.join(given)}, not several" if len(given) > 1 else None
+
+
+def _one_remesh_target(request: Any) -> Optional[str]:
+    """remesh_unreal_mesh takes an edge length or a triangle count, not both."""
+    if request.target_edge_length is not None and request.target_triangle_count is not None:
+        return "Give target_edge_length or target_triangle_count, not both"
+    return None
+
+
+#: Ends the description of the mesh tools that read any mesh source.
+_MESH_SOURCE_NOTE = (
+    " Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs."
+)
+
+#: Ends the description of the mesh tool that creates a mesh from nothing.
+_MESH_CREATE_NOTE = _MESH_SOURCE_NOTE
+
+#: Ends the description of every mesh tool that changes or creates a mesh from another.
+_MESH_EDIT_NOTE = (
+    " Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); "
+    "needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs."
+)
 
 
 def _png_format(request: Any) -> Optional[str]:
@@ -418,11 +494,18 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "Execute arbitrary Python code inside the Unreal Engine editor. "
             "Use for operations not covered by other tools. The code runs via "
             "PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return "
-            "structured data. UE 5.7 hazard: do not leave a reference to an "
+            "structured data. Each call starts in a fresh namespace with unreal "
+            "imported, and every name it binds is discarded when it ends, returned "
+            "or raised: nothing carries over to the next call (pass values back in "
+            "as code), and a callback it registers must import what it uses inside "
+            "itself. Never keep an unreal package or world, or an object that refers to "
+            "one, in sys.modules, a module attribute or a registered callback: the next "
+            "map change aborts the editor. UE 5.7 hazard: do not leave a reference to an "
             "unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, "
             "unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) "
-            "in a reference cycle; a later garbage collection, including the editor's "
-            "own on autosave, crashes the editor. Call them inline. "
+            "in a reference cycle (a class attribute or a method's default argument puts "
+            "it in one); a later garbage collection, including the editor's own on "
+            "autosave, crashes the editor. Call them inline. "
             "For granular CLI operations see: simul unreal --help"
         ),
         response=UnrealExecuteScriptResponse,
@@ -616,25 +699,41 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="search_unreal_assets",
-        description="Search the Unreal Asset Registry by name, class, or package path.",
+        description=(
+            "Search the Unreal Asset Registry, loading nothing: every mounted content root (/Game, /Engine, "
+            "plugins) unless package_paths narrows it, subfolders included. Matches part of the asset name "
+            "(ignoring case), sorted by path; page with offset (total counts every match). Each asset carries "
+            "the registry metadata Unreal records, such as Triangles, LODs, NaniteEnabled and CollisionPrims."
+        ),
         response=UnrealSearchAssetsResponse,
         read_only=True,
         idempotent=True,
         method="search_assets",
         params=(
-            ToolParam("query", str, "", description="Search query string."),
+            ToolParam(
+                "query",
+                str,
+                "",
+                description="Part of the asset name to match, ignoring case; empty matches every asset.",
+            ),
             ToolParam(
                 "class_names",
                 str,
                 "",
-                description="Comma-separated UClass names to filter.",
+                description=(
+                    "Comma-separated asset classes, by name (StaticMesh, Material, Texture2D) or class path "
+                    "(/Script/Engine.StaticMesh). Empty matches every class."
+                ),
                 convert=_name_list,
             ),
             ToolParam(
                 "package_paths",
                 str,
                 "",
-                description="Comma-separated package paths to search.",
+                description=(
+                    "Comma-separated content folders to search, such as /Game/Props. Empty searches every "
+                    "mounted content root."
+                ),
                 convert=_name_list,
             ),
             ToolParam(
@@ -643,6 +742,96 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 100,
                 description=f"Maximum number of results, from 1 to {MAX_ASSET_SEARCH_RESULTS}.",
             ),
+            ToolParam(
+                "offset",
+                Annotated[int, Field(ge=0)],
+                0,
+                description="Matches to skip, for the next page: pass the previous call's next_offset.",
+            ),
+            ToolParam(
+                "recursive_paths",
+                bool,
+                True,
+                description="Include the subfolders of package_paths.",
+            ),
+            ToolParam(
+                "include_subclasses",
+                bool,
+                True,
+                description="Include assets whose class derives from one of class_names.",
+            ),
+        ),
+    ),
+    UnrealTool(
+        name="import_unreal_asset",
+        description=(
+            "Import an FBX, glTF, GLB or OBJ file as assets (meshes, materials, textures) under a /Game folder "
+            "through Unreal's Interchange importer, saved, placing no actor. Every file the model names (glTF "
+            "buffers and images, OBJ MTL libraries and textures, FBX textures, UDIM tiles) must be inside the "
+            "sandbox too, else SandboxError with details.references_outside. Without replace_existing, assets "
+            "that already exist are kept, and a file whose every asset exists imports nothing; with it, "
+            "Unreal reimports the mesh and keeps the other assets, listed in kept_assets."
+        ),
+        response=UnrealImportAssetResponse,
+        read_only=False,
+        destructive=True,
+        method="import_asset",
+        params=(
+            ToolParam(
+                "file_path",
+                str,
+                description="Path of the .fbx, .gltf, .glb or .obj file on disk; must be inside the sandbox.",
+            ),
+            ToolParam(
+                "destination_path",
+                str,
+                "/Game/Imports",
+                description="Content folder under /Game to import into (/Game itself included).",
+            ),
+            ToolParam(
+                "replace_existing",
+                bool,
+                False,
+                description=(
+                    "Reimport the asset named after the file. Unreal keeps the textures and materials an "
+                    "earlier import made (kept_assets, with a warning). Default false keeps every existing "
+                    "asset, and refuses (InvalidState) a file whose every asset exists."
+                ),
+            ),
+        ),
+    ),
+    UnrealTool(
+        name="save_unreal_assets",
+        description=(
+            "Save modified packages to disk: the named assets, the level being edited (save_level), or every "
+            "modified package (all_dirty). Only /Game packages unless allow_engine_content; refused during "
+            "Play In Editor. dry_run lists what would be saved."
+        ),
+        response=UnrealSaveAssetsResponse,
+        read_only=False,
+        idempotent=True,
+        destructive=True,
+        method="save_assets",
+        params=(
+            ToolParam(
+                "asset_paths",
+                str,
+                "",
+                description="Comma-separated asset paths whose packages to save, such as /Game/Materials/MI_Red.",
+                convert=_name_list,
+            ),
+            ToolParam(
+                "save_level",
+                bool,
+                False,
+                description=(
+                    "Save the level being edited: its map package and, in a World Partition level, its "
+                    "actors' packages."
+                ),
+            ),
+            ToolParam("all_dirty", bool, False, description="Save every modified package."),
+            ToolParam("allow_engine_content", bool, False, description=_ALLOW_ENGINE_CONTENT_DESCRIPTION),
+            ToolParam("dry_run", bool, False, description="Report what would be saved; save nothing."),
         ),
     ),
     UnrealTool(
@@ -663,6 +852,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealGetThumbnailResponse,
         read_only=True,
+        idempotent=True,
         method="get_actor_thumbnail",
         params=(
             ToolParam("asset_path", str, description="Full asset path."),
@@ -723,6 +913,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealFocusActorResponse,
         read_only=False,
+        idempotent=True,
         method="focus_on_actor",
         params=(
             ToolParam("actor_path", str, description="Full actor path to focus on."),
@@ -798,6 +989,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealDeleteActorResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="delete_actor",
         params=(ToolParam("actor_path", str, description="Full actor path, as list_unreal_actors reports it."),),
@@ -885,6 +1077,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealSetActorParentResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="set_actor_parent",
         params=(
@@ -1105,6 +1298,21 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("actor_path", str),
             ToolParam("material_path", str),
             ToolParam("slot_index", int, 0),
+            ToolParam(
+                "slot_name",
+                str,
+                "",
+                description="Material slot name, as the Details panel shows it; empty uses slot_index.",
+            ),
+            ToolParam(
+                "component_name",
+                str,
+                "",
+                description=(
+                    "Mesh component to assign to, by name (StaticMeshComponent0) or path. Empty picks the "
+                    "actor's mesh root component, else its only mesh component."
+                ),
+            ),
         ),
     ),
     UnrealTool(
@@ -1292,7 +1500,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "<destination_path>/<file name>, and actors into the level being edited. Without "
             "replace_existing it is refused when that folder already holds assets, and existing actors are "
             "kept; with it, those assets and the level's actors from an earlier import of the file are "
-            "replaced."
+            "replaced. Every layer and asset the stage draws on (sublayers, references, payloads, clips, "
+            "textures) must be inside the sandbox too, else SandboxError naming them."
         ),
         response=UnrealImportUsdResponse,
         read_only=False,
@@ -1306,8 +1515,18 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 Optional[Dict[str, Any]],
                 None,
                 description=(
-                    "Boolean USD options: import_actors, import_geometry, import_materials, "
-                    "import_lights, import_cameras."
+                    "USDImporter options. Booleans: import_actors, import_geometry, import_materials, "
+                    "import_skeletal_animations, import_level_sequences, import_groom_assets, "
+                    "import_sparse_volume_textures, import_sounds, import_only_used_materials, "
+                    "use_prim_kinds_for_collapsing (merge a prim's meshes into one per kinds_to_collapse; "
+                    "false keeps a mesh per prim), merge_identical_material_slots, "
+                    "share_assets_for_identical_prims, prim_path_folder_structure, interpret_lods. "
+                    "kinds_to_collapse: list of USD kinds (model, component, group, assembly, subcomponent). "
+                    "fallback_collision_type: none (render triangles), convex_decomposition, convex_hull, "
+                    "sphere, cube, mesh_simplification, capsule, custom_mesh. nanite_triangle_threshold: int. "
+                    "prims_to_import: prim paths. meters_per_unit with up_axis (y or z), together, override the "
+                    "stage's own. Lights and cameras import as actors with import_actors. Unset options take "
+                    "Unreal's defaults."
                 ),
             ),
             ToolParam(
@@ -1326,10 +1545,13 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="export_unreal_usd",
         description=(
             "Export actors of the level being edited with the optional USDImporter plugin's "
-            "LevelExporterUSD; actors_exported counts the actors the written stage has a prim for."
+            "LevelExporterUSD; actors_exported counts the actors the written stage has a prim for. Mesh and "
+            "material files go to <output name>_assets beside the output. DynamicMeshActors export as empty "
+            "Xforms, reported in warnings."
         ),
         response=UnrealExportUsdResponse,
         read_only=False,
+        idempotent=True,
         destructive=True,
         method="export_usd",
         params=(
@@ -1345,6 +1567,17 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 Optional[Dict[str, Any]],
                 None,
                 description="Boolean USD options: export_actor_folders, export_sublayers.",
+            ),
+            ToolParam(
+                "overwrite",
+                bool,
+                False,
+                description=(
+                    "Replace the files the export writes. Default false refuses it (InvalidState, with "
+                    "details.existing_files) when the output exists, its <output name>_assets folder holds "
+                    "files, or, with export_sublayers, a sublevel layer or MaterialOverrides file beside it "
+                    "exists. Every file written is listed in written_files."
+                ),
             ),
         ),
     ),
@@ -1393,7 +1626,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="get_unreal_interchange_info",
-        description="Query available Interchange pipelines and supported formats.",
+        description=(
+            "Interchange's supported formats by translator kind (assets, scenes, actors), the project's "
+            "content and scene pipeline stacks, and whether USD import and export are available."
+        ),
         response=UnrealGetInterchangeInfoResponse,
         read_only=True,
         idempotent=True,
@@ -1405,7 +1641,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Execute several Remote Control requests in one HTTP call, in order. Each result is "
             "Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has "
-            "error and error_type. Operations without a RequestId are numbered for you."
+            "error and error_type. Operations without a RequestId are numbered for you. Python run "
+            "through PythonScriptLibrary gets a fresh namespace per call, as in execute_unreal_script; "
+            "an ExecuteConsoleCommand of a py command is refused (ValidationError)."
         ),
         response=UnrealBatchOperationsResponse,
         read_only=False,
@@ -1574,23 +1812,49 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
     ),
     # -- Geometry and modeling (GeometryScript) --------------------------------------
+    # Each needs the GeometryScripting plugin (simul unreal setup enables it) and
+    # takes DynamicMeshActor paths; see _unreal_mesh_scripts. A tool that replaces
+    # a mesh or a collision is destructive; none is idempotent (repeating an edit
+    # edits again, repeating a creation creates another actor).
     UnrealTool(
         name="generate_unreal_mesh_primitive",
-        description="Create a parametric mesh primitive (box, sphere, cylinder, cone, torus, capsule).",
+        description=(
+            "Create a parametric mesh primitive as a new DynamicMeshActor, centred on location, in "
+            "Unreal's axes (X forward, Y right, Z up); the spawn is one undoable transaction. "
+            "Dimensions in cm: box width (X), depth (Y), height (Z); sphere radius; cylinder radius, "
+            "height; cone base_radius, top_radius, height; capsule radius, length (its straight part); "
+            "torus major_radius, minor_radius." + _MESH_CREATE_NOTE
+        ),
         response=UnrealGenerateMeshPrimitiveResponse,
         read_only=False,
         method="generate_mesh_primitive",
         params=(
-            ToolParam("primitive_type", str),
-            ToolParam("dimensions", str, "{}", convert=_optional_json),
-            ToolParam("segments", int, 32),
-            ToolParam("location", str, "", convert=_optional_floats),
+            ToolParam("primitive_type", Literal["box", "sphere", "cylinder", "cone", "capsule", "torus"]),
+            ToolParam(
+                "dimensions",
+                str,
+                "{}",
+                description=(
+                    'JSON object of the type\'s dimensions in cm, each above 0, e.g. {"width": 200, '
+                    '"depth": 100, "height": 50}; missing ones take their defaults (box 100 each; sphere '
+                    "radius 50; cylinder radius 50, height 100; cone base_radius 50, top_radius 0, height "
+                    "100; capsule radius 30, length 75; torus major_radius 50, minor_radius 20)."
+                ),
+                convert=_optional_json,
+            ),
+            ToolParam("segments", Annotated[int, Field(ge=MIN_SEGMENTS, le=MAX_SEGMENTS)], 32),
+            ToolParam("location", _Vector3, "", convert=_three_numbers),
             ToolParam("actor_label", Optional[str], None),
         ),
     ),
     UnrealTool(
         name="apply_unreal_mesh_boolean",
-        description="Apply boolean operation (union, subtract, intersect) between two meshes.",
+        description=(
+            "Apply a boolean of a tool DynamicMeshActor's mesh to a target DynamicMeshActor's mesh, in "
+            "place and undoable: both meshes take part where they are in the level (their world "
+            "transforms), and the result replaces the target's mesh. The tool actor is left as it was."
+            + _MESH_EDIT_NOTE
+        ),
         response=UnrealApplyMeshBooleanResponse,
         read_only=False,
         destructive=True,
@@ -1598,144 +1862,258 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         params=(
             ToolParam("target_mesh_path", str),
             ToolParam("tool_mesh_path", str),
-            ToolParam("operation", str),
+            ToolParam(
+                "operation",
+                Literal["union", "subtract", "intersect", "difference", "intersection"],
+                description="union, subtract (or difference) or intersect (or intersection).",
+            ),
         ),
     ),
     UnrealTool(
         name="compute_unreal_convex_hull",
-        description="Compute convex hull envelope of a mesh.",
+        description=(
+            "Compute the convex hull of a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset, "
+            "simplified to max_faces triangles, as simple collision: on a new DynamicMeshActor at the "
+            "source's transform whose mesh is the hull (output 'actor'), on the source itself "
+            "('collision': a StaticMesh's asset, under /Game, saved with save) or both; one undoable "
+            "transaction." + _MESH_SOURCE_NOTE
+        ),
         response=UnrealComputeConvexHullResponse,
         read_only=False,
+        destructive=True,
         method="compute_convex_hull",
-        params=(ToolParam("mesh_path", str),),
+        params=(
+            ToolParam("mesh_path", str),
+            ToolParam("max_faces", Annotated[int, Field(ge=0, le=10000)], 250),
+            ToolParam("output", Literal["actor", "collision", "both"], "actor"),
+            ToolParam("save", bool, False),
+        ),
     ),
     UnrealTool(
         name="decompose_unreal_convex_hull",
-        description="V-HACD convex decomposition for collision geometry.",
+        description=(
+            "Decompose a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset into convex hulls "
+            "with Unreal's own convex decomposition (GeometryScript's, not V-HACD), as simple collision: "
+            "on a new DynamicMeshActor at the source's transform holding the pieces (output 'actor'), on "
+            "the source itself ('collision': a StaticMesh's asset, under /Game, saved with save) or both; "
+            "one undoable transaction. Reports each piece and how much of the source's volume they cover."
+            + _MESH_SOURCE_NOTE
+        ),
         response=UnrealDecomposeConvexHullResponse,
         read_only=False,
         destructive=True,
         method="decompose_convex_hull",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("max_hulls", int, 16),
-            ToolParam("max_vertices_per_hull", int, 32),
-            ToolParam("min_cluster_size", int, 256),
-            ToolParam("resolution", int, 100000),
+            ToolParam("max_hulls", Annotated[int, Field(ge=1, le=64)], 8),
+            ToolParam("max_vertices_per_hull", Annotated[int, Field(ge=4, le=256)], 32),
+            ToolParam("error_tolerance", Annotated[float, Field(ge=0)], 0.0),
+            ToolParam("min_part_thickness", Annotated[float, Field(ge=0)], 0.1),
+            ToolParam("output", Literal["actor", "collision", "both"], "actor"),
+            ToolParam("save", bool, False),
         ),
     ),
     UnrealTool(
         name="edit_unreal_mesh_topology",
-        description="Edit mesh topology (extrude, bevel, inset, loop cut, scale_faces).",
+        description=(
+            "Extrude or inset selected faces, or bevel edges, of a DynamicMeshActor's mesh, in place and "
+            "undoable. Faces are selected by direction ('normal:0,0,1') or by a box, in the mesh's local "
+            "space; bevel takes 'polygroup' or 'sharp' edges, or a face region's border." + _MESH_EDIT_NOTE
+        ),
         response=UnrealEditMeshTopologyResponse,
         read_only=False,
         destructive=True,
         method="edit_mesh_topology",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("operation", str),
+            ToolParam("operation", Literal["extrude_faces", "inset_faces", "bevel_edges"]),
             ToolParam("face_selection", Optional[str], None),
             ToolParam("edge_selection", Optional[str], None),
             ToolParam("distance", Optional[float], None),
-            ToolParam("offset", Optional[float], None),
-            ToolParam("scale", str, "", convert=_optional_floats),
-            ToolParam("count", Optional[int], None),
+            ToolParam("offset", Optional[Annotated[float, Field(gt=0)]], None),
+            ToolParam("count", Optional[Annotated[int, Field(ge=0, le=16)]], None),
         ),
     ),
     UnrealTool(
         name="subdivide_unreal_mesh",
-        description="Catmull-Clark / Loop / bilinear subdivision.",
+        description=(
+            "Subdivide a DynamicMeshActor's mesh, in place and undoable: Catmull-Clark over quad "
+            "polygroups, Loop over triangles, or uniform tessellation. A result over "
+            f"{MAX_RESULT_TRIANGLES:,} triangles is refused before anything runs." + _MESH_EDIT_NOTE
+        ),
         response=UnrealSubdivideMeshResponse,
         read_only=False,
         destructive=True,
         method="subdivide_mesh",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("level", int, 2),
-            ToolParam("scheme", str, "catmull_clark"),
+            ToolParam("level", Annotated[int, Field(ge=1, le=4)], 2),
+            ToolParam("scheme", Literal["catmull_clark", "loop", "uniform"], "catmull_clark"),
         ),
     ),
     UnrealTool(
         name="simplify_unreal_mesh",
-        description="Simplify/decimate a mesh to reduce triangle count.",
+        description=(
+            "Simplify a DynamicMeshActor's mesh, in place and undoable, to a triangle count, a fraction of "
+            "its triangles, or as far as it stays within max_error cm of the original; one target at most, "
+            "half the triangles by default." + _MESH_EDIT_NOTE
+        ),
         response=UnrealSimplifyMeshResponse,
         read_only=False,
         destructive=True,
         method="simplify_mesh",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("target_triangle_count", Optional[int], None),
-            ToolParam("target_percentage", Optional[float], None),
-            ToolParam("max_error", Optional[float], None),
+            ToolParam("target_triangle_count", Optional[Annotated[int, Field(ge=4)]], None),
+            ToolParam("target_percentage", Optional[Annotated[float, Field(gt=0, lt=1)]], None),
+            ToolParam("max_error", Optional[Annotated[float, Field(gt=0)]], None),
         ),
+        check=_one_simplify_target,
     ),
     UnrealTool(
         name="cut_unreal_mesh_plane",
-        description="Cut/slice a mesh along an arbitrary plane.",
+        description=(
+            "Cut a DynamicMeshActor's mesh with a plane, given in world space by default: the half the "
+            "normal points into is removed, or kept as a second DynamicMeshActor with keep_both_sides, "
+            "in one undoable transaction. A plane that misses the mesh changes nothing." + _MESH_EDIT_NOTE
+        ),
         response=UnrealCutMeshPlaneResponse,
         read_only=False,
         destructive=True,
         method="cut_mesh_plane",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("plane_origin", str, convert=_floats),
-            ToolParam("plane_normal", str, convert=_floats),
+            ToolParam("plane_origin", _Vector3, convert=_required_three_numbers),
+            ToolParam("plane_normal", _Vector3, convert=_required_three_numbers),
             ToolParam("fill_holes", bool, True),
             ToolParam("keep_both_sides", bool, False),
+            ToolParam("space", Literal["world", "local"], "world"),
         ),
     ),
     UnrealTool(
         name="validate_unreal_mesh",
-        description="Validate mesh integrity (manifold, normals, degenerates, self-intersection).",
+        description=(
+            "Check the mesh of a DynamicMeshActor, a StaticMeshActor or a StaticMesh asset: closed (no open "
+            "border edges), manifold (no bowtie "
+            "vertices), degenerate_triangles, orientation (a closed mesh's faces point out), compact (no ID "
+            "gaps), normals and uvs, each with its count and detail. It does not look for "
+            "self-intersections. Reads only, also while PIE runs. Needs the GeometryScripting plugin, "
+            "which simul unreal setup enables."
+        ),
         response=UnrealValidateMeshResponse,
         read_only=True,
         idempotent=True,
         method="validate_mesh",
         params=(
-            ToolParam("mesh_path", str),
-            ToolParam("checks", str, "", convert=_name_list),
+            ToolParam(
+                "mesh_path",
+                str,
+            ),
+            ToolParam(
+                "checks",
+                str,
+                "",
+                description=(
+                    "Comma-separated checks to run (closed, manifold, degenerate_triangles, orientation, "
+                    "compact, normals, uvs); empty runs all."
+                ),
+                convert=_name_list,
+            ),
         ),
     ),
     UnrealTool(
         name="convert_unreal_mesh_format",
-        description="Convert mesh between formats (static mesh, dynamic mesh, skeletal mesh).",
+        description=(
+            "Convert between StaticMeshes and editable DynamicMeshActors. dynamic_mesh places a "
+            "DynamicMeshActor copy of a StaticMesh asset (at location) or of a StaticMeshActor (at its "
+            "transform), with its materials, for the other mesh tools to edit. static_mesh writes a "
+            "DynamicMeshActor's mesh, materials and simple collision into a StaticMesh asset under /Game "
+            "(refusing /Engine and plugin content and, without overwrite, an existing asset) and saves "
+            "only that asset; writing the asset is not undoable. replace_actor swaps the source actor for "
+            "the result in one undoable step. Unreal's USD exporter "
+            "writes DynamicMeshActors as empty Xforms, so convert (with replace_actor) before exporting a "
+            "mesh made with these tools. Needs the "
+            "GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs."
+        ),
         response=UnrealConvertMeshFormatResponse,
         read_only=False,
         destructive=True,
         method="convert_mesh_format",
         params=(
-            ToolParam("mesh_path", str),
-            ToolParam("target_format", str),
-            ToolParam("tessellation_options", str, "{}", convert=_optional_json),
+            ToolParam(
+                "mesh_path",
+                str,
+                description=(
+                    "dynamic_mesh: a StaticMesh asset (/Game/Meshes/SM_Crate) or a StaticMeshActor; "
+                    "static_mesh: a DynamicMeshActor."
+                ),
+            ),
+            ToolParam("target_format", Literal["dynamic_mesh", "static_mesh"]),
+            ToolParam("asset_path", Optional[str], None),
+            ToolParam("overwrite", bool, False),
+            ToolParam("save", bool, True),
+            ToolParam("replace_actor", bool, False),
+            ToolParam("collision", Literal["auto", "component", "convex_hull", "none"], "auto"),
+            ToolParam("nanite", bool, False),
+            ToolParam("location", _Vector3, "", convert=_three_numbers),
         ),
     ),
     UnrealTool(
         name="remesh_unreal_mesh",
-        description="Remesh a mesh (uniform, adaptive) to improve triangle quality.",
+        description=(
+            "Uniformly remesh a DynamicMeshActor's mesh, in place and undoable, to a target edge length or "
+            "triangle count (by default its own triangle count), for evenly sized triangles; reports the "
+            f"result's mean edge length. The remesher makes up to {REMESH_OVERSHOOT:g} times the target, so "
+            f"a target_triangle_count over {MAX_REMESH_TARGET_TRIANGLES:,}, or a target predicted to make "
+            f"over {MAX_RESULT_TRIANGLES:,} triangles, is refused."
+            + _MESH_EDIT_NOTE
+        ),
         response=UnrealRemeshMeshResponse,
         read_only=False,
         destructive=True,
         method="remesh_mesh",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("mode", str, "uniform"),
-            ToolParam("target_edge_length", Optional[float], None),
-            ToolParam("target_triangle_count", Optional[int], None),
-            ToolParam("smoothing_iterations", int, 3),
+            ToolParam("mode", Literal["uniform"], "uniform"),
+            ToolParam("target_edge_length", Optional[Annotated[float, Field(gt=0)]], None),
+            ToolParam(
+                "target_triangle_count",
+                Optional[Annotated[int, Field(ge=4, le=MAX_REMESH_TARGET_TRIANGLES)]],
+                None,
+                description=f"Target triangle count, 4 to {MAX_REMESH_TARGET_TRIANGLES:,}.",
+            ),
+            ToolParam("smoothing_iterations", Annotated[int, Field(ge=1, le=50)], 3),
         ),
+        check=_one_remesh_target,
     ),
     UnrealTool(
         name="compute_unreal_mesh_uv",
-        description="Generate or recompute UV coordinates for a mesh.",
+        description=(
+            "Generate UVs for a DynamicMeshActor's mesh with XAtlas or PatchBuilder and pack them with "
+            "island_padding texels between islands, in place and undoable. Method 'auto' uses XAtlas up to "
+            f"{XATLAS_MAX_TRIANGLES:,} triangles and PatchBuilder above that; 'xatlas' on a larger mesh "
+            "is refused, since XAtlas crashed the editor on larger meshes." + _MESH_EDIT_NOTE
+        ),
         response=UnrealComputeMeshUvResponse,
         read_only=False,
         destructive=True,
         method="compute_mesh_uv",
         params=(
             ToolParam("mesh_path", str),
-            ToolParam("method", str, "auto_uv"),
-            ToolParam("uv_channel", int, 0),
-            ToolParam("island_padding", float, 2.0),
+            ToolParam(
+                "method",
+                Literal["auto", "auto_uv", "xatlas", "patch_builder"],
+                "auto",
+                description="auto, xatlas or patch_builder; the reply's method names the one that ran.",
+            ),
+            ToolParam(
+                "uv_channel",
+                Annotated[int, Field(ge=0, le=7)],
+                0,
+                description="UV channel to write; it must exist on the mesh.",
+            ),
+            ToolParam("island_padding", Annotated[float, Field(gt=0, le=64)], 2.0),
+            ToolParam("texture_resolution", Annotated[int, Field(ge=64, le=8192)], 1024),
         ),
     ),
 )

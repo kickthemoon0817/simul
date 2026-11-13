@@ -237,7 +237,7 @@ def test_invalid_collision_is_refused_before_sending(
 
     result = asyncio.run(tools.create_isaac_object(prim_path="/World/Box", collision="sphere"))
 
-    assert result["error_type"] == "ValueError"
+    assert result["error_type"] == "ValidationError"
     assert "convexHull" in result["error"]
     assert captured == []
 

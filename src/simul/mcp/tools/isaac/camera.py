@@ -332,8 +332,9 @@ class CameraMixin:
             "captures there. inline=true also returns the image as a content block."
         ),
         read_only=False,
+        # Deletes the oldest captures; each call writes a new file.
         destructive=True,
-        idempotent=True,
+        idempotent=False,
     )
     async def capture_isaac_viewport(
         self,

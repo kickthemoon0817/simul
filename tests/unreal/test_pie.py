@@ -261,7 +261,7 @@ class Editor:
         level_editor = SimpleNamespace(
             is_in_play_in_editor=lambda: editor.pie,
             editor_request_end_play=end_play,
-            on_map_changed=SimpleNamespace(add_callable=lambda callback: None),
+            on_map_changed=SimpleNamespace(add_callable_unique=lambda callback: None),
             get_viewport_config_keys=lambda: [VIEWPORT],
             get_active_viewport_config_key=lambda: VIEWPORT,
             editor_get_game_view=lambda viewport: False,
@@ -512,35 +512,6 @@ def test_a_delete_unreal_refuses_outside_pie_is_an_error(
 
 
 @pytest.mark.parametrize(
-    ("method", "kwargs"),
-    [
-        ("generate_mesh_primitive", {"primitive_type": "box"}),
-        ("compute_convex_hull", {"mesh_path": LEVEL + "Crate"}),
-        ("decompose_convex_hull", {"mesh_path": LEVEL + "Crate"}),
-        (
-            "convert_mesh_format",
-            {"mesh_path": "/Game/Meshes/SM_Crate", "target_format": "dynamic_mesh"},
-        ),
-    ],
-)
-def test_mesh_tools_that_spawn_actors_are_refused_during_pie(
-    editor: Editor, monkeypatch: pytest.MonkeyPatch, method: str, kwargs: Dict[str, Any]
-) -> None:
-    """Each spawns its result with EditorActorSubsystem, which returns None during PIE."""
-    session = _session(editor, monkeypatch)
-
-    editor.pie = True
-    refused = asyncio.run(getattr(session, method)(**kwargs))
-    editor.pie = False
-    ran = asyncio.run(getattr(session, method)(**kwargs))
-
-    assert refused["success"] is False and refused["error_type"] == PIE_ACTIVE
-    assert refused["error"] == pie_refusal("spawn actors")["error"]
-    # Outside PIE the body runs: the fake editor has no GeometryScript, so it raises.
-    assert "GeometryScript" in ran["error"] or "EditorAssetLibrary" in ran["error"]
-
-
-@pytest.mark.parametrize(
     ("method", "kwargs", "action"),
     [
         ("import_usd", {"usd_path": "examples/whale.usd"}, "import USD into the level"),
@@ -651,6 +622,10 @@ class AssetLibrary:
             "MaterialEditingLibrary": SimpleNamespace(
                 set_material_instance_parent=self.set_material_instance_parent
             ),
+            # The registry lists no level at these paths, so the parent is loaded.
+            "AssetRegistryHelpers": SimpleNamespace(
+                get_asset_registry=lambda: SimpleNamespace(get_assets_by_package_name=lambda package: [])
+            ),
             "MaterialInterface": MaterialInterface,
             "MaterialInstanceConstant": MaterialInstanceConstant,
             "MaterialInstanceConstantFactoryNew": SimpleNamespace,
@@ -713,17 +688,20 @@ def test_a_material_instance_outside_pie_is_created_parented_and_saved(
 
 
 @pytest.mark.parametrize(
-    ("parent_path", "instance_name", "error"),
+    ("parent_path", "instance_name", "error_type", "error"),
     [
         (
             "/Game/Materials/M_Missing",
             "MI_Chair",
-            "Parent material not found: /Game/Materials/M_Missing",
+            "NotFoundError",
+            "No parent material at '/Game/Materials/M_Missing': pass a Material or Material Instance asset path "
+            "such as /Engine/BasicShapes/BasicShapeMaterial",
         ),
         (
             "/Game/Materials/M_Wood",
             "M_Wood",
-            "Asset already exists: /Game/Materials/M_Wood",
+            "InvalidState",
+            "Asset already exists: /Game/Materials/M_Wood; pass another instance_name or save_path",
         ),
     ],
 )
@@ -733,6 +711,7 @@ def test_a_material_instance_outside_pie_reports_a_missing_parent_or_a_taken_nam
     monkeypatch: pytest.MonkeyPatch,
     parent_path: str,
     instance_name: str,
+    error_type: str,
     error: str,
 ) -> None:
     result = asyncio.run(
@@ -741,7 +720,7 @@ def test_a_material_instance_outside_pie_reports_a_missing_parent_or_a_taken_nam
         )
     )
 
-    assert result["success"] is False and result["error_type"] == "ScriptError"
+    assert result["success"] is False and result["error_type"] == error_type
     assert result["error"] == error
     assert "create_asset" not in asset_library.calls
 

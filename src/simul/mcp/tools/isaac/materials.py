@@ -517,7 +517,7 @@ class MaterialsMixin:
             naming the expected type or the closest known input names.
         """
         if not property_name or not property_name.strip():
-            return ErrorResponse(error="property_name is empty", error_type="ValueError").model_dump()
+            return ErrorResponse(error="property_name is empty", error_type="ValidationError").model_dump()
         script = _compose_script(
             """\
             import json

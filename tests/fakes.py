@@ -1031,7 +1031,15 @@ class FakeDepsgraph:
         """The copy of ``obj`` this depsgraph evaluated, or ``obj`` as an original."""
         held = not any(obj is out for out in self._left_out)
         return SimpleNamespace(
-            original=obj, is_evaluated=held, matrix_world=obj.matrix_world
+            original=obj,
+            is_evaluated=held,
+            matrix_world=obj.matrix_world,
+            # The animated local channels, as the evaluated copy carries them.
+            rotation_euler=getattr(obj, "rotation_euler", None),
+            rotation_quaternion=getattr(obj, "rotation_quaternion", None),
+            rotation_axis_angle=getattr(obj, "rotation_axis_angle", None),
+            # An armature's pose bones, as they are after the evaluation.
+            pose=getattr(obj, "pose", None),
         )
 
 
@@ -1168,3 +1176,76 @@ def fake_anim_utils() -> ModuleType:
     module = ModuleType("bpy_extras.anim_utils")
     module.action_get_channelbag_for_slot = action_get_channelbag_for_slot  # type: ignore[attr-defined]
     return module
+
+
+def fake_app_handlers() -> SimpleNamespace:
+    """``bpy.app.handlers`` stand-in: the playback handler lists and ``persistent``.
+
+    ``persistent`` marks a handler to survive file loads, as Blender's
+    decorator does, and returns the same function.
+    """
+
+    def persistent(function: Callable[..., Any]) -> Callable[..., Any]:
+        setattr(function, "_bpy_persistent", True)
+        return function
+
+    return SimpleNamespace(
+        persistent=persistent, animation_playback_pre=[], animation_playback_post=[]
+    )
+
+
+class FakePlayback:
+    """``bpy.context.screen`` playback and the ``bpy.ops.screen.animation_*`` operators.
+
+    One object serves as the screen (``is_animation_playing``) and as
+    ``bpy.ops.screen``, and runs them as Blender 5.0.1 does:
+    ``animation_play`` toggles, stopping playback that runs in either
+    direction and otherwise starting it from the current frame
+    (``ED_screen_animation_play``); ``animation_cancel`` stops playback and,
+    with ``restore_frame`` (its default), returns to the frame it started
+    from. Starting calls the ``animation_playback_pre`` handlers, stopping the
+    ``animation_playback_post`` ones. ``advance(ticks)`` moves the frame as
+    the event loop's playback timer would.
+
+    Attributes:
+        calls: ``(operator, properties)`` per operator call, in order.
+    """
+
+    def __init__(self, scene: Any, handlers: Any) -> None:
+        self.scene = scene
+        self.handlers = handlers
+        self.is_animation_playing = False
+        self.reverse = False
+        self.start_frame: Optional[int] = None
+        self.calls: List[Tuple[str, Dict[str, Any]]] = []
+
+    def animation_play(self, reverse: bool = False, sync: bool = False) -> set:
+        self.calls.append(("animation_play", {"reverse": reverse}))
+        if self.is_animation_playing:
+            self._stop()
+        else:
+            for handler in list(self.handlers.animation_playback_pre):
+                handler(self.scene, None)
+            self.is_animation_playing = True
+            self.reverse = reverse
+            self.start_frame = self.scene.frame_current
+        return {"FINISHED"}
+
+    def animation_cancel(self, restore_frame: bool = True) -> set:
+        self.calls.append(("animation_cancel", {"restore_frame": restore_frame}))
+        if self.is_animation_playing:
+            start = self.start_frame
+            self._stop()
+            if restore_frame and start is not None:
+                self.scene.frame_current = start
+        return {"PASS_THROUGH"}
+
+    def _stop(self) -> None:
+        self.is_animation_playing = False
+        for handler in list(self.handlers.animation_playback_post):
+            handler(self.scene, None)
+
+    def advance(self, ticks: int) -> None:
+        """Let the playback timer fire ``ticks`` times."""
+        if self.is_animation_playing:
+            self.scene.frame_current += -ticks if self.reverse else ticks

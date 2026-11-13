@@ -190,7 +190,7 @@ def test_unusable_gravity_is_refused_before_sending(
 ) -> None:
     tools, captured = capturing_tools
     result = asyncio.run(tools.create_isaac_physics_scene(**kwargs))
-    assert result["success"] is False and result["error_type"] == "ValueError"
+    assert result["success"] is False and result["error_type"] == "ValidationError"
     assert captured == []
 
 
@@ -335,7 +335,7 @@ def test_configure_refuses_bad_settings_before_sending(
 ) -> None:
     tools, captured = capturing_tools
     result = asyncio.run(tools.configure_isaac_physics_scene(**kwargs))
-    assert result["success"] is False and result["error_type"] == "ValueError"
+    assert result["success"] is False and result["error_type"] == "ValidationError"
     assert captured == []
 
 
@@ -496,7 +496,7 @@ def test_impossible_material_values_are_refused_before_sending(
 ) -> None:
     tools, captured = capturing_tools
     result = asyncio.run(tools.set_isaac_physics_material("/World/Box", **kwargs))
-    assert result["success"] is False and result["error_type"] == "ValueError"
+    assert result["success"] is False and result["error_type"] == "ValidationError"
     assert captured == []
 
 
@@ -789,7 +789,7 @@ def test_set_joint_drive_refuses_bad_values_before_sending(
 ) -> None:
     tools, captured = capturing_tools
     result = asyncio.run(tools.set_isaac_joint_drive("/World/J", **kwargs))
-    assert result["success"] is False and result["error_type"] == "ValueError"
+    assert result["success"] is False and result["error_type"] == "ValidationError"
     assert captured == []
 
 

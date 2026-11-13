@@ -3,6 +3,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
+from ... import error_types
 from ...registration._helpers import apply_success_from_error, utf8_byte_length
 from ...schemas.common import ErrorResponse
 from ._shared import (
@@ -11,6 +12,29 @@ from ._shared import (
     logger,
 )
 from .._meta import tool_meta
+
+
+def _typed_aspect_failures(payload: Dict[str, Any], aspects: List[str]) -> Dict[str, Any]:
+    """Give each failed aspect of a prim-detail answer a type from the vocabulary.
+
+    An aspect is read on its own and fails in place, so its failure is a
+    payload inside the answer that the envelope does not see. The bridge names
+    it after the exception its reader raised inside Kit (an ``AttributeError``,
+    a ``TypeError``): the engine's failure, kept as ``exception_type``.
+    """
+    for aspect in aspects:
+        section = payload.get(aspect)
+        if not isinstance(section, dict) or section.get("success") is not False:
+            continue
+        name = section.get("error_type")
+        if isinstance(name, str) and name and not error_types.is_known(name):
+            section["error_type"] = error_types.engine_failure_type(name)
+            details = section.get("details")
+            details = dict(details) if isinstance(details, dict) else {}
+            details.setdefault("exception_type", name)
+            section["details"] = details
+        error_types.normalize_error_payload(section)
+    return payload
 
 
 class CoreToolsMixin:
@@ -51,7 +75,7 @@ class CoreToolsMixin:
                     f"Unknown aspect(s): {', '.join(unknown)}. "
                     f"Valid aspects: {', '.join(sorted(PRIM_DETAIL_ASPECTS))}."
                 ),
-                error_type="ValueError",
+                error_type="ValidationError",
             ).model_dump()
 
         # One bridge round trip reads every aspect; the per-aspect loop below
@@ -61,7 +85,7 @@ class CoreToolsMixin:
             "get_prim_detail", {"prim_path": prim_path, "aspects": requested}
         )
         if bridge_result is not None:
-            return bridge_result
+            return _typed_aspect_failures(bridge_result, requested)
 
         detail: Dict[str, Any] = {
             "success": True,
@@ -76,10 +100,11 @@ class CoreToolsMixin:
             detail[aspect] = await method(prim_path)
             if detail[aspect].get("error") == missing:
                 # A missing prim fails every aspect alike. Answer the way the
-                # bridge's get_prim_detail does, not with success: true and
-                # the same error in each aspect.
+                # bridge's get_prim_detail does (its PrimNotFound, which the
+                # envelope maps onto NotFoundError), not with success: true
+                # and the same error in each aspect.
                 return ErrorResponse(error=missing, error_type="PrimNotFound").model_dump()
-        return detail
+        return _typed_aspect_failures(detail, requested)
 
     @tool_meta(
         name="execute_isaac_script",
@@ -129,7 +154,7 @@ class CoreToolsMixin:
                     "security.allow_script_execution. Use the granular tools, or "
                     "set SECURITY__ALLOW_SCRIPT_EXECUTION=true to re-enable it."
                 ),
-                error_type="ScriptExecutionDisabled",
+                error_type=error_types.SCRIPT_EXECUTION_DISABLED,
             ).model_dump()
         code_bytes = utf8_byte_length(code)
         if code_bytes > MAX_SCRIPT_BYTES:
@@ -138,7 +163,7 @@ class CoreToolsMixin:
                     f"Code payload too large ({code_bytes} bytes in UTF-8, "
                     f"max {MAX_SCRIPT_BYTES})."
                 ),
-                error_type="PayloadTooLarge",
+                error_type=error_types.PAYLOAD_TOO_LARGE,
             ).model_dump()
 
         client = self._client
@@ -147,7 +172,7 @@ class CoreToolsMixin:
                 result = await client.execute_vscode_only(code)
             else:
                 result = await client.execute(code)
-        except ConnectionRefusedError:
+        except ConnectionRefusedError as exc:
             return ErrorResponse(
                 error=(
                     f"Isaac Sim is not reachable at {client.address}. "
@@ -155,9 +180,9 @@ class CoreToolsMixin:
                     "isaacsim.code_editor.vscode extension enabled. "
                     "Use ping_isaac to verify connectivity."
                 ),
-                error_type="ConnectionError",
+                **error_types.exception_fields(exc),
             ).model_dump()
-        except TimeoutError:
+        except TimeoutError as exc:
             return ErrorResponse(
                 error=(
                     f"Script execution timed out after "
@@ -166,16 +191,22 @@ class CoreToolsMixin:
                     "unresponsive. Use ping_isaac to check if Isaac Sim is "
                     "still reachable."
                 ),
-                error_type="TimeoutError",
+                **error_types.exception_fields(exc),
             ).model_dump()
         except Exception as exc:
+            # A reset mid-reply is a ConnectionError, a garbled reply an
+            # EngineError: the shared classes, never the bare "Exception".
             logger.error("Script execution failed: %s", exc, exc_info=True)
             return ErrorResponse(
-                error=str(exc), error_type="Exception"
+                error=str(exc) or type(exc).__name__,
+                **error_types.exception_fields(exc),
             ).model_dump()
 
         if not result.success:
-            return self._script_failure(result)
+            # Whatever the agent's script raised (a NameError, an OSError, a
+            # ConnectionRefusedError of its own) is a ScriptError, as on
+            # Unreal, naming it; only the transport's own failures keep theirs.
+            return self._script_failure(result, raised=error_types.SCRIPT_ERROR)
 
         output = result.output.strip()
         if output:

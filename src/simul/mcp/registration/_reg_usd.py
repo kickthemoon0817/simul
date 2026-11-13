@@ -624,7 +624,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             'update_prim_attributes {"active": false}. A refused delete changes nothing.'
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=False, open_world=False, destructive=True
+            read_only=False, idempotent=True, open_world=False, destructive=True
         ),
         output_schema=None,
     )
