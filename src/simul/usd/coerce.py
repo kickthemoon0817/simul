@@ -209,7 +209,16 @@ def _scalar_converter(scalar: Sdf.ValueTypeName) -> Optional[Callable[[Any], Any
         return to_asset
     if cpp_type in ("GfTimeCode", "SdfTimeCode"):
         default_type = type(scalar.defaultValue)
-        return lambda value: default_type(_number(value, "double", scalar))
+
+        def to_time_code(value: Any) -> Any:
+            if not _is_number(value):
+                raise ValueProblem(f"{scalar} takes a finite number, not {_shape(value)}")
+            number = _real(value, "double", scalar)
+            if not math.isfinite(number):
+                raise ValueProblem(f"{scalar} takes a finite number, not {value!r}")
+            return default_type(number)
+
+        return to_time_code
     precision = _precision(cpp_type)
     if cpp_type.startswith("GfVec") and python_class is not None:
         dimension = int(python_class.dimension)

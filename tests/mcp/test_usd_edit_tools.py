@@ -280,7 +280,7 @@ def test_schema_attribute_warning_reaches_the_wire(driver: _Driver, loaded: Dict
     assert payload["success"] is True
     assert payload["created_attributes"] == {"physics:mass": "float"}
     (warning,) = payload["warnings"]
-    assert warning["code"] == "SchemaNotApplied" and "PhysicsMassAPI" in warning["message"]
+    assert warning["code"] == "UnappliedSchemaAttribute" and "PhysicsMassAPI" in warning["message"]
     assert warning["location"] == {"prim_path": "/World/Box", "property_path": "/World/Box.physics:mass"}
 
 

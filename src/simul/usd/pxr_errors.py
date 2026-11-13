@@ -15,9 +15,10 @@ of the prim is still reported.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from ._pxr import Tf, Usd, UsdShade
+from ._pxr import Sdf, Tf, Usd, UsdShade
+from .validation import ValidationIssue
 
 _TF_ERROR = re.compile(
     r"Error in '[^']*' at line \d+ in file .*? : '(?P<message>.*?)'(?=\s*(?:Error in|$))",
@@ -25,7 +26,7 @@ _TF_ERROR = re.compile(
 )
 
 # A spec pxr names in a message, ``@<layer identifier>@</Prim.property>``.
-_SPEC_REFERENCE = re.compile(r"@[^@\s]*@<(?P<path>[^>]*)>")
+_SPEC_REFERENCE = re.compile(r"@(?P<layer>[^@\s]*)@<(?P<path>[^>]*)>")
 
 # Warning code for a property a read could not resolve.
 UNREADABLE_PROPERTY = "UnreadableProperty"
@@ -69,23 +70,42 @@ def is_pxr_error(exc: BaseException) -> bool:
     return isinstance(exc, Tf.ErrorException)
 
 
-def _read_reason(exc: BaseException) -> str:
-    """pxr's reason for a failed read, naming the property by path rather than by layer and path."""
-    return _SPEC_REFERENCE.sub(lambda match: match.group("path"), tf_error_reason(exc))
+def _read_failure(exc: BaseException) -> Tuple[str, Optional[str]]:
+    """pxr's reason for a failed read, and the file of the first spec it names.
+
+    pxr names a spec as ``@<layer identifier>@</Prim.property>``; the reason
+    keeps the path (a path in that layer, which a reference may map to a
+    different path on the stage) and the layer is returned as its file path,
+    without the format arguments the session adds to a root layer's
+    identifier.
+    """
+    reason = tf_error_reason(exc)
+    match = _SPEC_REFERENCE.search(reason)
+    layer = Sdf.Layer.SplitIdentifier(match.group("layer"))[0] if match else None
+    return _SPEC_REFERENCE.sub(lambda found: found.group("path"), reason), layer or None
 
 
-def unreadable_issue(prim: Usd.Prim, message: str, property_name: Optional[str] = None) -> Dict[str, Any]:
-    """A warning (``USDIssue`` fields) about a property of ``prim`` a read could not resolve."""
-    location: Dict[str, Any] = {"prim_path": prim.GetPath().pathString}
-    if property_name:
-        location["property_path"] = prim.GetPath().AppendProperty(property_name).pathString
-    return {
-        "severity": "warning",
-        "code": UNREADABLE_PROPERTY,
-        "message": message,
-        "source": "simul",
-        "location": location,
-    }
+def unreadable_issue(
+    prim: Usd.Prim, message: str, property_name: Optional[str] = None, layer: Optional[str] = None
+) -> Dict[str, Any]:
+    """A warning (``USDIssue`` fields) about a property of ``prim`` a read could not resolve.
+
+    Args:
+        prim: The prim the read was for.
+        message: What could not be read and why.
+        property_name: The property, when the failure is one property of
+            ``prim``.
+        layer: The file holding the spec pxr refused.
+    """
+    property_path = prim.GetPath().AppendProperty(property_name).pathString if property_name else None
+    return ValidationIssue(
+        "warning",
+        UNREADABLE_PROPERTY,
+        message,
+        layer=layer,
+        prim_path=prim.GetPath().pathString,
+        property_path=property_path,
+    ).to_dict()
 
 
 def relationship_targets(rel: Usd.Relationship, problems: List[Dict[str, Any]]) -> Optional[List[str]]:
@@ -97,15 +117,52 @@ def relationship_targets(rel: Usd.Relationship, problems: List[Dict[str, Any]]) 
     try:
         return [target.pathString for target in rel.GetTargets()]
     except Tf.ErrorException as exc:
+        reason, layer = _read_failure(exc)
         problems.append(
             unreadable_issue(
                 rel.GetPrim(),
-                f"Cannot read relationship {rel.GetName()}: {_read_reason(exc)}. A layer authors it as "
-                "an attribute, which USD cannot read as a relationship; it is left out of relationships.",
+                f"Cannot read relationship {rel.GetName()}: {reason}. A layer authors it as an attribute, "
+                "which USD cannot read as a relationship; it is left out of relationships.",
                 rel.GetName(),
+                layer,
             )
         )
         return None
+
+
+def _direct_binding(prim: Usd.Prim, purposes: Sequence[str]) -> Optional[str]:
+    """The material ``prim`` itself binds for the first of ``purposes`` it binds, or None.
+
+    A binding pxr cannot read on this prim counts as none.
+    """
+    api = UsdShade.MaterialBindingAPI(prim)
+    for purpose in purposes:
+        try:
+            material = api.GetDirectBinding(purpose).GetMaterial()
+        except Tf.ErrorException:
+            continue
+        if material:
+            return material.GetPath().pathString
+    return None
+
+
+def _nearest_readable_binding(prim: Usd.Prim, purpose: str) -> Optional[str]:
+    """The nearest direct binding on ``prim`` or an ancestor that pxr can read.
+
+    The fallback when ``ComputeBoundMaterial`` fails on a malformed binding
+    somewhere up the chain: a prim's own valid binding still counts. A
+    purpose-specific binding is preferred to the all-purpose one at each
+    level, as USD resolves them; binding strength and collection bindings are
+    not considered.
+    """
+    purposes = [purpose, UsdShade.Tokens.allPurpose] if purpose else [UsdShade.Tokens.allPurpose]
+    current = prim
+    while current and not current.IsPseudoRoot():
+        material = _direct_binding(current, purposes)
+        if material:
+            return material
+        current = current.GetParent()
+    return None
 
 
 def bound_material_path(
@@ -115,8 +172,9 @@ def bound_material_path(
 
     Resolution reads the ``material:binding`` relationships of the prim and
     its ancestors. When one of them is authored as an attribute pxr raises;
-    the binding is then reported as None, with a warning in ``problems``
-    naming the property pxr refused.
+    the binding is then the nearest direct binding that pxr can read (the
+    prim's own, or an ancestor's), with a warning in ``problems`` naming the
+    property pxr refused.
 
     Args:
         prim: The prim.
@@ -128,17 +186,25 @@ def bound_material_path(
     try:
         material, _relationship = api.ComputeBoundMaterial(purpose) if purpose else api.ComputeBoundMaterial()
     except Tf.ErrorException as exc:
+        fallback = _nearest_readable_binding(prim, purpose)
         if problems is not None:
             which = f"{purpose} material binding" if purpose else "material binding"
+            reason, layer = _read_failure(exc)
+            outcome = (
+                f"the nearest binding pxr can read, {fallback}, is reported"
+                if fallback
+                else "the binding is reported as none"
+            )
             problems.append(
                 unreadable_issue(
                     prim,
-                    f"Cannot resolve the {which} of {prim.GetPath()}: {_read_reason(exc)}. A "
-                    "material:binding property on it or an ancestor is authored as an attribute, which "
-                    "USD cannot read as a relationship; the binding is reported as none.",
+                    f"Cannot resolve the {which} of {prim.GetPath()}: {reason}. A material:binding "
+                    f"property on it or an ancestor is authored as an attribute, which USD cannot read as a "
+                    f"relationship; {outcome}.",
+                    layer=layer,
                 )
             )
-        return None
+        return fallback
     return material.GetPath().pathString if material else None
 
 

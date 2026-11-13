@@ -363,8 +363,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "\"-Infinity\" or \"NaN\". An array attribute carries its length "
             "and its first array_preview elements, so a large mesh stays small; "
             "use get_mesh_info for geometry statistics. A property pxr cannot read "
-            "(a material:binding or physics:body0 authored as an attribute) is left "
-            "out and named in warnings instead of failing the call."
+            "(a material:binding or physics:body0 authored as an attribute) is named "
+            "in warnings instead of failing the call; the binding falls back to the "
+            "nearest one pxr can read."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -452,8 +453,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "The attribute keys active, instanceable and kind set prim metadata. "
             "Relationship names the type does not define (material:binding, "
             "skel:skeleton) are refused (RelationshipNotEditable); an attribute of an "
-            "API schema the type lacks takes the schema's type with a SchemaNotApplied "
-            "warning."
+            "API schema the type lacks takes the schema's type with an "
+            "UnappliedSchemaAttribute warning."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=False, destructive=True
@@ -563,8 +564,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "have (material:binding, physics:body0, skel:skeleton) is refused with "
             "UnsupportedOperation (RelationshipNotEditable), never written as an "
             "attribute. An attribute of an API schema the prim lacks (physics:mass, "
-            "drive:angular:physics:stiffness) takes the schema's type and returns a "
-            "SchemaNotApplied warning naming the API to apply. An animated attribute "
+            "drive:angular:physics:stiffness) takes the schema's type and returns an "
+            "UnappliedSchemaAttribute warning naming the API to apply; plain names such "
+            "as axis or camera stay custom attributes. An animated attribute "
             "needs time_code, since a default value is hidden by its time samples; a "
             "sample is refused where a weaker layer or value clips hold the animation. "
             "Refuses instance proxies (prims inside an instanceable prim)."
@@ -733,8 +735,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "materialBind geometry subset, and its physics material. Computed with "
             "numpy, so a million-vertex mesh takes well under a second. time_code "
             "reads a deforming mesh's points; points_time_samples says whether it "
-            "deforms. A material binding pxr cannot resolve is reported as none and "
-            "named in warnings."
+            "deforms. A material binding pxr cannot resolve falls back to the nearest "
+            "direct binding pxr can read and is named in warnings."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False

@@ -42,6 +42,10 @@ def _build(directory: Path) -> Path:
     UsdShade.Material.Define(stage, "/World/Looks/Steel")
     UsdGeom.Cube.Define(stage, "/World/Box")
     UsdGeom.Scope.Define(stage, "/World/Group")
+    rig = UsdGeom.Xform.Define(stage, "/World/Rig").GetPrim()
+    rig.CreateAttribute("camera", Sdf.ValueTypeNames.String).Set("front")
+    rig.CreateAttribute("skel:skeleton", Sdf.ValueTypeNames.String).Set("/World/Skel")
+    UsdShade.Shader.Define(stage, "/World/Looks/Steel/Surface")
     joint = UsdPhysics.RevoluteJoint.Define(stage, "/World/Joint")
     joint.CreateBody0Rel().SetTargets(["/World/Box"])
     joint.CreateUpperLimitAttr(90.0)
@@ -195,7 +199,8 @@ class TestRelationshipNamesAreRefused:
         )
 
         (problem,) = error.details["problems"]
-        assert "authored as an attribute" in problem["reason"]
+        assert "malformed.usda authors as an attribute" in problem["reason"]
+        assert "correct it in malformed.usda" in problem["reason"]
         assert session.get_stage(stage_id).GetPrimAtPath("/W/Box").GetAttribute("material:binding").Get() == (
             "/W/Looks/Mat"
         )
@@ -207,7 +212,8 @@ class TestRelationshipNamesAreRefused:
         error = _refusal(session.update_prim_attributes, stage_id, "/W/Joint", {"physics:body0": "/W/Box"})
 
         assert error.details["code"] == editing.RELATIONSHIP_NOT_EDITABLE
-        assert "PhysicsJoint" in error.details["problems"][0]["reason"]
+        assert "this prim's type, PhysicsRevoluteJoint" in error.details["problems"][0]["reason"]
+        assert "correct it in malformed.usda" in error.details["problems"][0]["reason"]
         assert session.get_stage(stage_id).GetRootLayer().ExportToString() == before
 
 
@@ -235,7 +241,21 @@ class TestReadsSurviveMalformedProperties:
         assert warning["severity"] == "warning"
         assert f"{culprit} is not a relationship" in warning["message"]
         assert "pxrInternal" not in warning["message"] and "SDF_FORMAT_ARGS" not in warning["message"]
-        assert warning["location"] == {"prim_path": path}
+        assert warning["location"]["prim_path"] == path
+        assert warning["location"]["layer"].endswith("malformed.usda")
+        assert "SDF_FORMAT_ARGS" not in warning["location"]["layer"]
+
+    def test_own_binding_survives_a_malformed_ancestor(self, stage) -> None:
+        own = UsdGeom.Cube.Define(stage, "/W/Group/Bound").GetPrim()
+        UsdShade.MaterialBindingAPI.Apply(own).Bind(UsdShade.Material(stage.GetPrimAtPath("/W/Looks/Mat")))
+        UsdGeom.Cube.Define(stage, "/W/Group/Bound/Inner")
+
+        info = describe_prim(own)
+        inner = describe_prim(stage.GetPrimAtPath("/W/Group/Bound/Inner"))
+
+        assert info["material_bindings"] == inner["material_bindings"] == ["/W/Looks/Mat"]
+        assert "/W/Group.material:binding is not a relationship" in info["warnings"][0]["message"]
+        assert "the nearest binding pxr can read, /W/Looks/Mat, is reported" in info["warnings"][0]["message"]
 
     def test_get_prim_info_leaves_out_a_relationship_authored_as_an_attribute(self, stage) -> None:
         info = describe_prim(stage.GetPrimAtPath("/W/Joint"))
@@ -273,7 +293,7 @@ class TestSchemaTypedAttributes:
 
         assert result["created_attributes"] == {"physics:mass": "float"}
         (warning,) = result["warnings"]
-        assert warning["code"] == editing.SCHEMA_NOT_APPLIED
+        assert warning["code"] == editing.UNAPPLIED_SCHEMA_ATTRIBUTE
         assert "PhysicsMassAPI" in warning["message"]
         assert warning["location"]["property_path"] == "/World/Group.physics:mass"
         prim = scene["stage"].GetPrimAtPath("/World/Group")
@@ -326,14 +346,79 @@ class TestSchemaTypedAttributes:
         assert "PhysicsMassAPI" in error.details["problems"][0]["reason"]
         assert not scene["stage"].GetPrimAtPath("/World/Group").GetAttribute("physics:mass")
 
-    def test_conflicting_schema_types_need_attribute_types(self, session, scene) -> None:
-        error = _refusal(session.update_prim_attributes, scene["id"], "/World/Group", {"scales": [[1, 1, 1]]})
+    def test_api_declarations_win_over_prim_types(self, session, scene) -> None:
+        # scales: float3[] in ParticleFieldScaleAttributeAPI, float3[] / half3[] in prim types.
+        result = session.update_prim_attributes(scene["id"], "/World/Group", {"scales": [[1, 1, 1]]})
+
+        assert result["created_attributes"] == {"scales": "float3[]"}
+        assert "ParticleFieldScaleAttributeAPI" in result["warnings"][0]["message"]
+
+    def test_conflicting_types_need_attribute_types_and_warn_for_the_chosen_one(
+        self, session, scene, monkeypatch
+    ) -> None:
+        declared = schema_properties.SchemaProperty(
+            "custom:pair",
+            (
+                schema_properties.Declaration("SomeAPI", True, False, Sdf.ValueTypeNames.Float3Array),
+                schema_properties.Declaration("SomePrimType", False, False, Sdf.ValueTypeNames.Half3Array),
+            ),
+        )
+        monkeypatch.setattr(schema_properties, "lookup", lambda name: declared if name == "custom:pair" else None)
+
+        error = _refusal(session.update_prim_attributes, scene["id"], "/World/Group", {"custom:pair": [[1, 1, 1]]})
         result = session.update_prim_attributes(
-            scene["id"], "/World/Group", {"scales": [[1, 1, 1]]}, attribute_types={"scales": "half3[]"}
+            scene["id"], "/World/Group", {"custom:pair": [[1, 1, 1]]}, attribute_types={"custom:pair": "half3[]"}
         )
 
         assert "attribute_types" in error.details["problems"][0]["reason"]
-        assert result["created_attributes"] == {"scales": "half3[]"}
+        assert result["created_attributes"] == {"custom:pair": "half3[]"}
+        (warning,) = result["warnings"]
+        assert "SomePrimType" in warning["message"] and "SomeAPI" not in warning["message"]
+
+    @pytest.mark.parametrize(
+        "attributes, attribute_types, created",
+        [
+            ({"axis": [0.0, 0.0, 1.0]}, {}, {"axis": "float3"}),
+            ({"axis": [0, 0, 1]}, {"axis": "double3"}, {"axis": "double3"}),
+            ({"type": "gripper"}, {}, {"type": "string"}),
+            ({"size": "large"}, {}, {"size": "string"}),
+            ({"camera": "wrist_cam"}, {}, {"camera": "string"}),
+            ({"geometry": "arm"}, {}, {"geometry": "string"}),
+        ],
+    )
+    def test_plain_names_stay_custom_attributes(self, session, scene, attributes, attribute_types, created) -> None:
+        result = session.update_prim_attributes(
+            scene["id"], "/World/Group", attributes, attribute_types=attribute_types
+        )
+
+        assert result["created_attributes"] == created
+        assert result["warnings"] == []
+
+    def test_existing_custom_attributes_named_like_relationships_stay_editable(self, session, scene) -> None:
+        result = session.update_prim_attributes(
+            scene["id"], "/World/Rig", {"camera": "back", "skel:skeleton": "/World/Other"}
+        )
+
+        assert result["changed"] == ["camera", "skel:skeleton"]
+        rig = scene["stage"].GetPrimAtPath("/World/Rig")
+        assert rig.GetAttribute("camera").Get() == "back"
+        assert rig.GetAttribute("skel:skeleton").Get() == "/World/Other"
+
+    def test_primvars_take_the_prim_type_type_without_a_warning(self, session, scene) -> None:
+        result = session.update_prim_attributes(
+            scene["id"], "/World/Group", {"primvars:displayColor": [[1, 0, 0]]}
+        )
+
+        assert result["created_attributes"] == {"primvars:displayColor": "color3f[]"}
+        assert result["warnings"] == []
+
+    def test_shader_inputs_are_not_typed_by_light_schemas(self, session, scene) -> None:
+        result = session.update_prim_attributes(
+            scene["id"], "/World/Looks/Steel/Surface", {"inputs:radius": 2}
+        )
+
+        assert result["created_attributes"] == {"inputs:radius": "int"}
+        assert result["warnings"] == []
 
     def test_prim_type_attribute_warns_without_an_api(self, session, scene) -> None:
         result = session.update_prim_attributes(scene["id"], "/World/Group", {"physics:axis": "Y"})
@@ -345,7 +430,7 @@ class TestSchemaTypedAttributes:
         result = session.create_prim(scene["id"], "/World/Heavy", "Cube", {"physics:mass": 2, "size": 3})
 
         assert result["created_attributes"] == {"physics:mass": "float"}
-        assert [warning["code"] for warning in result["warnings"]] == [editing.SCHEMA_NOT_APPLIED]
+        assert [warning["code"] for warning in result["warnings"]] == [editing.UNAPPLIED_SCHEMA_ATTRIBUTE]
 
     def test_custom_attributes_are_still_inferred_without_warnings(self, session, scene) -> None:
         result = session.update_prim_attributes(scene["id"], "/World/Group", {"custom:count": 5})
@@ -427,6 +512,13 @@ class TestNonFiniteAndOverflow:
             converted = [converted.GetReal(), *converted.GetImaginary()]
 
         assert list(converted) == expected if isinstance(expected, list) else converted == expected
+
+    @pytest.mark.parametrize("value", ["Infinity", "-Infinity", "NaN"])
+    def test_time_codes_stay_finite(self, value) -> None:
+        with pytest.raises(coerce.ValueProblem, match="finite number"):
+            coerce.coerce(value, Sdf.ValueTypeNames.TimeCode)
+
+        assert coerce.coerce(12, Sdf.ValueTypeNames.TimeCode) == Sdf.TimeCode(12)
 
     def test_nan_is_accepted(self) -> None:
         assert math.isnan(coerce.coerce("NaN", Sdf.ValueTypeNames.Float))

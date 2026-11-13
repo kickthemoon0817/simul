@@ -28,6 +28,7 @@ from . import coerce, lookup, schema_properties
 from ._pxr import Kind, Sdf, Tf, Usd, UsdGeom
 from .pxr_errors import tf_error_reason
 from .timecode import resolve_time_code
+from .validation import ValidationIssue
 
 # Error types, from the vocabulary every backend's envelope uses.
 VALIDATION = "ValidationError"
@@ -59,7 +60,7 @@ CODE_ERROR_TYPES: Dict[str, str] = {
     RELATIONSHIP_NOT_EDITABLE: UNSUPPORTED,
 }
 # Warning code for an attribute written for a schema the prim does not have.
-SCHEMA_NOT_APPLIED = "SchemaNotApplied"
+UNAPPLIED_SCHEMA_ATTRIBUTE = "UnappliedSchemaAttribute"
 
 # Prim metadata the tools set through the proper USD API rather than as an
 # attribute of the same name.
@@ -585,13 +586,22 @@ class _Planner:
                 )
             if name in self.requested:
                 raise _Problem("a relationship, which attribute_types does not apply to")
-            if relationship and any(isinstance(spec, Sdf.AttributeSpec) for spec in relationship.GetPropertyStack()):
-                declared_rel = schema_properties.lookup(name) or schema_properties.SchemaProperty(name, ())
-                raise _Problem(_relationship_refusal(declared_rel, authored=True), RELATIONSHIP_NOT_EDITABLE)
+            layer = _attribute_spec_layer(relationship) if relationship else None
+            if layer is not None:
+                # The prim's own schema makes it a relationship, and pxr refuses the attribute spec.
+                owner = f"this prim's type, {prim.GetTypeName()}" if prim.GetTypeName() else None
+                raise _Problem(_relationship_refusal(name, None, layer, owner), RELATIONSHIP_NOT_EDITABLE)
             return _plan_relationship(name, value)
         declared = schema_properties.lookup(name)
         if declared is not None and declared.relationship:
-            raise _Problem(_relationship_refusal(declared, authored=bool(attribute)), RELATIONSHIP_NOT_EDITABLE)
+            if not attribute:
+                raise _Problem(_relationship_refusal(name, declared, None), RELATIONSHIP_NOT_EDITABLE)
+            if schema_properties.is_material_binding_name(name):
+                # Binding resolution reads it on every prim, and pxr refuses the attribute.
+                layer = _attribute_spec_layer(attribute)
+                raise _Problem(_relationship_refusal(name, declared, layer), RELATIONSHIP_NOT_EDITABLE)
+            # Otherwise only a schema this prim lacks makes it a relationship; pxr reads it as the
+            # attribute it is, so it stays editable.
         requested = self.requested.get(name)
         if attribute:
             return self._plan_existing(name, value, attribute, requested)
@@ -710,12 +720,17 @@ class _Planner:
         write.create = True
         write.custom = False
         write.variability = declaration.variability
-        write.warning = self._schema_warning(name, declared, type_name)
+        write.warning = self._schema_warning(name, schema_properties.restricted_to(declared, type_name), type_name)
         return write
 
     def _schema_warning(
         self, name: str, declared: schema_properties.SchemaProperty, type_name: Sdf.ValueTypeName
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
+        """The warning for an attribute written for schemas the prim lacks; ``declared`` holds those of its type.
+
+        None for a primvar a prim type declares: primvars are inherited, so a
+        descendant of that type reads it.
+        """
         apis = declared.api_schemas
         if apis:
             needed = apis[0] if len(apis) == 1 else f"one of {', '.join(apis)}"
@@ -724,21 +739,20 @@ class _Planner:
                 f"written as {type_name}, the schema's type, but USD and simulators ignore it until "
                 f"{needed} is applied to the prim; simul has no tool that applies API schemas yet."
             )
+        elif name.startswith("primvars:"):
+            return None
         else:
             message = (
                 f"{name} is an attribute of the prim type {declared.declared_by()}, not of {self.prim_path}'s "
                 f"type. It was written as {type_name}, the schema's type, but nothing reads it on this prim."
             )
-        return {
-            "severity": "warning",
-            "code": SCHEMA_NOT_APPLIED,
-            "message": message,
-            "source": "simul",
-            "location": {
-                "prim_path": str(self.prim_path),
-                "property_path": str(self.prim_path.AppendProperty(name)),
-            },
-        }
+        return ValidationIssue(
+            "warning",
+            UNAPPLIED_SCHEMA_ATTRIBUTE,
+            message,
+            prim_path=str(self.prim_path),
+            property_path=str(self.prim_path.AppendProperty(name)),
+        ).to_dict()
 
     def _plan_new_op(
         self,
@@ -801,17 +815,40 @@ class _Planner:
                 )
 
 
-def _relationship_refusal(declared: schema_properties.SchemaProperty, *, authored: bool) -> str:
-    """Why a relationship name is refused: these tools only retarget relationships a prim already has."""
-    where = (
-        "UsdShade's material:binding namespace (MaterialBindingAPI)"
-        if schema_properties.is_material_binding_name(declared.name)
-        else declared.declared_by() or "the prim's schema"
-    )
-    if authored:
+def _attribute_spec_layer(prop: Usd.Property) -> Optional[str]:
+    """The layer holding the strongest attribute spec for ``prop``, or None when no layer has one."""
+    for spec in prop.GetPropertyStack():
+        if isinstance(spec, Sdf.AttributeSpec):
+            return _layer_label(spec.layer)
+    return None
+
+
+def _relationship_refusal(
+    name: str,
+    declared: Optional[schema_properties.SchemaProperty],
+    authored_in: Optional[str],
+    owner: Optional[str] = None,
+) -> str:
+    """Why a relationship name is refused: these tools only retarget relationships a prim already has.
+
+    Args:
+        name: The property name.
+        declared: The registry's declarations; None when the prim's own
+            schema declares the relationship.
+        authored_in: The layer that authors it as an attribute, when one
+            does.
+        owner: Names the prim's own schema when ``declared`` is None.
+    """
+    if schema_properties.is_material_binding_name(name):
+        where = "UsdShade's material:binding namespace (MaterialBindingAPI)"
+    elif declared is not None and declared.declared_by():
+        where = declared.declared_by()
+    else:
+        where = owner or "this prim's schema"
+    if authored_in is not None:
         return (
-            f"a relationship in USD (declared by {where}) that this prim has authored as an attribute; "
-            "relationships are not editable here, so correct it in the source file"
+            f"a relationship in USD (declared by {where}) that {authored_in} authors as an attribute on this "
+            f"prim, which pxr cannot read; relationships are not editable here, so correct it in {authored_in}"
         )
     return (
         f"a relationship in USD (declared by {where}), not an attribute, and relationships are not editable "
@@ -839,15 +876,17 @@ def plan_writes(
     a new transform op (``xformOp:<type>[:<suffix>]``), typed by the op and
     added to ``xformOpOrder``; an attribute another schema declares (an API
     schema the prim does not have, a multiple-apply instance such as
-    ``drive:angular:physics:stiffness``, another prim type), typed by that
-    schema and reported with a ``SchemaNotApplied`` warning; or a new custom
-    attribute typed by ``attribute_types`` or inferred from the value. Other
-    prim metadata keys are refused, since writing them as attributes would
-    silently do nothing, and so is a name any schema declares a relationship
-    (``material:binding``, ``physics:body0``, ``skel:skeleton``) unless the
-    prim already has that relationship: written as an attribute, pxr could
-    no longer read it. Values are converted to the resolved type (see
-    :mod:`simul.usd.coerce`).
+    ``drive:angular:physics:stiffness``, or for a namespaced name another
+    prim type; see :func:`schema_properties.lookup`), typed by that schema
+    and reported with an ``UnappliedSchemaAttribute`` warning; or a new
+    custom attribute typed by ``attribute_types`` or inferred from the value.
+    Other prim metadata keys are refused, since writing them as attributes
+    would silently do nothing. So is a new name a schema declares a
+    relationship (``material:binding``, ``physics:body0``,
+    ``skel:skeleton``) unless the prim already has that relationship, and a
+    relationship pxr cannot read because a layer authors it as an attribute
+    (one the prim's own schema declares, or a ``material:binding``).
+    Values are converted to the resolved type (see :mod:`simul.usd.coerce`).
 
     Args:
         prim: The existing prim, or None when it is about to be created.
@@ -1425,7 +1464,7 @@ __all__ = [
     "NOT_FOUND",
     "REFUSED",
     "RELATIONSHIP_NOT_EDITABLE",
-    "SCHEMA_NOT_APPLIED",
+    "UNAPPLIED_SCHEMA_ATTRIBUTE",
     "SETTABLE_METADATA",
     "UNKNOWN_PRIM_TYPE",
     "UNSUPPORTED",

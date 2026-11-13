@@ -329,7 +329,8 @@ class MeshInfo(BaseModel):
         default_factory=list,
         description=(
             "Material bindings pxr could not resolve (UnreadableProperty), such as a "
-            "material:binding authored as an attribute; that binding is reported as none"
+            "material:binding authored as an attribute; the nearest binding pxr can "
+            "read is reported instead"
         ),
     )
 
@@ -372,7 +373,7 @@ class PrimActionResponse(BaseModel):
     warnings: Optional[List[USDIssue]] = Field(
         None,
         description=(
-            "What the edit wrote but USD may not read: SchemaNotApplied for an attribute "
+            "What the edit wrote but USD may not read: UnappliedSchemaAttribute for an attribute "
             "of an API schema the prim does not have applied (or of another prim type)"
         ),
     )

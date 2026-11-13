@@ -12,6 +12,15 @@ a name matches one with any instance name the registry allows, and the schema
 is reported with that instance (``PhysicsDriveAPI:angular``).
 ``MaterialBindingAPI`` declares no properties, though every name in the
 ``material:binding`` namespace is one of its relationships.
+
+API schemas are what a prim gains by having one applied, so their
+declarations always count, and win over a prim type's. A prim type's
+declaration counts only for a namespaced name (``physics:body0``,
+``physics:axis``): plain names such as ``axis``, ``size``, ``type`` or
+``camera`` are declared by some prim type or other, yet on any other prim they
+are ordinary custom attributes. ``inputs:`` and ``outputs:`` names are shader
+and light parameters, typed by the node that reads them, so prim types do not
+type them either.
 """
 
 from __future__ import annotations
@@ -25,6 +34,8 @@ from ._pxr import Sdf, Tf, Usd
 _INSTANCE = "__INSTANCE_NAME__"
 _MATERIAL_BINDING = "material:binding"
 _MATERIAL_BINDING_API = "MaterialBindingAPI"
+# Connectable namespaces whose types come from the shader or light node, not a prim type.
+_NODE_NAMESPACES = ("inputs:", "outputs:")
 
 
 @dataclass(frozen=True)
@@ -185,7 +196,10 @@ def is_material_binding_name(name: str) -> bool:
 
 
 def lookup(name: str) -> Optional[SchemaProperty]:
-    """Return what the registered schemas declare ``name`` to be, or None when none declares it.
+    """Return what the registered schemas declare ``name`` to be, or None when none counts.
+
+    API schema declarations win; a prim type's counts only for a namespaced
+    name outside ``inputs:`` and ``outputs:`` (see the module docstring).
 
     Args:
         name: A property name, such as ``physics:mass`` or
@@ -193,8 +207,19 @@ def lookup(name: str) -> Optional[SchemaProperty]:
     """
     if is_material_binding_name(name):
         return SchemaProperty(name, (Declaration(_MATERIAL_BINDING_API, True, True),))
-    declarations = _index()[0].get(name) or tuple(_template_matches(name))
-    return SchemaProperty(name, tuple(declarations)) if declarations else None
+    declarations = tuple(_index()[0].get(name) or _template_matches(name))
+    apis = tuple(declaration for declaration in declarations if declaration.api)
+    if apis:
+        declarations = apis
+    elif ":" not in name or name.startswith(_NODE_NAMESPACES):
+        return None
+    return SchemaProperty(name, declarations) if declarations else None
 
 
-__all__ = ["Declaration", "SchemaProperty", "is_material_binding_name", "lookup"]
+def restricted_to(declared: SchemaProperty, type_name: Sdf.ValueTypeName) -> SchemaProperty:
+    """``declared`` with only the declarations of ``type_name``."""
+    chosen = tuple(declaration for declaration in declared.declarations if declaration.type_name == type_name)
+    return SchemaProperty(declared.name, chosen)
+
+
+__all__ = ["Declaration", "SchemaProperty", "is_material_binding_name", "lookup", "restricted_to"]
