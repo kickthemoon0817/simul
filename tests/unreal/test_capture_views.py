@@ -897,6 +897,40 @@ async def test_a_shot_past_the_deadline_says_where_unreal_may_still_write_it(
     assert sys.modules[CAPTURE_LOCK_MODULE].owner is None
 
 
+@pytest.mark.asyncio
+async def test_a_poll_the_editor_runs_after_the_call_gave_up_leaves_the_png(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #355: polls queued while the editor rendered ran after the call had failed, converted the late
+    shot to this call's JPEG and deleted the PNG the error named (HighresScreenshot00003_<token>.jpg, live)."""
+    monkeypatch.setattr(unreal_runtime, "_CAPTURE_BASE_SECONDS", 0.3)
+    editor.shots_unfinished = True
+    polls: List[str] = []
+    run_python = editor.run_python
+
+    def recording(code: str) -> Dict[str, Any]:
+        if "size_wanted" in script_source(code):
+            polls.append(code)
+        return run_python(code)
+
+    editor.run_python = recording  # type: ignore[method-assign]
+    request = {"resolution_x": 64, "resolution_y": 36, "view": "editor", "format": "jpeg"}
+    async with remote_control(editor) as settings:
+        late, _ = await call_tool(settings, "capture_unreal_viewport", request)
+    assert late["error_type"] == "CaptureError" and polls
+
+    # The shot lands; a poll that was queued behind it runs, before the call's lock release would.
+    png = editor.shots / "HighresScreenshot00000.png"
+    write_png(str(png), (64, 36), EDITOR_BLUE)
+    token = re.search(r"lock\.owner == '([0-9a-f]+)'", script_source(polls[-1]))[1]  # type: ignore[index]
+    sys.modules[CAPTURE_LOCK_MODULE].owner = token
+    reply = run_python(polls[-1])
+
+    assert png.exists() and not list(editor.shots.glob("*.jpg"))
+    shown = json.loads(reply["LogOutput"][-1]["Output"].split("@@SIMUL_SCREENSHOT@@", 1)[1])
+    assert (shown["path"], shown["pending"]) == ("", str(png))
+
+
 def test_the_capture_deadline_grows_with_the_pixels() -> None:
     assert unreal_runtime.capture_deadline(None) == 15.0
     assert unreal_runtime.capture_deadline((1920, 1080)) == pytest.approx(15.52, abs=0.01)

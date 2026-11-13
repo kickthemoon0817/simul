@@ -764,6 +764,26 @@ async def test_batch_operations_refuses_a_python_command_to_anything_but_the_lib
     assert fake.commands == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batched", [False, True])
+async def test_a_python_command_to_a_preset_function_is_never_sent(batched: bool) -> None:
+    """Review of #355: a preset can expose ExecutePythonCommandEx; its route names no object to recognise."""
+    route = "/remote/preset/Tools/function/RunPython"
+    call = {"Parameters": {"PythonCommand": "pkg = unreal.Probe()"}, "GenerateTransaction": False}
+    path, body = (route, call) if not batched else (
+        "/remote/batch", {"Requests": [{"RequestId": 1, "URL": route + "?x=1", "Verb": "PUT", "Body": call}]})
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            with pytest.raises(Exception) as raised:
+                await session._http_put(path, body)
+            # A preset function that passes no PythonCommand goes out as it is.
+            await session._http_put(route, {"Parameters": {"Speed": 2}})
+
+    assert raised.value.details["code"] == "python_outside_runner"  # type: ignore[attr-defined]
+    assert sent == [{"path": route, "body": {"Parameters": {"Speed": 2}}}]
+    assert unisolated_commands("/remote/preset/Tools/property/Speed", {"Parameters": {"PythonCommand": "x"}}) == []
+
+
 def test_isolate_request_leaves_other_requests_alone_and_refuses_what_python_command_refuses() -> None:
     body = {"objectPath": "/Game/M.M:PersistentLevel.A", "propertyName": "Tags"}
     assert isolate_request("/remote/object/property", body) is body
@@ -867,3 +887,36 @@ def test_a_stream_the_script_installs_stays_and_others_are_left_alone(unreal_str
     exec(runner_command("print('kept')\n", "exec"), {})  # noqa: S102
 
     assert mine.getvalue() == "kept\n" and entries == []
+
+
+DETACH = "import io, sys\nsys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')\nprint('mine')\n"
+
+
+def test_a_script_that_rewraps_stdout_succeeds_and_keeps_its_output_in_its_call(unreal_streams: Any) -> None:
+    """Review of #355: after sys.stdout.detach() the swapped stream had no buffer, and the restore raised
+    AttributeError: a call that ran reported a ScriptError, its namespace was not cleared and its output
+    came out in the next call."""
+    entries, flushes, stdout, stderr = unreal_streams()
+    namespace: Dict[str, Any] = {}
+
+    exec(runner_command(DETACH, "exec"), namespace)  # noqa: S102 - must not raise
+
+    assert entries == [("Info", "mine\n")] and len(flushes) == 1
+    # The stream the script installed stays (as the stream a script installs always does).
+    assert sys.stdout is not stdout and sys.stderr is stderr
+    entries.clear()
+    flushes.clear()
+
+    exec(runner_command("import sys\nprint('next')\nsys.stdout.write('tail')\n", "exec"), {})  # noqa: S102
+
+    # The next call's output is its own, and Unreal's log is written once for it.
+    assert entries == [("Info", "next\n"), ("Info", "tail")] and len(flushes) == 1
+
+
+def test_the_namespace_is_cleared_whatever_the_script_did_to_the_streams(unreal_streams: Any) -> None:
+    unreal_streams()
+    sys.modules["unreal"].Probe = Probe  # type: ignore[attr-defined]
+
+    exec(runner_command(DETACH + "sys.stderr = None\npkg = unreal.Probe()\n", "exec"), {})  # noqa: S102
+
+    assert len(Probe.alive) == 0 and sys.stderr is None

@@ -87,11 +87,15 @@ class _Log(io.BufferedIOBase):
     # each write is one log entry. Unreal's flush, log_flush, writes the whole
     # log to disk (GLog->Flush), and its streams' line buffering ran it after
     # every line, about 11 ms a line on UE 5.7.4, so a script printing
-    # thousands of lines held the editor for minutes. Here flush does nothing,
-    # and run flushes the log once, when the call ends.
-    def __init__(self, log_func):
+    # thousands of lines held the editor for minutes. Here flush does nothing
+    # while the call runs, and run flushes the log once, when it ends; past
+    # the call (a stream the script wrapped around this one stays) it is
+    # Unreal's flush again.
+    def __init__(self, log_func, flush_func=None):
         self.log_func = log_func
+        self.flush_func = flush_func
         self.wrote = False
+        self.active = True
     def writable(self):
         return True
     def write(self, data):
@@ -99,33 +103,55 @@ class _Log(io.BufferedIOBase):
         self.wrote = True
         return len(data)
     def flush(self):
-        pass
+        if not self.active and callable(self.flush_func):
+            self.flush_func()
 
 def _swap_streams(swapped):
     # Unreal's own streams only, each for one that makes the same entries in
     # the same order (line-buffered text over the same log function); a
-    # stream anything else installed stays as it is.
+    # stream anything else installed stays as it is. Never raises: the
+    # script's own failure, or none, is what the call reports.
     for name in ("stdout", "stderr"):
-        stream = getattr(sys, name, None)
-        log_func = getattr(getattr(stream, "buffer", None), "log_func", None)
-        if isinstance(stream, io.TextIOWrapper) and callable(log_func):
-            unflushed = io.TextIOWrapper(_Log(log_func), encoding="utf-8", line_buffering=True,
-                                         write_through=stream.write_through)
-            swapped.append((name, stream, unflushed))
-            setattr(sys, name, unflushed)
-
-def _restore_streams(swapped):
-    wrote = None
-    for name, stream, unflushed in swapped:
         try:
-            unflushed.flush()  # a last line the script left unfinished is this call's output
+            stream = getattr(sys, name, None)
+            buffer = getattr(stream, "buffer", None)
+            log_func = getattr(buffer, "log_func", None)
+            if isinstance(stream, io.TextIOWrapper) and callable(log_func):
+                log = _Log(log_func, getattr(buffer, "flush_func", None))
+                unflushed = io.TextIOWrapper(log, encoding="utf-8", line_buffering=True,
+                                             write_through=stream.write_through)
+                swapped.append((name, stream, unflushed, log))
+                setattr(sys, name, unflushed)
         except Exception:
             pass
-        if unflushed.buffer.wrote:
-            wrote = stream
-        # A stream the script installed itself stays.
-        if getattr(sys, name, None) is unflushed:
-            setattr(sys, name, stream)
+
+def _restore_streams(swapped):
+    # Never raises, whatever the script did to the streams: a script that
+    # detached sys.stdout (sys.stdout = io.TextIOWrapper(sys.stdout.detach()))
+    # leaves the swapped stream without a buffer, and writes through a stream
+    # of its own to the same _Log, which records what was written.
+    wrote = None
+    for name, stream, unflushed, log in swapped:
+        try:
+            current = getattr(sys, name, None)
+            for own in (unflushed, current):
+                try:
+                    # A last line the script left unfinished, in this
+                    # stream or the one it wrapped around the log, is this
+                    # call's output.
+                    if own is unflushed or getattr(own, "buffer", None) is log:
+                        own.flush()
+                except Exception:
+                    pass
+            if current is not unflushed and getattr(current, "buffer", None) is log:
+                log.active = False  # the script's stream over it outlives the call
+            if log.wrote:
+                wrote = stream
+            # A stream the script installed itself stays.
+            if current is unflushed:
+                setattr(sys, name, stream)
+        except Exception:
+            pass
     if wrote is not None:
         try:
             wrote.flush()  # Unreal's log to disk, once
@@ -500,7 +526,7 @@ def isolate_request(path: str, body: Optional[Dict[str, Any]], guard: str = "") 
 
 
 def _call_commands(body: Any) -> List[str]:
-    """Every string a ``/remote/object/call`` body passes as ``PythonCommand``, whatever it calls."""
+    """Every string a function call's body (an object call's or a preset's) passes as ``PythonCommand``."""
     parameters_key = _key(body, "parameters") if isinstance(body, dict) else None
     parameters = body.get(parameters_key) if parameters_key is not None else None
     if not isinstance(parameters, dict):
@@ -510,13 +536,26 @@ def _call_commands(body: Any) -> List[str]:
     return [command] if isinstance(command, str) else []
 
 
+#: A Remote Control preset's exposed function: its body's ``Parameters`` are
+#: the function's, so a preset exposing ``ExecutePythonCommandEx`` takes a
+#: ``PythonCommand`` there, and the route does not say which function it is.
+_PRESET_FUNCTION = re.compile(r"/remote/preset/[^/]+/function/[^/]+")
+
+
+def _calls_python_by_name(route: str) -> bool:
+    """Whether a route calls a function with the parameters its body names: an object call or a preset function."""
+    return route == "/remote/object/call" or _PRESET_FUNCTION.fullmatch(route) is not None
+
+
 def unisolated_commands(path: str, body: Optional[Dict[str, Any]]) -> List[str]:
     """The ``PythonCommand`` values a request would send outside the runner.
 
-    Every ``/remote/object/call``, on its own or in a ``/remote/batch``, whose
-    parameters pass a ``PythonCommand`` that is not a ``runner_command``,
-    whatever object and function it names: a command ``python_command`` does
-    not recognise is still one Remote Control could hand to Python.
+    Every ``/remote/object/call`` and every Remote Control preset function
+    call (``/remote/preset/<preset>/function/<function>``), on its own or in
+    a ``/remote/batch``, whose parameters pass a ``PythonCommand`` that is not
+    a ``runner_command``, whatever object and function it names: a command
+    ``python_command`` does not recognise is still one Remote Control could
+    hand to Python. Other routes pass no function parameters.
 
     Args:
         path: The request's route.
@@ -526,13 +565,13 @@ def unisolated_commands(path: str, body: Optional[Dict[str, Any]]) -> List[str]:
         The offending commands; empty when every one runs in the runner.
     """
     calls: List[Any]
-    if _route(path) == "/remote/object/call":
+    if _calls_python_by_name(_route(path)):
         calls = [body]
     elif _route(path) == BATCH_ROUTE:
         calls = [
             part.get(_key(part, "Body") or "Body")
             for part in _batch_parts(body)
-            if _route(part.get(_key(part, "URL") or "URL") or "") == "/remote/object/call"
+            if _calls_python_by_name(_route(part.get(_key(part, "URL") or "URL") or ""))
         ]
     else:
         return []

@@ -673,7 +673,7 @@ def capture_late_error(resolution: Optional[Tuple[int, int]], seconds: float, jp
         f"({_CAPTURE_BASE_SECONDS:g} s plus {_CAPTURE_SECONDS_PER_MEGAPIXEL:g} s per megapixel). Unreal cannot "
         "cancel the shot, so it may still write it: to details.pending_path when it has begun to, otherwise as the "
         "next HighresScreenshotNNNNN.png (or this call's SimulShot_ file) in details.pending_dir"
-        + (", as a PNG: the JPEG is made only within the call" if jpeg else "")
+        + (", as a PNG: once the call has given up, no poll of it converts the shot to JPEG" if jpeg else "")
         + ". Capture at a lower resolution, or check the editor before capturing again."
     )
 
@@ -1288,7 +1288,8 @@ def decide(args):
     registry = sys.modules.get({PROPERTY_TRANSACTIONS!r})
     entry = registry.open.pop(args["token"], None) if registry is not None else None
     if entry is None:
-        return {{"applied": None, "restored": False, "closed": None, "error": "the write was not prepared"}}
+        return {{"applied": None, "restored": False, "closed": None, "prepared": False,
+                "error": "the write was not prepared"}}
     obj = unreal.find_object(None, entry["path"])
     result = {{"applied": None, "restored": False, "closed": None}}
     try:
@@ -3776,6 +3777,7 @@ if lock.owner not in (None, {token!r}) and now < lock.expires:
     print({marker!r} + json.dumps({{'busy': True}}))
     return
 lock.owner, lock.expires = {token!r}, now + {_CAPTURE_LOCK_SECONDS!r}
+lock.taken_at = now  # the editor's clock, before the trigger: when this call's waits start at the earliest
 level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
 pie = bool(level.is_in_play_in_editor())
 game = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world() if pie else None
@@ -3843,11 +3845,16 @@ print({marker!r} + json.dumps(payload))
             if failed is not None:
                 return failed
 
-        def read_code(game_shot: bool) -> str:
+        def read_code(game_shot: bool, give_up_after: float) -> str:
+            # give_up_after: seconds from the lock's taken_at by which the
+            # call has stopped waiting. A poll the editor runs later (queued
+            # while it rendered) converts nothing, so a shot that lands after
+            # the call gave up stays the PNG its error names.
             return prelude + EDITOR_WORLD + in_function(f"""
 lock = capture_lock()
 if lock.owner == {token!r}:
     lock.expires = time.time() + {_CAPTURE_LOCK_SECONDS!r}
+late = lock.owner != {token!r} or time.time() > getattr(lock, 'taken_at', 0.0) + {give_up_after!r}
 size_wanted = {list(resolution) if resolution is not None else None!r}
 quality = {jpeg_quality!r}
 inline_limit = {inline_limit!r}
@@ -3878,7 +3885,7 @@ written = [path for path in started if complete(path)
            and (size_wanted is None or png_size(path) == size_wanted)]
 # What Unreal has begun to write, for a capture that runs out of time.
 payload = {{'path': '', 'size_bytes': 0, 'pending': max(started, key=os.path.getmtime) if started else None}}
-if written:
+if written and not (late and quality is not None):
     target = max(written, key=os.path.getmtime)
     path, size = target, os.path.getsize(target)
     if quality is not None:
@@ -3916,10 +3923,13 @@ print({marker!r} + json.dumps(payload))
         seconds = capture_deadline(resolution)
         poll_timeout = max(self.timeout, seconds)
 
-        async def written(seconds: float, game_shot: bool) -> Dict[str, Any]:
+        async def written(seconds: float, game_shot: bool, waited: float = 0.0) -> Dict[str, Any]:
+            # waited: what earlier waits of this call took at most, so that
+            # the editor's give-up time, counted from before the trigger,
+            # never comes after this wait's deadline.
             payload: Dict[str, Any] = {}
             pending = None
-            code = read_code(game_shot)
+            code = read_code(game_shot, waited + seconds)
             # Short first wait so UE's frame loop runs HighResShot, then poll.
             await asyncio.sleep(_CAPTURE_POLL_SECONDS)
             deadline = asyncio.get_event_loop().time() + seconds
@@ -3954,7 +3964,7 @@ print({marker!r} + json.dumps(payload))
             if failed is not None:
                 return failed
             taken, fell_back = "editor", True
-            capture_payload = await written(seconds, False)
+            capture_payload = await written(seconds, False, waited=_GAME_VIEW_WAIT_SECONDS)
         pending = capture_payload.pop("pending", None)
         if not capture_payload.get("path") or not capture_payload.get("size_bytes"):
             # Unreal cannot cancel the shot: say where it lands, as the game
@@ -4952,28 +4962,50 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         if "value" in previous:
             result["previous_value"] = previous["value"]
 
+        token = uuid.uuid4().hex
         try:
             parts = await self._property_write(
-                actor_path, property_name, parsed_value, container, generate_transaction
+                actor_path, property_name, parsed_value, container, generate_transaction, token
             )
         except UnrealError as exc:
             if _not_sent(exc) is not None:
                 raise  # it never left this machine: nothing ran
-            # The batch may have run, compared and rolled back in the editor;
-            # its answer is lost or unreadable. Say what Unreal holds now.
+            # The batch may have run, in part or whole; its answer is lost or
+            # unreadable. Close what it may have left open, then say what
+            # Unreal holds now.
+            decided = await self._decide_property_write(token, parsed_value, str(exc))
             now = await self._read_property(actor_path, property_name)
             failed: Dict[str, Any] = {**result, "success": False, "error": str(exc), "error_type": exc.error_type}
             if exc.details:
                 failed["details"] = exc.details
             if "value" in now:
                 failed["value"] = now["value"]
+            if decided.get("applied") is not None:
+                failed.update(applied=decided["applied"], restored=bool(decided.get("restored")))
+            failed["warning"] = decided.get("late") or (
+                f"The write's undo transaction may still be open: {decided.get('error')}"
+            )
             return failed
         return self._property_reply(result, property_name, parsed_value, parts)
 
     def _property_reply(
         self, result: Dict[str, Any], name: str, value: Any, parts: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """set_actor_property's reply from its batch's answers (``_property_write``)."""
+        """set_actor_property's reply from its batch's answers (``_property_write``).
+
+        A verdict reached in a request of its own (``_decide_property_write``)
+        says so in ``warning``, whatever the outcome.
+        """
+        reply = self._property_outcome(result, name, value, parts)
+        late = parts["decided"].get("late")
+        if late:
+            reply["warning"] = f"{reply.get('warning') or ''} {late}".strip()
+        return reply
+
+    def _property_outcome(
+        self, result: Dict[str, Any], name: str, value: Any, parts: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """The reply ``_property_reply`` gives, but for how late its verdict came."""
         decided, written, held, final = parts["decided"], parts["written"], parts["held"], parts["final"]
         if parts["failure"] is not None and decided.get("applied") is None:
             # The write failed and could not be compared: nothing was emptied
@@ -5048,12 +5080,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             )
         if decided.get("error"):
             done["warning"] = f"{done.get('warning', '')} {decided['error']}".strip()
-        if decided.get("late"):
-            done["warning"] = (
-                f"{done.get('warning', '')} The write's own verdict did not run in its batch ({decided['late']}), "
-                "so it was decided in a request of its own: an edit another client made in between may share its "
-                "undo step"
-            ).strip()
         return done
 
     async def _property_write(
@@ -5063,13 +5089,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         value: Any,
         container: Optional[str],
         transaction: bool,
+        token: str,
     ) -> Dict[str, Any]:
         """Write, finish, compare and keep or roll back one property, in one Remote Control batch.
 
         Remote Control runs a batch's parts one after another, with no editor
         tick and no other request between them, so the undo transaction opens
         and closes inside it: it never spans two requests, and a concurrent
-        call's write never lands in it.
+        call's write never lands in it. ``token`` names the write in the
+        editor; a caller whose batch raised decides it again by it
+        (``_decide_property_write``).
 
         Returns:
             ``failure`` (the UnrealError the write was answered with, or None),
@@ -5078,29 +5107,20 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             ``applied``, ``restored``, ``closed``) and ``final`` (the read-back
             after it).
         """
-        token = uuid.uuid4().hex
         begin = {"token": token, "path": path, "name": name, "transaction": transaction, "empty": container}
         read = {"objectPath": path, "propertyName": name, "access": "READ_ACCESS"}
-        try:
-            responses = await self._property_batch(
-                [
-                    ("/remote/object/call", _python_call(PROPERTY_BEGIN, begin)),
-                    ("/remote/object/property", {
-                        "objectPath": path, "propertyName": name, "propertyValue": {name: value},
-                        "access": "WRITE_ACCESS",
-                    }),
-                    ("/remote/object/call", _python_call(PROPERTY_FINISH)),
-                    ("/remote/object/property", read),
-                    ("/remote/object/call", _python_call(PROPERTY_DECIDE, {"token": token, "expected": value})),
-                    ("/remote/object/property", read),
-                ]
-            )
-        except UnrealError as exc:
-            if _not_sent(exc) is None:
-                # The batch may have run in part, its verdict not: close
-                # what it may have left open. The caller reports the rest.
-                await self._decide_property_write(token, value, str(exc))
-            raise
+        responses = await self._property_batch(
+            [
+                ("/remote/object/call", _python_call(PROPERTY_BEGIN, begin)),
+                ("/remote/object/property", {
+                    "objectPath": path, "propertyName": name, "propertyValue": {name: value}, "access": "WRITE_ACCESS",
+                }),
+                ("/remote/object/call", _python_call(PROPERTY_FINISH)),
+                ("/remote/object/property", read),
+                ("/remote/object/call", _python_call(PROPERTY_DECIDE, {"token": token, "expected": value})),
+                ("/remote/object/property", read),
+            ]
+        )
         began = self._parse_python_json(responses[0].get("ResponseBody") or {})
         written = _batch_failure(responses[1], "/remote/object/property")
         decided = self._parse_python_json(responses[4].get("ResponseBody") or {})
@@ -5143,8 +5163,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             why: Why the batch's verdict is missing, for the reply.
 
         Returns:
-            PROPERTY_DECIDE's verdict, with ``late`` saying why it came late,
-            or ``{"error": ...}`` when it failed again.
+            PROPERTY_DECIDE's verdict with ``late``, the reply's warning,
+            saying what happened to the write's transaction; ``applied`` None
+            and no ``error`` when there was nothing left to decide; or
+            ``{"error": ...}`` when it failed again.
         """
         try:
             raw = await self._execute_python(
@@ -5155,7 +5177,28 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         decided = self._parse_python_json(raw)
         if "applied" not in decided:
             return {"error": f"{why}; deciding it again failed too: {decided.get('error')}"}
-        return {**decided, "late": why}
+        if decided.get("prepared") is False:
+            return {
+                "applied": None,
+                "restored": False,
+                "late": (
+                    f"The write's verdict did not come back from its batch ({why}), and it had nothing left to "
+                    "close: the batch closed its own undo transaction, or never opened one"
+                ),
+            }
+        closed = {"ended": "ended", "cancelled": "cancelled"}.get(str(decided.get("closed")))
+        return {
+            **decided,
+            "late": (
+                f"The write's verdict did not run in its batch ({why}), so it ran in a request of its own"
+                + (
+                    f", which {closed} the write's undo transaction: an edit another client made in between "
+                    "may share that undo step"
+                    if closed
+                    else ""
+                )
+            ),
+        }
 
     async def _property_batch(self, operations: List[Tuple[str, Dict[str, Any]]]) -> List[Dict[str, Any]]:
         """Send operations as one Remote Control batch and return the answers in order."""

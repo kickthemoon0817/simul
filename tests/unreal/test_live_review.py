@@ -34,6 +34,42 @@ def require_disposable_editor():
         pytest.skip("Set SIMUL_UNREAL_REVIEW_LIVE=1 only for a disposable editor")
 
 
+@pytest.fixture(autouse=True)
+def back_on_the_starting_map(require_disposable_editor):
+    """Reopen the map a test started on when it left the editor on another one.
+
+    Several tests open scratch levels (new_level) and used to leave the editor
+    there, unsaved. A scratch level of this module's (/Game/SimulReview...) is
+    deleted once the editor has left it; any other map is left alone.
+    """
+
+    async def where():
+        client = session()
+        try:
+            await client.control_simulation("stop")
+            return await current_map(client)
+        finally:
+            await client.close()
+
+    started_on = asyncio.run(where())
+    yield
+    try:
+        now = asyncio.run(where())
+    except Exception:  # an editor a test left unable to answer: nothing to restore
+        return
+    if now == started_on:
+        return
+
+    async def restore():
+        client = session()
+        try:
+            await leave_scratch_level(client, started_on, now if now.startswith("/Game/SimulReview") else None)
+        finally:
+            await client.close()
+
+    asyncio.run(restore())
+
+
 def session():
     base = Settings()
     return UnrealRuntimeSession(
@@ -174,7 +210,8 @@ async def leave_scratch_level(client, started_on, scratch):
 
     A map never saved (``/Temp/Untitled_N``, a disposable editor's startup map)
     cannot be reopened, so a new blank map takes its place. Unsaved changes in
-    the scratch level are discarded, and nothing else is saved.
+    the scratch level are discarded, and nothing else is saved. ``scratch``
+    None deletes nothing.
     """
     await client._execute_json_script(f"""
 import unreal, json
@@ -183,7 +220,9 @@ if {started_on!r}.startswith("/Temp/"):
     utils.new_blank_map(False)
 else:
     utils.load_map({started_on!r})
-deleted = unreal.EditorAssetLibrary.delete_asset({scratch!r})
+scratch = {scratch!r}
+deleted = bool(scratch) and unreal.EditorAssetLibrary.does_asset_exist(scratch) \\
+    and unreal.EditorAssetLibrary.delete_asset(scratch)
 print(json.dumps({{'deleted': bool(deleted)}}))
 """)
 

@@ -1500,7 +1500,9 @@ Behaviour worth knowing:
   cancel the shot, `details.pending_path` names the file Unreal has begun to
   write (null until one appears: an editor shot's number is chosen when its
   pane draws), `details.pending_dir` the directory it lands in and
-  `details.deadline_s` the wait. `view` picks what is captured, and the
+  `details.deadline_s` the wait. A late shot stays a PNG even with
+  `format: "jpeg"`: a poll the editor runs after the call's deadline (one
+  queued while it rendered) converts nothing. `view` picks what is captured, and the
   reply says which (`view`, `pie_active`): `editor` is the level editor
   viewport, whose camera `set_unreal_camera_view` moves; `game` is the
   player's view during a Play In Editor session (HighResShot run in the game
@@ -1742,21 +1744,33 @@ Behaviour worth knowing:
   `/remote/batch`, `batch_unreal_operations`' and the batch
   `set_unreal_actor_property` sends alike. (`call_unreal_actor_function` takes
   only actors of the level open in the editor, so it never reaches the Python
-  library.) The session refuses to send any request that would hand Python a
-  `PythonCommand` past that runner, whatever object it calls, with a
-  `ValidationError` (`details.code: "python_outside_runner"`). The property
-  write's batch used to embed the value in commands sent past it, so a value
-  naming a `.py` file followed by a space (a tag `see setup.py first`) was
-  written but reported as failed, and left the editor's undo transaction
-  open for the rest of the session. A write whose closing step does not run
-  in its batch is now closed by a request of its own, and its reply reads
-  back what Unreal holds.
+  library.) The session refuses, with a `ValidationError`
+  (`details.code: "python_outside_runner"`), to send a `/remote/object/call`
+  or a Remote Control preset function call
+  (`/remote/preset/<preset>/function/<function>`), on its own or inside a
+  `/remote/batch`, whose parameters pass a `PythonCommand` that is not the
+  runner's, whatever object or function it names: a preset can expose
+  `ExecutePythonCommandEx` under a name of its own. Those are the routes
+  that pass function parameters; Python the editor runs some other way (a
+  Blueprint, an editor utility) is outside what simul sends. The property
+  write's batch used to embed the value in commands sent past the runner, so
+  a value naming a `.py` file followed by a space (a tag `see setup.py
+  first`) was written but reported as failed, and left the editor's undo
+  transaction open for the rest of the session. A write whose closing step
+  did not run in its batch is now decided and closed by a request of its
+  own, which the reply's `warning` says (or that the batch had closed it
+  already), and a failed write's reply reads back what Unreal holds.
   - **Printing is cheap.** While a call runs, Unreal's `sys.stdout` and
     `sys.stderr` are replaced by streams that make the same log entries in the
     same order without writing Unreal's log to disk after every line, which
     took about 11 ms a line (400 printed lines: 4.8 s, now 0.04 s); the log is
     written once when the call ends. A last line the script leaves without a
-    newline is part of that call's output, not the next call's.
+    newline is part of that call's output, not the next call's. A stream the
+    script installs itself stays installed after the call, as before; one it
+    wraps around the swapped stream's buffer
+    (`sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding="utf-8")`)
+    keeps writing to Unreal's log, and what it holds when the call ends is
+    that call's output.
   - **Why it matters.** UE 5.7 runs all literal Python in one dict that every
     call and the editor's own Python console share, and `FileExecutionScope`
     applies only to `.py` files. A name a script leaves there keeps its object

@@ -46,7 +46,7 @@ import pytest
 from aiohttp import web
 
 from simul.adapters import unreal_runtime
-from simul.adapters._unreal_python import RUNNER_MODULE, isolate_request, unwrap_command
+from simul.adapters._unreal_python import RUNNER_MODULE, isolate_request, unwrap, unwrap_command
 from simul.adapters.unreal_runtime import PROPERTY_TRANSACTIONS, UnrealRuntimeSession
 from simul.config import Settings
 
@@ -180,6 +180,8 @@ class Editor:
         # wrap: editor_session fails a test that leaves any.
         self.outside_runner: List[str] = []
         self.skip_decide = 0
+        self.hide_decide = 0
+        self.batch_stops_after: Optional[int] = None
         self.drop_batch_answer = False
         self.dirty = False  # the level's package
 
@@ -355,8 +357,14 @@ class Editor:
         if route == "/remote/batch":
             # Each part's body goes in verbatim, as HandleBatchRequest writes it.
             parts = []
-            for request in body["Requests"]:
+            for index, request in enumerate(body["Requests"]):
+                if self.batch_stops_after is not None and index >= self.batch_stops_after:
+                    break  # the editor went no further (with drop_batch_answer: the answer is lost too)
                 code, answer = self.dispatch(request["URL"], request["Body"])
+                if self.hide_decide and "def decide(" in json.dumps(unwrap(request["Body"])):
+                    # The verdict ran, but its answer is lost.
+                    self.hide_decide -= 1
+                    answer = {"ReturnValue": True, "CommandResult": "None", "LogOutput": []}
                 text = answer if isinstance(answer, Printed) else json.dumps(answer)
                 parts.append(f'{{"RequestId":{request["RequestId"]},"ResponseCode":{code},"ResponseBody":{text}}}')
             return 200, Printed('{"Responses":[' + ",".join(parts) + "]}")
@@ -717,6 +725,46 @@ async def test_a_lost_batch_answer_leaves_nothing_open_and_reports_what_unreal_h
         assert (result["success"], result["error_type"]) == (False, "ConnectionError")
         assert "whether the request ran is unknown" in result["error"]
         assert result["value"] == ["x"] and "restored" not in result
+        assert "nothing left to close: the batch closed its own undo transaction" in result["warning"]
+        assert editor.depth == 0 and editor.open_transactions() == {} and len(editor.history) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_stopped_before_its_verdict_is_decided_and_reported() -> None:
+    """Review of #355: when the batch failed with an error, the verdict run afterwards was discarded."""
+    async with editor_session() as (session, editor):
+        editor.batch_stops_after, editor.drop_batch_answer = 2, True  # BEGIN and the write ran, nothing after
+        result = await session.set_actor_property(ACTOR, "Tags", '["x"]')
+
+        assert (result["success"], result["error_type"]) == (False, "ConnectionError")
+        assert (result["value"], result["applied"], result["restored"]) == (["x"], True, False)
+        assert "ran in a request of its own, which ended the write's undo transaction" in result["warning"]
+        assert editor.depth == 0 and editor.open_transactions() == {} and len(editor.history) == 1
+        editor.undo()
+        assert editor.objects[ACTOR].props["Tags"] == ["seed"]
+
+
+@pytest.mark.asyncio
+async def test_a_batch_answered_in_part_is_decided_and_reported() -> None:
+    async with editor_session() as (session, editor):
+        editor.batch_stops_after = 2
+        result = await session.set_actor_property(ACTOR, "Tags", '["x"]')
+
+        assert (result["success"], result["error_type"]) == (False, "EngineError")
+        assert "answered no part [3, 4, 5, 6]" in result["error"]
+        assert (result["value"], result["applied"]) == (["x"], True)
+        assert "ran in a request of its own" in result["warning"]
+        assert editor.depth == 0 and editor.open_transactions() == {} and len(editor.history) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_whose_answer_was_lost_in_the_batch_is_not_reported_as_run_again() -> None:
+    async with editor_session() as (session, editor):
+        editor.hide_decide = 1
+        result = await session.set_actor_property(ACTOR, "Tags", '["x"]')
+
+        assert result["applied"] is True and result["value"] == ["x"], result
+        assert "nothing left to close" in result["warning"] and "request of its own" not in result["warning"]
         assert editor.depth == 0 and editor.open_transactions() == {} and len(editor.history) == 1
 
 
@@ -920,7 +968,7 @@ async def test_a_verdict_that_did_not_run_in_the_batch_still_closes_the_transact
         result = await session.set_actor_property(ACTOR, "Tags", '["x"]')
 
         assert result["applied"] is True and result["value"] == ["x"], result
-        assert "decided in a request of its own" in result["warning"]
+        assert "ran in a request of its own, which ended the write's undo transaction" in result["warning"]
         assert editor.depth == 0 and editor.open_transactions() == {} and len(editor.history) == 1
         editor.undo()
         assert editor.objects[ACTOR].props["Tags"] == ["seed"]
