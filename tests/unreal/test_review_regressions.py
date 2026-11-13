@@ -330,6 +330,7 @@ def script_session(monkeypatch, tmp_path):
             set_game_paused=lambda world, value: setattr(world, "paused", value)
             or True,
         ),
+        WorldPartitionBlueprintLibrary=SimpleNamespace(get_actor_descs=lambda: None),
     )
     monkeypatch.setitem(sys.modules, "unreal", unreal)
     base = Settings()

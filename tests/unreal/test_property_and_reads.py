@@ -222,6 +222,8 @@ class Editor:
             SystemLibrary=SimpleNamespace(
                 is_valid=lambda obj: obj.get_path_name() not in editor.destroyed
             ),
+            # The level is not a World Partition map: Unreal returns no descriptors.
+            WorldPartitionBlueprintLibrary=SimpleNamespace(get_actor_descs=lambda: None),
             get_editor_subsystem=subsystems.__getitem__,
             UnrealEditorSubsystem="UnrealEditorSubsystem",
             LevelEditorSubsystem="LevelEditorSubsystem",
@@ -514,7 +516,8 @@ def test_lights_and_cameras_are_counted_by_class_not_by_name(
         scene["static_meshes"],
         scene["lights"],
         scene["cameras"],
-    ) == (6, 1, 2, 1)
+        scene["world_partition"],
+    ) == (6, 1, 2, 1, False)
 
 
 # -- health keeps its warnings; busy is not down ------------------------------------

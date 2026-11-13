@@ -341,6 +341,7 @@ class Editor:
                 )
             ),
             MathLibrary=SimpleNamespace(class_is_child_of=class_is_child_of),
+            WorldPartitionBlueprintLibrary=SimpleNamespace(get_actor_descs=lambda: None),
             ScopedEditorTransaction=self.transaction,
         )
 

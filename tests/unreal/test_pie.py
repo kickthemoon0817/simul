@@ -334,6 +334,8 @@ class Editor:
             EditorLoadingAndSavingUtils=SimpleNamespace(
                 get_dirty_map_packages=lambda: []
             ),
+            # The Lab map is not a World Partition map: no actor descriptors.
+            WorldPartitionBlueprintLibrary=SimpleNamespace(get_actor_descs=lambda: None),
             ScopedEditorTransaction=editor.transaction,
             MathLibrary=SimpleNamespace(class_is_child_of=lambda cls, parent: True),
             load_object=load_object,

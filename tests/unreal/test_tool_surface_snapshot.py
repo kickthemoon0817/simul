@@ -78,7 +78,15 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
     "unreal_health_check": {},
     "ping_unreal": {},
     "list_unreal_instances": {"scan": False},
-    "capture_unreal_viewport": {"resolution_x": 640, "resolution_y": 360, "format": "png", "inline": True},
+    "capture_unreal_viewport": {
+        "resolution_x": 640,
+        "resolution_y": 360,
+        "format": "jpeg",
+        "inline": True,
+        "view": "game",
+        "jpeg_quality": 70,
+        "inline_max_size": 320,
+    },
     "execute_unreal_script": {"code": "import unreal\nprint('hi')", "mode": "EvaluateStatement"},
     "control_unreal_ui": {
         "agent_control": "set_property",
@@ -131,7 +139,22 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
     "describe_unreal_object": {"object_path": ACTOR},
     "get_unreal_actor_thumbnail": {"asset_path": MESH, "width": 64, "height": 32},
     "summarize_unreal_scene": {},
-    "get_unreal_viewport_info": {},
+    "load_unreal_world_partition_actors": {
+        "bounds_min": "-100, -100,0",
+        "bounds_max": "100,100,50",
+        "max_actors": 20,
+        "action": "unload",
+    },
+    "get_unreal_viewport_info": {"measure_size": True},
+    "capture_unreal_camera": {
+        "actor_path": ACTOR,
+        "resolution_x": 320,
+        "resolution_y": 240,
+        "format": "jpeg",
+        "inline": True,
+        "jpeg_quality": 60,
+        "inline_max_size": 160,
+    },
     "set_unreal_camera_view": {
         "location_x": 100.0,
         "location_y": -200.0,
@@ -390,6 +413,9 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
 # preparing the session call.
 ERROR_CASES: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("capture_unreal_viewport", {"format": "jpg"}),
+    ("capture_unreal_viewport", {"view": "player"}),
+    ("capture_unreal_camera", {"actor_path": ACTOR, "jpeg_quality": 0}),
+    ("load_unreal_world_partition_actors", {"bounds_min": "1,x,3", "bounds_max": "2,2,2"}),
     ("execute_unreal_script", {"code": "print(1)", "mode": "Bogus"}),
     ("set_unreal_camera_view", {"location_x": 1.0, "location_y": 2.0}),
     ("set_unreal_camera_view", {"location_x": 1.0, "location_y": 2.0, "location_z": 3.0, "rotation_roll": 4.0}),
