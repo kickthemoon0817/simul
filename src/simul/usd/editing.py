@@ -17,7 +17,6 @@ source paths, and sometimes the wrong cause) never reaches the caller.
 from __future__ import annotations
 
 import difflib
-import re
 import uuid
 from dataclasses import dataclass
 from functools import lru_cache
@@ -25,9 +24,11 @@ from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tupl
 
 from pxr import Pcp
 
-from . import coerce, lookup
+from . import coerce, lookup, schema_properties
 from ._pxr import Kind, Sdf, Tf, Usd, UsdGeom
+from .pxr_errors import tf_error_reason
 from .timecode import resolve_time_code
+from .validation import ValidationIssue
 
 # Error types, from the vocabulary every backend's envelope uses.
 VALIDATION = "ValidationError"
@@ -43,9 +44,12 @@ UNKNOWN_PRIM_TYPE = "UnknownPrimType"
 INVALID_ATTRIBUTE = "InvalidAttribute"
 EDIT_FAILED = "EditFailed"
 INVALID_TIME_CODE = "InvalidTimeCode"
+# A relationship the prim does not have, or has authored as an attribute.
+RELATIONSHIP_NOT_EDITABLE = "RelationshipNotEditable"
 # Stage lifecycle (save, export, reload) codes, used by the headless session.
 INVALID_FILE_PATH = "InvalidFilePath"
 SAVE_FAILED = "SaveFailed"
+RELOAD_FAILED = "ReloadFailed"
 CODE_ERROR_TYPES: Dict[str, str] = {
     INVALID_PRIM_PATH: VALIDATION,
     UNKNOWN_PRIM_TYPE: VALIDATION,
@@ -54,7 +58,11 @@ CODE_ERROR_TYPES: Dict[str, str] = {
     INVALID_FILE_PATH: VALIDATION,
     EDIT_FAILED: ENGINE,
     SAVE_FAILED: ENGINE,
+    RELOAD_FAILED: ENGINE,
+    RELATIONSHIP_NOT_EDITABLE: UNSUPPORTED,
 }
+# Warning code for an attribute written for a schema the prim does not have.
+UNAPPLIED_SCHEMA_ATTRIBUTE = "UnappliedSchemaAttribute"
 
 # Prim metadata the tools set through the proper USD API rather than as an
 # attribute of the same name.
@@ -75,13 +83,11 @@ _EXTRA_PRIM_FIELDS = frozenset(
     }
 )
 
-_TF_ERROR = re.compile(
-    r"Error in '[^']*' at line \d+ in file .*? : '(?P<message>.*?)'(?=\s*(?:Error in|$))",
-    re.S,
-)
-
 _ROOT = Sdf.Path.absoluteRootPath
 _XFORMABLE_TYPE = Tf.Type.FindByName("UsdGeomXformable")
+# Shading nodes: their inputs:/outputs: are typed by the node (Sdr), not by a light API.
+_SHADING_NODE_TYPES = tuple(Tf.Type.FindByName(name) for name in ("UsdShadeShader", "UsdShadeNodeGraph"))
+_NODE_NAMESPACES = ("inputs:", "outputs:")
 
 
 class USDEditError(Exception):
@@ -117,22 +123,6 @@ class USDEditError(Exception):
             "error_type": self.error_type,
             "details": self.details or None,
         }
-
-
-def tf_error_reason(exc: BaseException) -> str:
-    """Return the human part of a pxr error, without C++ function and file names.
-
-    Args:
-        exc: Usually a ``Tf.ErrorException``; any exception is accepted.
-
-    Returns:
-        The messages pxr attached, joined with ``; ``, or the exception text.
-    """
-    text = str(exc)
-    messages = [match.group("message").strip() for match in _TF_ERROR.finditer(text)]
-    if messages:
-        return "; ".join(messages)
-    return text.strip() or type(exc).__name__
 
 
 def describe_value(value: Any) -> str:
@@ -414,6 +404,10 @@ class PlannedWrite:
             creates a transform op.
         append_to_op_order: Add the op to the prim's ``xformOpOrder`` so it
             takes effect.
+        custom: A created attribute is custom; False for one a schema
+            declares, authored as the schema would author it.
+        variability: Variability of a created attribute.
+        warning: A ``USDIssue`` the edit reports with its result.
     """
 
     name: str
@@ -424,6 +418,9 @@ class PlannedWrite:
     time: Optional[float] = None
     xform_op: Optional[Tuple[str, Any, str]] = None
     append_to_op_order: bool = False
+    custom: bool = True
+    variability: Any = Sdf.VariabilityVarying
+    warning: Optional[Dict[str, Any]] = None
 
     @property
     def label(self) -> str:
@@ -431,7 +428,11 @@ class PlannedWrite:
 
 
 class _Problem(Exception):
-    """One rejected entry, collected by the planner."""
+    """One rejected entry, collected by the planner, with the code of a refusal that has one."""
+
+    def __init__(self, reason: str, code: Optional[str] = None) -> None:
+        super().__init__(reason)
+        self.code = code
 
 
 def _plan_metadata(name: str, value: Any) -> PlannedWrite:
@@ -465,12 +466,32 @@ def _plan_relationship(name: str, value: Any) -> PlannedWrite:
 def _time_samples_note(attribute: Usd.Attribute) -> Optional[str]:
     """Describe an attribute's animation, or None when it has a default value only."""
     samples = attribute.GetTimeSamples()
+    clips = _clip_owner(attribute)
     if samples:
         span = f"{samples[0]:g}" if len(samples) == 1 else f"{samples[0]:g} to {samples[-1]:g}"
-        return f"{len(samples)} time sample(s) at {span}"
-    if attribute.ValueMightBeTimeVarying():
-        return "values from clips"
+        source = f" from value clips on {clips}" if clips else ""
+        return f"{len(samples)} time sample(s) at {span}{source}"
+    if clips or attribute.ValueMightBeTimeVarying():
+        return f"values from value clips on {clips}" if clips else "values from clips"
     return None
+
+
+def _clip_owner(attribute: Usd.Attribute, time: Optional[Usd.TimeCode] = None) -> Optional[str]:
+    """Return the prim whose value clips supply the attribute's value at ``time``, or None.
+
+    The attribute must resolve from clips at that time (with no time, its
+    strongest source of animated values); the prim is the attribute's own or
+    the nearest ancestor with clip sets authored.
+    """
+    info = attribute.GetResolveInfo() if time is None else attribute.GetResolveInfo(time)
+    if info.GetSource() != Usd.ResolveInfoSourceValueClips:
+        return None
+    prim = attribute.GetPrim()
+    while prim and not prim.IsPseudoRoot():
+        if Usd.ClipsAPI(prim).GetClips():
+            return str(prim.GetPath())
+        prim = prim.GetParent()
+    return str(attribute.GetPrim().GetPath())
 
 
 def _time_sample_layer(attribute: Usd.Attribute) -> Optional[Sdf.Layer]:
@@ -497,9 +518,13 @@ class _Planner:
         time_code: Optional[float],
         xformable: bool,
         edit_layer: Optional[Sdf.Layer] = None,
+        prim_path: Optional[Sdf.Path] = None,
+        shading_node: bool = False,
     ) -> None:
         self.prim = prim
         self.definition = definition
+        self.shading_node = shading_node
+        self.prim_path = prim_path if prim_path is not None else (prim.GetPath() if prim is not None else _ROOT)
         self.attributes = attributes
         self.time_code = time_code
         self.xformable = xformable
@@ -519,8 +544,11 @@ class _Planner:
             except coerce.ValueProblem as problem:
                 self.reject(name, str(problem))
 
-    def reject(self, name: Any, reason: str) -> None:
-        self.problems.append({"attribute": str(name), "reason": reason})
+    def reject(self, name: Any, reason: str, code: Optional[str] = None) -> None:
+        problem = {"attribute": str(name), "reason": reason}
+        if code is not None:
+            problem["code"] = code
+        self.problems.append(problem)
 
     def plan(self) -> List[PlannedWrite]:
         properties: List[PlannedWrite] = []
@@ -531,7 +559,7 @@ class _Planner:
             try:
                 write = self._plan_one(name, value)
             except (_Problem, coerce.ValueProblem) as problem:
-                self.reject(name, str(problem))
+                self.reject(name, str(problem), getattr(problem, "code", None))
                 continue
             (metadata if write.kind == "metadata" else properties).append(write)
         for write in properties:
@@ -565,7 +593,25 @@ class _Planner:
                 )
             if name in self.requested:
                 raise _Problem("a relationship, which attribute_types does not apply to")
+            layer = _attribute_spec_layer(relationship) if relationship else None
+            if layer is not None:
+                # The prim's own schema makes it a relationship, and pxr refuses the attribute spec.
+                owner = _declaring_schema(prim, name) if prim is not None else None
+                raise _Problem(_relationship_refusal(name, None, layer, owner), RELATIONSHIP_NOT_EDITABLE)
             return _plan_relationship(name, value)
+        if self.shading_node and name.startswith(_NODE_NAMESPACES):
+            declared = None  # a shader or node graph parameter, which no light schema types
+        else:
+            declared = schema_properties.lookup(name)
+        if declared is not None and declared.relationship:
+            if not attribute:
+                raise _Problem(_relationship_refusal(name, declared, None), RELATIONSHIP_NOT_EDITABLE)
+            if schema_properties.is_material_binding_name(name):
+                # Binding resolution reads it on every prim, and pxr refuses the attribute.
+                layer = _attribute_spec_layer(attribute)
+                raise _Problem(_relationship_refusal(name, declared, layer), RELATIONSHIP_NOT_EDITABLE)
+            # Otherwise only a schema this prim lacks makes it a relationship; pxr reads it as the
+            # attribute it is, so it stays editable.
         requested = self.requested.get(name)
         if attribute:
             return self._plan_existing(name, value, attribute, requested)
@@ -584,6 +630,8 @@ class _Planner:
         op = coerce.parse_xform_op_name(name)
         if op is not None:
             return self._plan_new_op(name, value, op, requested)
+        if declared is not None:
+            return self._plan_schema_attribute(name, value, declared, requested)
         type_name = requested or coerce.infer_type(value)
         if type_name is None:
             if value is None or isinstance(value, Mapping):
@@ -620,6 +668,13 @@ class _Planner:
                     "frame; pass time_code to write the sample at one time"
                 )
         else:
+            clips = _clip_owner(attribute, resolve_time_code(self.time_code))
+            if clips is not None:
+                raise _Problem(
+                    f"its value at time {self.time_code:g} comes from value clips (authored on {clips}); "
+                    "a time sample authored in a layer is stronger than every clip, so one sample written "
+                    "here would replace the whole clip animation"
+                )
             source = _time_sample_layer(attribute)
             if source is not None and self.edit_layer is not None and source != self.edit_layer:
                 raise _Problem(
@@ -646,6 +701,68 @@ class _Planner:
             if not self.explicit_op_order and name not in self.op_order:
                 write.append_to_op_order = True
         return write
+
+    def _plan_schema_attribute(
+        self,
+        name: str,
+        value: Any,
+        declared: schema_properties.SchemaProperty,
+        requested: Optional[Sdf.ValueTypeName],
+    ) -> PlannedWrite:
+        """Plan a new attribute that a schema the prim lacks declares: the schema's type, plus a warning."""
+        types = declared.type_names
+        listed = " or ".join(str(type_name) for type_name in types)
+        if requested is not None:
+            if requested not in types:
+                raise _Problem(
+                    f"declared as {listed} by {declared.declared_by()}; attribute_types cannot make it {requested}"
+                )
+            type_name = requested
+        elif len(types) == 1:
+            type_name = types[0]
+        else:
+            raise _Problem(
+                f"declared as {listed} by different schemas ({declared.declared_by(limit=6)}); name the one "
+                f'you mean with attribute_types, for example {{"{name}": "{types[0]}"}}'
+            )
+        declaration = declared.declaration_for(type_name)
+        write = self._plan_value(name, value, type_name, declaration.allowed_tokens, declaration.variability)
+        write.create = True
+        write.custom = False
+        write.variability = declaration.variability
+        write.warning = self._schema_warning(name, schema_properties.restricted_to(declared, type_name), type_name)
+        return write
+
+    def _schema_warning(
+        self, name: str, declared: schema_properties.SchemaProperty, type_name: Sdf.ValueTypeName
+    ) -> Optional[Dict[str, Any]]:
+        """The warning for an attribute written for schemas the prim lacks; ``declared`` holds those of its type.
+
+        None for a primvar a prim type declares: primvars are inherited, so a
+        descendant of that type reads it.
+        """
+        apis = declared.api_schemas
+        if apis:
+            needed = apis[0] if len(apis) == 1 else f"one of {', '.join(apis)}"
+            message = (
+                f"{name} is an attribute of {needed}, which {self.prim_path} does not have applied. It was "
+                f"written as {type_name}, the schema's type, but USD and simulators ignore it until "
+                f"{needed} is applied to the prim; simul has no tool that applies API schemas yet."
+            )
+        elif name.startswith("primvars:"):
+            return None
+        else:
+            message = (
+                f"{name} is an attribute of the prim type {declared.declared_by()}, not of {self.prim_path}'s "
+                f"type. It was written as {type_name}, the schema's type, but nothing reads it on this prim."
+            )
+        return ValidationIssue(
+            "warning",
+            UNAPPLIED_SCHEMA_ATTRIBUTE,
+            message,
+            prim_path=str(self.prim_path),
+            property_path=str(self.prim_path.AppendProperty(name)),
+        ).to_dict()
 
     def _plan_new_op(
         self,
@@ -708,6 +825,68 @@ class _Planner:
                 )
 
 
+def _declaring_schema(prim: Usd.Prim, name: str) -> Optional[str]:
+    """Name the schema of ``prim`` that declares property ``name``: its type or an applied API."""
+    registry = Usd.SchemaRegistry()
+    type_name = prim.GetTypeName()
+    definition = registry.FindConcretePrimDefinition(type_name) if type_name else None
+    if definition is not None and definition.GetPropertyDefinition(name):
+        return f"this prim's type, {type_name}"
+    for applied in prim.GetAppliedSchemas():
+        api, instance = Usd.SchemaRegistry.GetTypeNameAndInstance(applied)
+        api_definition = registry.FindAppliedAPIPrimDefinition(api)
+        if api_definition is None:
+            continue
+        names = api_definition.GetPropertyNames()
+        if instance:
+            names = [Usd.SchemaRegistry.MakeMultipleApplyNameInstance(template, instance) for template in names]
+        if name in names:
+            return f"its applied {applied}"
+    return None
+
+
+def _attribute_spec_layer(prop: Usd.Property) -> Optional[str]:
+    """The layer holding the strongest attribute spec for ``prop``, or None when no layer has one."""
+    for spec in prop.GetPropertyStack():
+        if isinstance(spec, Sdf.AttributeSpec):
+            return _layer_label(spec.layer)
+    return None
+
+
+def _relationship_refusal(
+    name: str,
+    declared: Optional[schema_properties.SchemaProperty],
+    authored_in: Optional[str],
+    owner: Optional[str] = None,
+) -> str:
+    """Why a relationship name is refused: these tools only retarget relationships a prim already has.
+
+    Args:
+        name: The property name.
+        declared: The registry's declarations; None when the prim's own
+            schema declares the relationship.
+        authored_in: The layer that authors it as an attribute, when one
+            does.
+        owner: Names the prim's own schema when ``declared`` is None.
+    """
+    if schema_properties.is_material_binding_name(name):
+        where = "UsdShade's material:binding namespace (MaterialBindingAPI)"
+    elif declared is not None and declared.declared_by():
+        where = declared.declared_by()
+    else:
+        where = owner or "this prim's schema"
+    if authored_in is not None:
+        return (
+            f"a relationship in USD (declared by {where}) that {authored_in} authors as an attribute on this "
+            f"prim, which pxr cannot read; relationships are not editable here, so correct it in {authored_in}"
+        )
+    return (
+        f"a relationship in USD (declared by {where}), not an attribute, and relationships are not editable "
+        "here: only one the prim already has can be retargeted. Writing it as an attribute would leave a "
+        "property pxr cannot read"
+    )
+
+
 def plan_writes(
     prim: Optional[Usd.Prim],
     definition: Optional[Usd.PrimDefinition],
@@ -718,6 +897,7 @@ def plan_writes(
     time_code: Optional[float] = None,
     xformable: bool = False,
     edit_layer: Optional[Sdf.Layer] = None,
+    shading_node: bool = False,
 ) -> List[PlannedWrite]:
     """Validate and type every requested change without writing anything.
 
@@ -725,9 +905,18 @@ def plan_writes(
     ``instanceable``, ``kind``); a property the prim already has (authored
     or defined by its schemas); a property the type being created defines;
     a new transform op (``xformOp:<type>[:<suffix>]``), typed by the op and
-    added to ``xformOpOrder``; or a new custom attribute typed by
-    ``attribute_types`` or inferred from the value. Other prim metadata keys
-    are refused, since writing them as attributes would silently do nothing.
+    added to ``xformOpOrder``; an attribute another schema declares (an API
+    schema the prim does not have, a multiple-apply instance such as
+    ``drive:angular:physics:stiffness``, or for a namespaced name another
+    prim type; see :func:`schema_properties.lookup`), typed by that schema
+    and reported with an ``UnappliedSchemaAttribute`` warning; or a new
+    custom attribute typed by ``attribute_types`` or inferred from the value.
+    Other prim metadata keys are refused, since writing them as attributes
+    would silently do nothing. So is a new name a schema declares a
+    relationship (``material:binding``, ``physics:body0``,
+    ``skel:skeleton``) unless the prim already has that relationship, and a
+    relationship pxr cannot read because a layer authors it as an attribute
+    (one the prim's own schema declares, or a ``material:binding``).
     Values are converted to the resolved type (see :mod:`simul.usd.coerce`).
 
     Args:
@@ -741,7 +930,11 @@ def plan_writes(
             writes defaults, and refuses attributes that are animated.
         xformable: The prim is (or will be) a UsdGeomXformable.
         edit_layer: The layer the writes go to; a time sample is refused
-            for an attribute whose animation a weaker layer holds.
+            for an attribute whose animation a weaker layer or value clips
+            hold.
+        shading_node: The prim is (or will be) a Shader or NodeGraph
+            (Material): its ``inputs:`` and ``outputs:`` are parameters
+            the node types, so no schema lookup types them.
 
     Returns:
         The planned writes: properties in request order, then metadata.
@@ -749,7 +942,9 @@ def plan_writes(
     Raises:
         USDEditError: ``ValidationError`` with code ``InvalidAttribute``
             listing every rejected entry in ``details.problems``, or with
-            code ``InvalidTimeCode``.
+            code ``InvalidTimeCode``; ``UnsupportedOperation`` with code
+            ``RelationshipNotEditable`` when every rejected entry is a
+            relationship the tools cannot author.
     """
     if time_code is not None:
         try:
@@ -761,14 +956,17 @@ def plan_writes(
                 INVALID_TIME_CODE, f"{exc}.", prim_path=str(prim_path), time_code=repr(time_code)
             ) from None
     attributes = attributes or {}
-    planner = _Planner(prim, definition, attributes, attribute_types or {}, time_code, xformable, edit_layer)
+    planner = _Planner(
+        prim, definition, attributes, attribute_types or {}, time_code, xformable, edit_layer, prim_path, shading_node
+    )
     writes = planner.plan()
     if planner.problems:
         problems = planner.problems
         count = len(attributes)
         listing = "; ".join(f"{p['attribute']!r}: {p['reason']}" for p in problems)
+        relationships_only = all(p.get("code") == RELATIONSHIP_NOT_EDITABLE for p in problems)
         raise USDEditError(
-            INVALID_ATTRIBUTE,
+            RELATIONSHIP_NOT_EDITABLE if relationships_only else INVALID_ATTRIBUTE,
             f"Rejected {len(problems)} of {count} attribute(s) on {prim_path}; nothing was changed. {listing}.",
             prim_path=str(prim_path),
             problems=problems,
@@ -802,7 +1000,7 @@ def _write_attribute(prim: Usd.Prim, write: PlannedWrite) -> None:
     else:
         attr = prim.GetAttribute(write.name)
         if not attr:
-            attr = prim.CreateAttribute(write.name, write.type_name, True)
+            attr = prim.CreateAttribute(write.name, write.type_name, write.custom, write.variability)
     if not attr or not attr.Set(write.value, time):
         raise _WriteFailure(write.name, "pxr rejected the value")
     if write.append_to_op_order and write.xform_op is None:
@@ -842,12 +1040,13 @@ def _apply_writes(prim: Usd.Prim, writes: Sequence[PlannedWrite]) -> None:
 
 
 def _summary(writes: Sequence[PlannedWrite]) -> Dict[str, Any]:
-    """The ``changed`` names and ``created_attributes`` types an edit reports."""
+    """The ``changed`` names, ``created_attributes`` types and ``warnings`` an edit reports."""
     changed = [write.label for write in writes]
     if any(write.append_to_op_order for write in writes) and "xformOpOrder" not in changed:
         changed.append("xformOpOrder")
     created = {write.name: str(write.type_name) for write in writes if write.create}
-    return {"changed": changed, "created_attributes": created}
+    warnings = [write.warning for write in writes if write.warning is not None]
+    return {"changed": changed, "created_attributes": created, "warnings": warnings}
 
 
 def _owner_spec(layer: Sdf.Layer, path: Sdf.Path) -> Sdf.PrimSpec:
@@ -975,6 +1174,11 @@ def _rolled_back(action: str, path: Sdf.Path, failure: _WriteFailure) -> USDEdit
 # ---------------------------------------------------------------------------
 
 
+def _is_shading_node(tf_type: Tf.Type) -> bool:
+    """Whether a prim type is a Shader or a NodeGraph (Material derives from NodeGraph)."""
+    return any(tf_type.IsA(node_type) for node_type in _SHADING_NODE_TYPES)
+
+
 def _check_creatable_under(stage: Usd.Stage, path: Sdf.Path) -> None:
     """Refuse a new prim beneath an instance or an inactive prim."""
     ancestor = path.GetParentPath()
@@ -1071,6 +1275,7 @@ def create_prim(
         time_code=time_code,
         xformable=Usd.SchemaRegistry.GetTypeFromName(prim_type).IsA(_XFORMABLE_TYPE),
         edit_layer=_edit_layer(stage),
+        shading_node=_is_shading_node(Usd.SchemaRegistry.GetTypeFromName(prim_type)),
     )
     journal = EditJournal(_edit_layer(stage), path)
     try:
@@ -1136,6 +1341,7 @@ def update_prim(
         time_code=time_code,
         xformable=prim.IsA(UsdGeom.Xformable),
         edit_layer=_edit_layer(stage),
+        shading_node=_is_shading_node(Usd.SchemaRegistry.GetTypeFromName(prim.GetTypeName())),
     )
     if writes:
         journal = EditJournal(_edit_layer(stage), path)
@@ -1298,6 +1504,8 @@ __all__ = [
     "INVALID_TIME_CODE",
     "NOT_FOUND",
     "REFUSED",
+    "RELATIONSHIP_NOT_EDITABLE",
+    "UNAPPLIED_SCHEMA_ATTRIBUTE",
     "SETTABLE_METADATA",
     "UNKNOWN_PRIM_TYPE",
     "UNSUPPORTED",

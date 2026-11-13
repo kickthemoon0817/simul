@@ -138,6 +138,7 @@ variable, so Blender must see the same `SIMUL_HOME` as the server (or set
 | `VIEWPORT__MAX_SIZE` | `2048` | Largest capture dimension |
 | `USD__ALLOWED_EXTENSIONS` | `[".usd",".usda",".usdc",".usdz"]` | Extensions the headless USD tools and `simul usd` commands open; load and validate share the list |
 | `USD__MAX_FILE_SIZE_MB` | `500` | Largest file they open; a bigger one fails with `FileTooLarge` |
+| `USD__VALIDATION_TIMEOUT_SECONDS` | `300` | Longest `validate_usd_file` may take when it checks a file in a separate process (a loaded stage holds an older copy of a file it uses); past it the call fails with `TimeoutError` |
 | `SECURITY__RELATIVE_PATH_BASE` | unset | Directory a relative tool path resolves against; unset uses the server's working directory ([File sandbox](#file-sandbox)) |
 
 `simul logs paths` prints the log locations the current settings resolve
@@ -384,9 +385,10 @@ outside the sandbox fails the call with `SandboxError`;
 `details.outside_sandbox` lists each offender's `kind`, its authored
 `asset_path`, the `location` it names, and the `layer` that names it, and
 `outside_count` gives the total. The kinds are `sublayer`, `reference`,
-`payload`, `clip` (a value clip or clip manifest), `asset` (a texture or
-other non-layer file), and `layer` when the post-composition check caught
-it. Only layers that pass are opened, so a refused file is never read.
+`payload`, `clip` (a value clip, clip manifest or clip template a clip set
+authors), `asset` (a texture, an `assetInfo` identifier or any other
+asset-valued attribute or metadata), and `layer` when the post-composition
+check caught it. Only layers that pass are opened, so a refused file is never read.
 After composition, the layers the stage uses by then are checked again as a
 backstop, judged afresh so a file swapped on disk between the two passes is
 caught. That check cannot see value clips: when a clip set authors a
@@ -404,6 +406,29 @@ anchors nowhere, such as `OmniPBR.mdl`, names no location and passes. A
 URL passes when its scheme is in `allowed_url_schemes`. To use a file whose
 references or textures live elsewhere, add that directory to
 `security.allowed_paths`.
+
+An Unreal content path is not a file, so it passes. Unreal's USD exporter
+writes each mesh's source material as
+`info:unreal:sourceAsset = @/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial@`,
+an object in the editor's content that Unreal's importer loads by name. A
+value passes this way only when all of these hold:
+
+- it is an asset value (kind `asset`), never a sublayer, reference,
+  payload or clip;
+- it sits under `/Engine`, `/Game` or `/Script` and ends in
+  `<Name>.<Name>`, where the suffix is no file extension;
+- nothing exists at that path on disk.
+
+`load_usd_file` lists each such path in `warnings` as `UnrealContentPath`,
+with the layer that names it. With the sandbox off nothing is checked, so
+nothing is listed. `validate_usd_file` reports pxr's
+`UnresolvableDependency` and `MissingSourceTypeInRegistry` about exactly
+those paths as warnings rather than errors, so an Unreal export inside the
+sandbox loads and validates. `@/Engine/x.usda@`, a relative path and another
+content root (a plugin's) are held to the sandbox like any other path. So is
+an `assetInfo` identifier, which in a copied export still names the folder
+Unreal wrote it to. Unreal's own USD import (`import_unreal_usd`) applies
+the same rule.
 
 The headless USD tools open a URL only through an asset resolver registered
 for its scheme. usd-core installs none, so `load_usd_file` refuses an
@@ -453,9 +478,12 @@ The headless USD per-prim queries (`get_prim_info`, `get_mesh_info`,
 `get_bounding_box`, `search_prims`) count only against that per-agent cap.
 They are local reads an agent issues once per prim while it inspects an
 asset, and the per-tool burst refused most of a prim-by-prim pass over a
-small robot. Every other tool, including `load_usd_file`,
-`validate_usd_file`, `summarize_scene` and the USD edit tools, spends from
-both buckets.
+small robot. `get_prim_subtree` spends from its own bucket for a first page
+only: each later page (a nonzero `offset`) counts only against the
+per-agent cap, since a walk over a large stage is one request in pages, and
+25 pages used to draw 15 refusals. Every other tool, including
+`load_usd_file`, `validate_usd_file`, `summarize_scene` and the USD edit
+tools, spends from both buckets.
 
 The defaults are meant to stop a runaway loop, not parallel work: one tool
 takes `burst_size` (10) calls at once and then `requests_per_minute` (60, one

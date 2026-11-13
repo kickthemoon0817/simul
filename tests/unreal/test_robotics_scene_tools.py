@@ -803,16 +803,52 @@ def test_a_rotated_instance_keeps_its_own_size(monkeypatch: pytest.MonkeyPatch) 
     assert by_index[1]["tilt_degrees"] == pytest.approx(14.0)
 
 
-def test_an_instanced_component_with_too_many_instances_counts_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_instanced_component_with_too_many_instances_is_listed_not_classified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-2 audit R2B-05: a component over the instance limit counted whole by its
+    bounds, so 1,500 scattered 30 cm cubes read as one 2,523 m2 floor among the real
+    ones. It is now listed apart, unclassified, and the warning says so."""
     monkeypatch.setattr(unreal_runtime, "ROBOTICS_MAX_INSTANCES", 3)
+    scattered = [((1000.0 * n, 700.0 * (n % 3), 100.0 * (n % 4)), (30.0, 30.0, 30.0), (0.0, 0.0, 0.0))
+                 for n in range(10)]
+    cubes = InstancedStaticMeshComponent(CUBE_MESH, scattered)
+    floor = FakeActor("Floor", [StaticMeshComponent(CUBE_MESH)], (2000, 2000, 10), (0, 0, -5))
+    actor = FakeActor("Scatter", [cubes])
+
+    result = _analyze(monkeypatch, FakeEditor([floor, actor]), analysis_types=["traversability", "graspability"])
+
+    assert [entry["name"] for entry in result["traversable_surfaces"]] == ["Floor"]
+    assert result["graspable_objects"] == []
+    assert result["skipped_instance_components_count"] == 1
+    (skipped,) = result["skipped_instance_components"]
+    assert skipped["component_path"] == LEVEL + "Scatter.InstancedStaticMeshComponent0"
+    assert skipped["instances"] == 10 and "instance_index" not in skipped
+    assert skipped["size"] == pytest.approx([9030, 1430, 330])  # the bounds of every cube
+    assert "more than 3 instances" in result["warning"] and "skipped_instance_components" in result["warning"]
+
+
+def test_an_actor_the_level_lists_twice_is_analyzed_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-2 audit R2B-09: after a USD import that replaced actors, Unreal's level
+    listing held each new actor twice, and the analysis counted 4 actors for 3."""
+    floor = FakeActor("Floor", [StaticMeshComponent(CUBE_MESH)], (1000, 1000, 10), (500, 500, 5))
+    prop = FakeActor("Prop", [StaticMeshComponent(CUBE_MESH)], (20, 20, 20), (0, 0, 10), mobility="MOVABLE")
+
+    result = _analyze(monkeypatch, FakeEditor([floor, prop, floor, prop]))
+
+    assert result["total_actors_analyzed"] == 2
+    assert [entry["name"] for entry in result["traversable_surfaces"]] == ["Floor"]
+    assert [entry["name"] for entry in result["graspable_objects"]] == ["Prop"]
+
+
+def test_an_analysis_without_oversized_instanced_components_has_no_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tiles = InstancedStaticMeshComponent(CUBE_MESH, _tiles())
-    actor = FakeActor("TileFloor", [tiles])
+    result = _analyze(monkeypatch, FakeEditor([FakeActor("TileFloor", [tiles])]), analysis_types=["traversability"])
 
-    surfaces = _analyze(monkeypatch, FakeEditor([actor]), analysis_types=["traversability"])["traversable_surfaces"]
-
-    assert len(surfaces) == 1
-    assert surfaces[0]["instances"] == 10 and "instance_index" not in surfaces[0]
-    assert surfaces[0]["size"] == pytest.approx([9200, 200, 10])  # the bounds of every tile
+    assert result["skipped_instance_components"] == [] and result["skipped_instance_components_count"] == 0
+    assert result["warning"] is None
 
 
 def test_later_pages_read_the_first_page_s_scan(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -108,7 +108,9 @@ class StageInfo(BaseModel):
         default_factory=list,
         description=(
             "Problems the stage loaded despite: missing sublayers, references or "
-            "payloads, unresolved reference prim paths"
+            "payloads, unresolved reference prim paths, and (with the sandbox on) "
+            "UnrealContentPath for each Unreal content path (/Engine/.../Name.Name in an "
+            "asset value) the sandbox let through as an editor object rather than a file"
         ),
     )
 
@@ -175,6 +177,13 @@ class PrimInfo(BaseModel):
     relationships: Dict[str, Any] = Field(
         default_factory=dict,
         description="Relationship name to {targets, authored}",
+    )
+    warnings: List[USDIssue] = Field(
+        default_factory=list,
+        description=(
+            "Properties pxr could not read (UnreadableProperty), such as a material:binding "
+            "or physics:body0 authored as an attribute; the rest of the prim is reported"
+        ),
     )
     metadata: Dict[str, Any] = Field(
         ...,
@@ -281,11 +290,22 @@ class MeshInfo(BaseModel):
     is_closed: Optional[bool] = Field(
         ..., description="Whether mesh is watertight; None when the mesh was not measured"
     )
+    consistently_oriented: Optional[bool] = Field(
+        None,
+        description=(
+            "For a closed mesh, whether the two faces sharing each edge run it in opposite "
+            "directions (no flipped face); None when the mesh is not closed"
+        ),
+    )
     surface_area: Optional[float] = Field(
         ..., description="Surface area in the mesh's own space (before transforms); None for invalid topology"
     )
     volume: Optional[float] = Field(
-        ..., description="Enclosed volume in the mesh's own space; None unless the mesh is closed"
+        ...,
+        description=(
+            "Enclosed volume in the mesh's own space; None unless the mesh is closed and "
+            "consistently oriented"
+        ),
     )
     bbox: Optional[BoundingBox] = Field(
         ..., description="Bounds of the points in the mesh's own space; None without points"
@@ -314,9 +334,19 @@ class MeshInfo(BaseModel):
     sampled_time_range: Optional[List[float]] = Field(
         None, description="[first, last] sample time of an unmeasured mesh's topology"
     )
-    note: Optional[str] = Field(None, description="Why the mesh was not measured")
+    note: Optional[str] = Field(
+        None, description="Why the mesh, or its volume, was not measured"
+    )
     time_code: Optional[float] = Field(
         None, description="Time code read; None for the default time"
+    )
+    warnings: List[USDIssue] = Field(
+        default_factory=list,
+        description=(
+            "Material bindings pxr could not resolve (UnreadableProperty), such as a "
+            "material:binding authored as an attribute; the nearest binding pxr can "
+            "read is reported instead"
+        ),
     )
 
 
@@ -354,6 +384,13 @@ class PrimActionResponse(BaseModel):
     )
     time_code: Optional[float] = Field(
         None, description="Time code the values were written at; null for defaults"
+    )
+    warnings: Optional[List[USDIssue]] = Field(
+        None,
+        description=(
+            "What the edit wrote but USD may not read: UnappliedSchemaAttribute for an attribute "
+            "of an API schema the prim does not have applied (or of another prim type)"
+        ),
     )
 
 
@@ -459,7 +496,8 @@ class PrimSubtreeResponse(BaseModel):
         ...,
         description=(
             "path, name, type, depth, child_count, api_schemas (kind, is_instance, "
-            "is_instance_proxy when set; attributes and relationships when asked)"
+            "is_instance_proxy when set; attributes and relationships when asked, and "
+            "warnings for a relationship pxr cannot read)"
         ),
     )
     count: int = Field(..., description="Prims in this page")
@@ -616,6 +654,13 @@ class StageExportResponse(BaseModel):
     message: str = Field(..., description="Status message")
 
 
+class FileNotReread(BaseModel):
+    """A changed file a reload could not reread."""
+
+    path: str = Field(..., description="Absolute path of the file")
+    reason: str = Field(..., description="Why pxr could not reread it")
+
+
 class StageReloadResponse(BaseModel):
     """Result of rereading a stage from disk."""
 
@@ -624,6 +669,13 @@ class StageReloadResponse(BaseModel):
     file_path: str = Field(..., description="The stage's root file")
     discarded_unsaved: bool = Field(..., description="Unsaved edits were dropped")
     reloaded_files: List[str] = Field(..., description="Files reread from disk")
+    failed_files: List[FileNotReread] = Field(
+        default_factory=list,
+        description=(
+            "Changed sublayers and referenced files pxr cannot parse now; each keeps its "
+            "previous content and stays changed on disk"
+        ),
+    )
     message: str = Field(..., description="Status message")
 
 
@@ -663,6 +715,7 @@ __all__ = [
     "StageSaveRequest",
     "StageExportRequest",
     "StageDiscardRequest",
+    "FileNotReread",
     "FileWritten",
     "StageStatus",
     "StageListResponse",
