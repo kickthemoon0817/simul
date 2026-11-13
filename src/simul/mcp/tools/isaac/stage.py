@@ -218,11 +218,33 @@ REFERENCE_ASSET_CORE = """\
 
     def _code_nodes_refusal(found):
         return _failure(
-            "The asset contains node(s) that run Python given as data ("
+            "The asset contains prim(s) that run Python: OmniGraph nodes that run code given "
+            "as data, or Python Scripting Components (OmniScriptingAPI / omni:scripting:scripts, "
+            "which Kit loads without asking once scripts are allowed) ("
             + ", ".join(found[:5]) + "). Script execution is disabled by "
             "security.allow_script_execution; nothing was changed.",
             "ScriptExecutionDisabled", None, script_capable_prims=found,
         )
+
+    def _unloaded_payloads_refusal(found):
+        return _failure(
+            "The asset contains payload(s) that are not loaded (" + ", ".join(found[:5])
+            + "), so what they would bring in, code included, cannot be checked. Script "
+            "execution is disabled by security.allow_script_execution; nothing was changed.",
+            "ScriptExecutionDisabled", None, unloaded_payload_prims=found,
+        )
+
+    def _guard_refusal(prim, guard):
+        # None when the referenced content may stay.
+        if not guard:
+            return None
+        found = _script_capable_prims_under(prim)
+        if found:
+            return _code_nodes_refusal(found)
+        unloaded = _unloaded_payload_prims_under(prim)
+        if unloaded:
+            return _unloaded_payloads_refusal(unloaded)
+        return None
 
     def _import_asset(stage, asset_path, requested, asset_prim_path, correct_units, guard):
         layer = Sdf.Layer.FindOrOpen(asset_path)
@@ -248,10 +270,10 @@ REFERENCE_ASSET_CORE = """\
         if _add_reference(holder, asset_path, root_path) != "added":
             stage.RemovePrim(created)
             return _composed_nothing(asset_path, root_path, root_name)
-        found = _script_capable_prims_under(holder) if guard else []
-        if found:
+        refusal = _guard_refusal(holder, guard)
+        if refusal is not None:
             stage.RemovePrim(created)
-            return _code_nodes_refusal(found)
+            return refusal
         result = {
             "referenced_prim": root_path or "/" + root_name,
             "used_default_prim": root_path is None,
@@ -291,10 +313,10 @@ REFERENCE_ASSET_CORE = """\
         if status == "nothing":
             _roll_back()
             return _composed_nothing(asset_path, root_path, root_name)
-        found = _script_capable_prims_under(prim) if guard else []
-        if found:
+        refusal = _guard_refusal(prim, guard)
+        if refusal is not None:
             _roll_back()
-            return _code_nodes_refusal(found)
+            return refusal
         units = _metrics(stage, layer)
         declined = None
         if _needs_correction(units) and correct_units:
@@ -639,7 +661,8 @@ class StageAssetMixin:
             "xformOp:rotateX:unitsResolve and the asset is referenced on its child "
             "<target_path>/<asset root name>, reported as asset_root_path "
             "(correct_units=false only reports it). With security.allow_script_execution "
-            "off, an asset containing code-running OmniGraph nodes is refused. "
+            "off, an asset containing code-running OmniGraph nodes or Python Scripting "
+            "Components (OmniScriptingAPI), or payloads that are not loaded, is refused. "
             "OBJ/FBX/glTF need converting to USD first. "
             "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
@@ -743,7 +766,8 @@ class StageAssetMixin:
             "ops on the prim only when it has no transform ops of its own (otherwise use "
             "import_isaac_asset, which wraps the reference). With "
             "security.allow_script_execution off, an asset containing code-running OmniGraph "
-            "nodes is refused. "
+            "nodes or Python Scripting Components (OmniScriptingAPI), or payloads that are not "
+            "loaded, is refused. "
             "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
         read_only=False,

@@ -358,13 +358,18 @@ DUPLICATE_PRIM_CORE = """\
         if refusal is not None:
             return refusal
         if script_guard:
+            # A copy of a Python Scripting Component is a new script instance
+            # Kit starts without asking, as is a copy of a code node.
             nodes = [
-                {"path": path, "node_type": _node_type_of(stage.GetPrimAtPath(path)) or ""}
+                {
+                    "path": path,
+                    "node_type": _node_type_of(stage.GetPrimAtPath(path)) or SCRIPTING_API_SCHEMA,
+                }
                 for path in _script_capable_prims_under(src)
             ]
             if nodes:
                 return _script_guard_error(
-                    "Refusing to duplicate " + prim_path + ": it holds OmniGraph nodes that run code ("
+                    "Refusing to duplicate " + prim_path + ": it holds prims that run code ("
                     + ", ".join(node["path"] + " " + node["node_type"] for node in nodes) + ").",
                     nodes=nodes,
                 )
@@ -960,7 +965,8 @@ class PrimEditMixin:
             "default (static) value; the reply warns when time samples hide it. With "
             "script execution disabled, writes that would plant code are refused: "
             "code-carrying attributes (inputs:script*, inputs:codeStr, ...), a node:type "
-            "that runs code, and any attribute of such a node."
+            "that runs code, any attribute of such a node, and the Python Scripting "
+            "Component's omni:scripting:* attributes."
         ),
         read_only=False,
         destructive=True,
@@ -1093,7 +1099,7 @@ class PrimEditMixin:
             "layer is copied as its flattened composed result (method='flattened_copy'), "
             "with instanceable prims inside kept instanced. Instance proxies are refused. "
             "With script execution disabled, a subtree holding OmniGraph nodes that run "
-            "code is refused."
+            "code or Python Scripting Components (OmniScriptingAPI) is refused."
         ),
         read_only=False,
     )

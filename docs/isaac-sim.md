@@ -245,6 +245,16 @@ local users and processes are**.
   framed or raw, before anything runs, compares it in constant time, and
   rejects everything when auth is required but no token is configured. A
   client without the token gets `AuthenticationError`.
+- **Auth only tightens.** The auth settings live in Carb, which any code in
+  Kit can write, and `set(path, dict)` replaces a whole subtree. The bridge
+  therefore latches its auth state. The first time auth is required, at
+  startup or on any later request, it stays required for the life of the
+  extension. The first token seen while it is required is the only one
+  accepted. A token python_server generates after the bridge started is
+  still picked up. A later write that clears `require_auth` or swaps the
+  token changes nothing; restart the extension to change auth deliberately.
+  Separately, `set_isaac_carb_settings` refuses any write that reaches the
+  transport namespaces, ancestors such as `/exts` and `/` included.
 - **The bridge's own token.** `--/exts/khemoo.simul/auth_token=<token>`
   (with `ISAAC_SIM__SOCKET_AUTH_TOKEN=<token>` for the server) protects the
   bridge on its own, for example on 5.1. There the VS Code socket on 8226
@@ -256,8 +266,16 @@ local users and processes are**.
   bridge runs as container root while the host user connects; there the
   discovery directory's mode and the token are the boundary.
 - **Tokens stay out of results.** `get_isaac_carb_settings` reads any
-  `auth_token` key back as `***`, the launch output redacts an `--auth-token`
-  value, and the token never travels inside an action's payload.
+  `auth_token` key back as `***`. `get_isaac_logs` redacts the token that
+  6.0.1's python_server logs at Info level, before its `search` filter runs,
+  so a search cannot probe it either. The launch output redacts an
+  `--auth-token` value, and the token never travels inside an action's
+  payload.
+- **Raw-code path.** The bridge also accepts raw Python on its port, for
+  stock-socket clients. A python_server JSON envelope sent there is refused
+  with `UnsupportedProtocol`, rather than run as a dict literal that does
+  nothing and has no timeout. A client whose socket port points at the
+  bridge then detects the raw-source flavour.
 - **Not a boundary.** `allow_unsafe_execution=false` on the bridge (see
   above). The control for agent-authored code is
   `SECURITY__ALLOW_SCRIPT_EXECUTION=false`.

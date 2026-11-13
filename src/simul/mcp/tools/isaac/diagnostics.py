@@ -410,6 +410,38 @@ class DiagnosticsMixin:
                         "belong to another Kit process."
                     )
 
+            # Transport tokens stay out of the result. Isaac Sim 6.0.1's
+            # python_server logs "Python server authentication token: <token>"
+            # at Info level when it generates one. Redaction runs before the
+            # search filter, so a search cannot probe the token either.
+            secrets = []
+            try:
+                import carb.settings
+                _settings = carb.settings.get_settings()
+                for _key in (
+                    "/exts/isaacsim.code_editor.python_server/auth_token",
+                    "/exts/khemoo.simul/auth_token",
+                ):
+                    _value = _settings.get(_key)
+                    if _value is not None and not isinstance(_value, bool) and len(str(_value).strip()) >= 4:
+                        secrets.append(str(_value).strip())
+            except Exception:
+                pass
+            token_pattern = re.compile(
+                r'((?:authentication|auth)[ _-]?token["\\']?\\s*[:=]\\s*["\\']?)[^\\s"\\',]+',
+                re.IGNORECASE,
+            )
+            redacted = [0]
+
+            def _redact(text):
+                original = text
+                for secret in secrets:
+                    text = text.replace(secret, "***")
+                text = token_pattern.sub(lambda match: match.group(1) + "***", text)
+                if text != original:
+                    redacted[0] += 1
+                return text
+
             if not log_path:
                 print(json.dumps({{"error": "No Kit log file found"}}))
             else:
@@ -439,7 +471,7 @@ class DiagnosticsMixin:
                         if raw_level == "warning":
                             raw_level = "warn"
                         source = m.group(2)
-                        message = m.group(3).strip()
+                        message = _redact(m.group(3).strip())
 
                         if raw_level in counts:
                             counts[raw_level] += 1
@@ -479,6 +511,8 @@ class DiagnosticsMixin:
                 }}
                 if source_warning:
                     payload["warning"] = source_warning
+                if redacted[0]:
+                    payload["redacted_lines"] = redacted[0]
                 print(json.dumps(payload))
         """)
         return await self._execute_json_script(script)
