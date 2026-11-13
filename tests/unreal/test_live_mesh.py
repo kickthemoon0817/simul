@@ -81,6 +81,24 @@ del _spawn
 """
 
 
+# Cuts a mesh in place the way a Blueprint or a Python GeometryScript call does,
+# outside simul, and reports the mesh's and the actor's x extent.
+_DIRECT_CUT = """
+import unreal, json
+def _cut(path):
+    actor = unreal.find_object(None, path)
+    mesh = actor.dynamic_mesh_component.get_dynamic_mesh()
+    frame = unreal.Transform()
+    frame.rotation = unreal.MathLibrary.make_rot_from_z(unreal.Vector(1, 0, 0)).quaternion()
+    unreal.GeometryScript_MeshBooleans.apply_mesh_plane_cut(mesh, frame, unreal.GeometryScriptMeshPlaneCutOptions())
+    origin, extent = actor.get_actor_bounds(False)
+    box = unreal.GeometryScript_MeshQueries.get_mesh_bounding_box(mesh)
+    return {"mesh_x_max": box.max.x, "actor_x_max": origin.x + extent.x - actor.get_actor_location().x}
+print(json.dumps(_cut(%r)))
+del _cut
+"""
+
+
 async def _state(client: UnrealRuntimeSession, path: str) -> Dict[str, Any]:
     return await client._execute_json_script(_STATE % path)
 
@@ -267,6 +285,44 @@ def test_mesh_operations_work_where_the_actors_are() -> None:
             top = await _generate(client, made, "box")
             raised = await client.edit_mesh_topology(top, "extrude_faces", face_selection="normal:0,0,1", distance=25)
             assert raised["faces_affected"] == 2 and raised["result_volume"] == pytest.approx(1_250_000), raised
+        finally:
+            await client._execute_json_script(_DESTROY % made)
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_mesh_restored_by_undo_follows_edits_outside_simul_after_a_touch() -> None:
+    """Undo left the component deaf to its restored mesh: a direct cut kept the old bounds (#337 review)."""
+
+    async def run() -> None:
+        client = _session()
+        made: List[str] = []
+        try:
+            box = await _generate(client, made, "box")
+            assert (await client.remesh_mesh(box, target_edge_length=20.0)).get("success") is not False
+            await client._execute_json_script(_UNDO)
+            # Any mesh tool touching the actor binds the restored mesh again.
+            assert (await client.validate_mesh(box)).get("success") is not False
+            cut = await client._execute_json_script(_DIRECT_CUT % box)
+            assert cut["mesh_x_max"] == pytest.approx(0.0, abs=0.01)
+            assert cut["actor_x_max"] == pytest.approx(0.0, abs=0.01)
+        finally:
+            await client._execute_json_script(_DESTROY % made)
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_result_over_the_cap_is_refused_live() -> None:
+    async def run() -> None:
+        client = _session()
+        made: List[str] = []
+        try:
+            ball = await _generate(client, made, "sphere", segments=256)
+            subdivided = await client.subdivide_mesh(ball, level=3, scheme="uniform")
+            assert (subdivided["error_type"], subdivided["details"]["code"]) == ("ValidationError", "RESULT_TOO_LARGE")
+            assert (await _state(client, ball))["triangles"] == 2 * 256 * 254
         finally:
             await client._execute_json_script(_DESTROY % made)
             await client.close()

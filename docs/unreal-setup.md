@@ -20,8 +20,15 @@ different, and turns one back on when the project disabled it.
 Unreal loads plugins at startup. When setup enables one in a project whose
 editor is already running (`--no-launch`), restart the editor before using the
 tools that need it; for GeometryScripting setup says so in
-`patched.uproject.warnings`. Like RemoteControl, GeometryScripting has runtime
-modules, so a packaged build of the project includes them.
+`patched.uproject.warnings` (not when setup launches the editor itself, which
+loads it).
+
+The GeometryScripting entry setup adds carries `"TargetAllowList": ["Editor"]`:
+the mesh tools run in the editor only, so a packaged game's plugin set stays as
+it was, and a Blueprint-only project still packages without a C++ build. A
+project whose game uses Geometry Script at runtime removes that line (or enables
+the plugin itself before running setup: setup leaves an existing entry's targets
+alone and only turns it on).
 
 ## What gets written into `Config/DefaultRemoteControl.ini`
 

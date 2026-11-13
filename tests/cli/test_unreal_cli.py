@@ -307,8 +307,23 @@ def test_setup_enables_geometry_scripting_and_says_so(tmp_path: Path, monkeypatc
     assert "GeometryScripting" in payload["patched"]["uproject"]["added"]
     (warning,) = payload["patched"]["uproject"]["warnings"]
     assert "mesh tools" in warning and "restart" in warning
-    plugins = {p["Name"]: p["Enabled"] for p in json.loads(uproject.read_text())["Plugins"]}
-    assert plugins["GeometryScripting"] is True
+    plugins = {p["Name"]: p for p in json.loads(uproject.read_text())["Plugins"]}
+    assert plugins["GeometryScripting"]["Enabled"] is True
+    # Editor only: a packaged game's plugin set stays as it was.
+    assert plugins["GeometryScripting"]["TargetAllowList"] == ["Editor"]
+
+
+def test_setup_that_launches_the_editor_asks_for_no_restart(tmp_path: Path, monkeypatch) -> None:
+    """The editor setup starts loads the plugin it just enabled, so the restart warning would mislead."""
+    uproject = _write_uproject(tmp_path)
+    _stub_launch(monkeypatch, "/opt/UE/UnrealEditor", {})
+
+    result = runner.invoke(app, ["--json", "unreal", "setup", str(uproject), "--yes"])
+
+    payload = json.loads(result.stdout)
+    assert payload["launched"] is True
+    assert "GeometryScripting" in payload["patched"]["uproject"]["added"]
+    assert payload["patched"]["uproject"]["warnings"] == []
 
 
 def test_setup_payload_engine_ini_is_none_when_no_bind(
@@ -1274,3 +1289,35 @@ def test_setup_closes_its_polling_session(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(app, ["--json", "unreal", "setup", str(uproject), "--no-launch", "--yes"])
 
     assert stub.closed is True
+
+
+# ---------------------------------------------------------------------------
+# simul unreal search
+# ---------------------------------------------------------------------------
+
+
+def test_search_shows_each_class_and_how_to_get_the_next_page(monkeypatch) -> None:
+    """The table read a "class" key the payload never had, so every row said "?"."""
+    calls = []
+
+    class _SearchStub(_ClosingStub):
+        async def search_assets(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "assets": [{"path": "/Engine/BasicShapes/Cube.Cube", "class_name": "StaticMesh"}],
+                "count": 1,
+                "total": 3,
+                "next_offset": 1,
+            }
+
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: _SearchStub())
+    monkeypatch.setattr(unreal_cli, "is_json_mode", lambda: False)
+
+    result = runner.invoke(app, ["unreal", "search", "Cube", "--class", "StaticMesh", "--limit", "1"])
+
+    assert result.exit_code == 0, result.output
+    assert "StaticMesh" in result.output and "(1 of 3)" in result.output
+    assert "--offset 1" in result.output
+    assert calls == [{
+        "query": "Cube", "class_names": ["StaticMesh"], "package_paths": None, "max_results": 1, "offset": 0,
+    }]

@@ -11,6 +11,7 @@ import pytest
 
 from simul.adapters import unreal_setup
 from simul.adapters.unreal_setup import (
+    GEOMETRY_SCRIPTING_RESTART_WARNING,
     HEADLESS_FLAGS,
     HTTP_LISTENERS_SECTION,
     REMOTE_CONTROL_SECTION,
@@ -43,8 +44,11 @@ def test_patch_uproject_adds_missing_plugins(tmp_path: Path) -> None:
     assert names["RemoteControl"]["Enabled"] is True
     assert names["PythonScriptPlugin"]["Enabled"] is True
     assert names["GeometryScripting"]["Enabled"] is True
+    # The mesh tools run in the editor; a packaged game gets no GeometryScripting.
+    assert names["GeometryScripting"]["TargetAllowList"] == ["Editor"]
+    assert "TargetAllowList" not in names["RemoteControl"]
     # Setup says why it enabled GeometryScripting, and that a running editor needs a restart.
-    assert len(result.warnings) == 1
+    assert result.warnings == [GEOMETRY_SCRIPTING_RESTART_WARNING]
     assert "mesh tools" in result.warnings[0] and "restart" in result.warnings[0]
 
 
@@ -89,7 +93,9 @@ def test_patch_uproject_enables_a_disabled_geometry_scripting(tmp_path: Path) ->
     assert result.updated == ["GeometryScripting"]
     assert "GeometryScripting" in result.warnings[0]
     data = json.loads(uproject.read_text())
-    assert {p["Name"]: p["Enabled"] for p in data["Plugins"]}["GeometryScripting"] is True
+    entry = {p["Name"]: p for p in data["Plugins"]}["GeometryScripting"]
+    # The project's own entry keeps its targets: setup only turns it on.
+    assert entry == {"Name": "GeometryScripting", "Enabled": True}
 
 
 def test_patch_uproject_noop_when_already_configured(tmp_path: Path) -> None:

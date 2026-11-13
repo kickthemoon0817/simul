@@ -25,6 +25,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from simul.adapters.unreal_setup import (
+    GEOMETRY_SCRIPTING_RESTART_WARNING,
     LauncherNotFound,
     ensure_remote_control_config,
     is_loopback_bind,
@@ -379,35 +380,36 @@ def map(
 def list_actors(
     actor_class: Optional[str] = typer.Option(None, "--class", "-c", help="Filter by actor class"),
     tag: Optional[str] = typer.Option(None, "--tag", help="Filter by actor tag"),
-    limit: int = typer.Option(200, "--limit", "-n", help="Max actors to return"),
+    limit: int = typer.Option(200, "--limit", "-n", help="Max actors in the page"),
+    offset: int = typer.Option(0, "--offset", help="Matching actors to skip (the previous page's next_offset)"),
+    label: Optional[str] = typer.Option(None, "--label", help="Keep actors whose label contains this text"),
+    subclasses: bool = typer.Option(False, "--subclasses", help="Also match classes derived from --class"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """List actors in the current level."""
+    """List actors in the current level, one page at a time."""
     session = _session(host, port)
     result = _run(session.list_actors(
         class_filter=actor_class,
         tag_filter=tag,
         max_results=limit,
+        offset=offset,
+        label_filter=label,
+        include_subclasses=subclasses,
     ), session)
     if is_json_mode():
         emit(result)
         return
     actors = result.get("actors", [])
-    table = Table(title=f"Actors ({len(actors)})")
+    table = Table(title=f"Actors ({len(actors)} of {result.get('total', len(actors))} from {offset})")
     table.add_column("Path", style="cyan")
     table.add_column("Class")
     table.add_column("Label")
     for a in actors:
-        if isinstance(a, dict):
-            table.add_row(
-                a.get("path", "?"),
-                a.get("class", "?"),
-                a.get("label", ""),
-            )
-        else:
-            table.add_row(str(a), "", "")
+        table.add_row(a.get("path", "?"), a.get("class_name", "?"), a.get("name", ""))
     console.print(table)
+    if result.get("hint"):
+        console.print(result["hint"])
 
 
 # ---------------------------------------------------------------------------
@@ -549,34 +551,43 @@ def set_property(
 # ---------------------------------------------------------------------------
 @app.command()
 def search(
-    query: str = typer.Argument(..., help="Search query (name or class)"),
-    search_class: Optional[str] = typer.Option(None, "--class", "-c", help="Filter by asset class"),
-    package_path: Optional[str] = typer.Option(None, "--package", help="Filter by package path"),
-    limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
+    query: str = typer.Argument(..., help="Part of the asset name to match, ignoring case"),
+    search_class: Optional[str] = typer.Option(
+        None, "--class", "-c", help="Filter by asset class: a name (StaticMesh) or class path"
+    ),
+    package_path: Optional[str] = typer.Option(
+        None, "--package", help="Filter by content folder, subfolders included"
+    ),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max results (1-1000)"),
+    offset: int = typer.Option(0, "--offset", help="Matches to skip, for the next page"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Search the Unreal Asset Registry."""
+    """Search the Unreal Asset Registry (every mounted content root unless --package narrows it)."""
     session = _session(host, port)
     result = _run(session.search_assets(
         query=query,
         class_names=[search_class] if search_class else None,
         package_paths=[package_path] if package_path else None,
         max_results=limit,
+        offset=offset,
     ), session)
     if is_json_mode():
         emit(result)
         return
     assets = result.get("assets", [])
-    table = Table(title=f"Assets matching '{query}' ({len(assets)})")
+    total = result.get("total", len(assets))
+    table = Table(title=f"Assets matching '{query}' ({len(assets)} of {total})")
     table.add_column("Path", style="cyan")
     table.add_column("Class")
     for a in assets:
         if isinstance(a, dict):
-            table.add_row(a.get("path", "?"), a.get("class", "?"))
+            table.add_row(a.get("path", "?"), a.get("class_name", "?"))
         else:
             table.add_row(str(a), "")
     console.print(table)
+    if result.get("next_offset") is not None:
+        console.print(f"More matches: --offset {result['next_offset']}")
 
 
 # ---------------------------------------------------------------------------
@@ -787,14 +798,24 @@ def list_materials(
 def scene_graph(
     root: Optional[str] = typer.Option(None, "--root", "-r", help="Root actor path"),
     depth: int = typer.Option(3, "--depth", "-d", help="Max traversal depth"),
+    components: bool = typer.Option(False, "--components", help="Include each actor's components"),
+    actor_class: Optional[str] = typer.Option(None, "--class", "-c", help="Keep actors of this class"),
+    subclasses: bool = typer.Option(False, "--subclasses", help="Also match classes derived from --class"),
+    offset: int = typer.Option(0, "--offset", help="Root children to skip (the previous page's next_offset)"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max root children in the page"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Query the Unreal scene graph hierarchy."""
+    """Read the level's attachment hierarchy, one page of the root's children at a time."""
     session = _session(host, port)
     result = _run(session.query_scene_graph(
         root_path=root,
         max_depth=depth,
+        include_components=components,
+        class_filter=actor_class,
+        include_subclasses=subclasses,
+        offset=offset,
+        max_results=limit,
     ), session)
     if is_json_mode():
         emit(result)
@@ -1182,13 +1203,20 @@ def setup(
         console.print(f"[red]config patch failed: {exc}[/red]")
         raise typer.Exit(1)
 
+    # An editor setup launches itself loads the plugins it just enabled; only one
+    # already running needs the restart.
+    uproject_warnings = [
+        warning
+        for warning in patch.uproject.warnings
+        if not (launch and warning == GEOMETRY_SCRIPTING_RESTART_WARNING)
+    ]
     if not is_json_mode():
         console.print(patch.uproject.summary())
         console.print(patch.ini.summary())
         if patch.engine_ini is not None and patch.engine_ini.changed:
             console.print(patch.engine_ini.summary())
         for warning in (
-            patch.uproject.warnings
+            uproject_warnings
             + patch.ini.warnings
             + (patch.engine_ini.warnings if patch.engine_ini else [])
         ):
@@ -1240,7 +1268,7 @@ def setup(
                 "changed": patch.uproject.changed,
                 "added": patch.uproject.added,
                 "updated": patch.uproject.updated,
-                "warnings": patch.uproject.warnings,
+                "warnings": uproject_warnings,
             },
             "ini": {
                 "changed": patch.ini.changed,

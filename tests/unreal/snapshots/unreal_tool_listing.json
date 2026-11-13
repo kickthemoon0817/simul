@@ -334,25 +334,40 @@
   {
    "name": "list_unreal_actors",
    "title": "List Unreal Actors",
-   "description": "List actors in the current Unreal Engine level with optional class and tag filters.",
+   "description": "List the current level's actors, one page at a time, with world transforms, tags and attachment (parent, children). Filter by class (optionally with subclasses), tag and label. total counts every match; a page stops at max_results or the response budget, and next_offset is where the next one starts.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "class_filter": {
       "default": "",
-      "description": "Filter by UClass name (empty string = no filter).",
+      "description": "Keep actors whose class has this name (StaticMeshActor, BP_Door_C) or path (/Script/Engine.StaticMeshActor); empty keeps every class.",
       "type": "string"
      },
      "tag_filter": {
       "default": "",
-      "description": "Filter by actor tag (empty string = no filter).",
+      "description": "Keep actors with this actor tag, ignoring case (empty string = no filter).",
       "type": "string"
      },
      "max_results": {
       "default": 200,
-      "description": "Maximum number of actors to return.",
+      "description": "Most actors in the page, 1 to 5000.",
       "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Matching actors to skip: the previous page's next_offset.",
+      "type": "integer"
+     },
+     "label_filter": {
+      "default": "",
+      "description": "Keep actors whose label contains this text, ignoring case (empty = no filter).",
+      "type": "string"
+     },
+     "include_subclasses": {
+      "default": false,
+      "description": "Also keep actors whose class derives from class_filter's: Light keeps PointLight, SpotLight and Blueprints derived from them.",
+      "type": "boolean"
      }
     }
    },
@@ -375,7 +390,7 @@
   {
    "name": "get_unreal_actor_info",
    "title": "Get Unreal Actor Info",
-   "description": "Get detailed information about a specific actor including transform, components, and tags. The path must name a live actor of the level open in the editor; a deleted actor, or one of a map that is not open, is not found, and no map is loaded to look for it.",
+   "description": "Get detailed information about a specific actor including transform, components, tags and attachment (parent and children). The path must name a live actor of the level open in the editor; a deleted actor, or one of a map that is not open, is not found, and no map is loaded to look for it.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -406,26 +421,74 @@
    }
   },
   {
+   "name": "list_unreal_actor_components",
+   "title": "List Unreal Actor Components",
+   "description": "List an actor's components, one page at a time: class, root and editor-only flags, and for scene components the component they are attached to, world location, mobility and visibility; primitive components add world bounds (center, half-size, sphere radius).",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "actor_path": {
+      "description": "Full object path of the actor.",
+      "type": "string"
+     },
+     "class_filter": {
+      "default": "",
+      "description": "Keep components whose class has this name or path or derives from it (PrimitiveComponent keeps meshes, shapes and sprites); empty keeps all.",
+      "type": "string"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Components to skip: the previous page's next_offset.",
+      "type": "integer"
+     },
+     "max_results": {
+      "default": 200,
+      "description": "Most components in the page, 1 to 5000.",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "actor_path"
+    ]
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": true,
+    "destructiveHint": null,
+    "idempotentHint": true,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
    "name": "search_unreal_assets",
    "title": "Search Unreal Assets",
-   "description": "Search the Unreal Asset Registry by name, class, or package path.",
+   "description": "Search the Unreal Asset Registry, loading nothing: every mounted content root (/Game, /Engine, plugins) unless package_paths narrows it, subfolders included. Matches part of the asset name (ignoring case), sorted by path; page with offset (total counts every match). Each asset carries the registry metadata Unreal records, such as Triangles, LODs, NaniteEnabled and CollisionPrims.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "query": {
       "default": "",
-      "description": "Search query string.",
+      "description": "Part of the asset name to match, ignoring case; empty matches every asset.",
       "type": "string"
      },
      "class_names": {
       "default": "",
-      "description": "Comma-separated UClass names to filter.",
+      "description": "Comma-separated asset classes, by name (StaticMesh, Material, Texture2D) or class path (/Script/Engine.StaticMesh). Empty matches every class.",
       "type": "string"
      },
      "package_paths": {
       "default": "",
-      "description": "Comma-separated package paths to search.",
+      "description": "Comma-separated content folders to search, such as /Game/Props. Empty searches every mounted content root.",
       "type": "string"
      },
      "max_results": {
@@ -434,6 +497,22 @@
       "maximum": 1000,
       "minimum": 1,
       "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Matches to skip, for the next page: pass the previous call's next_offset.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "recursive_paths": {
+      "default": true,
+      "description": "Include the subfolders of package_paths.",
+      "type": "boolean"
+     },
+     "include_subclasses": {
+      "default": true,
+      "description": "Include assets whose class derives from one of class_names.",
+      "type": "boolean"
      }
     }
    },
@@ -444,6 +523,100 @@
     "title": null,
     "readOnlyHint": true,
     "destructiveHint": null,
+    "idempotentHint": true,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "import_unreal_asset",
+   "title": "Import Unreal Asset",
+   "description": "Import an FBX, glTF, GLB or OBJ file as assets (meshes, materials, textures) under a /Game folder through Unreal's Interchange importer, saved, placing no actor. Every file the model names (glTF buffers and images, OBJ MTL libraries and textures, FBX textures, UDIM tiles) must be inside the sandbox too, else SandboxError with details.references_outside. Without replace_existing, assets that already exist are kept, and a file whose every asset exists imports nothing; with it, Unreal reimports the mesh and keeps the other assets, listed in kept_assets.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "file_path": {
+      "description": "Path of the .fbx, .gltf, .glb or .obj file on disk; must be inside the sandbox.",
+      "type": "string"
+     },
+     "destination_path": {
+      "default": "/Game/Imports",
+      "description": "Content folder under /Game to import into (/Game itself included).",
+      "type": "string"
+     },
+     "replace_existing": {
+      "default": false,
+      "description": "Reimport the asset named after the file. Unreal keeps the textures and materials an earlier import made (kept_assets, with a warning). Default false keeps every existing asset, and refuses (InvalidState) a file whose every asset exists.",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "file_path"
+    ]
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": null,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "save_unreal_assets",
+   "title": "Save Unreal Assets",
+   "description": "Save modified packages to disk: the named assets, the level being edited (save_level), or every modified package (all_dirty). Only /Game packages unless allow_engine_content; refused during Play In Editor. dry_run lists what would be saved.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "asset_paths": {
+      "default": "",
+      "description": "Comma-separated asset paths whose packages to save, such as /Game/Materials/MI_Red.",
+      "type": "string"
+     },
+     "save_level": {
+      "default": false,
+      "description": "Save the level being edited: its map package and, in a World Partition level, its actors' packages.",
+      "type": "boolean"
+     },
+     "all_dirty": {
+      "default": false,
+      "description": "Save every modified package.",
+      "type": "boolean"
+     },
+     "allow_engine_content": {
+      "default": false,
+      "description": "Also write to content outside the project's /Game folder: /Engine or a plugin's content, which every project using that engine or plugin shares. Default false refuses it (SandboxError).",
+      "type": "boolean"
+     },
+     "dry_run": {
+      "default": false,
+      "description": "Report what would be saved; save nothing.",
+      "type": "boolean"
+     }
+    }
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": false,
+    "destructiveHint": true,
     "idempotentHint": true,
     "openWorldHint": null
    },
@@ -1297,8 +1470,18 @@
      },
      "slot_index": {
       "default": 0,
-      "description": "Material slot index (default 0).",
+      "description": "Material slot index (default 0); unused when ``slot_name`` is given.",
       "type": "integer"
+     },
+     "slot_name": {
+      "default": "",
+      "description": "Material slot name, as the Details panel shows it; empty uses slot_index.",
+      "type": "string"
+     },
+     "component_name": {
+      "default": "",
+      "description": "Mesh component to assign to, by name (StaticMeshComponent0) or path. Empty picks the actor's mesh root component, else its only mesh component.",
+      "type": "string"
      }
     },
     "required": [
@@ -1806,7 +1989,7 @@
   {
    "name": "import_unreal_usd",
    "title": "Import Unreal Usd",
-   "description": "Import USD with Unreal's optional USDImporter plugin, enabled at editor startup: assets to <destination_path>/<file name>, and actors into the level being edited. Without replace_existing it is refused when that folder already holds assets, and existing actors are kept; with it, those assets and the level's actors from an earlier import of the file are replaced.",
+   "description": "Import USD with Unreal's optional USDImporter plugin, enabled at editor startup: assets to <destination_path>/<file name>, and actors into the level being edited. Without replace_existing it is refused when that folder already holds assets, and existing actors are kept; with it, those assets and the level's actors from an earlier import of the file are replaced. Every layer and asset the stage draws on (sublayers, references, payloads, clips, textures) must be inside the sandbox too, else SandboxError naming them.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1831,7 +2014,7 @@
        }
       ],
       "default": null,
-      "description": "Boolean USD options: import_actors, import_geometry, import_materials, import_lights, import_cameras."
+      "description": "USDImporter options. Booleans: import_actors, import_geometry, import_materials, import_skeletal_animations, import_level_sequences, import_groom_assets, import_sparse_volume_textures, import_sounds, import_only_used_materials, use_prim_kinds_for_collapsing (merge a prim's meshes into one per kinds_to_collapse; false keeps a mesh per prim), merge_identical_material_slots, share_assets_for_identical_prims, prim_path_folder_structure, interpret_lods. kinds_to_collapse: list of USD kinds (model, component, group, assembly, subcomponent). fallback_collision_type: none (render triangles), convex_decomposition, convex_hull, sphere, cube, mesh_simplification, capsule, custom_mesh. nanite_triangle_threshold: int. prims_to_import: prim paths. meters_per_unit with up_axis (y or z), together, override the stage's own. Lights and cameras import as actors with import_actors. Unset options take Unreal's defaults."
      },
      "replace_existing": {
       "default": false,
@@ -1862,7 +2045,7 @@
   {
    "name": "export_unreal_usd",
    "title": "Export Unreal Usd",
-   "description": "Export actors of the level being edited with the optional USDImporter plugin's LevelExporterUSD; actors_exported counts the actors the written stage has a prim for.",
+   "description": "Export actors of the level being edited with the optional USDImporter plugin's LevelExporterUSD; actors_exported counts the actors the written stage has a prim for. Mesh and material files go to <output name>_assets beside the output. DynamicMeshActors export as empty Xforms, reported in warnings.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1887,6 +2070,11 @@
       ],
       "default": null,
       "description": "Boolean USD options: export_actor_folders, export_sublayers."
+     },
+     "overwrite": {
+      "default": false,
+      "description": "Replace the files the export writes. Default false refuses it (InvalidState, with details.existing_files) when the output exists, its <output name>_assets folder holds files, or, with export_sublayers, a sublevel layer or MaterialOverrides file beside it exists. Every file written is listed in written_files.",
+      "type": "boolean"
      }
     },
     "required": [
@@ -2014,7 +2202,7 @@
   {
    "name": "get_unreal_interchange_info",
    "title": "Get Unreal Interchange Info",
-   "description": "Query available Interchange pipelines and supported formats.",
+   "description": "Interchange's supported formats by translator kind (assets, scenes, actors), the project's content and scene pipeline stacks, and whether USD import and export are available.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2072,7 +2260,7 @@
   {
    "name": "query_unreal_scene_graph",
    "title": "Query Unreal Scene Graph",
-   "description": "Query the Unreal scene graph hierarchy.",
+   "description": "Read the level's attachment hierarchy as a tree: the level (or the root_path actor), the actors attached to it and theirs, max_depth levels down, optionally with each actor's components. One page of the root's children at a time; total_actors and total_depth cover the whole tree.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2087,16 +2275,16 @@
        }
       ],
       "default": null,
-      "description": "Root actor path (None for level root)."
+      "description": "Actor whose attached actors form the tree; null or empty starts at the level."
      },
      "max_depth": {
       "default": 10,
-      "description": "Maximum traversal depth.",
+      "description": "Levels below the root to include, 1 to 64 (the root's children are level 1).",
       "type": "integer"
      },
      "include_components": {
       "default": false,
-      "description": "Include component sub-trees.",
+      "description": "Give each actor its components: name, class, is_root, attach_parent.",
       "type": "boolean"
      },
      "class_filter": {
@@ -2109,7 +2297,22 @@
        }
       ],
       "default": null,
-      "description": "Filter actors by UClass name."
+      "description": "Keep actors whose class has this name or path, and the actors above them (matches_filter false); null keeps every actor."
+     },
+     "include_subclasses": {
+      "default": false,
+      "description": "Also keep actors whose class derives from class_filter's.",
+      "type": "boolean"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Root children to skip: the previous page's next_offset.",
+      "type": "integer"
+     },
+     "max_results": {
+      "default": 100,
+      "description": "Most root children in the page, 1 to 5000.",
+      "type": "integer"
      }
     }
    },
@@ -2223,7 +2426,7 @@
   {
    "name": "get_unreal_actor_by_semantic_label",
    "title": "Get Unreal Actor By Semantic Label",
-   "description": "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case.",
+   "description": "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case. One page at a time: total_matches counts every match, and next_offset is where the next page starts.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2239,7 +2442,12 @@
      },
      "max_results": {
       "default": 100,
-      "description": "Maximum number of actors to return, 1 to 5000.",
+      "description": "Most actors in the page, 1 to 5000.",
+      "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Matching actors to skip: the previous page's next_offset.",
       "type": "integer"
      }
     },
@@ -2266,7 +2474,7 @@
   {
    "name": "generate_unreal_mesh_primitive",
    "title": "Generate Unreal Mesh Primitive",
-   "description": "Create a parametric mesh primitive as a new DynamicMeshActor, centred on location, in Unreal's axes (X forward, Y right, Z up); the spawn is one undoable transaction. Dimensions in cm: box width (X), depth (Y), height (Z); sphere radius; cylinder radius, height; cone base_radius, top_radius, height; capsule radius, length (its straight part); torus major_radius, minor_radius. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
+   "description": "Create a parametric mesh primitive as a new DynamicMeshActor, centred on location, in Unreal's axes (X forward, Y right, Z up); the spawn is one undoable transaction. Dimensions in cm: box width (X), depth (Y), height (Z); sphere radius; cylinder radius, height; cone base_radius, top_radius, height; capsule radius, length (its straight part); torus major_radius, minor_radius. Needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2290,15 +2498,25 @@
      },
      "segments": {
       "default": 32,
-      "description": "Steps around the shape (3 to 512): a sphere's longitude and latitude steps, a cylinder's, cone's or capsule's sides, a torus's steps around its axis (half as many around the tube).",
+      "description": "Steps around the shape (3 to 512): a sphere's longitude and latitude steps, a cylinder's, cone's or capsule's sides, a torus's steps around its axis (half as many around the tube). A 512-segment sphere has 522,240 triangles.",
       "maximum": 512,
       "minimum": 3,
       "type": "integer"
      },
      "location": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "number"
+        },
+        "type": "array"
+       }
+      ],
       "default": "",
-      "description": "Spawn location [x, y, z] in cm.",
-      "type": "string"
+      "description": "Spawn location [x, y, z] in cm."
      },
      "actor_label": {
       "anyOf": [
@@ -2611,7 +2829,7 @@
   {
    "name": "subdivide_unreal_mesh",
    "title": "Subdivide Unreal Mesh",
-   "description": "Subdivide a DynamicMeshActor's mesh, in place and undoable: Catmull-Clark over quad polygroups, Loop over triangles, or uniform tessellation. A result over 2,000,000 triangles is refused. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
+   "description": "Subdivide a DynamicMeshActor's mesh, in place and undoable: Catmull-Clark over quad polygroups, Loop over triangles, or uniform tessellation. A result over 2,000,000 triangles is refused before anything runs. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2744,12 +2962,32 @@
       "type": "string"
      },
      "plane_origin": {
-      "description": "A point on the plane [x, y, z] in cm.",
-      "type": "string"
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "number"
+        },
+        "type": "array"
+       }
+      ],
+      "description": "A point on the plane [x, y, z] in cm."
      },
      "plane_normal": {
-      "description": "The plane's normal [x, y, z].",
-      "type": "string"
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "number"
+        },
+        "type": "array"
+       }
+      ],
+      "description": "The plane's normal [x, y, z]."
      },
      "fill_holes": {
       "default": true,
@@ -2881,7 +3119,7 @@
   {
    "name": "remesh_unreal_mesh",
    "title": "Remesh Unreal Mesh",
-   "description": "Uniformly remesh a DynamicMeshActor's mesh, in place and undoable, to a target edge length or triangle count (by default its own triangle count), for evenly sized triangles; reports the result's mean edge length. A result over 2,000,000 triangles is refused. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
+   "description": "Uniformly remesh a DynamicMeshActor's mesh, in place and undoable, to a target edge length or triangle count (by default its own triangle count), for evenly sized triangles; reports the result's mean edge length. The remesher makes up to 1.6 times the target, so a target_triangle_count over 1,250,000, or a target predicted to make over 2,000,000 triangles, is refused. Takes DynamicMeshActor paths (convert_unreal_mesh_format makes one from a StaticMesh asset); needs the GeometryScripting plugin, which simul unreal setup enables; refused while PIE runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2912,7 +3150,7 @@
      "target_triangle_count": {
       "anyOf": [
        {
-        "maximum": 2000000,
+        "maximum": 1250000,
         "minimum": 4,
         "type": "integer"
        },
@@ -2921,7 +3159,7 @@
        }
       ],
       "default": null,
-      "description": "Target triangle count."
+      "description": "Target triangle count, 4 to 1,250,000."
      },
      "smoothing_iterations": {
       "default": 3,
@@ -3029,7 +3267,10 @@
    "get_unreal_loaded_map",
    "list_unreal_actors",
    "get_unreal_actor_info",
+   "list_unreal_actor_components",
    "search_unreal_assets",
+   "import_unreal_asset",
+   "save_unreal_assets",
    "describe_unreal_object",
    "get_unreal_actor_thumbnail",
    "summarize_unreal_scene",
@@ -3090,7 +3331,10 @@
    "get_unreal_loaded_map",
    "list_unreal_actors",
    "get_unreal_actor_info",
+   "list_unreal_actor_components",
    "search_unreal_assets",
+   "import_unreal_asset",
+   "save_unreal_assets",
    "describe_unreal_object",
    "get_unreal_actor_thumbnail",
    "summarize_unreal_scene",
@@ -3150,7 +3394,10 @@
    "get_unreal_loaded_map",
    "list_unreal_actors",
    "get_unreal_actor_info",
+   "list_unreal_actor_components",
    "search_unreal_assets",
+   "import_unreal_asset",
+   "save_unreal_assets",
    "describe_unreal_object",
    "get_unreal_actor_thumbnail",
    "summarize_unreal_scene",
@@ -3208,7 +3455,10 @@
    "get_unreal_loaded_map",
    "list_unreal_actors",
    "get_unreal_actor_info",
+   "list_unreal_actor_components",
    "search_unreal_assets",
+   "import_unreal_asset",
+   "save_unreal_assets",
    "describe_unreal_object",
    "get_unreal_actor_thumbnail",
    "summarize_unreal_scene",
