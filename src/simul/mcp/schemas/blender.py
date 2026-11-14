@@ -1247,16 +1247,16 @@ class BlenderDeleteObjectResponse(BaseModel):
         None,
         description=(
             "Empties whose rigid body constraint joining the object was removed first; "
-            "Blender's Delete left it pointing at the freed body, which crashed Blender "
-            "when the simulation restarted"
+            "Blender's Delete left it pointing at the freed body, which can crash "
+            "Blender when the simulation restarts"
         ),
     )
     warnings: Optional[List[str]] = Field(
         None,
         description=(
-            "Constraints joining the object that were left in place: one whose other "
-            "object is already gone (removing it can crash Blender) or one Blender "
-            "would not remove"
+            "Constraints joining the object that were left in place: one the "
+            "simulation stepped with an object that is already gone (removing it may "
+            "crash Blender) or one Blender would not remove"
         ),
     )
     removed_from_file: Optional[bool] = Field(
@@ -3155,9 +3155,9 @@ class BlenderGetPhysicsStateRequest(BaseModel):
     step_simulation: bool = Field(
         True,
         description=(
-            "Step an unbaked rigid-body simulation from its cache start to the current "
-            "frame before reading the pose, when that is estimated at 12 s or less, "
-            "and for at most 22 s"
+            "Step an unbaked rigid-body simulation to the current frame, from the last "
+            "frame its memory cache holds, before reading the pose: unless that is "
+            "estimated at over 36 s, and for at most 22 s"
         ),
     )
 
@@ -3442,10 +3442,11 @@ class BlenderBakeSimulationRequest(BaseModel):
     allow_long_bake: bool = Field(
         False,
         description=(
-            "Bake above 20 000 frames or an estimated 12 s (from the rigid bodies and "
-            "their collision shapes, substeps, solver iterations, cloth and soft-body "
-            "vertices and quality, particles and replaying fluid domains), and past 22 s, "
-            "which can outlast the client timeout while Blender keeps baking"
+            "Bake above 20 000 frames or an estimated 36 s (from the rigid bodies, what "
+            "they touch and their collision shapes, substeps, solver iterations, cloth "
+            "and soft-body vertices, quality and contact, particles and replaying fluid "
+            "domains), and past 22 s, which can outlast the client timeout while Blender "
+            "keeps baking"
         ),
     )
 
@@ -3486,8 +3487,10 @@ class BlenderBakeSimulationResponse(BaseModel):
     complete: Optional[bool] = Field(
         None,
         description=(
-            "False when a rigid_body bake stopped at its 22 s deadline before frame_end: "
-            "frame_end then says how far it got, and the frames up to it are baked"
+            "False when the bake stopped at its 22 s deadline before frame_end: every "
+            "cache is baked up to the frame it stopped at, which a warning names (the "
+            "rigid-body cache's frame_end, and that of each cloth, soft-body and dynamic "
+            "paint cache)"
         ),
     )
     rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
