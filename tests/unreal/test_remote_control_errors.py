@@ -333,7 +333,9 @@ async def test_a_read_timeout_and_a_mutation_timeout_are_told_apart() -> None:
         await asyncio.sleep(1.0)
         return web.json_response({})
 
-    async with editor(handler, timeout=0.2, max_retries=0) as session:
+    # Without the hold after the read's timeout, which would refuse the write
+    # unsent (test_unreal_timeout_hold.py).
+    async with editor(handler, timeout=0.2, max_retries=0, hold_after_timeout=0) as session:
         with pytest.raises(UnrealTimeoutError) as read:
             await session.describe_object(CUBE)
         with pytest.raises(UnrealTimeoutError) as write:

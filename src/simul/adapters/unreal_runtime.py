@@ -53,6 +53,7 @@ from ._unreal_errors import (
     remote_control_message,
     script_not_found,
 )
+from ._unreal_hold import EditorHolds, TimedOutRequest, is_hold_refusal
 from ._unreal_mesh_scripts import (
     BOOLEAN_ALIASES,
     BOOLEAN_OPERATIONS,
@@ -1991,12 +1992,15 @@ class UnrealRuntimeSession(LoggerMixin):
     use the ``unreal`` module directly.
     """
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Optional[Settings] = None, holds: Optional[EditorHolds] = None) -> None:
         """
         Initialize Unreal runtime session.
 
         Args:
             settings: Configuration settings.
+            holds: The editors held after a timed-out request, shared by the
+                sessions of one adapter so a hold outlives its call; a
+                session of its own when None.
         """
         if not UNREAL_AVAILABLE:
             raise ImportError(
@@ -2014,6 +2018,14 @@ class UnrealRuntimeSession(LoggerMixin):
         self.max_retries: int = cfg.max_retries
         self.retry_base_delay: float = cfg.retry_base_delay
         self.ping_timeout: float = cfg.ping_timeout
+        # After a request times out the editor is held until it has finished
+        # it (_unreal_hold): requests to it are refused meanwhile.
+        self._owns_holds = holds is None
+        self._holds: EditorHolds = holds if holds is not None else EditorHolds(cfg.hold_after_timeout)
+        # The MCP tool this session serves, set by its registration, to name a
+        # timed-out request in the hold; None outside the MCP server.
+        self.tool_name: Optional[str] = None
+        self.tool_read_only: Optional[bool] = None
 
         # Hash the configured passphrase once at construction. None means no
         # header is injected — preserves the no-auth status quo for users
@@ -2117,6 +2129,7 @@ class UnrealRuntimeSession(LoggerMixin):
         max_retries: Optional[int] = None,
         response_kind: str = "json",
         _skip_attachment: bool = False,
+        probe: bool = False,
     ) -> Dict[str, Any]:
         """
         Perform an HTTP request with retry and exponential backoff.
@@ -2125,15 +2138,28 @@ class UnrealRuntimeSession(LoggerMixin):
         5xx) with exponential backoff. Mutations are sent once because a failed
         response does not establish whether the editor applied the operation.
 
+        A request that times out holds the editor (``_unreal_hold``): until
+        the editor has finished it, for at most ``unreal.hold_after_timeout``
+        seconds, every other request to it is refused with ``InstanceBusy``
+        before anything is sent, since Remote Control would run it only after
+        the one that timed out.
+
         Args:
             method: HTTP method (``GET``, ``PUT``, ``POST``).
             path: URL path.
             body: Optional JSON-serializable request body.
             timeout_override: Per-call timeout in seconds.
             max_retries: Override for ``self.max_retries``.
+            probe: A reachability probe (``ping``, ``health_check``): sent
+                while the editor is held, and its timeout holds nothing.
 
         Returns:
             Parsed JSON response as a dictionary.
+
+        Raises:
+            UnrealError: ``InstanceBusy`` while the editor is held, besides
+                the failures ``_transport_error`` and ``remote_control_error``
+                name.
         """
         attached = self.settings.unreal.mode == "attached" and not _skip_attachment
         try:
@@ -2149,6 +2175,12 @@ class UnrealRuntimeSession(LoggerMixin):
             # the attachment check first in attached mode.
             body = isolate(body or {}, self._attachment_guard() if attached else "")
         elif attached:
+            self._load_attachment()  # the editor a hold is kept for
+        if not probe:
+            held = self._holds.refusal(self._endpoint)
+            if held is not None:
+                raise held
+        if attached and not runs_python:
             body = await self._guard_attachment(method, path, body)
         stray = unisolated_commands(path, body)
         if stray:
@@ -2278,11 +2310,29 @@ class UnrealRuntimeSession(LoggerMixin):
                     await self._recycle_session()
                     await asyncio.sleep(delay)
                     continue
-                raise self._transport_error(
-                    exc, method, path, body, timeout_override, retry_safe
-                ) from exc
+                hold = isinstance(exc, asyncio.TimeoutError) and not probe and self._holds.limit > 0
+                error = self._transport_error(exc, method, path, body, timeout_override, retry_safe, hold)
+                if hold:
+                    self._hold_editor(method, path, retry_safe)
+                raise error from exc
 
         raise last_exc  # type: ignore[misc]
+
+    @property
+    def _endpoint(self) -> str:
+        """``host:port`` of the editor this session talks to."""
+        return f"{self.host}:{self.port}"
+
+    def _hold_editor(self, method: str, path: str, retry_safe: bool) -> None:
+        """Hold the editor after a request to ``path`` timed out (``_unreal_hold``)."""
+        request = TimedOutRequest(
+            call=self.tool_name or f"{method} {path}",
+            route=path,
+            changes_state=not retry_safe and not self.tool_read_only,
+            since=time.monotonic(),
+        )
+        passphrase = {"Passphrase": self._passphrase_md5} if self._passphrase_md5 else {}
+        self._holds.hold(self.host, self.port, request, passphrase)
 
     def _request_headers(self, path: str) -> Dict[str, str]:
         """Headers one request adds to the session's defaults.
@@ -2318,6 +2368,7 @@ class UnrealRuntimeSession(LoggerMixin):
         body: Optional[Dict[str, Any]],
         timeout_override: Optional[float],
         retry_safe: bool,
+        held: bool = False,
     ) -> Exception:
         """The error to report for a request Remote Control never answered.
 
@@ -2328,6 +2379,8 @@ class UnrealRuntimeSession(LoggerMixin):
             body: The request's body.
             timeout_override: The request's timeout, when it had its own.
             retry_safe: Whether the request only reads.
+            held: Whether its timeout holds the editor, which a timeout's
+                message then says.
 
         Returns:
             An ``UnrealTimeoutError`` for a timeout, which for a request that
@@ -2351,6 +2404,11 @@ class UnrealRuntimeSession(LoggerMixin):
                 message = (
                     f"Remote Control did not answer {method} {path} within {timeout}s. The editor "
                     "may still apply the request: check its state before retrying"
+                )
+            if held:
+                message += (
+                    ". Until the editor has finished it, other Unreal calls get InstanceBusy rather than "
+                    "queue behind it (unreal.hold_after_timeout)"
                 )
             return UnrealTimeoutError(message, TIMEOUT_ERROR, details=details)
         connection_failed = isinstance(exc, ConnectionError) or (
@@ -2596,6 +2654,7 @@ class UnrealRuntimeSession(LoggerMixin):
         path: str,
         timeout_override: Optional[float] = None,
         max_retries: Optional[int] = None,
+        probe: bool = False,
     ) -> Dict[str, Any]:
         """
         Perform an HTTP GET against the Remote Control API.
@@ -2604,12 +2663,14 @@ class UnrealRuntimeSession(LoggerMixin):
             path: URL path (e.g. ``/remote/info``).
             timeout_override: Per-call timeout in seconds.
             max_retries: Override for ``self.max_retries``.
+            probe: A reachability probe, sent while the editor is held
+                (``_http_request``).
 
         Returns:
             Parsed JSON response as a dictionary.
         """
         return await self._http_request(
-            "GET", path, timeout_override=timeout_override, max_retries=max_retries,
+            "GET", path, timeout_override=timeout_override, max_retries=max_retries, probe=probe,
         )
 
     async def _http_put(
@@ -2656,7 +2717,10 @@ class UnrealRuntimeSession(LoggerMixin):
             ``AuthenticationError`` (HTTP 401: ``UNREAL__PASSPHRASE`` is
             missing or wrong) or ``ProbeNotSent`` (the request never left
             this machine: out of file descriptors or local ports, or the host
-            name did not resolve).
+            name did not resolve). While the editor is held after a timed-out
+            request (``_http_request``), a probe that gets no answer adds
+            ``held_after_timeout``; one that is answered ends the hold, since
+            the editor answers in arrival order.
         """
         address = f"{self.host}:{self.port}"
         t0 = time.monotonic()
@@ -2668,10 +2732,12 @@ class UnrealRuntimeSession(LoggerMixin):
                 "/remote/info",
                 timeout_override=self.ping_timeout,
                 max_retries=0,
+                probe=True,
             )
         except Exception as exc:
             refusal = _refusal(exc)
             if refusal is not None:
+                self._holds.editor_answered(self._endpoint, t0)
                 return {
                     "reachable": True,
                     "address": address,
@@ -2700,12 +2766,32 @@ class UnrealRuntimeSession(LoggerMixin):
                 busy = await self._busy(self.ping_timeout)
                 if busy is not None:
                     failure.update(busy)
+            self._report_hold(failure, exc)
             return failure
+        self._holds.editor_answered(self._endpoint, t0)
         return {
             "reachable": True,
             "address": address,
             "latency_ms": round((time.monotonic() - t0) * 1000, 1),
         }
+
+    def _report_hold(self, failure: Dict[str, Any], exc: BaseException) -> None:
+        """Add ``held_after_timeout`` to a probe's failure while the editor is held.
+
+        In attached mode the probe's attachment check runs Python, which the
+        hold keeps from the editor: that refusal reports the editor busy too.
+        """
+        held = self._holds.info(self._endpoint)
+        if held is None:
+            return
+        failure["held_after_timeout"] = held
+        if is_hold_refusal(exc):
+            failure.update(busy=True, error_type=INSTANCE_BUSY)
+        elif failure.get("busy"):
+            failure["error"] = (
+                f"{failure['error']}. It is still running {held['timed_out_tool']}, whose answer timed out "
+                f"{held['busy_for_seconds']:.0f}s ago, and simul sends it nothing else until it has finished"
+            )
 
     async def _busy(self, waited: float) -> Optional[Dict[str, Any]]:
         """The busy fields for an endpoint that timed out, or None when it is down.
@@ -3090,21 +3176,24 @@ class UnrealRuntimeSession(LoggerMixin):
             does not answer within ``unreal.ping_timeout`` (as ``ping``; the
             metadata script then gets the full ``unreal.timeout``) is ``busy``
             (``error_type`` ``InstanceBusy``), reported after that one attempt,
-            since a retry would wait on the same busy editor.
+            since a retry would wait on the same busy editor. A hold after a
+            timed-out request is reported and ended as ``ping`` does.
         """
         probe_timeout = self.ping_timeout
+        t0 = time.monotonic()
         try:
             try:
-                await self._http_get("/remote/info", timeout_override=probe_timeout, max_retries=0)
+                await self._http_get("/remote/info", timeout_override=probe_timeout, max_retries=0, probe=True)
             except UnrealConnectionError:
                 # Nothing listening yet may be an editor still starting up, so
                 # this one is retried. An error status or a timeout is not:
                 # a retry would get the same answer, or wait on the same busy
                 # editor.
-                await self._http_get("/remote/info", timeout_override=probe_timeout)
+                await self._http_get("/remote/info", timeout_override=probe_timeout, probe=True)
         except Exception as exc:
             refusal = _refusal(exc)
             if refusal is not None:
+                self._holds.editor_answered(self._endpoint, t0)
                 self.logger.warning("Health check: %s", refusal["error"])
                 # Remote Control answered, so the editor is reachable; callers
                 # still reading ``connected`` must not take it as usable.
@@ -3116,8 +3205,10 @@ class UnrealRuntimeSession(LoggerMixin):
                 busy = await self._busy(probe_timeout)
                 if busy is not None:
                     unreachable.update(busy)
+            self._report_hold(unreachable, exc)
             self.logger.warning("Health check connectivity failed: %s", unreachable["error"])
             return unreachable
+        self._holds.editor_answered(self._endpoint, t0)
 
         # One script for all metadata: a single Remote Control round trip
         # instead of one per field. A failed or gated script leaves the
@@ -3843,6 +3934,8 @@ print({marker!r} + json.dumps(payload))
                     await self._execute_python(snapshot_code, mode="ExecuteFile"), marker
                 )
             except Exception as exc:
+                if is_hold_refusal(exc):
+                    raise  # nothing was sent: InstanceBusy, not a capture failure
                 snapshot = {"error": str(exc)}
             if not snapshot.get("busy"):
                 break
@@ -5084,7 +5177,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 actor_path, property_name, parsed_value, container, generate_transaction, token
             )
         except UnrealError as exc:
-            if _not_sent(exc) is not None:
+            if _not_sent(exc) is not None or is_hold_refusal(exc):
                 raise  # it never left this machine: nothing ran
             # The batch may have run, in part or whole; its answer is lost or
             # unreadable. Close what it may have left open, then say what
@@ -5287,6 +5380,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         try:
             raw = await self._execute_python(_json_args({"token": token, "expected": value}) + PROPERTY_DECIDE)
         except UnrealError as exc:
+            if is_hold_refusal(exc):
+                # The batch timed out and the editor is still running it: its
+                # own PROPERTY_DECIDE runs when it gets there.
+                return {
+                    "applied": None,
+                    "restored": False,
+                    "late": (
+                        "The editor is still running the write's batch, whose own verdict keeps or puts back the "
+                        "value and closes its undo transaction when the batch ends: read the property back before "
+                        "retrying"
+                    ),
+                }
             return {"error": f"{why}; deciding it again failed too: {exc}"}
         decided = self._parse_python_json(raw)
         if "applied" not in decided:
@@ -6825,6 +6930,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "error": (
                     f"Unreal did not answer within {timeout:g} s, but the editor keeps running the script, "
                     f"so {work} may still complete. Check the result before retrying: a retry runs it again."
+                    + (
+                        " Until the editor has finished it, other Unreal calls get InstanceBusy rather than "
+                        "queue behind it (unreal.hold_after_timeout)."
+                        if self._holds.get(self._endpoint) is not None
+                        else ""
+                    )
                 ),
                 "details": {
                     "timeout_seconds": timeout,
@@ -8437,6 +8548,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         afterwards and reports an unclosed client session and connector
         when the session is garbage-collected.
         """
+        if self._owns_holds:
+            # A session of its own: nothing outlives it to end its hold.
+            self._holds.close()
         if self._session is not None and not self._session.closed:
             await self._session.close()
         self._session = None
@@ -8459,6 +8573,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         sockets, so async callers should ``await close()`` (or use
         ``async with``) instead.
         """
+        if self._owns_holds:
+            self._holds.close()
         if self._session is None or self._session.closed:
             self._session = None
             return
@@ -8488,6 +8604,9 @@ class UnrealRuntimeAdapter(LoggerMixin):
             settings: Configuration settings.
         """
         self.settings: Settings = settings or get_settings()
+        # Shared by every session, so an editor held after a timed-out call
+        # stays held for the calls that follow (_unreal_hold).
+        self.holds = EditorHolds(self.settings.unreal.hold_after_timeout)
         self.logger.info("Unreal runtime adapter initialized")
 
     @contextmanager
@@ -8496,9 +8615,9 @@ class UnrealRuntimeAdapter(LoggerMixin):
         Create an Unreal runtime session context manager.
 
         Yields:
-            UnrealRuntimeSession instance.
+            UnrealRuntimeSession instance, sharing the adapter's holds.
         """
-        session = UnrealRuntimeSession(self.settings)
+        session = UnrealRuntimeSession(self.settings, holds=self.holds)
         try:
             yield session
         finally:
@@ -8515,7 +8634,8 @@ class UnrealRuntimeAdapter(LoggerMixin):
         return UNREAL_AVAILABLE and self.settings.unreal.enabled
 
     def close(self) -> None:
-        """Nothing is held between sessions; each one cleans up after itself."""
+        """Release the editors held after a timeout; each session cleans up after itself."""
+        self.holds.close()
 
     def get_capabilities(self) -> List[str]:
         """

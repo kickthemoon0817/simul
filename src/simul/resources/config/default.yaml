@@ -195,3 +195,8 @@ security:
 unreal:
   mode: endpoint
   # attachment_path: "${SIMUL_HOME}/unreal/attachment.json"   # default under the state directory
+  # After a request times out while the editor may still be running it, send
+  # that editor nothing more (other calls get InstanceBusy) until it answers
+  # again, for at most this many seconds. 0 turns the hold off, and later calls
+  # then queue behind the request on the editor's game thread.
+  hold_after_timeout: 300.0
