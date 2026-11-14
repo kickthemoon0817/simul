@@ -71,7 +71,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CONTEXT_MEMBER_ERROR = "AttributeError: 'Context' object has no attribute"
+# Matched anywhere in the error: add-ons up to 0.1.12 prefixed it with "AttributeError: ".
+_CONTEXT_MEMBER_ERROR = "'Context' object has no attribute"
 CONTEXT_OVERRIDE_HINT = (
     "Hint: bpy.context lost its window/view-layer members, usually because the "
     "script loaded a file (read_homefile/open_mainfile), which replaces the window "
@@ -347,6 +348,15 @@ _EXPORT_TEXTURE_DIRS = ("textures",)
 # wrote, so that exporting into a huge folder stays quick.
 _EXPORT_SCAN_LIMIT = 20_000
 
+# What a delete that left a rigid body constraint without one of its bodies
+# means for the simulation. Reopening the saved file does not lift the
+# refusal: the constraint still lacks a body there.
+_DANGLING_CONSTRAINT_ADVICE = (
+    "Restarting the simulation stays refused until that constraint is removed or "
+    "given two rigid bodies. Save the file and open it again before doing either "
+    "(opening it may crash Blender once while it frees the broken constraint)"
+)
+
 # Output-format settings a capture changes and restores, in restore order:
 # media_type first, so that the saved file_format is valid again.
 _IMAGE_FORMAT_FIELDS = (
@@ -609,27 +619,32 @@ def add_context_hint(error: Optional[str]) -> Optional[str]:
     return f"{error}. {CONTEXT_OVERRIDE_HINT}"
 
 
-def _script_error(exc: BaseException) -> Optional[str]:
-    """Describe what an ``execute_script`` script raised, for its ``error`` field.
+def _script_error(exc: BaseException) -> Dict[str, Any]:
+    """Describe what an ``execute_script`` script raised, for its result.
 
     Args:
         exc: Anything the script raised, ``SystemExit`` and
             ``KeyboardInterrupt`` included.
 
     Returns:
-        ``<class>: <message>``, with the context-override recipe for a missing
-        ``bpy.context`` member and what happened for an exit or interrupt.
+        ``error``, the message, with the context-override recipe for a missing
+        ``bpy.context`` member and what happened for an exit or interrupt; and
+        ``details.exception_type``, the class, which the envelope reports
+        there rather than in front of the message, as the other backends do.
     """
-    if isinstance(exc, (SystemExit, KeyboardInterrupt)):
-        name = type(exc).__name__
-        error = f"{name}: {exc}" if str(exc) else name
-        if isinstance(exc, SystemExit):
-            return (
-                f"{error}. The script called sys.exit() or exit(), which ends only the "
-                "script here: the lines after it did not run, and Blender keeps running."
-            )
-        return f"{error}. The script was interrupted; the lines after it did not run."
-    return add_context_hint(f"{type(exc).__name__}: {exc}")
+    name = type(exc).__name__
+    if isinstance(exc, SystemExit):
+        code = "" if exc.code is None else f" with {exc.code!r}"
+        error = (
+            f"The script called sys.exit() or exit(){code}, which ends only the script "
+            "here: the lines after it did not run, and Blender keeps running."
+        )
+    elif isinstance(exc, KeyboardInterrupt):
+        reason = f" ({exc})" if str(exc) else ""
+        error = f"The script was interrupted{reason}; the lines after it did not run."
+    else:
+        error = add_context_hint(str(exc)) or name
+    return {"error": error, "details": {"exception_type": name}}
 
 
 def script_output_prefix(output: str, max_chars: int) -> str:
@@ -3444,8 +3459,7 @@ class BlenderRuntimeSession:
                     f"The rigid body constraint on '{carrier.name}' joins '{obj.name}' to an "
                     "object that was already deleted or has no rigid body, so it was left as "
                     "it is: removing it can crash Blender, which reads the freed body. "
-                    "Restarting the simulation stays refused until the file is saved and "
-                    "opened again"
+                    + _DANGLING_CONSTRAINT_ADVICE
                 )
                 continue
             problem = cls._remove_constraint(scene, carrier)
@@ -3455,8 +3469,7 @@ class BlenderRuntimeSession:
                 warnings.append(
                     f"Could not remove the rigid body constraint on '{carrier.name}' that "
                     f"joins '{obj.name}' ({problem}); Blender's Delete leaves it pointing at "
-                    "the deleted body, so restarting the simulation is refused until the "
-                    "file is saved and opened again"
+                    "the deleted body. " + _DANGLING_CONSTRAINT_ADVICE
                 )
         return removed, warnings
 
@@ -3680,21 +3693,28 @@ class BlenderRuntimeSession:
             previous parent and the child's world location afterwards.
 
         Raises:
-            ValueError: The parent is the child itself or one of its
-                descendants, which would make a parent loop (Blender refuses
-                such a parent without an error).
+            ValidationError: The parent is the child itself (``details.code``
+                ``self_parent``) or one of its descendants, which would make a
+                parent loop (``parent_loop``); Blender refuses such a parent
+                without an error.
         """
         child = self._get_object_or_raise(child_name)
         parent = self._get_object_or_raise(parent_name)
         if parent == child:
-            raise ValueError(f"Object '{child_name}' cannot be its own parent")
+            raise ValidationError(
+                f"Object '{child_name}' cannot be its own parent",
+                "self_parent",
+                field="parent_name",
+            )
         ancestor, seen = parent.parent, [parent]
         while ancestor is not None and ancestor not in seen:
             if ancestor == child:
-                raise ValueError(
+                raise ValidationError(
                     f"Cannot parent '{child_name}' to '{parent_name}': '{parent_name}' is a "
                     f"descendant of '{child_name}', so the parenting would make a loop. "
-                    f"Clear the parent of '{parent_name}' (or of the object between them) first"
+                    f"Clear the parent of '{parent_name}' (or of the object between them) first",
+                    "parent_loop",
+                    field="parent_name",
                 )
             seen.append(ancestor)
             ancestor = ancestor.parent
@@ -5405,9 +5425,10 @@ class BlenderRuntimeSession:
 
         Returns:
             Dict with file_path (the file written), file_format, gltf_format
-            (GLTF only), files_written (every file the export created or
-            changed in file_path's folder and in its new or textures
-            subfolders, file_path first), object_count (the objects chosen for
+            (GLTF only), files_written (the files the exporter wrote:
+            file_path first, then its .bin or .mtl, the images a .gltf names
+            and the textures in textures/; another file that changed in the
+            folder meanwhile is not listed), object_count (the objects chosen for
             export; None for the whole scene), exporter_options (the operator
             properties set besides filepath) and warning.
 
@@ -5508,7 +5529,7 @@ class BlenderRuntimeSession:
         except Exception:
             self._remove_empty_folders(created)
             raise
-        written = self._written_files(main.parent, before, target)
+        written = self._export_written_files(main.parent, before, target, fmt, variant)
         if target not in written:
             self._remove_empty_folders(created)
             raise RuntimeError(
@@ -5908,20 +5929,46 @@ class BlenderRuntimeSession:
         return written
 
     @classmethod
-    def _simready_written_files(
-        cls, folder: Path, before: Dict[str, Tuple[int, int]], target: str
+    def _export_written_files(
+        cls,
+        folder: Path,
+        before: Dict[str, Tuple[int, int]],
+        target: str,
+        fmt: str,
+        variant: Optional[str] = None,
     ) -> List[str]:
-        """The files a SimReady export wrote: the asset, then the textures it wrote beside it.
+        """The files an export wrote: the file, then its companion and its textures.
 
-        Blender's USD exporter writes nothing else there (its raw layer is
-        removed, and a .usdz packs its textures), so another file the folder
-        gained meanwhile, such as a log being written, is not the export's.
+        Besides the file, Blender's exporters write only the companion of its
+        format (an OBJ's .mtl, a separate glTF's .bin), the images a .gltf
+        names, and the textures the USD exporter puts in ``textures/`` (a
+        SimReady export's raw layer is removed, and a .usdz packs its
+        textures). Another file the folder gained or changed meanwhile, such
+        as a log being written, is not the export's.
+
+        Args:
+            folder: The folder of the file.
+            before: ``_folder_state`` of the folder before the export.
+            target: The file written.
+            fmt: The export format.
+            variant: The glTF layout, for GLTF.
         """
+        main = Path(target)
+        ours = {target, *(str(path) for path in cls._companion_files(main, fmt, variant))}
+        if fmt == "GLTF":
+            try:
+                ours.update(
+                    os.path.normpath(candidate)
+                    for candidates in _gltf_reads(main)
+                    for candidate in candidates
+                )
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
+                logger.warning("Could not list the files %s refers to: %s", main.name, exc)
         texture_dirs = {str(folder / name) for name in _EXPORT_TEXTURE_DIRS}
         return [
             path
             for path in cls._written_files(folder, before, target)
-            if path == target or os.path.dirname(path) in texture_dirs
+            if path in ours or os.path.dirname(path) in texture_dirs
         ]
 
     def _run_export(
@@ -10091,7 +10138,7 @@ class BlenderRuntimeSession:
                     **_captured_output(),
                     "return_value": None,
                     "duration_seconds": round(time.monotonic() - start, 4),
-                    "error": _script_error(exc),
+                    **_script_error(exc),
                 }
             elapsed = time.monotonic() - start
             return_value: Optional[str] = None
@@ -10129,7 +10176,7 @@ class BlenderRuntimeSession:
             "duration_seconds": round(float(timeout), 4),
             "timed_out": True,
             "error": (
-                f"TimeoutError: script did not finish within {timeout:g}s. "
+                f"Script did not finish within {timeout:g}s. "
                 "It is still running on a background thread and cannot be "
                 "stopped; its output is discarded."
             ),
@@ -12005,7 +12052,9 @@ class BlenderRuntimeSession:
         )
         return {
             "file_path": file_path,
-            "files_written": self._simready_written_files(main_file.parent, before, file_path),
+            "files_written": self._export_written_files(
+                main_file.parent, before, file_path, "USD"
+            ),
             "object_count": len(prims),
             "default_prim": report["default_prim"],
             "prims": [{"object_name": n, "prim_path": p} for n, p in prims[:limit]],

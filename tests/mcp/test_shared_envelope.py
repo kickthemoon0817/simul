@@ -139,16 +139,17 @@ def _noted(exc: Exception, *notes: str) -> Exception:
                 "ValueError: Attached window is not in Object Mode", "ValueError", {}
             ),
             # The class Blender raised is the exception_type; a ValueError is
-            # a ValidationError in the shared taxonomy, on every backend.
+            # a ValidationError in the shared taxonomy, on every backend. The
+            # prefix an older add-on put on the message is dropped (R2-BLA-03).
             {
-                "error": "ValueError: Attached window is not in Object Mode",
+                "error": "Attached window is not in Object Mode",
                 "error_type": "ValidationError",
                 "details": {
                     "exception_type": "ValueError",
                     "errors": [
                         {
                             "field": None,
-                            "message": "ValueError: Attached window is not in Object Mode",
+                            "message": "Attached window is not in Object Mode",
                             "type": "value_error",
                         }
                     ],

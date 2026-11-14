@@ -7461,7 +7461,9 @@ class TestExecuteScript:
         result = session.execute_script("def bad(")
 
         assert result["error"] is not None
-        assert "SyntaxError" in result["error"]
+        # R2-BLA-03: the class is in details, not in front of the message.
+        assert not result["error"].startswith("SyntaxError")
+        assert result["details"] == {"exception_type": "SyntaxError"}
         assert result["duration_seconds"] >= 0.0
 
     def test_execute_script_runtime_error(
@@ -7475,8 +7477,8 @@ class TestExecuteScript:
         session = blender_runtime.BlenderRuntimeSession()
         result = session.execute_script("x = 1 / 0")
 
-        assert result["error"] is not None
-        assert "ZeroDivisionError" in result["error"]
+        assert result["error"] == "division by zero"
+        assert result["details"] == {"exception_type": "ZeroDivisionError"}
         assert "temp_override" not in result["error"]
 
     def test_execute_script_context_member_error_gets_override_recipe(
@@ -7492,9 +7494,8 @@ class TestExecuteScript:
             "class Context:\n    pass\nContext().active_object"
         )
 
-        assert result["error"].startswith(
-            "AttributeError: 'Context' object has no attribute 'active_object'"
-        )
+        assert result["error"].startswith("'Context' object has no attribute 'active_object'")
+        assert result["details"] == {"exception_type": "AttributeError"}
         assert "view_layer=win.view_layer" in result["error"]
         assert blender_runtime.add_context_hint(result["error"]) == result["error"]
 
@@ -7520,7 +7521,7 @@ class TestExecuteScript:
         assert elapsed < 2.0
         assert result["timed_out"] is True
         assert result["error"] is not None
-        assert result["error"].startswith("TimeoutError")
+        assert result["error"].startswith("Script did not finish within 0.2s.")
         assert "still running" in result["error"]
         assert result["output"] is None
         # Discarded, not cut: there is no truncation to report.
@@ -7554,17 +7555,22 @@ class TestExecuteScript:
         session = blender_runtime.BlenderRuntimeSession()
         result = session.execute_script("x = 1 / 0", timeout=5.0)
 
-        assert "ZeroDivisionError" in result["error"]
+        assert result["error"] == "division by zero"
+        assert result["details"] == {"exception_type": "ZeroDivisionError"}
         assert "timed_out" not in result
 
     @pytest.mark.parametrize("timeout", [None, 5.0])
     @pytest.mark.parametrize(
-        ("ending", "error"),
+        ("ending", "error", "raised"),
         [
-            ("sys.exit(0)", "SystemExit: 0. The script called sys.exit()"),
-            ("sys.exit()", "SystemExit. The script called sys.exit()"),
-            ("exit(3)", "SystemExit: 3. The script called sys.exit()"),
-            ("raise KeyboardInterrupt", "KeyboardInterrupt. The script was interrupted"),
+            ("sys.exit(0)", "The script called sys.exit() or exit() with 0, which", "SystemExit"),
+            ("sys.exit()", "The script called sys.exit() or exit(), which", "SystemExit"),
+            ("exit(3)", "The script called sys.exit() or exit() with 3, which", "SystemExit"),
+            (
+                "raise KeyboardInterrupt",
+                "The script was interrupted; the lines after it did not run.",
+                "KeyboardInterrupt",
+            ),
         ],
     )
     def test_execute_script_reports_an_exit_as_the_scripts_error(
@@ -7573,6 +7579,7 @@ class TestExecuteScript:
         timeout: Optional[float],
         ending: str,
         error: str,
+        raised: str,
     ) -> None:
         """B1-10: sys.exit(0) in a script ended the user's attached Blender.
 
@@ -7592,6 +7599,7 @@ class TestExecuteScript:
 
         assert result["error"].startswith(error)
         assert "Blender keeps running" in result["error"] or "interrupted" in result["error"]
+        assert result["details"] == {"exception_type": raised}
         assert result["output"] == "finishing batch job\n"
         assert result["return_value"] is None
         assert "timed_out" not in result
@@ -7656,7 +7664,8 @@ class TestExecuteScript:
         session = blender_runtime.BlenderRuntimeSession()
         result = session.execute_script("print('C' * 500)\nraise ValueError('late')", max_output_chars=100)
 
-        assert result["error"] == "ValueError: late"
+        assert result["error"] == "late"
+        assert result["details"] == {"exception_type": "ValueError"}
         assert result["output"] == "C" * 100
         assert result["output_truncated"] is True and result["output_total_chars"] == 501
 
