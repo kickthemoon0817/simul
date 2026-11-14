@@ -242,6 +242,13 @@ def _clip_sample_range(stage: Usd.Stage, prim_paths: Iterable[Sdf.Path]) -> Opti
     can animate (``_clip_attributes``) are asked for their time samples, so
     whatever pxr composes is what is reported. When a set's manifest cannot
     be had, every attribute under the clipped prim is asked instead.
+
+    A manifest-declared attribute is asked whatever
+    ``ValueMightBeTimeVarying`` says: pxr 26.11 answers False for a
+    clip-valued attribute of an instance proxy (an instanceable asset
+    animated by clips) while ``GetTimeSamples`` returns its samples. Without
+    a manifest that test still filters the many attributes asked, except on
+    instance proxies.
     """
     first: Optional[float] = None
     last: Optional[float] = None
@@ -250,10 +257,11 @@ def _clip_sample_range(stage: Usd.Stage, prim_paths: Iterable[Sdf.Path]) -> Opti
         if not prim:
             continue
         attributes = _clip_attributes(prim)
+        declared = attributes is not None
         if attributes is None:
             attributes = [attribute for descendant in Usd.PrimRange(prim) for attribute in descendant.GetAttributes()]
         for attribute in attributes:
-            if not attribute.ValueMightBeTimeVarying():
+            if not declared and not attribute.ValueMightBeTimeVarying() and not attribute.GetPrim().IsInstanceProxy():
                 continue
             times = attribute.GetTimeSamples()
             if times:
