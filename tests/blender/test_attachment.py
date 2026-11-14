@@ -1145,7 +1145,7 @@ def test_a_request_expired_in_the_queue_says_it_did_not_run(
     "sent",
     [
         "Cannot parent 'P' to 'C': 'C' is a descendant of 'P'",
-        # An add-on up to 0.1.12 put the class in front of the message.
+        # An add-on up to 0.1.13 put the class in front of the message.
         "ValidationError: Cannot parent 'P' to 'C': 'C' is a descendant of 'P'",
     ],
 )

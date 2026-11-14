@@ -71,7 +71,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Matched anywhere in the error: add-ons up to 0.1.12 prefixed it with "AttributeError: ".
+# Matched anywhere in the error: add-ons up to 0.1.13 prefixed it with "AttributeError: ".
 _CONTEXT_MEMBER_ERROR = "'Context' object has no attribute"
 CONTEXT_OVERRIDE_HINT = (
     "Hint: bpy.context lost its window/view-layer members, usually because the "

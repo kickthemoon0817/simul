@@ -109,7 +109,7 @@ class BridgeRemoteError(RuntimeError):
     """A rejected operation, with the remote policy diagnostic preserved.
 
     The message is the add-on's without the ``<error_type>: `` prefix that
-    add-ons up to simul 0.1.12 put in front of it: the class is reported in
+    add-ons up to simul 0.1.13 put in front of it: the class is reported in
     ``error_type`` (and ``details.exception_type``), not in the text.
     """
 
