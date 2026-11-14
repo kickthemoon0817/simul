@@ -609,6 +609,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "structured data: the first one printed comes back as the result, its keys as "
             "data, so an error or *_error key (a position_error metric) does not fail the "
             "call; it fails only when the script raises or prints \"success\": false. "
+            "A script that prints no JSON object returns its printed output and, beside it, "
+            "stderr: what it wrote to sys.stderr or logged as a warning or error. "
             "Each call starts in a fresh namespace with unreal "
             "imported, and every name it binds is discarded when it ends, returned "
             "or raised: nothing carries over to the next call (pass values back in "
@@ -1641,8 +1643,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 description=(
                     "For start: simulate (Simulate In Editor: physics runs, no player, the viewport keeps "
                     "the editor camera) or play (a Play session in the level viewport: the game mode "
-                    "possesses a pawn, and when it stops Unreal puts the game camera's view in the "
-                    "viewport). Ignored by the other actions."
+                    "possesses a pawn; Unreal leaves the game camera's view in the viewport when it "
+                    "stops, so stop puts the editor camera back where it was, editor_camera_restored). "
+                    "Ignored by the other actions."
                 ),
             ),
         ),

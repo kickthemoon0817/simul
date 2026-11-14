@@ -1217,7 +1217,7 @@ def test_attached_calls_and_the_pie_stop_work_whichever_level_the_game_is_on(
 
     assert status["map_path"] == "/Game/Maps/Lab.Lab"
     assert loaded == {"map_path": "/Game/Maps/Lab.Lab", "pie_active": True}
-    assert stopped == {"action": "stop", "state": "stopped"}
+    assert stopped == {"action": "stop", "state": "stopped", "editor_camera_restored": None}
     assert editor.pie is False
 
 

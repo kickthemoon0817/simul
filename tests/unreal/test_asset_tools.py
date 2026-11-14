@@ -1199,6 +1199,95 @@ def test_replace_existing_replaces_the_assets_and_the_earlier_actors_and_says_so
     assert (options.existing_actor_policy, options.existing_asset_policy) == ("REPLACE", "REPLACE")
     payload = UnrealImportUsdResponse(**replaced).model_dump()
     assert payload["removed_actor_paths"] == first["actor_paths"]
+    assert payload["left_over_assets"] == [] and payload["left_over_assets_count"] == 0
+
+
+def test_replace_existing_reports_the_assets_an_earlier_import_left(editor: SimpleNamespace) -> None:
+    """Round-4 audit m5: SM_Root stayed in the folder beside the new meshes, unreported."""
+    _import(editor)  # collapsed: SM_Root
+
+    replaced = _import(editor, replace_existing=True, import_options={"use_prim_kinds_for_collapsing": False})
+
+    assert replaced.get("success", True) is not False, replaced
+    assert replaced["left_over_assets"] == ["/Game/Imports/scene/StaticMeshes/SM_Root"]
+    assert replaced["left_over_assets_count"] == 1
+    (warning,) = [w for w in replaced["warnings"] if "earlier import" in w]
+    assert "SM_Root" in warning and "left as they are" in warning
+    assert "/Game/Imports/scene/StaticMeshes/SM_Root" in editor.fake.content, "nothing is deleted"
+
+
+def _geometry_pxr(editor: SimpleNamespace, prims: List[Tuple[str, str]]) -> SimpleNamespace:
+    """The fake editor's pxr, with a stage of typed prims the import's geometry count walks."""
+    gprims = {"Mesh", "Cube", "Sphere", "Capsule", "Cylinder", "Cone"}
+
+    class Prim:
+        def __init__(self, path: str, kind: str) -> None:
+            self.path, self.kind = path, kind
+
+        def GetPath(self) -> str:  # noqa: N802 - pxr's name
+            return self.path
+
+        def GetTypeName(self) -> str:  # noqa: N802 - pxr's name
+            return self.kind
+
+        def IsA(self, schema: Any) -> bool:  # noqa: N802 - pxr's name
+            return schema == "Gprim" and self.kind in gprims
+
+    class PrimRange:
+        def __init__(self, root: Any) -> None:
+            self.prims, self.at, self.pruned = [Prim(p, k) for p, k in prims], -1, None
+
+        def __iter__(self) -> "PrimRange":
+            return self
+
+        def __next__(self) -> Prim:
+            while True:
+                self.at += 1
+                if self.at >= len(self.prims):
+                    raise StopIteration
+                prim = self.prims[self.at]
+                if self.pruned is None or not prim.path.startswith(self.pruned + "/"):
+                    return prim
+
+        def PruneChildren(self) -> None:  # noqa: N802 - pxr's name
+            self.pruned = self.prims[self.at].path
+
+    stage = SimpleNamespace(GetPseudoRoot=lambda: Prim("/", ""), GetPrimAtPath=lambda path: SimpleNamespace())
+    base = editor.fake.pxr()
+    base.Usd.Stage.LoadAll = "LoadAll"
+    base.Usd.Stage.Open = lambda path, load=None: stage
+    base.Usd.PrimRange = PrimRange
+    base.UsdGeom = SimpleNamespace(Gprim="Gprim")
+    return base
+
+
+ROBOTS = [("/Root", "Xform"), ("/Root/Robot", "Xform"), ("/Root/Robot/Chassis", "Mesh"),
+          ("/Root/Robot/Chassis/Arm", "Mesh"), ("/Root/Robot/Chassis/Wheel", "Mesh"),
+          ("/Root/Hand", "SkelRoot"), ("/Root/Hand/Skin", "Mesh")]
+
+
+def test_a_collapsing_import_that_merges_prims_warns(
+    editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-4 audit m4: two robots of 6 mesh prims came back as one SM_Root, with no warning."""
+    monkeypatch.setitem(sys.modules, "pxr", _geometry_pxr(editor, ROBOTS))
+
+    merged = _import(editor)
+    apart = _import(editor, destination_path="/Game/Apart", import_options={"use_prim_kinds_for_collapsing": False})
+
+    # The skeletal mesh under its SkelRoot is no static mesh component a prim, so it is left out.
+    assert merged["stage_geometry_prims"] == 3 and merged["mesh_components"] == 1
+    (warning,) = [w for w in merged["warnings"] if "use_prim_kinds_for_collapsing" in w]
+    assert "3 geometry prims" in warning and "1 static mesh component:" in warning
+    assert "use_prim_kinds_for_collapsing false" in warning
+    assert not any("use_prim_kinds_for_collapsing true" in w for w in apart["warnings"])
+
+
+def test_an_import_whose_stage_pxr_cannot_read_has_no_geometry_count(editor: SimpleNamespace) -> None:
+    result = _import(editor)
+
+    assert result["stage_geometry_prims"] is None
+    assert not any("use_prim_kinds_for_collapsing" in w for w in result["warnings"])
 
 
 def test_an_import_leaves_no_factory_holding_its_scene_actor_in_the_console(
