@@ -23,6 +23,7 @@ import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from simul.adapters import blender_runtime
+from simul.mcp.schemas.simready import SimReadyExportResponse
 from simul.utils.paths import PathPolicy
 from tests.fakes import FakeMatrix
 
@@ -1152,3 +1153,123 @@ def test_an_agreeing_blender_rigid_body_is_not_reported(
     validated = scene.session.validate_simready_compliance(["robot"])
 
     assert not any("Blender" in i["message"] for i in validated["issues"])
+
+
+# ---------------------------------------------------------------------------
+# Round-3 audit (R3-BL-04): an export past the simulation's start
+# ---------------------------------------------------------------------------
+
+
+def _simulated(scene: Any, baked: bool = True, info: str = "") -> SimpleNamespace:
+    """arm_link hinged to a passive base_link, which a bake moved past frame 1.
+
+    The stand-in scene shows arm_link at its own transform up to the cache start
+    and in its simulated pose after it, as Blender's rigid body world does.
+    """
+    _articulated(scene)
+    carrier = _carrier(
+        scene, "HINGE", use_limit_ang_z=True, limit_ang_z_lower=-0.785, limit_ang_z_upper=0.785
+    )
+    base, arm = scene.obj("base_link"), scene.obj("arm_link")
+    base.rigid_body = SimpleNamespace(type="PASSIVE", enabled=True, kinematic=False, mass=1.0)
+    arm.rigid_body = SimpleNamespace(type="ACTIVE", enabled=True, kinematic=False, mass=1.0)
+    rest = arm.matrix_world
+    moved = FakeMatrix.Translation((0.0, 0.25, 0.3))
+    blender_scene = scene.fake.context.scene
+    blender_scene.rigidbody_world = SimpleNamespace(
+        enabled=True,
+        collection=SimpleNamespace(all_objects=[base, arm]),
+        constraints=SimpleNamespace(all_objects=[carrier]),
+        point_cache=SimpleNamespace(
+            frame_start=1, frame_end=250, is_baked=baked, is_outdated=False, info=info
+        ),
+    )
+    frames: List[Any] = []
+
+    def frame_set(frame: int, subframe: float = 0.0) -> None:
+        frames.append((frame, subframe))
+        blender_scene.frame_current = frame
+        blender_scene.frame_subframe = subframe
+        arm.matrix_world = rest if frame <= 1 else moved
+
+    blender_scene.frame_set = frame_set
+    frame_set(120, 0.5)
+    frames.clear()
+    return SimpleNamespace(frames=frames, scene=blender_scene, carrier=carrier, rest=rest)
+
+
+def _arm_position(path: Path) -> List[float]:
+    stage = Usd.Stage.Open(str(path))
+    world = UsdGeom.XformCache().GetLocalToWorldTransform(
+        stage.GetPrimAtPath("/robot/base_link/arm_link")
+    )
+    return list(world.ExtractTranslation())
+
+
+def test_an_export_past_the_cache_start_writes_the_rest_pose_and_restores_the_frame(
+    scene: Any,
+) -> None:
+    """Exported at frame 120 after a bake, the asset was written in its simulated pose with
+    every joint frame rebased to it: a hinge at its 45-degree limit read as 0 to 90."""
+    simulated = _simulated(scene)
+    path = scene.out / "rest.usda"
+
+    result = scene.session.export_simready_usd(str(path), object_names=["robot"])
+
+    assert simulated.frames == [(1, 0.0), (120, 0.5)]
+    assert result["pose_frame"] == 1
+    assert "written in its pose at frame 1, the rigid-body simulation's start" in result["warnings"][0]
+    assert _arm_position(path) == pytest.approx([0.0, 0.0, 0.35])
+    SimReadyExportResponse(success=True, **result)
+
+
+def test_an_export_at_the_cache_start_or_without_a_moving_body_stays_put(scene: Any) -> None:
+    simulated = _simulated(scene)
+    simulated.scene.frame_set(1)
+    simulated.frames.clear()
+
+    at_start = scene.session.export_simready_usd(str(scene.out / "a.usda"), object_names=["robot"])
+    scene.obj("arm_link").rigid_body.type = "PASSIVE"
+    simulated.scene.frame_set(120)
+    simulated.frames.clear()
+    unmoved = scene.session.export_simready_usd(str(scene.out / "b.usda"), object_names=["robot"])
+
+    assert simulated.frames == []
+    assert (at_start["pose_frame"], unmoved["pose_frame"]) == (1, 120)
+    assert not any("pose at frame" in w for w in at_start["warnings"] + unmoved["warnings"])
+
+
+@pytest.mark.parametrize("why", ["not_cached", "at_risk"])
+def test_an_export_that_cannot_go_back_says_it_wrote_the_moved_pose(
+    scene: Any, why: str
+) -> None:
+    """An unbaked cache that does not hold the frame would not show the pose again, and a
+    constraint at risk may crash Blender when the frame changes: the export stays at the
+    current frame and says what that writes."""
+    simulated = _simulated(scene, baked=False, info="")
+    if why == "at_risk":
+        simulated.scene.rigidbody_world.point_cache.is_baked = True
+        blender_runtime._built_constraints[blender_runtime._uid(simulated.carrier)] = {
+            "constraint": blender_runtime._pointer(simulated.carrier.rigid_body_constraint),
+            "bodies": {12345: 1},  # a body that is gone
+        }
+    path = scene.out / "moved.usda"
+
+    result = scene.session.export_simready_usd(str(path), object_names=["robot"])
+
+    assert simulated.frames == []
+    assert result["pose_frame"] == 120
+    note = result["warnings"][0]
+    assert "written in its pose at frame 120, where the rigid-body simulation has moved" in note
+    assert ("may crash Blender" in note) == (why == "at_risk")
+    assert "Set the frame to 1 (set_blender_frame) and export again" in note
+    assert _arm_position(path) == pytest.approx([0.0, 0.25, 0.3])
+
+
+def test_an_unbaked_cache_that_holds_the_frame_goes_back_to_it(scene: Any) -> None:
+    simulated = _simulated(scene, baked=False, info="150 frames in memory (2 KiB).")
+
+    result = scene.session.export_simready_usd(str(scene.out / "c.usda"), object_names=["robot"])
+
+    assert simulated.frames == [(1, 0.0), (120, 0.5)]
+    assert result["pose_frame"] == 1

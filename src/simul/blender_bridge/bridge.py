@@ -25,7 +25,12 @@ from typing import Any, Callable, Optional
 import bpy
 from bpy.app.handlers import persistent
 
-from ..adapters.blender_runtime import BlenderRuntimeSession, stop_watching_playback
+from ..adapters.blender_runtime import (
+    BlenderRuntimeSession,
+    stop_watching_constraints,
+    stop_watching_playback,
+    watch_constraints,
+)
 from ..utils.errors import ScriptExecutionDisabled, exception_message, exception_type_name
 from ..utils.paths import PathPolicy, state_dir
 from .agent_control import reset_ui
@@ -288,6 +293,8 @@ class BlenderBridge:
             )
             bpy.app.handlers.load_post.append(self._load_handler)
             bpy.app.timers.register(self._timer, first_interval=0.05, persistent=True)
+            # From now on, record which rigid body constraints the simulation steps.
+            watch_constraints()
         except Exception:
             self.stop()
             raise
@@ -306,8 +313,10 @@ class BlenderBridge:
             self.listener.close()
             self.listener = None
         self.discovery_path.unlink(missing_ok=True)
-        # play_blender_animation's playback handlers are persistent.
+        # play_blender_animation's playback handlers are persistent, and so
+        # are the constraint guard's.
         stop_watching_playback()
+        stop_watching_constraints()
 
     def poll(self) -> float | None:
         """Accept, read and answer requests from Blender's main-thread timer.

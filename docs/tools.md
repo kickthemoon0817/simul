@@ -2278,10 +2278,14 @@ Behaviour worth knowing:
   `removed_constraints` names it): Blender's Delete left the constraint
   pointing at the freed body, and the next restart of the simulation crashed
   Blender 5.0.1 (see `bake_blender_simulation` below). A constraint whose other
-  object was already deleted or has no rigid body is left as it is, since
-  removing it reads the freed body and crashed Blender where its own Delete did
-  not; one Blender will not remove is left too. `warnings` names both, and
-  Blender's Delete runs as before.
+  object is already deleted or has no rigid body is removed too when the
+  simulation never stepped it with that object, since Bullet then never built
+  it; one the simulation did step is left as it is, since removing it reads the
+  freed body and may crash Blender where its own Delete did not, and so is one
+  Blender will not remove. `warnings` names both, and Blender's Delete runs as
+  before. Deleting the empty of a constraint the simulation stepped with a body
+  that is now gone is refused (`RefusedOperation`, `ConstraintWithoutBody`),
+  since Blender's Delete reads the freed body too.
 - `list_blender_scene_objects` and `search_blender_objects` return a page:
   `count` objects from `offset`, `total` matching, and `next_offset` for the
   next page (`null` after the last; `truncated` says whether more follow). A
@@ -2746,12 +2750,16 @@ Behaviour worth knowing:
   on from there (`simulated_frames` counts the frames it stepped). What the
   cache holds is read from its English info text; anything else (outdated,
   frames skipped, a translated interface) walks from the cache start. A page
-  ends before a sample whose simulation is estimated at more than 6 s (or
-  needs more than `max_simulated_frames` when given), so each call does at most
+  ends before a sample whose simulation is estimated at more than 18 s (3 times
+  a 6 s budget, as the 22 s deadline below stops what the estimate underrates;
+  or more than `max_simulated_frames` when given), so each call does at most
   that much and the next page goes on. The estimate is the one
-  `bake_blender_simulation` uses (below): rigid bodies (by collision shape) x
-  substeps x solver iterations, plus the cloth, soft bodies, dynamic paint,
-  particles and fluid domains that step along unbaked. Whatever the estimate,
+  `bake_blender_simulation` uses (below): rigid bodies by what they touch and
+  their collision shape, substeps and solver iterations, plus the cloth, soft
+  bodies, dynamic paint, particles and fluid domains that step along unbaked.
+  Before round 3 it charged every body as piled and every vertex of a convex
+  hull's mesh, so a 6-link hinge arm paged 39 frames a call. Whatever the
+  estimate,
   an unconfirmed page also ends once it has stepped for 22 s, with a `warning`
   naming the frame it reached; the frames it simulated stay cached, so the next
   page goes on from there. A request whose first sample alone needs more is
@@ -2852,6 +2860,20 @@ Behaviour worth knowing:
     step), and springs and breaking thresholds have no exact equivalent: each
     is reported in `issues` and `warnings`, and `physics.joints` lists the
     joints written.
+
+  The asset's pose and joint frames are those at the rigid-body simulation's
+  start, where Blender defines the constraints' frames. Exported past the
+  cache start, where the simulation has moved the bodies, the asset used to be
+  written in its simulated pose with every joint frame rebased to it: a hinge
+  limited to ±45° that had swung to its limit read as 0° to 90° in a
+  simulator. When the export holds a moving rigid body (or a descendant of
+  one) and the scene is past the cache start, the export runs at the cache
+  start and the scene goes back to its frame afterwards; `pose_frame` gives
+  the frame written and a warning says so. When going back would not show the
+  same pose (an unbaked cache that does not hold the frame), or the frame
+  change may crash Blender (a constraint the guard below refuses), the asset
+  is written as it is, with a warning to set the frame to the cache start and
+  export again.
 
   `collider_type` and the friction values also apply to the meshes of
   descendants that set none of their own, so metadata on an asset root makes
@@ -3008,7 +3030,13 @@ Behaviour worth knowing:
   its own 250 frames) while `ptcache.free_bake` freed only the one.
   `scope: "all"` frees and bakes every point cache, as Bake All Dynamics does:
   rigid bodies, cloth, soft bodies and dynamic paint over the requested range,
-  particle systems over the range their emission settings give.
+  particle systems over the range their emission settings give. It steps each
+  frame and then marks each cache baked from what it holds, like the
+  `rigid_body` scope, instead of running `ptcache.bake_all`, which cannot be
+  stopped part way; the caches read back exactly as Bake All's (Blender 5.0.1:
+  a cloth on a collider, emitted particles and 20 piled bodies over 60 frames
+  differed by 0.0). Caches Bake All skips (a fluid domain's own particle
+  systems, hair without dynamics) are left as they are.
   `free_blender_bake` takes the same scope and lists what it `freed`. A disabled
   rigid body world is refused rather than marked baked with no frames. The bake
   runs on Blender's main thread, stepping every frame, and the scene returns to
@@ -3055,84 +3083,103 @@ Behaviour worth knowing:
   included. Shape, flow, falloff, maximum distance and noise can be set too.
   `get_blender_force_field_info` refuses an object whose field type is NONE,
   such as a collider, whose collision settings live in the same place.
-- `bake_blender_simulation` refuses more than 20 000 frames, or a bake
-  estimated at more than 12 s, unless `allow_long_bake: true`. A GUI Blender
-  took up to 1.7 times as long as the headless one the estimate was measured
-  on, so that is about 20 s there, inside the 30 s an attached call waits by
-  default. The estimate is
+- Without `allow_long_bake: true`, `bake_blender_simulation` stops stepping
+  after 22 s, bakes the frames it simulated in every cache, and answers with
+  `complete: false` and a warning naming the frame it reached (the rigid-body
+  cache's `frame_end`, and that of each cloth, soft-body and dynamic paint
+  cache, are cut to it). That leaves 8 s of the 30 s an attached call waits by
+  default. Up front it refuses more than 20 000 frames, or a bake estimated at
+  more than 36 s, 3 times the 12 s a call is meant to take: a GUI Blender took
+  up to 1.7 times as long as the headless one the estimate was measured on, so
+  12 s is about 20 s there, and the deadline catches whatever the estimate
+  underrates, so only a bake estimated far over is turned away. The estimate is
   the frames times what each simulation costs a frame, at rates measured with
-  this tool in headless Blender 5.0.1 on an M-series Mac (the slowest case of
-  each kind):
+  this tool in headless Blender 5.0.1 on an M-series Mac:
 
   | Simulation | Cost a frame |
   |---|---|
-  | Rigid bodies | bodies x substeps x (4.2 + 0.11 x solver iterations) µs: 300 piled convex-hull cubes took 5.1 µs a body and substep at 10 iterations, 9.3 at 50, 12.7 at 100; scattered ones 1.8. A body costs more by its collision shape: a convex hull its vertices / 14 times (at least once), a MESH shape its triangles / 56 times, counting the modifiers when `mesh_source` is not BASE; primitive shapes once. 300 piled 482-vertex UV-sphere hulls took 0.70 of that estimate, 162-vertex hulls 0.92, 960-triangle meshes 0.65 |
-  | Cloth | vertices x (1.2 + 1.6 x quality) µs, x 1.3 with self-collision: an 80x80 grid took 2.1, 8.0 and 11.6 µs a vertex over its first 100 frames at quality 1, 5 and 10, and 9.2 µs over 291 frames at quality 5 |
-  | Soft body | vertices x 5 µs (x step_min / 10 above 10 steps), x 2.5 with self-collision |
+  | Rigid bodies | Per moving body (active, enabled, not animated) and substep, by what it touches, read from the bounding boxes: one within a quarter of its size of another moving body is piled, (4.2 + 0.11 x solver iterations) µs, measured on 300 piled hull cubes (5.1-5.3 µs at 10 iterations, 9.3 at 50); any other is lone, resting on or falling onto a static body, (1.2 + 0.067 x iterations) µs (300 scattered cubes, 1.8-2.1 µs). A pair a constraint keeps from colliding does not count as touching. Each constraint adds 0.05 µs an iteration. The collision shape scales the cost, counting the modifiers when `mesh_source` is not BASE: a convex hull by the hull's own vertices, which Blender builds it from (a 64-segment cylinder of 5 760 vertices has 128), a piled one a cube per 14 of them and a lone one 1 + (vertices - 8) / 48 cubes; a MESH shape on a moving body a cube per 48 triangles, piled or not; a piled box half a cube; other primitives one. A passive MESH shape is a BVH: a lone body over it costs the triangles under its own extent (at most 64), not the whole mesh's |
+  | Cloth | vertices x (1.2 + 1.6 x quality) µs, x 1.3 with self-collision, times its contact: an 80x80 grid falling on a 512-face sphere took 2.1, 8.0 and 11.6 µs a vertex over its first 100 frames at quality 1, 5 and 10, and 0.44 of that with no collider. The contact grows with the share of the cloth the colliders under it can hold (a quarter of their bounding-box surface over the cloth's area, at most all of it) and with how many collider faces a vertex reaches (its spacing plus twice the collision distance, over a face's size): a cloth draping a 21 634-face body costs 7 times the rates |
+  | Soft body | vertices x 5 µs (x step_min / 10 above 10 steps), x 2.5 with self-collision, x (1 + collider faces / 10 000) |
   | Dynamic paint | vertices of a vertex surface x 0.5 µs (image surfaces have no point cache) |
-  | Particles | particles x 0.1 µs, SPH fluid particles x 1 µs; hair dynamics as cloth over the hair points |
-  | Fluid domain in Replay mode | cells (resolution³, scaled to the domain's shape) x 1 µs for smoke, 3 µs for liquid; the Modular and All cache types simulate only through Blender's own fluid bake |
+  | Particles | particles x 0.1 µs, SPH fluid particles x 1 µs; hair dynamics as cloth over the hair points; a fluid domain's own systems (FLIP, spray, foam) are the domain's cost |
+  | Fluid domain in Replay mode | 0.6 µs a cell for smoke, 1.5 µs for liquid, over the cells (resolution³, scaled to the domain's shape) up to 32 768, then 32 768 x (cells / 32 768)^0.6: resolution 64 took 3.3 times as long as 32; the Modular and All cache types simulate only through Blender's own fluid bake |
 
   Modifiers before a cloth or soft body multiply its vertices: Subdivision by 4
-  per level, Array by its count, Mirror by 2 per axis, Solidify by 2. Cloth and
-  soft bodies cost (1 + collider faces / 10 000) times as much, for the faces
-  of the objects with a Collision modifier. With `scope: "rigid_body"` the other caches that are not baked
-  count too, since stepping the frames simulates them along. The refusal
-  (`error_type: "ValidationError"`, `details.code: "BakeOverBudget"`) names each
-  part, the estimate (`details.estimated_seconds`) and how many frames fit
-  (`details.frames_that_fit`). Bakes the estimate put just under 16 s took
-  16.2 s (300 piled cubes over 1000 frames at the default 10 substeps), 14.8 s
-  (100 substeps, 100 frames), 16.4 s (100 solver iterations, 349 frames) and
-  15.1 s (the 80x80 cloth, 264 frames) headless. The audit's bakes that passed
-  the old frames x bodies bound, 300 bodies over 1000 frames at 100 substeps
-  (62.7 s) and the cloth over 1000 frames (55.6 s), are refused, and so is a
-  review's 300 default UV spheres over 100 frames, which froze a GUI Blender
-  for 50 s when its shapes were not counted.
+  per level, Array by its count, Mirror by 2 per axis, Solidify by 2. With
+  `scope: "rigid_body"` the other caches that are not baked count too, since
+  stepping the frames simulates them along. The refusal (`error_type:
+  "ValidationError"`, `details.code: "BakeOverBudget"`) names each part, the
+  estimate (`details.estimated_seconds`), the refusal limit
+  (`details.limit_seconds`, 36) and how many frames take the 12 s budget
+  (`details.frames_that_fit`). Estimated against measured, headless: a 6-link
+  hinge arm of 5 760-vertex hull links over 250 frames 0.11 s against 0.04 s
+  (estimated at 38 s and refused before round 3), 20 cubes on an 80 000-triangle
+  terrain 0.52 s against 0.65 s (19 s before), 300 scattered cubes over 1000
+  frames 5.6 s against 5.4 s (16 s before), 10 cubes beside a resolution-32
+  liquid domain 11.6 s against 12.2 s (25 s before), 300 piled cubes at 100
+  substeps over 75 frames 11.9 s against 11.4 s, and a 2 500-vertex cloth
+  draping a 21 634-face body over 164 frames 26.4 s against 31.7 s (12 s
+  before; 250 frames are now refused). Round 2's piles came out at 0.5-1.0 of
+  their estimates.
 
-  What the estimate does not see (geometry-node simulations, frame-change
-  handlers, a scene slower than the measured ones) is bounded by a deadline: a
-  `rigid_body` bake without `allow_long_bake` stops stepping after 22 s, bakes
-  the frames it simulated, and answers with `complete: false`, `frame_end` set
-  to the last frame baked and a warning. `scope: "all"` runs Blender's Bake All,
-  which cannot be stopped part way, so only the estimate bounds it.
-  A bake runs on Blender's main thread and cannot be stopped once it starts.
-  Past the attached-mode client timeout (`BLENDER__CONNECTION_TIMEOUT`, 30 s by
-  default), the call reports a timeout while Blender keeps baking, and the next
-  calls wait behind it and can time out too. Raise the timeout before allowing
-  a long bake; `get_blender_rigid_body_world` shows when it has finished
+  The deadline bounds what the estimate does not see (geometry-node
+  simulations, frame-change handlers, a scene slower than the measured ones).
+  `allow_long_bake: true` bakes the whole range in one call, which cannot be
+  stopped once it starts on Blender's main thread: past the attached-mode
+  client timeout (`BLENDER__CONNECTION_TIMEOUT`, a server setting, 30 s by
+  default) the call reports a `TimeoutError` while Blender keeps baking, and
+  the next calls wait behind it and can time out too.
+  `get_blender_rigid_body_world` shows when it has finished
   (`rigid_body_cache.is_baked`).
 - `bake_blender_simulation`, `set_blender_frame`, `play_blender_animation`
   (play and reverse), `capture_blender_viewport_sequence`, the trajectory tools,
   `get_blender_physics_state` when it steps, and `export_blender_file` when it
   exports animation (glTF, FBX, USD) refuse with `error_type:
   "RefusedOperation"` (`details.code: "ConstraintWithoutBody"`,
-  `details.constraints`) while a rigid body constraint joins an object that was
-  deleted or has no rigid body. Restarting a simulation from its first frame
-  makes Blender rebuild its physics world, and the rebuild first removes every
-  constraint it built, reading the constraint's two bodies. Deleting a jointed
-  body or removing its rigid body (in Blender, or from a script) frees the body
-  but leaves the built constraint pointing at it, so the rebuild crashed
-  Blender 5.0.1 in `btDiscreteDynamicsWorld::removeConstraint` and the unsaved
-  scene was lost; under macOS `MallocScribble` it crashed every time, and
-  after a deleted body Blender's own frame stepping from the first frame
-  crashed the same way. The
-  rebuild is the only way Blender restarts a simulation, so the bake cannot
-  avoid it. Removing or editing the broken constraint reads the freed body too,
-  and freeing the scene (quitting, opening a file) crashed the same way. Save
-  the file first (`save_blender_file`), which keeps the work. Opening it again
-  (`open_blender_file`) or quitting may then crash Blender once; the saved file
-  opens with its constraints built afresh, where each one can be given two
-  rigid bodies or removed. An undo (Ctrl+Z) that re-reads a jointed body leaves
-  the same dangling constraint with both objects set, which no tool can see:
-  after undoing past rigid body constraints, save the file and open it again
-  before simulating.
-- `get_blender_physics_state` steps an unbaked simulation from the cache start
-  to the current frame before reading the pose (`step_simulation`, default
-  true, when the frames to simulate are estimated at 12 s or less, as for a
-  bake, and for at most 22 s: then `pose_source` is `unknown` and the warning
-  says where it stopped; the simulated frames stay cached, so calling again
-  goes on), as playback would, so like `get_blender_object_trajectory` it is not
-  read-only: an unbaked
+  `details.constraints`) while a rigid body constraint was simulated with an
+  object that has since been deleted or lost its rigid body. Blender builds a
+  constraint in its Bullet world when the simulation steps with both of its
+  objects carrying a rigid body. Deleting one of them, or removing its rigid
+  body (in Blender, or from a script), frees that body but leaves the built
+  constraint pointing at it. Stepping again validates the constraint, and
+  restarting from the first frame rebuilds the world, which first removes
+  every constraint it built; both read the freed body, which crashed Blender
+  5.0.1 in `btDiscreteDynamicsWorld::removeConstraint` and lost the unsaved
+  scene (every time under macOS `MallocScribble`). Freeing such a constraint
+  reads it too: deleting its empty (with Blender's Delete, or
+  `bpy.data.objects.remove`), opening another file or quitting crashed in
+  `RB_constraint_delete`. No change inside the session removes it safely, so
+  the refusal says Blender may crash and how to keep the work: save the file
+  first (`save_blender_file`). A constraint is built only while its file is
+  open, so the saved file, opened again (which may crash Blender this once,
+  after the save), steps normally, and each such constraint can then be given
+  two rigid bodies or removed. `delete_blender_object` removes a body's
+  constraints before deleting it, which avoids the state.
+
+  Only constraints Bullet may have built with the missing body are refused.
+  From the add-on's start (or embedded mode's first session), every frame
+  change records the constraints whose two objects have rigid bodies, with
+  those bodies; a file load forgets the records, since nothing is built then.
+  A constraint whose object was missing whenever the simulation stepped was
+  never built and steps safely, and is not refused: one being set up with an
+  end still unset, or one in a file saved after its body was deleted (both
+  stepped cleanly under `MallocScribble`). A rigid body removed and added
+  again is a new Bullet body, so the constraint is refused until the file is
+  reopened. Undo moves the records to the bodies it restores; an undo that
+  re-reads a simulated jointed body can still leave a dangling constraint,
+  which no tool can see, so after undoing past rigid body constraints, save
+  the file and open it again before simulating. A constraint that had already
+  lost its body when the add-on started is taken as never built.
+- `get_blender_physics_state` steps an unbaked simulation to the current
+  frame before reading the pose (`step_simulation`, default true, unless the
+  frames to simulate are estimated at more than 36 s, as for a bake, and for
+  at most 22 s: then `pose_source` is `unknown` and the warning says where it
+  stopped). It starts from the last frame the memory cache holds, as the
+  trajectory walk does, so calling again goes on where the last call stopped
+  (before round 3 it walked again from the cache start through every cached
+  frame). It steps as playback would, so like `get_blender_object_trajectory`
+  it is not read-only: an unbaked
   simulation advances one frame at a time, so after `set_blender_frame` jumped
   from 1 to 48 a falling body still sat at its starting pose. Frames Blender has
   cached are read, not simulated again. `pose_source` says where the pose comes

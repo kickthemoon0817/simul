@@ -1060,8 +1060,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "also resets a rigid body's cache. Another scene linking it keeps it "
             "(remaining_scenes); use_global=true deletes it from every scene and the file. "
             "A rigid body constraint joining it to another rigid body is removed first "
-            "(removed_constraints), since one left pointing at the deleted body crashes "
-            "Blender when the simulation restarts; one that cannot be is named in warnings."
+            "(removed_constraints), since one left pointing at the deleted body can crash "
+            "Blender when the simulation restarts; one that cannot be safely is named in "
+            "warnings. Deleting the empty of a constraint the simulation stepped with a "
+            "body that is gone is refused (RefusedOperation), as it may crash Blender."
         ),
         hints=DESTRUCTIVE,
         operation="delete_object",
@@ -1500,8 +1502,9 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Get an object's world pose and rigid-body state at the current frame. An "
             "unbaked simulation advances one frame at a time, so after a frame jump a "
             "body sits where it was last simulated: by default the scene first steps "
-            "from the cache start to the current frame, as playback would (when that "
-            "is estimated at 12 s or less, and for at most 22 s). pose_source and "
+            "to the current frame from the last frame its memory cache holds, as "
+            "playback would (unless that is estimated at over 36 s, and for at most "
+            "22 s, after which calling again goes on from there). pose_source and "
             "simulated_for_frame say "
             "whether the "
             "pose is the simulation's for this frame; frames past the cache end hold "
@@ -1522,7 +1525,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Sample the world pose of an object, or of an armature's bone, over a frame "
             "range, a page at a time (next_offset continues). Not read-only: it steps "
             "the scene through the frames (frame-change handlers run, an unbaked "
-            "rigid-body cache fills, more than an estimated 6 s of simulation, or "
+            "rigid-body cache fills, more than an estimated 18 s of simulation, or "
             "22 s of stepping, only with max_simulated_frames) and restores the current "
             "frame afterwards."
         ),
@@ -1563,17 +1566,20 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "bodies, cloth, soft bodies, dynamic paint, particles). Refused for a "
             "disabled rigid body world. The reply gives the range the cache holds "
             "and warns about scene frames it leaves out, where bodies hold their "
-            "pose. A bake runs on Blender's main thread and cannot be stopped, so one "
-            "over 20 000 frames or an estimated 12 s is refused unless "
-            "allow_long_bake=true; the estimate counts rigid bodies (by collision-shape "
-            "vertices) x substeps x solver iterations, cloth and soft-body vertices x "
-            "quality, particles and replaying fluid domains, and the refusal says how "
-            "many frames fit. A rigid_body bake that still runs 22 s stops there and "
-            "bakes what it simulated (complete: false). Past the client timeout Blender "
-            "keeps baking and the next calls wait behind it. Refused (RefusedOperation) "
-            "while a rigid body constraint joins a deleted object or one without a rigid "
-            "body, since restarting that simulation crashes Blender 5.0.1; save the file "
-            "first (reopening it may crash Blender once)."
+            "pose. A bake runs on Blender's main thread, so without "
+            "allow_long_bake=true one that runs 22 s stops there and bakes what it "
+            "simulated (complete: false), and one over 20 000 frames or estimated at "
+            "over 36 s (3 times the 12 s a call is meant to take) is refused up front; "
+            "the estimate counts rigid bodies by what they touch, collision shape "
+            "(hull vertices), substeps and solver iterations, cloth and soft-body "
+            "vertices x quality and contact, particles and replaying fluid domains, and "
+            "the refusal says how many frames fit. With allow_long_bake=true the whole "
+            "range bakes in one call; past the client's timeout (30 s, a server setting) "
+            "it reports a timeout while Blender keeps baking and the next calls wait "
+            "behind it. Refused (RefusedOperation) while a rigid body constraint was "
+            "simulated with an object that is now deleted or without a rigid body, "
+            "since stepping it again may crash Blender 5.0.1; save the file first "
+            "(opening it again may crash Blender once, and then steps normally)."
         ),
         hints=OVERWRITING,
         operation="bake_simulation",
@@ -1767,7 +1773,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "metersPerUnit follows the scene's Unit Scale. Listed objects export with their "
             "descendants, hidden ones too; lights, cameras and the World are left out by default. "
             "Refuses when validation finds errors; skip_checks leaves a check out, force=true "
-            "ignores every error. Returns each object's prim path."
+            "ignores every error. Past the rigid-body cache start, where the simulation has "
+            "moved the bodies, the asset is written in its pose at the cache start (where "
+            "Blender defines the joint frames) and the scene's frame is restored "
+            "(pose_frame). Returns each object's prim path."
         ),
         hints=OVERWRITING,
         operation="export_simready_usd",

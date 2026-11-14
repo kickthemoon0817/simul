@@ -422,8 +422,11 @@ arrives; only a connection that sends nothing for 10 seconds while Blender is
 free to read is dropped. A larger request is refused before it is sent, with an
 error that names the limit; send the data in several calls instead.
 
-`bake_blender_simulation` refuses a bake likely to outlast the timeout unless
-`allow_long_bake` is set; see [tools.md](tools.md).
+`bake_blender_simulation` stops a bake after 22 s with the frames it simulated
+(`complete: false`), whatever its scope, and refuses up front only a bake
+estimated far over what a call should take, unless `allow_long_bake` is set;
+`get_blender_physics_state` and the trajectory tools stop their stepping after
+22 s too. See [tools.md](tools.md).
 
 ## Configuration
 

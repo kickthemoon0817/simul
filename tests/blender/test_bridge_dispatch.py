@@ -1194,6 +1194,32 @@ def test_stopping_the_bridge_removes_the_playback_handlers(
     assert removed == [True]
 
 
+def test_the_bridge_watches_the_constraints_the_simulation_steps(
+    bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 audit (R3-BL-03): the crash guard refuses only constraints the simulation
+    stepped with a body that is gone, which it learns from frame changes from the bridge's
+    start on; the handlers are persistent, so stopping the bridge removes them."""
+    calls: list = []
+    monkeypatch.setattr(bridge_module, "watch_constraints", lambda: calls.append("watch"))
+    monkeypatch.setattr(bridge_module, "stop_watching_constraints", lambda: calls.append("stop"))
+    monkeypatch.setattr(bridge_module, "stop_watching_playback", lambda: None)
+    bpy = sys.modules["bpy"]
+    registered: list = []
+    bpy.app.timers = SimpleNamespace(  # type: ignore[attr-defined]
+        is_registered=lambda timer: timer in registered,
+        register=lambda timer, **kwargs: registered.append(timer),
+        unregister=registered.remove,
+    )
+    bpy.app.handlers.load_post = []  # type: ignore[attr-defined]
+    bridge = _bridge(bridge_module, tmp_path)
+
+    bridge.start()
+    bridge.stop()
+
+    assert calls == ["watch", "stop"]
+
+
 # ---------------------------------------------------------------------------
 # A declared error type survives the bridge
 # ---------------------------------------------------------------------------

@@ -24,6 +24,29 @@ def _no_recorded_playback() -> Iterator[None]:
     blender_runtime._playback.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_recorded_constraints() -> Iterator[None]:
+    """Start each test with no constraint recorded as simulated, and no hull counted.
+
+    The crash guard's record of the constraints the simulation stepped and the
+    hull-vertex cache are module-level, as in the one Blender process the
+    add-on lives in.
+    """
+    for record in (
+        blender_runtime._built_constraints,
+        blender_runtime._constraint_watch,
+        blender_runtime._HULL_VERTICES,
+    ):
+        record.clear()
+    yield
+    for record in (
+        blender_runtime._built_constraints,
+        blender_runtime._constraint_watch,
+        blender_runtime._HULL_VERTICES,
+    ):
+        record.clear()
+
+
 @pytest.fixture
 def anim_utils(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Install the ``bpy_extras.anim_utils`` stand-in that reads a ``FakeAction``.
