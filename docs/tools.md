@@ -756,7 +756,9 @@ Notes:
   and so does a call whose reply timed out: other calls get `InstanceBusy`
   (`details.reason: "finishing_timed_out_call"`) until the engine is done,
   from this server and every other simul server sharing `SIMUL_HOME`
-  (`details.held_by` names another server's pid). Meanwhile `ping_isaac`,
+  (`details.held_by` names another server's pid; a hold whose server stopped
+  is taken over by the next call, which checks the engine first and reports
+  `details.adopted_from`). Meanwhile `ping_isaac`,
   `get_isaac_runtime_info` and `list_isaac_instances` answer at once, without
   a probe, with `busy: true` and `held_after_timeout`; see
   [isaac-sim.md](isaac-sim.md#transports). A call runs on the instance that was

@@ -188,6 +188,52 @@ def test_a_cancelled_backend_call_is_marked_executed_unknown(
     assert audit["status"] == "cancelled" and audit["executed"] == "unknown"
 
 
+def test_a_forced_exit_records_the_calls_still_in_flight_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, audit_rows: List[Dict[str, Any]]
+) -> None:
+    """Review of #370: a second SIGTERM exited 143 with no usage or audit row for the call it cut short.
+
+    ``simul server`` calls ``record_calls_in_flight`` just before ``os._exit``;
+    here the call then goes on and is cancelled, and is not recorded again.
+    """
+    instance = _server(monkeypatch, tmp_path)
+    recorded: List[int] = []
+
+    class _Adapter:
+        def is_available(self) -> bool:
+            return True
+
+        def create_session(self) -> Any:
+            import contextlib
+
+            return contextlib.nullcontext(object())
+
+    async def start(started: asyncio.Event) -> Any:
+        async def script(session: Any) -> Dict[str, Any]:
+            started.set()
+            recorded.append(instance.record_calls_in_flight("forced_exit"))
+            await asyncio.sleep(10)
+            return {"success": True}
+
+        return await instance._exec_backend("execute_unreal_script", _Adapter(), "Unreal", None, script)
+
+    _cancel_inside_a_call("execute_unreal_script", start)
+
+    assert recorded == [1]
+    row = _row(instance, "execute_unreal_script")
+    assert (row["success"], row["error"], row["cancelled"], row["executed"]) == (
+        False,
+        "forced_exit",
+        True,
+        "unknown",
+    )
+    (audit,) = audit_rows
+    assert audit["status"] == "cancelled" and audit["reason"] == "forced_exit"
+    assert audit["executed"] == "unknown" and audit["tool"] == "execute_unreal_script"
+    assert audit["request_id"] and audit["session"], "the envelope told the row its session"
+    assert instance.record_calls_in_flight("forced_exit") == 0, "nothing is left in flight"
+
+
 def test_a_call_cancelled_before_it_started_did_not_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

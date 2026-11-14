@@ -13,6 +13,7 @@ import difflib
 import functools
 import hashlib
 import inspect
+import itertools
 import json
 import os
 import re
@@ -56,7 +57,7 @@ from ..adapters import IsaacRuntimeAdapter, IsaacSocketClient
 from ..adapters.isaac_socket_client import UnfinishedRequest
 from ..adapters.base import BackendAdapter
 from ..config import Settings, get_settings
-from ..logging import LoggerMixin, current_request_id, get_logger, note_call_outcome
+from ..logging import LoggerMixin, bound_call_outcome, current_request_id, get_logger, record_calls_in_flight
 from ..resources import find_checkout_root, resource
 from ..utils.errors import exception_message, exception_type_name
 from ..utils.paths import PathPolicy, SandboxDenied, sandbox_error
@@ -234,6 +235,10 @@ class IsaacHold:
         record: The hold's record for the other simul servers on the machine
             (``simul.utils.engine_holds``), or None when it has none.
         client: The client of the call that timed out.
+        limit: The hold's limit in seconds; ``isaac_sim.hold_after_timeout``
+            when None. A hold taken over keeps the one it had.
+        adopted_from: For a hold taken over from another simul server that
+            stopped or exited while it held the engine, that server's pid.
     """
 
     tool_name: str
@@ -241,6 +246,8 @@ class IsaacHold:
     task: "Optional[asyncio.Task[None]]" = None
     record: Optional[Any] = None
     client: Any = None
+    limit: Optional[float] = None
+    adopted_from: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -263,6 +270,12 @@ class AdmittedInstance:
 _ADMITTED_INSTANCE: "contextvars.ContextVar[Optional[AdmittedInstance]]" = contextvars.ContextVar(
     "simul_admitted_isaac_instance", default=None
 )
+
+
+#: How long a call that takes over another server's orphaned hold waits for
+#: its idle probe before it is refused: an idle Isaac Sim answers the probe
+#: within a frame, so the call then goes ahead.
+ADOPTED_HOLD_PROBE_SECONDS: float = 1.0
 
 
 def _isaac_endpoint(client: Any) -> Optional[str]:
@@ -785,6 +798,10 @@ class SimulMCPServer(LoggerMixin):
         # Those holds as every simul server on the machine sees them, and the
         # other servers' holds this one honours (simul.utils.engine_holds).
         self._shared_holds = SharedHolds("isaac")
+        # Every call the envelope is running, with what records it should the
+        # process exit before it ends (record_calls_in_flight).
+        self._calls_in_flight: Dict[int, Callable[[str], None]] = {}
+        self._call_keys = itertools.count()
         # Request tasks waiting for the engine to finish a call their client
         # cancelled; a stopping server waits for them, bounded.
         self._draining_calls: Set["asyncio.Task[Any]"] = set()
@@ -1881,6 +1898,10 @@ class SimulMCPServer(LoggerMixin):
         call_started = False
         entered = time.monotonic()
         started: Optional[float] = None
+        recorded = False
+        # This call's audit row, which a forced exit tells how the call ended
+        # from outside it (record_calls_in_flight).
+        note_outcome = bound_call_outcome()
 
         async def run(request: Optional[BaseModel]) -> Dict[str, Any]:
             nonlocal call_started
@@ -1900,6 +1921,10 @@ class SimulMCPServer(LoggerMixin):
             # One request id ties this row to the call's audit row, which this
             # also tells how the call ended (the audit used to say "ok" for
             # every call that did not raise). Neither may fail the call.
+            nonlocal recorded
+            if recorded:
+                return  # once per call: a forced exit may have recorded it already
+            recorded = True
             try:
                 recorded_agent = self._recorded_agent_id(agent_id)
                 self.usage_tracker.record(
@@ -1915,7 +1940,7 @@ class SimulMCPServer(LoggerMixin):
                     cancelled=status == "cancelled",
                     executed=executed,
                 )
-                note_call_outcome(
+                note_outcome(
                     # The name the call is recorded under: <unknown tool> for
                     # a made-up one, as in the usage row.
                     tool=tool_name,
@@ -1939,6 +1964,23 @@ class SimulMCPServer(LoggerMixin):
             )
             return self._as_text_result(refusal.payload)
 
+        def record_forced_exit(reason: str) -> None:
+            # The process exits with the call still in flight; nothing after
+            # this runs, so the call is recorded now.
+            if recorded:
+                return
+            since = started if started is not None else entered
+            record(
+                (time.monotonic() - since) * 1000,
+                False,
+                reason,
+                status="cancelled",
+                reason=reason,
+                executed="unknown" if call_started else False,
+            )
+
+        in_flight = next(self._call_keys)
+        self._calls_in_flight[in_flight] = record_forced_exit
         try:
             if self._is_paging_continuation(tool_name, params):
                 rate_error = self._check_rate_limit(tool_name, agent_id, continuation=True)
@@ -1993,6 +2035,7 @@ class SimulMCPServer(LoggerMixin):
                 record(duration, False, "cancelled", status="cancelled", executed="unknown")
             raise
         finally:
+            self._calls_in_flight.pop(in_flight, None)
             # One place for every way a call can end before it starts. A
             # cancelled wait for the instance lock raises CancelledError out
             # of the admission hook, and would otherwise leave Isaac's tool
@@ -2109,7 +2152,10 @@ class SimulMCPServer(LoggerMixin):
         refused at once. Then the instance's lock is taken, bounded by
         ``server.timeout`` so a caller queued behind a long step learns the
         instance is busy instead of waiting until its own client gives up,
-        which would read as "unreachable". An admitted call holds the lock
+        which would read as "unreachable". With the lock held, a hold
+        another server left on the engine (it stopped or exited) is taken
+        over, and the call waits for one idle probe
+        (``_take_over_orphaned_hold``). An admitted call holds the lock
         until it has finished, and the caller's binding heartbeat is
         refreshed before the lock is released.
 
@@ -2138,12 +2184,18 @@ class SimulMCPServer(LoggerMixin):
                 yield Refusal(self._instance_busy_error(instance_name), "instance_busy")
                 return
             # Another server may have begun holding the engine while this call
-            # waited for the lock.
-            elsewhere = self._foreign_isaac_hold(client)
+            # waited for the lock, or left a hold (it stopped or exited) that
+            # this server takes over, checking the engine before sending.
+            elsewhere, orphan = self._shared_isaac_holds(client)
             if elsewhere is not None:
                 lock.release()
                 yield Refusal(self._held_elsewhere_error(instance_name, elsewhere), "instance_busy")
                 return
+            if orphan is not None:
+                refusal = await self._take_over_orphaned_hold(instance_name, lock, client, orphan)
+                if refusal is not None:
+                    yield refusal
+                    return
             entered = time.monotonic()
             try:
                 yield None
@@ -2170,6 +2222,124 @@ class SimulMCPServer(LoggerMixin):
             return None
         return self._shared_holds.foreign(endpoint)
 
+    def _shared_isaac_holds(self, client: Any) -> Tuple[Optional[SharedHold], Optional[SharedHold]]:
+        """Another server's live hold on ``client``'s engine, and a hold left there to take over.
+
+        One read of the records. No orphan is returned while
+        ``isaac_sim.hold_after_timeout`` is 0 or for a client without the
+        idle probe (a test double).
+        """
+        endpoint = _isaac_endpoint(client)
+        if endpoint is None:
+            return None, None
+        live, orphans = self._shared_holds.records(endpoint)
+        if live:
+            return min(live, key=lambda hold: hold.since), None
+        if (
+            not orphans
+            or self.settings.isaac_sim.hold_after_timeout <= 0
+            or not callable(getattr(client, "adopt_unfinished_request", None))
+        ):
+            return None, None
+        return None, min(orphans, key=lambda hold: hold.since)
+
+    async def _take_over_orphaned_hold(
+        self, instance_name: str, lock: asyncio.Lock, client: Any, orphan: SharedHold
+    ) -> Optional[Refusal]:
+        """Take over a hold another simul server left on this call's engine, before the call is sent.
+
+        A server that stops while it holds Isaac Sim after a timeout releases
+        its record, and one that is killed leaves it behind; the engine may
+        still be running the call that timed out (``engine_holds``). The
+        first server about to send that engine something after that takes the
+        hold over: it republishes the record as its own and runs its own idle
+        probe (``wait_until_idle``). An engine that answers within
+        ``ADOPTED_HOLD_PROBE_SECONDS`` is idle and the call goes ahead;
+        otherwise the hold goes on in this server, which keeps ``lock`` until
+        the engine has finished, as after a timeout of its own, and the call
+        is refused with InstanceBusy.
+
+        Called with ``lock`` held, for an orphan ``_shared_isaac_holds``
+        returned.
+
+        Args:
+            instance_name: The instance the call was admitted to.
+            lock: Its lock, held.
+            client: The admitted client.
+            orphan: The hold left on its engine.
+
+        Returns:
+            None when the call may be sent (``lock`` still held); otherwise
+            the refusal, ``lock`` then released or handed to the hold.
+        """
+        limit = max(0.0, orphan.expires_at - orphan.since)
+        hold = IsaacHold(
+            tool_name=orphan.tool,
+            since=time.monotonic() - max(0.0, time.time() - orphan.since),
+            client=client,
+            limit=limit,
+            adopted_from=orphan.pid,
+        )
+        taken, record = self._shared_holds.adopt(
+            orphan, live=lambda: hold.task is None or (not hold.task.done() and not hold.task.get_loop().is_closed())
+        )
+        if not taken:
+            # Another server took it over first and holds the engine now.
+            elsewhere = self._foreign_isaac_hold(client)
+            if elsewhere is None:
+                return None
+            lock.release()
+            return Refusal(self._held_elsewhere_error(instance_name, elsewhere), "instance_busy")
+        hold.record = record
+        self.logger.warning(
+            "Isaac instance %r may still be running %s for another simul server (pid %d) that stopped "
+            "holding it; checking the engine before sending anything",
+            instance_name,
+            orphan.tool,
+            orphan.pid,
+        )
+        client.adopt_unfinished_request(orphan.tool, orphan.detail("transport"))
+        remaining = max(0.0, orphan.expires_at - time.time())
+        waiting = asyncio.ensure_future(client.wait_until_idle(remaining))
+        try:
+            await asyncio.wait({waiting}, timeout=min(ADOPTED_HOLD_PROBE_SECONDS, remaining))
+        except BaseException:
+            # The call was cancelled while it probed: the hold goes on without it.
+            self._keep_adopted_hold(instance_name, lock, hold, waiting)
+            raise
+        if not waiting.done():
+            self._keep_adopted_hold(instance_name, lock, hold, waiting)
+            return Refusal(self._instance_busy_error(instance_name), "instance_busy")
+        failure = waiting.exception()
+        if failure is not None:
+            self.logger.warning(
+                "Could not tell whether Isaac instance %r finished %s (%s); sending the call",
+                instance_name,
+                orphan.tool,
+                failure,
+            )
+        elif not waiting.result():
+            self.logger.warning(
+                "The hold on Isaac instance %r for %s reached its limit; sending the call",
+                instance_name,
+                orphan.tool,
+            )
+        else:
+            self.logger.info("Isaac instance %r had finished %s; sending the call", instance_name, orphan.tool)
+        client.forget_unfinished_request()
+        self._shared_holds.withdraw(record)
+        return None
+
+    def _keep_adopted_hold(
+        self, instance_name: str, lock: asyncio.Lock, hold: IsaacHold, waiting: "asyncio.Future[bool]"
+    ) -> None:
+        """Hand ``lock`` to a hold taken over from another server, which ends once ``waiting`` does."""
+        hold.task = asyncio.get_running_loop().create_task(
+            self._hold_until_engine_idle(instance_name, hold.client, hold, hold.limit or 0.0, None, waiting)
+        )
+        hold.task.add_done_callback(lambda _task: self._end_hold(instance_name, lock, hold))
+        self._isaac_holds[instance_name] = hold
+
     def isaac_hold_report(self, instance_name: str, client: Any) -> Optional[Dict[str, Any]]:
         """Describe a hold on an instance, this server's or another's; None when it is not held.
 
@@ -2183,12 +2353,17 @@ class SimulMCPServer(LoggerMixin):
 
         Returns:
             ``isaac_hold_info``'s fields, plus ``held_by`` (the other
-            server's ``pid``) for another server's hold.
+            server's ``pid``) for another server's hold. A hold whose server
+            stopped or exited is reported too, ``held_by.stopped: true``:
+            the next call takes it over and checks the engine first.
         """
         local = self.isaac_hold_info(instance_name)
         if local is not None:
             return local
         elsewhere = self._foreign_isaac_hold(client)
+        if elsewhere is None and self.settings.isaac_sim.hold_after_timeout > 0:
+            endpoint = _isaac_endpoint(client)
+            elsewhere = None if endpoint is None else self._shared_holds.orphan(endpoint)
         return None if elsewhere is None else elsewhere.info()
 
     def _held_elsewhere_error(self, instance_name: str, hold: SharedHold) -> Dict[str, Any]:
@@ -2221,9 +2396,14 @@ class SimulMCPServer(LoggerMixin):
                 error_type=error_types.INSTANCE_BUSY,
             ).model_dump()
         info = self.isaac_hold_info(instance_name) or {}
+        whose = (
+            ""
+            if hold.adopted_from is None
+            else f" for another simul server (pid {hold.adopted_from}) that stopped holding it"
+        )
         return ErrorResponse(
             error=(
-                f"Isaac instance {instance_name!r} is still running {hold.tool_name}, whose "
+                f"Isaac instance {instance_name!r} is still running {hold.tool_name}{whose}, whose "
                 f"reply timed out {info.get('busy_for_seconds', 0):.0f}s ago. Isaac Sim keeps "
                 "running a call after its reply times out and runs the next one only after "
                 "it, so the server keeps the instance until the engine has finished rather "
@@ -2240,16 +2420,22 @@ class SimulMCPServer(LoggerMixin):
 
         Returns:
             ``timed_out_tool``, ``busy_for_seconds`` (since the reply timed
-            out) and ``hold_limit_seconds``.
+            out) and ``hold_limit_seconds``; for a hold taken over from
+            another server that stopped, ``adopted_from`` (its pid).
         """
         hold = self._isaac_holds.get(instance_name)
         if hold is None:
             return None
-        return {
+        info: Dict[str, Any] = {
             "timed_out_tool": hold.tool_name,
             "busy_for_seconds": round(time.monotonic() - hold.since, 1),
-            "hold_limit_seconds": self.settings.isaac_sim.hold_after_timeout,
+            "hold_limit_seconds": (
+                self.settings.isaac_sim.hold_after_timeout if hold.limit is None else round(hold.limit, 3)
+            ),
         }
+        if hold.adopted_from is not None:
+            info["adopted_from"] = hold.adopted_from
+        return info
 
     def _hold_if_engine_busy(
         self,
@@ -2319,6 +2505,8 @@ class SimulMCPServer(LoggerMixin):
                 time.time() - (time.monotonic() - unfinished.since),
                 limit,
                 live=lambda: not task.done() and not task.get_loop().is_closed(),
+                # A server that takes the hold over probes the same way.
+                details={"transport": unfinished.transport},
             )
         self.logger.warning(
             "%s timed out while Isaac Sim may still be running it; holding instance %r "
@@ -2336,14 +2524,17 @@ class SimulMCPServer(LoggerMixin):
         hold: IsaacHold,
         limit: float,
         binding: Optional[IsaacSessionBinding] = None,
+        waiting: "Optional[asyncio.Future[bool]]" = None,
     ) -> None:
         """Wait for Isaac Sim to finish the request that timed out; ``_end_hold`` then releases it.
 
         Refreshes ``binding``'s claim every quarter of the claim lifetime while it waits.
+        ``waiting`` is an idle probe already running (a hold taken over).
         """
-        waiting = asyncio.ensure_future(
-            client.wait_until_idle(max(0.0, limit - (time.monotonic() - hold.since)))
-        )
+        if waiting is None:
+            waiting = asyncio.ensure_future(
+                client.wait_until_idle(max(0.0, limit - (time.monotonic() - hold.since)))
+            )
         try:
             while not waiting.done():
                 await asyncio.wait({waiting}, timeout=CLAIM_TTL_SECONDS / 4)
@@ -2645,6 +2836,30 @@ class SimulMCPServer(LoggerMixin):
                 len(self._draining_calls),
                 len(self._isaac_holds),
             )
+
+    def record_calls_in_flight(self, reason: str = "forced_exit") -> int:
+        """Record every call still in flight, for a process about to exit without waiting for it.
+
+        ``simul server`` calls this before ``os._exit`` on a second SIGTERM or
+        SIGINT, which unwinds nothing: each call's usage and audit rows would
+        never be written. Each call not recorded yet is recorded
+        ``cancelled`` with ``reason`` and ``executed: "unknown"`` (``false``
+        for one still waiting to start), and every audit row still to be
+        written is written (``simul.logging.record_calls_in_flight``).
+
+        Args:
+            reason: The rows' ``reason`` and usage ``error``.
+
+        Returns:
+            How many audit rows were written.
+        """
+        for record in list(self._calls_in_flight.values()):
+            try:
+                record(reason)
+            except Exception as exc:  # pragma: no cover - defensive
+                self.logger.warning("Could not record a call still in flight: %s", exc)
+        self._calls_in_flight.clear()
+        return record_calls_in_flight(reason)
 
     async def wait_for_draining_calls(self) -> None:
         """Wait, up to the shutdown deadline, for cancelled Isaac calls still waiting on the engine.
@@ -3501,7 +3716,9 @@ class SimulMCPServer(LoggerMixin):
         """Release server resources on shutdown. Idempotent.
 
         Instances held after a timed-out call are released: their wait for
-        the engine is cancelled, with a warning naming the call.
+        the engine is cancelled, with a warning naming the call, and their
+        records are left ``released`` for the other simul servers, the next
+        of which to reach the engine takes the hold over.
         """
         if self._shut_down:
             return
@@ -3520,9 +3737,10 @@ class SimulMCPServer(LoggerMixin):
             forget = getattr(client, "forget_unfinished_request", None)
             if callable(forget):
                 forget()
-            # The other servers stop waiting for it now, not once the task ends.
+            # Left to the other servers now, not once the task ends: the next
+            # one to reach the engine takes the hold over and checks it first.
             record, hold.record = hold.record, None
-            self._shared_holds.withdraw(record)
+            self._shared_holds.release(record)
             if hold.task is not None:
                 hold.task.cancel()
                 holds.append(hold.task)

@@ -608,3 +608,58 @@ def test_another_server_s_hold_refuses_requests_to_the_same_editor_unsent(tmp_pa
     assert left == [], "server A removed its record once the editor answered"
     assert after == {"success": True, "output": "ran"}
     assert not any("marker_b" in command for command in editor.commands())
+
+
+def test_a_hold_a_stopped_server_left_is_taken_over_before_anything_is_sent(tmp_path: Path) -> None:
+    """Review of #370: a hold ended with its server, and the next server's request queued behind it again.
+
+    Server A stops while the editor still runs its timed-out script: its
+    record stays, ``released``. B's next request takes the hold over, sends
+    its own probe, and is refused while the editor is still busy.
+    """
+
+    async def scenario() -> Tuple[_GameThreadEditor, List[Dict[str, Any]], UnrealError, bool, List[Path], Any]:
+        editor = _GameThreadEditor()
+        await editor.start()
+        records = tmp_path / "holds"
+        settings = _settings(editor.port)
+        server_a, server_b = UnrealRuntimeAdapter(settings), UnrealRuntimeAdapter(settings)
+        server_a.holds = _unreal_hold.EditorHolds(1.0e3, SharedHolds("unreal", records))
+        server_b.holds = _unreal_hold.EditorHolds(1.0e3, SharedHolds("unreal", records))
+        endpoint = f"127.0.0.1:{editor.port}"
+        try:
+            with server_a.create_session() as a:
+                with pytest.raises(UnrealTimeoutError):
+                    await a.execute_script("import time; time.sleep(2.5)")
+                await a.close()
+            server_a.close()  # the server stops mid-hold
+            released = [json.loads(path.read_text()) for path in records.glob("*.json")]
+            with server_b.create_session() as b:
+                with pytest.raises(UnrealError) as refused:
+                    await b.execute_script("marker_b = 1")
+                await b.close()
+            held = server_b.holds.get(endpoint) is not None
+            await _released(server_b.holds, endpoint)
+            left = sorted(records.glob("*.json"))
+            with server_b.create_session() as b:
+                after = await b.execute_script("after_b = 1")
+                await b.close()
+            return editor, released, refused.value, held, left, after
+        finally:
+            server_a.close()
+            server_b.close()
+            await editor.stop()
+
+    editor, released, refused, held, left, after = asyncio.run(scenario())
+
+    (record,) = released
+    assert record["released"] is True and record["details"]["changes_state"] is True
+    assert refused.error_type == "InstanceBusy"
+    assert refused.details["reason"] == "finishing_timed_out_call"
+    assert refused.details["adopted_from"] == os.getpid()
+    assert refused.details["timed_out_route"] == "/remote/object/call"
+    assert "stopped holding it" in str(refused) and "nothing was sent" in str(refused)
+    assert held
+    assert left == [], "B removed the record it took over once the editor answered"
+    assert after == {"success": True, "output": "ran"}
+    assert not any("marker_b" in command for command in editor.commands())

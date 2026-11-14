@@ -380,6 +380,25 @@ class IsaacSocketClient:
         """Stop tracking the unfinished request, after giving up on waiting for it."""
         self._unfinished = None
 
+    def adopt_unfinished_request(self, action: str, transport: Optional[str] = None) -> None:
+        """Track a request another simul server's reply timed out on, so ``wait_until_idle`` probes for it.
+
+        For a hold taken over from a server that stopped or exited
+        (``simul.utils.engine_holds``). The probe goes over the bridge when
+        the other server's request did, or this client prefers it, and the
+        bridge is configured; otherwise over the stock socket. A request
+        this client already tracks stays the one waited for.
+
+        Args:
+            action: The other server's timed-out call, for the log.
+            transport: ``"bridge"`` or ``"socket"``, the transport the other
+                server's request went over; None when its record says nothing.
+        """
+        if self._unfinished is not None:
+            return
+        over_bridge = self._bridge_configured and (transport == "bridge" or self._prefer_bridge)
+        self._unfinished = UnfinishedRequest("bridge" if over_bridge else "socket", action, time.monotonic())
+
     async def wait_until_idle(self, timeout: float) -> bool:
         """Wait until Isaac Sim has finished the request whose reply timed out.
 

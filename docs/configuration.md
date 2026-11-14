@@ -97,7 +97,7 @@ unless you configure that path yourself:
 | Audit stream | `logs/audit.jsonl` | `LOGGING__AUDIT_PATH` |
 | Tool usage log (`simul stats`, `get_tool_usage_stats`) | `logs/tool_usage.jsonl` | none |
 | Isaac Sim session and claim records | `sessions/<port>.json` | none |
-| Holds after a timed-out Isaac or Unreal call, shared by every server ([isaac-sim.md](isaac-sim.md#transports)) | `holds/<backend>-<host>_<port>.<pid>.*.json` | none |
+| Holds after a timed-out Isaac or Unreal call, shared by every server ([isaac-sim.md](isaac-sim.md#transports)); a temporary file a killed writer left is removed after a minute | `holds/<backend>-<host>_<port>.<pid>.*.json` | none |
 | Blender discovery files and the attachment | `blender/`, `blender/attachment.json` | `BLENDER__DISCOVERY_DIR`, `BLENDER__ATTACHMENT_PATH` |
 | `simul blender install-bridge` ZIP | `blender/simul_blender_bridge.zip` | `--output` |
 | Unreal attachment | `unreal/attachment.json` | `UNREAL__ATTACHMENT_PATH` |
@@ -130,7 +130,7 @@ variable, so Blender must see the same `SIMUL_HOME` as the server (or set
 | `ISAAC_SIM__SOCKET_AUTH_TOKEN` | unset | Token for a 6.0 python_server started with `--auth-token`; also sent to the bridge, which then requires it ([security model](isaac-sim.md#security-model)) |
 | `ISAAC_SIM__BRIDGE_FAILURE_THRESHOLD` / `ISAAC_SIM__BRIDGE_COOLDOWN_SECONDS` | `3` / `30` | Bridge circuit breaker; see [isaac-sim.md](isaac-sim.md#transports) |
 | `ISAAC_SIM__HOLD_AFTER_TIMEOUT` | `300` | After an Isaac call times out while Isaac Sim may still be running it, the server keeps the instance until the engine has finished, for at most this many seconds, and other calls get `InstanceBusy` meanwhile, from every simul server sharing `SIMUL_HOME` (the hold is recorded under `$SIMUL_HOME/holds/`); `0` releases it at once ([isaac-sim.md](isaac-sim.md#transports)) |
-| `SERVER__SHUTDOWN_TIMEOUT` | `5` | Longest a stopping server (SIGTERM, SIGINT, or stdin closed over stdio) waits for the calls still running when the stop began, counted from then: Isaac calls it was running or that a client had cancelled, and USD or attached-Blender calls on worker threads. Past it the server exits anyway (0) and the log names each call it stopped waiting for; those are recorded `executed: "unknown"`. A worker thread that keeps Python's interpreter lock (pxr in one long call) one second past it ends the process with exit 1 and every thread's traceback on stderr. An Isaac instance or Unreal editor held after a timed-out call is released at once, and a second SIGTERM or SIGINT exits at once (`128 +` the signal). Keep it under the supervisor's grace period (Docker: 10 s) |
+| `SERVER__SHUTDOWN_TIMEOUT` | `5` | Longest a stopping server (SIGTERM, SIGINT, or stdin closed over stdio) waits for the calls still running when the stop began, counted from then: Isaac calls it was running or that a client had cancelled, and USD or attached-Blender calls on worker threads. Past it the server exits anyway (0) and the log names each call it stopped waiting for; those are recorded `executed: "unknown"`. A worker thread that keeps Python's interpreter lock (pxr in one long call on a large stage, which happens on ordinary stops) one second past it ends the process with exit 1 and every thread's traceback in `simul_errors.log`, after a line saying why; the `Shutdown: waiting up to …` line in `simul.log` says so beforehand. An Isaac instance or Unreal editor held after a timed-out call is released at once (its record is left for the next server to take over), and a second SIGTERM or SIGINT exits at once (`128 +` the signal), first recording each call still in flight `cancelled` with reason `forced_exit`. Keep it under the supervisor's grace period (Docker: 10 s) |
 | `UNREAL__HOST` / `UNREAL__PORT` | `localhost` / `30010` | Remote Control endpoint |
 | `UNREAL__TOOL_SURFACE` | `thin` | `full` registers every granular Unreal tool (`--unreal-tools` overrides) |
 | `BLENDER__TOOL_SURFACE` | `full` | `thin` registers only the essentials in `THIN_BLENDER_TOOLS` (`--blender-tools` overrides) |
@@ -628,7 +628,13 @@ it, rotated copies included, with `simul stats --reset`.
 `status` is `ok`, `error` (with the envelope's `error_type`, and `reason`
 `rate_limited`, `instance_busy` or `instance_claimed` for a call refused
 before it ran) or `cancelled`, with `executed` as in the usage row; an
-exception that escaped the tool adds `error_class`. `request_id` matches the
+exception that escaped the tool adds `error_class`. A call still in flight
+when a second SIGTERM or SIGINT ends a stopping server is written just before
+the process exits: `cancelled`, `executed: "unknown"` (`false` for one still
+waiting to start) and `reason: "forced_exit"`, with `error: "forced_exit"` in
+its usage row; one still in flight when a stopping server exits past
+`SERVER__SHUTDOWN_TIMEOUT` (an Isaac call still waiting on the engine) is
+written the same way with `server_stopped`. `request_id` matches the
 call's usage row and the `[request_id tool]` prefix of its lines in
 `simul.log`. A call to a tool that is not registered is named
 `<unknown tool>`, as in its usage row, with the name it gave in

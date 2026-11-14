@@ -517,6 +517,8 @@ class _StopSignals:
     back in place until the command returns, and a signal then ends the
     process at once instead of being recorded: exit 0 when it is the first
     (shutdown has run), ``128 + signal`` when a stop signal came before it.
+    ``server`` is the stopped ``SimulMCPServer``, whose calls still in
+    flight a forced exit records.
     """
 
     def __init__(self) -> None:
@@ -524,12 +526,13 @@ class _StopSignals:
         self.originals: Dict[int, Any] = {}
         self.stopped = False
         self.signalled = False
+        self.server: Any = None
 
     def _record(self, signum: int, _frame: Any) -> None:
         if self.stopped:
             if self.signalled or self.received:
-                _force_exit(signum)
-            _exit_now(signum)
+                _force_exit(signum, self.server)
+            _exit_now(signum, self.server)
         self.received.append(signum)
 
     def __enter__(self) -> "_StopSignals":
@@ -577,7 +580,7 @@ def _flush_everything() -> None:
             pass
 
 
-def _exit_now(signum: Optional[int]) -> NoReturn:
+def _exit_now(signum: Optional[int], server: Any = None) -> NoReturn:
     """End the process with exit 0 once a stopped server has shut down.
 
     For a stdio server whose client keeps stdin open: the thread FastMCP reads
@@ -590,24 +593,56 @@ def _exit_now(signum: Optional[int]) -> NoReturn:
     Args:
         signum: The signal that stopped the server, reported; None when it
             stopped on its own (stdin closed).
+        server: The ``SimulMCPServer``, whose calls not recorded yet are
+            recorded ``server_stopped``; None when it was never built.
     """
     if signum is not None:
         _report_stopped(signum)
+    # Calls a stop recorded as it cancelled them are not recorded again; one
+    # still unrecorded (an Isaac call still waiting on the engine past the
+    # deadline) would otherwise never be.
+    _record_calls_in_flight(server, "server_stopped")
     _flush_everything()
     os._exit(0)
 
 
-def _force_exit(signum: int) -> NoReturn:
+def _record_calls_in_flight(server: Any, reason: str) -> int:
+    """Record the calls still in flight before the process exits without them, ``cancelled`` with ``reason``.
+
+    Returns:
+        How many were recorded; 0 when nothing could be.
+    """
+    try:
+        if server is not None:
+            return int(server.record_calls_in_flight(reason))
+        from simul.logging import record_calls_in_flight
+
+        return record_calls_in_flight(reason)
+    except Exception:  # pragma: no cover - the exit must happen whatever this does
+        return 0
+
+
+def _force_exit(signum: int, server: Any = None) -> NoReturn:
     """End the process at once on a second SIGTERM or SIGINT while the server stops.
 
     Nothing more is waited for: not Isaac Sim, not a worker thread, not the
-    transport. The logs are flushed and the exit status is ``128 + signum``
-    (143 for SIGTERM, 130 for SIGINT), as for a process the signal ended.
+    transport. Each call still in flight is recorded first, in the usage log
+    and the audit log, as ``cancelled`` with ``executed: "unknown"`` and
+    reason ``forced_exit``, since nothing after this would write its rows.
+    Then the logs are flushed and the exit status is ``128 + signum`` (143
+    for SIGTERM, 130 for SIGINT), as for a process the signal ended.
+
+    Args:
+        signum: The second signal.
+        server: The ``SimulMCPServer``, or None when it was never built.
     """
     name = _signal_name(signum)
+    recorded = _record_calls_in_flight(server, "forced_exit")
     get_logger(__name__).warning(
-        "%s again while stopping: exiting at once without waiting for the calls still running",
+        "%s again while stopping: exiting at once without waiting for the calls still running "
+        "(%d recorded cancelled, reason forced_exit)",
         name,
+        recorded,
     )
     console.print(f"[yellow]Server stopped at once ({name} again)[/yellow]")
     _flush_everything()
@@ -631,7 +666,10 @@ async def _let_worker_calls_finish(server: Any, signum: Optional[int]) -> None:
     by 2 s that way. So a timer that needs no interpreter lock
     (``faulthandler.dump_traceback_later``) ends the process
     ``_WORKER_LOCK_GRACE_SECONDS`` after the deadline if it is still there,
-    with exit 1 and every thread's traceback on stderr.
+    with exit 1 and every thread's traceback in the errors log
+    (``simul_errors.log``; stderr when there is none), after a line saying
+    what it is. The log line that starts the wait says so, since nothing
+    can be logged once the timer fires.
 
     Args:
         server: The stopped ``SimulMCPServer``, or None when it was never built.
@@ -644,16 +682,22 @@ async def _let_worker_calls_finish(server: Any, signum: Optional[int]) -> None:
     timeout = float(server.settings.server.shutdown_timeout) if server is not None else 0.0
     deadline = server._shutdown_deadline() if server is not None else time.monotonic()
     remaining = max(0.0, deadline - time.monotonic())
+    calls = ", ".join(worker_threads.running())
+    dump, where = _thread_dump_target(server, calls, remaining)
     get_logger(__name__).info(
-        "Shutdown: waiting up to %.1fs for %s, running on a worker thread",
+        "Shutdown: waiting up to %.1fs for %s, running on a worker thread. If it still holds Python's "
+        "interpreter lock %gs after that (one long pxr call on a large stage does), the process exits 1 "
+        "and writes every thread's traceback to %s",
         remaining,
-        ", ".join(worker_threads.running()),
+        calls,
+        _WORKER_LOCK_GRACE_SECONDS,
+        where,
     )
     flush_logs()
     try:
-        faulthandler.dump_traceback_later(remaining + _WORKER_LOCK_GRACE_SECONDS, exit=True)
+        faulthandler.dump_traceback_later(remaining + _WORKER_LOCK_GRACE_SECONDS, exit=True, file=dump)
         armed = True
-    except (AttributeError, OSError, RuntimeError, ValueError):  # no usable stderr
+    except (AttributeError, OSError, RuntimeError, ValueError):  # no usable file
         armed = False
     try:
         while True:
@@ -667,11 +711,56 @@ async def _let_worker_calls_finish(server: Any, signum: Optional[int]) -> None:
                     ", ".join(names),
                     timeout,
                 )
-                _exit_now(signum)
+                _exit_now(signum, server)
             await asyncio.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
     finally:
         if armed:
             faulthandler.cancel_dump_traceback_later()
+        if dump is not sys.stderr:
+            try:
+                dump.close()
+            except OSError:  # pragma: no cover - defensive
+                pass
+
+
+def _thread_dump_target(server: Any, calls: str, remaining: float) -> Tuple[Any, str]:
+    """The file the worker-lock backstop writes its thread dump to, and what to call it in the log.
+
+    The errors log (``simul_errors.log``), opened for appending, with a line
+    in its format first saying what a dump right after it means; stderr when
+    file logging is off or the file cannot be opened. The dump is written
+    without the interpreter lock (``faulthandler``), so the line has to be
+    written now, before it is known whether the dump comes.
+
+    Args:
+        server: The stopped ``SimulMCPServer``, whose settings name the log;
+            None when it was never built.
+        calls: The calls running on worker threads.
+        remaining: Seconds until the shutdown deadline.
+    """
+    from simul.logging import LOG_FILE_MODE, error_log_path, make_private_dir
+
+    path = error_log_path(server.settings) if server is not None else None
+    if path is None:
+        return sys.stderr, "stderr"
+    line = (
+        f"{time.strftime('%Y-%m-%d %H:%M:%S')} [- -] {__name__} - WARNING - main.py - "
+        f"_let_worker_calls_finish() - Shutdown: waiting up to {remaining:.1f}s for {calls} on a worker "
+        "thread. A thread dump right after this line means it still held Python's interpreter lock "
+        f"{_WORKER_LOCK_GRACE_SECONDS:g}s past server.shutdown_timeout, and the process exited 1 without it\n"
+    )
+    try:
+        make_private_dir(path.parent)
+        stream = os.fdopen(os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, LOG_FILE_MODE), "a", encoding="utf-8")
+    except (OSError, ValueError):
+        return sys.stderr, "stderr"
+    try:
+        stream.write(line)
+        stream.flush()
+    except OSError:
+        stream.close()
+        return sys.stderr, "stderr"
+    return stream, str(path)
 
 
 async def _stop_serving(
@@ -706,7 +795,7 @@ async def _stop_serving(
                 return
             await server.shutdown()
         # Only the thread blocked reading stdin is left.
-        _exit_now(signum)
+        _exit_now(signum, server)
     # HTTP/SSE: uvicorn got the same signal (its handler replaced the loop's
     # while it serves) and stops gracefully. A signal that came before it
     # took the signals over (still starting) reached only this loop.
@@ -719,7 +808,7 @@ async def _stop_serving(
         return
     if server is not None:
         await server.shutdown()
-    _exit_now(signum)
+    _exit_now(signum, server)
 
 
 async def _serve(
@@ -765,6 +854,8 @@ async def _serve(
     repeats: Dict[int, int] = {}
     # Set once the server has shut down and only worker-thread calls are left.
     shut_down: List[bool] = []
+    # The server, once start_mcp_server has built it.
+    servers: List[Any] = []
 
     def _python_handler(signum: int, _frame: Any) -> None:
         # The Python-level handler under the loop's (in place of asyncio's
@@ -782,9 +873,9 @@ async def _serve(
             taken[signum] = taken.get(signum, 0) + 1
         if received:
             # A second signal while stopping ends the process at once.
-            _force_exit(signum)
+            _force_exit(signum, servers[0] if servers else None)
         if shut_down:
-            _exit_now(signum)
+            _exit_now(signum, servers[0] if servers else None)
         received.append(signum)
         signalled.set()
 
@@ -819,7 +910,6 @@ async def _serve(
     if stop_signals is not None and stop_signals.received:
         received[:0] = stop_signals.received
         signalled.set()
-    servers: List[Any] = []
     try:
         if received:
             # Stopped before the server was built: nothing to shut down.
@@ -851,6 +941,7 @@ async def _serve(
         if stop_signals is not None:
             # A signal from here on ends the process at once (_StopSignals).
             stop_signals.signalled = bool(received)
+            stop_signals.server = servers[0] if servers else None
             stop_signals.stopped = True
         for signum, before in previous.items():
             try:

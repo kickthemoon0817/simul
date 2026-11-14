@@ -203,10 +203,31 @@ A stopped timeline is not flagged: USD then holds the authored state, which
   reads those records before it sends anything to that Isaac Sim and answers
   `InstanceBusy` at once, read-only tools included, with `details.held_by`
   naming the holder's pid, until the holder sees the engine idle and removes
-  its record. A record whose server exited (a crash, SIGKILL) or that is
-  past its expiry is ignored and removed. The servers must share the state
-  directory (`SIMUL_HOME`, default `~/.simul`); a client of Isaac Sim that is
-  not a simul server is not covered.
+  its record. A record past its expiry is removed.
+- **A hold outlives its server.** A server that stops while it holds the
+  engine leaves its record marked `released`; one that crashed or was
+  killed leaves it as it was. Either way the engine may still be running the
+  call, so the next simul server about to send it something takes the hold
+  over: it publishes the record as its own (`details.adopted_from` names the
+  server it came from) and runs its own idle probe first. An idle engine
+  answers within a second and the call goes ahead; otherwise the call gets
+  `InstanceBusy` and that server holds the engine until it has finished,
+  within the original hold's limit. `ping_isaac` reports such a record with
+  `held_by.stopped: true`. A holder counts as gone when its pid has exited or
+  now names another process: the record keeps the holder's process start
+  time (`pid_started`), so a reused pid does not keep a stale record alive,
+  on Windows too. Where neither can be read the record lasts until its
+  expiry.
+- **What the records do not cover.** A record exists only once a reply has
+  timed out. A call another server sends while the first call is still
+  running, before its timeout, still queues inside Kit behind it and can
+  time out too. Within one server the instance lock prevents that; across
+  servers, enforced claims do (`ISAAC_SIM__ENFORCE_CLAIMS`, see
+  [configuration.md](configuration.md#multi-agent-claims)): each agent claims the instance it
+  drives, and mutating calls from other agents are refused before they are
+  sent. The servers must share the state directory (`SIMUL_HOME`, default
+  `~/.simul`); a client of Isaac Sim that is not a simul server is not
+  covered.
 - **Status during a hold.** While an instance is held (by this server or
   another), `ping_isaac`, `get_isaac_runtime_info` and `list_isaac_instances`
   answer at once from the servers' own state instead of sending a probe that
