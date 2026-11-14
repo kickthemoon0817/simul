@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -33,6 +34,7 @@ from simul.config import Settings
 from simul.mcp import backends as backends_module
 from simul.mcp import server as server_module
 from simul.mcp.usage_tracker import ToolUsageTracker
+from simul.utils.engine_holds import SharedHolds
 from tests.fakes import FakeFastMCP
 from tests.tcp_fakes import FakeTcpServer
 
@@ -550,3 +552,59 @@ def test_shutdown_releases_a_held_editor(
     assert took < 1.0
     assert task is not None and task.cancelled()
     assert "Released the Unreal editor" in caplog.text and "execute_unreal_script" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Another simul server on the same editor (round-3 audit M3-2)
+# ---------------------------------------------------------------------------
+
+
+def test_another_server_s_hold_refuses_requests_to_the_same_editor_unsent(tmp_path: Path) -> None:
+    """Each agent's client spawns its own server: the hold covered only the server that saw the timeout.
+
+    Two adapters stand for two servers; their holds meet in the shared records
+    (``simul.utils.engine_holds``), here a directory of the test's own.
+    """
+
+    async def scenario() -> Tuple[_GameThreadEditor, UnrealError, Dict[str, Any], List[str], Dict[str, Any]]:
+        editor = _GameThreadEditor()
+        await editor.start()
+        records = tmp_path / "holds"
+        settings = _settings(editor.port)
+        server_a, server_b = UnrealRuntimeAdapter(settings), UnrealRuntimeAdapter(settings)
+        server_a.holds = _unreal_hold.EditorHolds(1.0e3, SharedHolds("unreal", records))
+        server_b.holds = _unreal_hold.EditorHolds(1.0e3, SharedHolds("unreal", records))
+        endpoint = f"127.0.0.1:{editor.port}"
+        try:
+            with server_a.create_session() as a:
+                with pytest.raises(UnrealTimeoutError):
+                    await a.execute_script("import time; time.sleep(1.0)")
+                await a.close()
+            with server_b.create_session() as b:
+                with pytest.raises(UnrealError) as refused:
+                    await b.execute_script("marker_b = 1")
+                ping = await b.ping()
+                await b.close()
+            await _released(server_a.holds, endpoint)
+            left = sorted(path.name for path in records.glob("*.json"))
+            with server_b.create_session() as b:
+                after = await b.execute_script("after_b = 1")
+                await b.close()
+            return editor, refused.value, ping, left, after
+        finally:
+            server_a.close()
+            server_b.close()
+            await editor.stop()
+
+    editor, refused, ping, left, after = asyncio.run(scenario())
+
+    assert refused.error_type == "InstanceBusy"
+    assert refused.details["reason"] == "finishing_timed_out_call"
+    assert refused.details["held_by"] == {"pid": os.getpid()}
+    assert refused.details["timed_out_route"] == "/remote/object/call"
+    assert refused.details["changes_state"] is True
+    assert "another simul server" in str(refused) and "nothing was sent" in str(refused)
+    assert ping["held_after_timeout"]["held_by"] == {"pid": os.getpid()}
+    assert left == [], "server A removed its record once the editor answered"
+    assert after == {"success": True, "output": "ran"}
+    assert not any("marker_b" in command for command in editor.commands())

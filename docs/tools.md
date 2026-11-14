@@ -739,8 +739,13 @@ Notes:
   until Isaac Sim has finished it (the bridge is asked to interrupt it first),
   and so does a call whose reply timed out: other calls get `InstanceBusy`
   (`details.reason: "finishing_timed_out_call"`) until the engine is done,
-  and `ping_isaac` reports `held_after_timeout`; see
-  [isaac-sim.md](isaac-sim.md#transports).
+  from this server and every other simul server sharing `SIMUL_HOME`
+  (`details.held_by` names another server's pid). Meanwhile `ping_isaac`,
+  `get_isaac_runtime_info` and `list_isaac_instances` answer at once, without
+  a probe, with `busy: true` and `held_after_timeout`; see
+  [isaac-sim.md](isaac-sim.md#transports). A call runs on the instance that was
+  active when it was issued, even if the session switches instances while it
+  waits.
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or

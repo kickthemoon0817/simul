@@ -14,6 +14,13 @@ game thread: ``GET /remote/info`` is served on it like every other route, and
 the editor's listening socket accepts connections while the game thread is
 blocked. The probe is therefore that GET, sent once when the hold starts and
 read until it answers, which proves that everything queued before it has run.
+
+Each hold is also recorded for the other simul servers on the machine
+(``simul.utils.engine_holds``): each agent's client usually spawns its own
+stdio server, and a server that knew nothing of another's hold sent its own
+request into the same queue (round-3 audit M3-2). A request to an editor
+another server holds is refused with ``InstanceBusy`` before anything is sent,
+until that server sees the editor answer again.
 """
 
 from __future__ import annotations
@@ -22,9 +29,11 @@ import asyncio
 import contextlib
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 from ..logging import get_logger
+from ..utils.engine_holds import SharedHold, SharedHolds, endpoint_key
 from ._unreal_errors import INSTANCE_BUSY, UnrealError
 
 logger = get_logger(__name__)
@@ -75,11 +84,22 @@ class EditorHold:
         endpoint: The editor's ``host:port``.
         request: The request that timed out.
         task: The probe that ends the hold once the editor answers.
+        record: The hold's record for the other simul servers, or None.
     """
 
     endpoint: str
     request: TimedOutRequest
     task: "Optional[asyncio.Task[None]]" = None
+    record: Optional[Path] = None
+
+
+def _shared_key(endpoint: str) -> Optional[str]:
+    """The ``endpoint_key`` of an editor's ``host:port``, or None when it has no port."""
+    host, _, port = endpoint.rpartition(":")
+    try:
+        return endpoint_key(host, int(port))
+    except ValueError:
+        return None
 
 
 class EditorHolds:
@@ -89,23 +109,35 @@ class EditorHolds:
     creates (the MCP server makes a session per call), so a hold outlives the
     call that timed out. A session made on its own has a private one.
 
+    The holds of the other simul servers on the machine count too
+    (``elsewhere``): a request to an editor one of them holds is refused the
+    same way.
+
     Args:
         limit: ``unreal.hold_after_timeout``: the longest hold, in seconds;
             0 holds nothing.
+        shared: The hold records every simul server on the machine sees;
+            ``$SIMUL_HOME/holds`` when None.
     """
 
-    def __init__(self, limit: float) -> None:
+    def __init__(self, limit: float, shared: Optional[SharedHolds] = None) -> None:
         self.limit = float(limit)
         self._holds: Dict[str, EditorHold] = {}
+        self._shared = shared if shared is not None else SharedHolds("unreal")
 
     def get(self, endpoint: str) -> Optional[EditorHold]:
         """The hold on ``endpoint``, or None when it is not held."""
         hold = self._holds.get(endpoint)
         if hold is not None and hold.task is not None and hold.task.get_loop().is_closed():
             # Its event loop ended (a test, a CLI run): nothing will end it.
-            self._holds.pop(endpoint, None)
+            self._end(hold)
             return None
         return hold
+
+    def elsewhere(self, endpoint: str) -> Optional[SharedHold]:
+        """The hold another simul server on the machine keeps on ``endpoint``, or None."""
+        key = _shared_key(endpoint)
+        return None if key is None else self._shared.foreign(key)
 
     def hold(self, host: str, port: int, request: TimedOutRequest, headers: Mapping[str, str]) -> bool:
         """Hold the editor at ``host:port`` until it answers a probe sent now.
@@ -128,9 +160,18 @@ class EditorHolds:
         if self.get(endpoint) is not None:
             return True
         hold = EditorHold(endpoint=endpoint, request=request)
-        hold.task = asyncio.get_running_loop().create_task(self._wait_for_editor(hold, host, port, dict(headers)))
-        hold.task.add_done_callback(lambda _task: self._end(hold))
+        task = asyncio.get_running_loop().create_task(self._wait_for_editor(hold, host, port, dict(headers)))
+        hold.task = task
+        task.add_done_callback(lambda _task: self._end(hold))
         self._holds[endpoint] = hold
+        hold.record = self._shared.publish(
+            endpoint_key(host, port),
+            request.call,
+            time.time() - (time.monotonic() - request.since),
+            self.limit,
+            live=lambda: not task.done() and not task.get_loop().is_closed(),
+            details={"timed_out_route": request.route, "changes_state": request.changes_state},
+        )
         logger.warning(
             "%s timed out while the editor at %s may still be running it; holding the editor until it "
             "answers again (at most %gs, unreal.hold_after_timeout)",
@@ -157,16 +198,18 @@ class EditorHolds:
             hold.task.cancel()
 
     def info(self, endpoint: str) -> Optional[Dict[str, Any]]:
-        """Describe the hold on ``endpoint``, or None when it is not held.
+        """Describe the hold on ``endpoint``, this server's or another's; None when it is not held.
 
         Returns:
             ``timed_out_tool``, ``timed_out_route``, ``changes_state``,
             ``busy_for_seconds`` (since the answer timed out) and
-            ``hold_limit_seconds``.
+            ``hold_limit_seconds``; another server's hold adds ``held_by``
+            (its ``pid``).
         """
         hold = self.get(endpoint)
         if hold is None:
-            return None
+            elsewhere = self.elsewhere(endpoint)
+            return None if elsewhere is None else elsewhere.info()
         request = hold.request
         return {
             "timed_out_tool": request.call,
@@ -183,14 +226,21 @@ class EditorHolds:
             return None
         effect = (
             "it may still change the editor's state"
-            if info["changes_state"]
+            if info.get("changes_state", True)
             else "it only reads, but the editor serves nothing else until it ends"
         )
+        holder = info.get("held_by")
+        whose = (
+            f" for another simul server on this machine (pid {holder.get('pid')})"
+            if isinstance(holder, dict)
+            else ""
+        )
+        ends = "that server sees the editor answer" if whose else "the editor answers"
         return UnrealError(
-            f"The editor at {endpoint} is still running {info['timed_out_tool']}, whose answer timed out "
-            f"{info['busy_for_seconds']:.0f}s ago ({effect}). Remote Control runs one request at a time, "
-            "so this one would wait behind it, time out too and run after being reported failed: nothing "
-            "was sent. Retry shortly; ping_unreal reports the hold. It ends once the editor answers "
+            f"The editor at {endpoint} is still running {info['timed_out_tool']}{whose}, whose answer timed "
+            f"out {info['busy_for_seconds']:.0f}s ago ({effect}). Remote Control runs one request at a "
+            "time, so this one would wait behind it, time out too and run after being reported failed: "
+            f"nothing was sent. Retry shortly; ping_unreal reports the hold. It ends once {ends} "
             f"again, or after {info['hold_limit_seconds']:g}s (unreal.hold_after_timeout)",
             INSTANCE_BUSY,
             details={"editor": endpoint, "reason": HOLD_REASON, **info},
@@ -212,6 +262,8 @@ class EditorHolds:
     def _end(self, hold: EditorHold) -> None:
         if self._holds.get(hold.endpoint) is hold:
             del self._holds[hold.endpoint]
+        record, hold.record = hold.record, None
+        self._shared.withdraw(record)
 
     async def _wait_for_editor(self, hold: EditorHold, host: str, port: int, headers: Dict[str, str]) -> None:
         """Wait, up to the limit, for the editor to answer a probe queued behind the timed-out request."""

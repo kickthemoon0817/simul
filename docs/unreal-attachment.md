@@ -221,9 +221,15 @@ they report it with `busy: true` and `held_after_timeout`, and an answer ends th
 hold. An editor that stops taking connections (it quit or crashed) ends it too.
 The hold lasts at most `UNREAL__HOLD_AFTER_TIMEOUT` seconds (default 300), after
 which the log warns and later calls queue behind the request again; `0` turns it
-off. A stopping server releases it at once. The hold lives in the simul server
-process that saw the timeout: another simul server, or another client of Remote
-Control, sending to the same editor meanwhile still queues behind the request.
+off. A stopping server releases it at once. The hold covers every simul server on
+the machine: it is also recorded under `$SIMUL_HOME/holds/` (the editor's
+`host:port`, the timed-out call, the holding server's pid and an expiry), and
+another simul server sends that editor nothing while the record is live, answering
+`InstanceBusy` with `details.held_by` naming the holder's pid, until the holder
+sees the editor answer and removes it. A record whose server exited, or that is
+past its expiry, is ignored. The servers must share `SIMUL_HOME` (default
+`~/.simul`); another client of Remote Control is not covered and still queues
+behind the request.
 
 ```sh
 simul unreal detach

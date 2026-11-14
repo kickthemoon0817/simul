@@ -69,10 +69,12 @@ def simul_state_outside_home(tmp_path_factory: pytest.TempPathFactory) -> Iterat
     """
     from simul import config
     from simul.mcp import session_manager, usage_tracker
+    from simul.utils import engine_holds
 
     state = tmp_path_factory.mktemp("simul-state")
     with pytest.MonkeyPatch.context() as patcher:
         patcher.setattr(session_manager, "_DEFAULT_SESSION_DIR", state / "sessions")
+        patcher.setattr(engine_holds, "_DEFAULT_HOLD_DIR", state / "holds")
         patcher.setattr(usage_tracker, "_DEFAULT_LOG_DIR", state / "logs")
         patcher.setenv("LOGGING__FILE_PATH", str(state / "logs" / "simul.log"))
         patcher.setenv("LOGGING__AUDIT_PATH", str(state / "logs" / "audit.jsonl"))

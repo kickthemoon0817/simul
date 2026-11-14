@@ -18,6 +18,33 @@ from ._shared import (
 from .joints import READ_JOINT_CORE
 from .._meta import tool_meta
 
+
+def mass_property_refusal(**values: Optional[float]) -> Optional[Dict[str, Any]]:
+    """The ValidationError for a mass or density that is negative or not finite, or None.
+
+    UsdPhysics reads 0 as "derive it from the shape" and a negative value as
+    no mass at all, and PhysX rejects such a body, so it is refused before
+    anything is written (round-3 audit m3-2: ``mass: -1`` was written to the
+    stage).
+
+    Args:
+        **values: The values by parameter name; None is not given.
+    """
+    for name, value in values.items():
+        if value is None:
+            continue
+        number = float(value)
+        if not math.isfinite(number) or number < 0:
+            return ErrorResponse(
+                error=(
+                    f"{name} must be a finite number >= 0 (0 lets PhysX derive it from the "
+                    f"shape); got {value!r}. Nothing was changed."
+                ),
+                error_type="ValidationError",
+            ).model_dump()
+    return None
+
+
 # PhysxSceneAPI attributes the scene tools read and write, as (result key,
 # attribute name, Sdf value type). The types are the ones PhysxSchema
 # declares, so an attribute authored where the schema is not registered
@@ -760,14 +787,26 @@ class PhysicsMixin:
 
         Args:
             prim_path: USD path of the prim.
-            mass: Mass in kg.
-            density: Density in kg/m^3 (used when mass is not set).
+            mass: Mass in kg, at least 0 (0 lets PhysX derive it).
+            density: Density in kg/m^3 (used when mass is not set), at least
+                0 (0 lets PhysX use its default).
             center_of_mass: Center of mass as [x, y, z] in the prim's local
                 frame, stage units (metres by default).
 
         Returns:
             Dict confirming updated mass properties.
         """
+        refusal = mass_property_refusal(mass=mass, density=density)
+        if refusal is not None:
+            return refusal
+        if center_of_mass is not None and len(center_of_mass) != 3:
+            return ErrorResponse(
+                error=(
+                    f"center_of_mass must have 3 components; got {len(center_of_mass)}. "
+                    "Nothing was changed."
+                ),
+                error_type="ValidationError",
+            ).model_dump()
         _prim_path = _pyval(prim_path)
         _mass = _pyval(mass)
         _density = _pyval(density)

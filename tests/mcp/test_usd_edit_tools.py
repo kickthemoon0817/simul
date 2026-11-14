@@ -177,6 +177,9 @@ def test_unknown_prim_type(driver: _Driver, loaded: Dict[str, Any]) -> None:
 
     assert (payload["error_type"], payload["details"]["code"]) == ("ValidationError", "UnknownPrimType")
     assert payload["details"]["suggestions"][0] == "Cube"
+    # Round-3 audit m3-3: the refusal is about one argument and names it.
+    (error,) = payload["details"]["errors"]
+    assert (error["field"], error["input"], error["suggestion"]) == ("prim_type", "Cub", "Cube")
     assert _unchanged(loaded)
 
 

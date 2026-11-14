@@ -66,10 +66,13 @@ class ItemBounds:
         positions: Bounds per position instead, for a fixed-length list whose
             items differ (``[width, height]``); the list is then advertised as
             exactly that many items.
+        count: The number of items the list must have (an ``[x, y, z]``
+            vector is 3), with or without ``each``.
     """
 
     each: Optional[Bounds] = None
     positions: Tuple[Bounds, ...] = ()
+    count: Optional[int] = None
 
 
 Constraint = Union[Bounds, Choices, ItemBounds]
@@ -80,6 +83,11 @@ _PAGE = Bounds(ge=1, le=1000)
 _OFFSET = Bounds(ge=0)
 #: A material factor documented as 0-1.
 _UNIT = Bounds(ge=0.0, le=1.0)
+#: An ``[x, y, z]`` vector the tool refuses at any other length.
+_XYZ = ItemBounds(count=3)
+#: A USD mass (kg) or density (kg/m^3): 0 leaves it to PhysX to derive, a
+#: negative one is no mass (UsdPhysics.MassAPI).
+_MASS = Bounds(ge=0.0)
 
 #: Isaac Sim viewport capture edge, ``MAX_CAPTURE_DIMENSION`` in the Isaac tools.
 ISAAC_MAX_CAPTURE_DIMENSION = 3840
@@ -126,6 +134,17 @@ UNREAL_ROBOTICS_MAX_RESULTS = 500
 UNREAL_LIGHT_MAX_INTENSITY = 1e9
 UNREAL_LIGHT_MIN_TEMPERATURE_K = 1000.0
 UNREAL_LIGHT_MAX_TEMPERATURE_K = 15000.0
+#: A body's mass override range in kg and its largest linear or angular
+#: damping (``PHYSICS_MIN_MASS_KG``, ``PHYSICS_MAX_MASS_KG``,
+#: ``PHYSICS_MAX_DAMPING``).
+UNREAL_PHYSICS_MIN_MASS_KG = 0.001
+UNREAL_PHYSICS_MAX_MASS_KG = 1e9
+UNREAL_PHYSICS_MAX_DAMPING = 1e6
+_UNREAL_BODY = {
+    "mass": Bounds(ge=UNREAL_PHYSICS_MIN_MASS_KG, le=UNREAL_PHYSICS_MAX_MASS_KG),
+    "linear_damping": Bounds(ge=0.0, le=UNREAL_PHYSICS_MAX_DAMPING),
+    "angular_damping": Bounds(ge=0.0, le=UNREAL_PHYSICS_MAX_DAMPING),
+}
 
 PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
     # -- Isaac Sim -------------------------------------------------------------
@@ -182,7 +201,11 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         ),
     },
     "create_isaac_object": {
-        "diffuse_color": ItemBounds(each=_UNIT),
+        "translation": _XYZ,
+        "rotation_euler": _XYZ,
+        "scale": _XYZ,
+        "mass": _MASS,
+        "diffuse_color": ItemBounds(each=_UNIT, count=3),
         "collision": Choices(
             (
                 "none",
@@ -195,6 +218,8 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         ),
     },
     "create_isaac_physics_scene": {"gravity_magnitude": Bounds(gt=0)},
+    "set_isaac_mass_properties": {"mass": _MASS, "density": _MASS, "center_of_mass": _XYZ},
+    "raycast_isaac_scene": {"origin": _XYZ, "direction": _XYZ},
     "add_isaac_collision": {
         "approximation": Choices(
             (
@@ -309,6 +334,8 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         "action": Choices(("start", "stop", "pause", "resume", "step")),
     },
     "apply_unreal_force": {"duration": Bounds(ge=0.0, le=UNREAL_FORCE_MAX_DURATION_S)},
+    "set_unreal_physics_params": dict(_UNREAL_BODY),
+    "setup_unreal_physics_bulk": dict(_UNREAL_BODY),
     "get_unreal_physics_state": {
         "max_results": Bounds(ge=1, le=UNREAL_PHYSICS_STATE_MAX_RESULTS),
         "offset": _OFFSET,
@@ -425,9 +452,14 @@ def _list_items(annotation: Any, constraint: ItemBounds) -> Any:
     (item,) = typing.get_args(annotation) or (Any,)
     if constraint.positions:
         return Tuple[tuple(Annotated[item, bounds.field()] for bounds in constraint.positions)]
-    if constraint.each is None:
-        return annotation
-    return List[Annotated[item, constraint.each.field()]]  # type: ignore[valid-type]
+    listed = (
+        annotation
+        if constraint.each is None
+        else List[Annotated[item, constraint.each.field()]]  # type: ignore[valid-type]
+    )
+    if constraint.count is None:
+        return listed
+    return Annotated[listed, Field(min_length=constraint.count, max_length=constraint.count)]
 
 
 def apply(annotation: Any, constraint: Constraint) -> Any:

@@ -95,6 +95,17 @@ def test_the_table_uses_the_isaac_render_and_solver_limits() -> None:
         ("configure_isaac_physics_scene", "time_steps_per_second", 1, None),
         ("configure_isaac_physics_scene", "min_position_iterations", 1, 255),
         ("configure_isaac_physics_scene", "max_velocity_iterations", 0, 255),
+        # Round-3 audit m3-2: a negative mass or density was written to the stage.
+        ("set_isaac_mass_properties", "mass", 0, None),
+        ("set_isaac_mass_properties", "density", 0, None),
+        ("create_isaac_object", "mass", 0, None),
+        # ...and Unreal's body ranges were in prose only.
+        ("set_unreal_physics_params", "mass", 0.001, 1e9),
+        ("set_unreal_physics_params", "linear_damping", 0, 1e6),
+        ("set_unreal_physics_params", "angular_damping", 0, 1e6),
+        ("setup_unreal_physics_bulk", "mass", 0.001, 1e9),
+        ("setup_unreal_physics_bulk", "linear_damping", 0, 1e6),
+        ("setup_unreal_physics_bulk", "angular_damping", 0, 1e6),
     ],
 )
 def test_isaac_bounds_the_tools_check_are_in_the_schema(
@@ -117,6 +128,51 @@ def test_list_item_bounds_are_in_the_schema(schemas: Dict[str, Dict[str, Any]]) 
     resolution = _array_branch(_property(schemas, "read_isaac_aovs", "resolution"))
     assert [(item["minimum"], item["maximum"]) for item in resolution["prefixItems"]] == [(1, 3840), (1, 2160)]
     assert resolution["minItems"] == resolution["maxItems"] == 2
+
+
+@pytest.mark.parametrize(
+    ("tool", "param"),
+    [
+        ("create_isaac_object", "translation"),
+        ("create_isaac_object", "rotation_euler"),
+        ("create_isaac_object", "scale"),
+        ("create_isaac_object", "diffuse_color"),
+        ("raycast_isaac_scene", "origin"),
+        ("raycast_isaac_scene", "direction"),
+        ("set_isaac_mass_properties", "center_of_mass"),
+    ],
+)
+def test_isaac_xyz_vectors_state_their_length(schemas: Dict[str, Dict[str, Any]], tool: str, param: str) -> None:
+    """Round-3 audit m3-2: the tools refuse any other length, which only their prose said."""
+    vector = _array_branch(_property(schemas, tool, param))
+    assert vector["minItems"] == vector["maxItems"] == 3
+
+
+def test_isaac_tools_refuse_a_negative_mass_or_density_themselves() -> None:
+    """The CLI calls the tools directly, past the schema."""
+    from simul.mcp.tools.isaac_tools import IsaacTools
+
+    class _NoEngine:
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("nothing may reach Isaac Sim")
+
+    tools = IsaacTools(_NoEngine(), Settings())  # type: ignore[arg-type]
+
+    async def run() -> List[Dict[str, Any]]:
+        return [
+            await tools.set_isaac_mass_properties("/World/Cube", mass=-1.0),
+            await tools.set_isaac_mass_properties("/World/Cube", density=float("nan")),
+            await tools.set_isaac_mass_properties("/World/Cube", center_of_mass=[0.0, 1.0]),
+            await tools.create_isaac_object("/World/Obj", mass=-3.0),
+        ]
+
+    refusals = asyncio.run(run())
+
+    assert [refusal["error_type"] for refusal in refusals] == ["ValidationError"] * 4
+    assert [refusal["error"].split(" ", 1)[0] for refusal in refusals] == [
+        "mass", "density", "center_of_mass", "mass",
+    ]
+    assert refusals[3]["error"].endswith("Nothing was created.")
 
 
 def _item_bounds(node: Dict[str, Any], defs: Dict[str, Any]) -> Dict[str, Any]:
@@ -248,6 +304,9 @@ def test_the_table_uses_the_unreal_runtime_constants() -> None:
     assert _constraints.UNREAL_LIGHT_MAX_INTENSITY == unreal_runtime.LIGHT_MAX_INTENSITY
     assert _constraints.UNREAL_LIGHT_MIN_TEMPERATURE_K == unreal_runtime.LIGHT_MIN_TEMPERATURE_K
     assert _constraints.UNREAL_LIGHT_MAX_TEMPERATURE_K == unreal_runtime.LIGHT_MAX_TEMPERATURE_K
+    assert _constraints.UNREAL_PHYSICS_MIN_MASS_KG == unreal_runtime.PHYSICS_MIN_MASS_KG
+    assert _constraints.UNREAL_PHYSICS_MAX_MASS_KG == unreal_runtime.PHYSICS_MAX_MASS_KG
+    assert _constraints.UNREAL_PHYSICS_MAX_DAMPING == unreal_runtime.PHYSICS_MAX_DAMPING
 
 
 def _isaac_clamps() -> Iterator[Tuple[str, str, int, Any]]:
@@ -429,6 +488,11 @@ def _isaac_server(tmp_path: Path) -> server_module.SimulMCPServer:
         ("read_isaac_aovs", {"aov_names": ["HdrColor"], "resolution": [3840, 4000]}, "resolution.1"),
         ("read_isaac_aovs", {"aov_names": ["HdrColor"], "resolution": [64, 64, 3]}, "resolution"),
         ("create_isaac_object", {"prim_path": "/World/B", "diffuse_color": [2.0, 0.0, 0.0]}, "diffuse_color.0"),
+        ("create_isaac_object", {"prim_path": "/World/B", "diffuse_color": [0.5, 0.5]}, "diffuse_color"),
+        ("create_isaac_object", {"prim_path": "/World/B", "mass": -3.0}, "mass"),
+        ("set_isaac_mass_properties", {"prim_path": "/World/C", "mass": -1.0}, "mass"),
+        ("set_isaac_mass_properties", {"prim_path": "/World/C", "density": -1.0}, "density"),
+        ("raycast_isaac_scene", {"origin": [0.0, 0.0], "direction": [0.0, 0.0, -1.0]}, "origin"),
     ],
 )
 def test_out_of_range_values_are_refused_not_clamped(
