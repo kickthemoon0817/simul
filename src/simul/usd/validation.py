@@ -44,7 +44,7 @@ from pxr import Ar
 
 from ..utils.paths import PathPolicy, SandboxDenied
 from ._pxr import Sdf, Tf, Usd, UsdGeom
-from .stage_files import layers_in_memory, public_identifier
+from .stage_files import LoadedLayersUnavailable, layers_in_memory, public_identifier
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import USDConfig
@@ -64,8 +64,15 @@ _PXR_NAMESPACE = re.compile(r"pxrInternal_v\d+(?:_\d+)*__pxrReserved__::")
 _TEXT_POSITION = re.compile(r"^(?P<file>.+?):(?P<line>\d+):(?P<column>\d+):\s*(?P<message>.*)$", re.S)
 _ASSET_IN_MESSAGE = re.compile(r"@([^@]+)@")
 _QUOTED = re.compile(r"'([^']+)'")
-# A spec pxr names in a message, ``@<layer identifier>@</Prim.property>``.
-SPEC_REFERENCE = re.compile(r"@(?P<layer>[^@\s]*)@<(?P<path>[^>]*)>")
+# A spec pxr names in a message, ``@<layer identifier>@</Prim.property>``. The
+# identifier is quoted verbatim, spaces and quotes included; it holds no ``@``
+# and neither starts nor ends with whitespace, so the text between two
+# unrelated ``@`` (``@a.usda@ and @b.usda@</P>``) is not taken for one.
+SPEC_REFERENCE = re.compile(r"@(?P<layer>(?:[^@\s](?:[^@\n]*[^@\s])?)?)@<(?P<path>[^>]*)>")
+# A validator that raised quotes this many of pxr's reasons in its issue;
+# the rest are counted. 20,000 malformed joints give 20,000 reasons, and one
+# issue holding them all outgrew the result budget, which then dropped it.
+MAX_VALIDATOR_FAILURE_REASONS = 3
 
 
 @dataclass(frozen=True)
@@ -754,10 +761,13 @@ def _validator_failure(name: str, exc: BaseException) -> ValidationIssue:
 
     Its checks did not run, so the file cannot be vouched for; pxr's reason
     usually names a spec it could not read (``@layer@</Prim.property>``), which
-    becomes the issue's location.
+    becomes the issue's location. The message quotes the first
+    ``MAX_VALIDATOR_FAILURE_REASONS`` distinct reasons and counts the rest.
     """
     reasons = list(dict.fromkeys(public_identifier(message) for message in tf_error_messages(exc)))
-    reason = "; ".join(reasons) or type(exc).__name__
+    reason = "; ".join(reasons[:MAX_VALIDATOR_FAILURE_REASONS]) or type(exc).__name__
+    if len(reasons) > MAX_VALIDATOR_FAILURE_REASONS:
+        reason += f"; and {len(reasons) - MAX_VALIDATOR_FAILURE_REASONS} more like these"
     location: Dict[str, Optional[str]] = {}
     spec = SPEC_REFERENCE.search(reason)
     if spec is not None:
@@ -1034,12 +1044,20 @@ def validate_usd_file(
         whether ``load_usd_file`` can); ``is_valid`` additionally needs no
         error-severity issue.
 
+    pxr cannot always list the layers it holds while another thread
+    releases some (an ended MCP session's stages; see
+    ``stage_files.layers_in_memory``). Then nothing says which layers are
+    copies, and the check runs in the fresh process.
+
     Raises:
         SandboxDenied: The file's composition reaches outside the sandbox.
         TimeoutError: The fresh process took longer than
             ``usd.validation_timeout_seconds``.
     """
-    in_memory = layers_in_memory()
+    try:
+        in_memory = layers_in_memory()
+    except LoadedLayersUnavailable:
+        return _validate_from_disk(file_path, usd_config, sandbox, "whatever layers pxr holds")
 
     def stale(layers: Iterable[Any]) -> List[str]:
         return [
@@ -1054,7 +1072,7 @@ def validate_usd_file(
         return _validate_here(file_path, usd_config, sandbox, stale=stale)
     except SandboxDenied as exc:
         named = [
-            Sdf.Layer.Find(entry["layer"])
+            _find_layer(entry["layer"])
             for entry in exc.details.get("outside_sandbox", [])
             if isinstance(entry, dict) and entry.get("layer") in in_memory
         ]
@@ -1064,6 +1082,25 @@ def validate_usd_file(
         # The refusal came from an in-memory copy older than its file.
     except _ReadFromDisk as exc:
         paths = exc.paths
+    return _validate_from_disk(file_path, usd_config, sandbox, ", ".join(paths))
+
+
+def _find_layer(identifier: str) -> Optional["Sdf.Layer"]:
+    """``Sdf.Layer.Find``, or None when pxr cannot hand the layer out (one being released meanwhile)."""
+    try:
+        return Sdf.Layer.Find(identifier)
+    except Exception:
+        return None
+
+
+def _validate_from_disk(
+    file_path: str, usd_config: "USDConfig", sandbox: Optional["CompositionSandbox"], held: str
+) -> ValidationReport:
+    """Validate in the fresh process; when it cannot run, here, with a ``ValidatedInMemoryCopy`` warning.
+
+    Args:
+        held: Names the in-memory layers a check here may use, for the warning.
+    """
     report = _validate_in_fresh_process(file_path, usd_config, sandbox)
     if report.problem is None:
         return report
@@ -1073,7 +1110,7 @@ def validate_usd_file(
             WARNING,
             "ValidatedInMemoryCopy",
             f"Could not check {file_path} in a separate process ({report.problem}), so it was "
-            f"checked here, with the in-memory copies loaded stages hold of {', '.join(paths)}; "
+            f"checked here, with the in-memory copies loaded stages hold of {held}; "
             "those may differ from the files on disk.",
             layer=file_path,
         )

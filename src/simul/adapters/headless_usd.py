@@ -11,10 +11,11 @@ from __future__ import annotations
 import os
 import secrets
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple, Union
+from typing import Any, Callable, Container, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple, Union
 
 from ..usd._pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
@@ -26,7 +27,7 @@ from ..usd import editing, stage_files
 from ..usd.editing import USDEditError
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
-from ..usd.sandbox import CompositionSandbox, OutsidePath
+from ..usd.sandbox import CompositionSandbox, OutsidePath, open_arc_layers
 from ..usd.validation import (
     USDLoadError,
     check_usd_file,
@@ -59,6 +60,12 @@ def _checked(check: Callable[[], Any]) -> Any:
 
 # A session that keeps loading without unloading is refused past this many stages.
 MAX_STAGES_PER_OWNER = 32
+# A file pxr read during a call at a moment nothing recorded (composition
+# opened it; no walk stamped it first) is taken for current only when it was
+# last modified at least this long before the call began. Two seconds cover a
+# filesystem that keeps modification times in whole seconds (HFS+) or in two
+# (FAT); a file written closer to the call is reread instead.
+_UNRECORDED_READ_MARGIN_NS = 2_000_000_000
 # Locks a save or export picks from by the path it writes.
 FILE_LOCK_STRIPES = 64
 SAVE_FAILED = editing.SAVE_FAILED
@@ -96,6 +103,58 @@ def _layer_in_memory(path: str) -> bool:
         return bool(Sdf.Layer.Find(path))
     except Exception:
         return False
+
+
+class _EveryLayer:
+    """Stands for "every layer was in memory" when pxr could not list them (see ``_layers_held_now``)."""
+
+    def __contains__(self, identifier: object) -> bool:
+        return True
+
+
+def _layers_held_now() -> Container[str]:
+    """The identifiers of the layers pxr holds, or, when pxr cannot list them, a container holding every one.
+
+    The unknown case counts each layer the session has no stamp for as
+    possibly older than its file, so it is reread rather than trusted.
+    """
+    try:
+        return stage_files.layers_in_memory()
+    except stage_files.LoadedLayersUnavailable:
+        return _EveryLayer()
+
+
+def _unrecorded_read_stamp(current: stage_files.Stamp, started: Optional[int]) -> stage_files.Stamp:
+    """The stamp to record for a file pxr read during a call that began at ``started`` (ns), at an unknown moment.
+
+    ``current`` is the file's stamp now. A file last modified well before the
+    call began was not written while pxr read it, so ``current`` describes
+    the content read. Otherwise nothing says which content pxr got: None
+    (unknown) never matches a file that exists, so the file counts as
+    changed and its layer is reread.
+    """
+    if current is None or started is None or current[0] < started - _UNRECORDED_READ_MARGIN_NS:
+        return current
+    return None
+
+
+def _open_composed_layers(
+    root: Any, sandbox: Optional[CompositionSandbox], reads: Dict[str, stage_files.Stamp]
+) -> List[Any]:
+    """Open the layers ``root`` draws on before the stage is composed, stamping each file before pxr reads it.
+
+    Through the sandbox's walk when the sandbox is on (which also holds them
+    to it), otherwise by following the composition arcs. The caller holds
+    the returned layers while it composes, so composition reuses them instead
+    of reading the files after their stamps were taken.
+
+    Raises:
+        SandboxDenied: A layer reaches outside the sandbox.
+    """
+    if sandbox is not None and sandbox.enabled:
+        walked: List[Any] = _checked(lambda: sandbox.check_layers(root, reads=reads))
+        return walked
+    return open_arc_layers(root, reads)
 
 
 class HeadlessUSDSession(LoggerMixin):
@@ -428,9 +487,18 @@ class HeadlessUSDSession(LoggerMixin):
                 loaded_stages=owned,
             )
 
+        # Every file is stamped before pxr reads it, so a write that lands
+        # while this load reads it leaves an older stamp: the file shows as
+        # changed (and is reread) instead of being vouched for with the content
+        # it had before. started bounds the reads nothing stamped beforehand.
+        started = time.time_ns()
         # The layers pxr already holds: composing reuses each as it is, so one
         # this session has no stamp for must be checked against its file.
-        preloaded = stage_files.layers_in_memory()
+        preloaded = _layers_held_now()
+        reads: Dict[str, stage_files.Stamp] = {}
+        # A URL has no stamp to take before the read; its layer's real path
+        # is stamped after it, as before.
+        root_read = {} if remote else {file_path: stage_files.stamp(file_path)}
         try:
             root = stage_files.open_private_root(file_path)
         except Exception as exc:
@@ -444,7 +512,7 @@ class HeadlessUSDSession(LoggerMixin):
             ) from exc
         # Held while the stage is composed, so composition finds these layers
         # in pxr's registry instead of parsing the files again.
-        walked = _checked(lambda: sandbox.check_layers(root)) if sandbox is not None else []
+        walked = _open_composed_layers(root, sandbox, reads)
         try:
             stage = stage_files.compose_stage(root)
         except Exception as exc:
@@ -454,7 +522,7 @@ class HeadlessUSDSession(LoggerMixin):
                 f"pxr parsed the {root.GetFileFormat().formatId} layer but could not compose a "
                 f"stage from it: {editing.tf_error_reason(exc)}",
             ) from exc
-        reloaded, unread = self._refresh_shared(stage, preloaded=preloaded)
+        reloaded, unread = self._refresh_shared(stage, preloaded=preloaded, reads=reads, started=started)
         if reloaded:
             self.logger.info(f"Reread changed files for {file_path}: {reloaded}")
         if sandbox is not None:
@@ -478,23 +546,50 @@ class HeadlessUSDSession(LoggerMixin):
             self._stage_records[stage_id] = _StageRecord(
                 file_path=file_path,
                 owner=owner,
-                stamps=self._stamps_in_use(stage, unread),
+                stamps=self._stamps_in_use(stage, root_read, reads, started),
                 unreal_content=sandbox.content_paths if sandbox is not None else [],
             )
         self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
         return stage_id
 
-    def _stamps_in_use(self, stage: Usd.Stage, unread: Mapping[str, str]) -> Dict[str, stage_files.Stamp]:
-        """The stamps to record for ``stage``: each file's current one, except for files pxr could not reread.
+    def _stamps_in_use(
+        self,
+        stage: Usd.Stage,
+        root_read: Mapping[str, stage_files.Stamp],
+        reads: Mapping[str, stage_files.Stamp],
+        started: Optional[int],
+    ) -> Dict[str, stage_files.Stamp]:
+        """The stamps to record for ``stage``: for each file it composes, the stamp of the content it shows.
 
-        Those keep the stamp of the content the stage still shows, so they
-        stay listed as changed on disk.
+        - The root file: ``root_read``, its stamp taken just before the call
+          read it into the private root layer.
+        - A shared layer the session tracks: the stamp of the content that
+          layer holds (``_shared_stamps``, taken before it was read or
+          reread). A file pxr could not reread keeps the stamp of the content
+          still in use, so it stays listed as changed on disk.
+        - Any other layer: its stamp from ``reads`` when this call read it,
+          otherwise (composition read it unrecorded) see
+          ``_unrecorded_read_stamp``. A layer with file format arguments,
+          which no load rereads, keeps its current stamp.
         """
-        stamps = stage_files.file_stamps(stage)
+        root = stage.GetRootLayer()
+        stamps: Dict[str, stage_files.Stamp] = {}
         with self._registry:
-            for path in unread:
+            for layer in stage_files.file_layers(stage):
+                path = layer.realPath
                 if path in stamps:
-                    stamps[path] = self._shared_stamps.get(path)
+                    continue  # the root comes first: its own read wins
+                current = stage_files.stamp(path)
+                if layer == root:
+                    stamps[path] = root_read.get(path, current)
+                elif path in self._shared_stamps:
+                    stamps[path] = self._shared_stamps[path]
+                elif path in reads:
+                    stamps[path] = reads[path]
+                elif Sdf.Layer.SplitIdentifier(layer.identifier)[1]:
+                    stamps[path] = current
+                else:
+                    stamps[path] = _unrecorded_read_stamp(current, started)
         return stamps
 
     def _changed_shared(
@@ -502,7 +597,9 @@ class HeadlessUSDSession(LoggerMixin):
         stage: Usd.Stage,
         skip: Optional[Set[str]] = None,
         extra: Iterable[Any] = (),
-        preloaded: Optional[Set[str]] = None,
+        preloaded: Optional[Container[str]] = None,
+        reads: Optional[Dict[str, stage_files.Stamp]] = None,
+        started: Optional[int] = None,
     ) -> List[Any]:
         """The shared layers whose files changed since the session read them, but ``skip``.
 
@@ -511,11 +608,16 @@ class HeadlessUSDSession(LoggerMixin):
         A layer with file format arguments (a private root, a throwaway
         copy) is nobody's shared layer and is left out.
 
-        A layer with no stamp was read by this load, unless it was already
-        in memory when the load began (``preloaded``, identifiers): then
-        nothing says which content of its file it holds (it outlived the
-        stages the session stamped it for), so it counts as changed and is
-        reread, rather than taken for the file as it is now.
+        A layer this call read from its file (``reads``, by real path) gets
+        the stamp taken just before that read; each entry is used once. A
+        layer with no stamp was otherwise read by this call's composition,
+        unless it was already in memory when the call began (``preloaded``,
+        identifiers): then nothing says which content of its file it holds
+        (it outlived the stages the session stamped it for), so it counts as
+        changed and is reread, rather than taken for the file as it is now.
+        One composition read gets ``_unrecorded_read_stamp`` (``started`` is
+        when the call began). A file written after its stamp was taken
+        counts as changed, so it is reread now.
         """
         root = stage.GetRootLayer()
         changed: List[Any] = []
@@ -531,13 +633,16 @@ class HeadlessUSDSession(LoggerMixin):
                 if skip and path in skip:
                     continue
                 current = stage_files.stamp(path)
-                if path not in self._shared_stamps:
+                if reads is not None and path in reads:
+                    # This call read the file into the layer just now.
+                    self._shared_stamps[path] = reads.pop(path)
+                elif path not in self._shared_stamps:
                     if preloaded is not None and layer.identifier in preloaded:
                         changed.append(layer)
-                    else:
-                        # First seen: this load just read it.
-                        self._shared_stamps[path] = current
-                elif self._shared_stamps[path] != current:
+                        continue
+                    # Composition read it during this call; when exactly is unknown.
+                    self._shared_stamps[path] = _unrecorded_read_stamp(current, started)
+                if self._shared_stamps[path] != current:
                     changed.append(layer)
         return changed
 
@@ -559,6 +664,9 @@ class HeadlessUSDSession(LoggerMixin):
         refreshable: List[Any] = []
         unread: Dict[str, str] = {}
         for layer in changed:
+            # Taken before the read: a fix saved while pxr fails to parse the
+            # file must not be recorded as the content that failed.
+            before = stage_files.stamp(layer.realPath)
             try:
                 candidate = stage_files.open_candidate(layer)
             except Exception as exc:
@@ -566,7 +674,7 @@ class HeadlessUSDSession(LoggerMixin):
                 self.logger.warning(f"Not rereading {layer.realPath}, which pxr cannot parse now: {reason}")
                 unread[layer.realPath] = reason
                 with self._registry:
-                    self._shared_unread[layer.realPath] = (stage_files.stamp(layer.realPath), reason)
+                    self._shared_unread[layer.realPath] = (before, reason)
                 continue
             if factory is not None:
                 _checked(lambda: factory().check_layers(candidate))
@@ -576,6 +684,12 @@ class HeadlessUSDSession(LoggerMixin):
     def _reread(self, layers: List[Any], stage: Usd.Stage) -> Tuple[List[str], Dict[str, str]]:
         """
         Reload ``layers`` (checked by ``_check_rereads``) in place, which every stage using them sees.
+
+        Each file is stamped just before its reread, so a write that lands
+        during the reread leaves the file changed rather than current. Every
+        other stage composing a reread layer shows its new content too, so
+        its record takes the new stamp and stops listing the file as changed
+        on disk.
 
         Afterwards each other stage using a reloaded layer is checked again,
         and one that now reaches outside the sandbox (a file swapped between
@@ -589,6 +703,7 @@ class HeadlessUSDSession(LoggerMixin):
         unread: Dict[str, str] = {}
         for layer in layers:
             path = layer.realPath
+            before = stage_files.stamp(path)
             try:
                 done = layer.Reload(True)
             except Exception as exc:
@@ -599,16 +714,32 @@ class HeadlessUSDSession(LoggerMixin):
                 self.logger.warning(f"Not rereading {path}: {reason}")
                 unread[path] = reason
                 with self._registry:
-                    self._shared_unread[path] = (stage_files.stamp(path), reason)
+                    self._shared_unread[path] = (before, reason)
                 continue
             reloaded.append(path)
             with self._registry:
-                self._shared_stamps[path] = stage_files.stamp(path)
+                self._shared_stamps[path] = before
                 self._shared_unread.pop(path, None)
+                self._restamp_stages_using(layer, before)
         factory = self._sandbox_factory
         if reloaded and factory is not None:
             self._recheck_stages_using(reloaded, factory, skip=stage)
         return reloaded, unread
+
+    def _restamp_stages_using(self, layer: Any, stamp: stage_files.Stamp) -> None:
+        """Record ``stamp`` for ``layer``'s file in every registered stage composing that layer.
+
+        A reread in place changes what each of them shows. A stage's own
+        root file is left alone: its private root layer was not reread.
+        Called with the registry lock held.
+        """
+        path = layer.realPath
+        for stage_id, record in self._stage_records.items():
+            if path == record.file_path or path not in record.stamps:
+                continue
+            other = self._active_stages.get(stage_id)
+            if other is not None and layer in other.GetUsedLayers():
+                record.stamps[path] = stamp
 
     def unreal_content_paths(self, stage_id: str) -> List[OutsidePath]:
         """
@@ -630,7 +761,12 @@ class HeadlessUSDSession(LoggerMixin):
             return list(record.unreal_content) if record is not None else []
 
     def _refresh_shared(
-        self, stage: Usd.Stage, skip: Optional[Set[str]] = None, preloaded: Optional[Set[str]] = None
+        self,
+        stage: Usd.Stage,
+        skip: Optional[Set[str]] = None,
+        preloaded: Optional[Container[str]] = None,
+        reads: Optional[Dict[str, stage_files.Stamp]] = None,
+        started: Optional[int] = None,
     ) -> Tuple[List[str], Dict[str, str]]:
         """
         Reload the shared layers of ``stage`` whose files changed since the session read them.
@@ -648,6 +784,9 @@ class HeadlessUSDSession(LoggerMixin):
             skip: Real paths not to check
             preloaded: Identifiers of the layers in memory when the call
                 began (see ``_changed_shared``)
+            reads: The stamps this call took just before it read files,
+                by real path (see ``_changed_shared``)
+            started: When the call began (``time.time_ns``)
 
         Returns:
             The real paths of the layers reloaded, and for each changed file
@@ -657,7 +796,9 @@ class HeadlessUSDSession(LoggerMixin):
             SandboxDenied: A changed file now reaches outside the sandbox;
                 nothing was reloaded.
         """
-        refreshable, unread = self._check_rereads(self._changed_shared(stage, skip, preloaded=preloaded))
+        refreshable, unread = self._check_rereads(
+            self._changed_shared(stage, skip, preloaded=preloaded, reads=reads, started=started)
+        )
         reloaded, failed = self._reread(refreshable, stage)
         unread.update(failed)
         return reloaded, unread
@@ -1095,9 +1236,12 @@ class HeadlessUSDSession(LoggerMixin):
                 stage_id=stage_id,
                 override="discard_unsaved",
             )
+        # As in a load, each file is stamped before pxr reads it.
+        started = time.time_ns()
         changed = stage_files.changed_files(stage, record.stamps)
-        preloaded = stage_files.layers_in_memory()
+        preloaded = _layers_held_now()
         factory = self._sandbox_factory
+        reads: Dict[str, stage_files.Stamp] = {}
         named: List[Any] = []
         if record.file_path in changed:
             try:
@@ -1108,19 +1252,26 @@ class HeadlessUSDSession(LoggerMixin):
                     f"Reloading {record.file_path} failed: {editing.tf_error_reason(exc)}",
                     file_path=record.file_path,
                 ) from exc
-            if factory is not None:
-                named = _checked(lambda: factory().check_layers(candidate))
+            # Held through the reread, so the new root composes these layers
+            # as read here rather than reading the files again unstamped.
+            named = _open_composed_layers(candidate, factory() if factory is not None else None, reads)
         # The shared layers the stage uses and those the new root content
         # names: a newly named one another stage holds may be older than its
         # file, whose new content must pass before the root is reread.
-        refreshable, unread = self._check_rereads(self._changed_shared(stage, extra=named, preloaded=preloaded))
+        refreshable, unread = self._check_rereads(
+            self._changed_shared(stage, extra=named, preloaded=preloaded, reads=reads, started=started)
+        )
         try:
+            # The root file is reread whether or not it changed; stamped first.
+            root_read = {record.file_path: stage_files.stamp(record.file_path)}
             root.Reload(True)
             reloaded, failed = self._reread(refreshable, stage)
             unread.update(failed)
             # A file the reread root names that no stage composed before was
             # read fresh; one another stage already holds may be stale.
-            more, failed = self._refresh_shared(stage, skip=set(unread), preloaded=preloaded)
+            more, failed = self._refresh_shared(
+                stage, skip=set(unread), preloaded=preloaded, reads=reads, started=started
+            )
             reloaded += more
             unread.update(failed)
         except SandboxDenied:
@@ -1142,7 +1293,7 @@ class HeadlessUSDSession(LoggerMixin):
                     f"Unloaded USD stage {stage_id}: after the reload it draws on files outside the sandbox"
                 )
                 raise
-        stamps = self._stamps_in_use(stage, unread)
+        stamps = self._stamps_in_use(stage, root_read, reads, started)
         with self._registry:
             record.stamps = stamps
             if factory is not None:

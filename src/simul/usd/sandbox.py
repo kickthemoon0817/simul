@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional,
 from pxr import Ar, Sdf, UsdUtils
 
 from ..utils.paths import SandboxDenied
+from . import stage_files
 from .clips import clip_sets
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -301,12 +302,17 @@ class CompositionSandbox:
         """
         return list(self._content.values())
 
-    def check_layers(self, root_layer: "Sdf.Layer") -> List["Sdf.Layer"]:
+    def check_layers(
+        self, root_layer: "Sdf.Layer", reads: Optional[Dict[str, "stage_files.Stamp"]] = None
+    ) -> List["Sdf.Layer"]:
         """Walk the layers ``root_layer`` draws on before the stage is composed.
 
         Args:
             root_layer: The opened root layer; its own path already passed the
                 sandbox.
+            reads: Records, for each layer the walk reads from its file, the
+                file's stamp taken just before the read
+                (``stage_files.open_layer``); None records nothing.
 
         Returns:
             The layers opened on the way. The caller holds them while it opens
@@ -323,7 +329,7 @@ class CompositionSandbox:
         # here exactly where composition will find it.
         context = Ar.GetResolver().CreateDefaultContextForAsset(root_layer.identifier)
         with Ar.ResolverContextBinder(context):
-            held, outside = self._walk([root_layer])
+            held, outside = self._walk([root_layer], reads)
         self._raise_if_outside(root_layer.identifier, outside)
         return held
 
@@ -362,7 +368,9 @@ class CompositionSandbox:
         outside.extend(found)
         self._raise_if_outside(root_id, outside)
 
-    def _walk(self, start: List["Sdf.Layer"]) -> Tuple[List["Sdf.Layer"], List[OutsidePath]]:
+    def _walk(
+        self, start: List["Sdf.Layer"], reads: Optional[Dict[str, "stage_files.Stamp"]] = None
+    ) -> Tuple[List["Sdf.Layer"], List[OutsidePath]]:
         """Breadth-first over ``start`` and every allowed layer they reach."""
         held: List["Sdf.Layer"] = []
         outside: List[OutsidePath] = []
@@ -379,7 +387,7 @@ class CompositionSandbox:
                     continue
                 if verdict is None or not _is_layer_path(verdict):
                     continue
-                child = self._open(verdict)
+                child = stage_files.open_layer(verdict, reads)
                 if child is not None and child.identifier not in self._visited:
                     held.append(child)
                     queue.append(child)
@@ -469,14 +477,6 @@ class CompositionSandbox:
     def _allowed(self, location: str) -> bool:
         return self._allowed_check(_outer_path(location))
 
-    @staticmethod
-    def _open(identifier: str) -> Optional["Sdf.Layer"]:
-        """Open an allowed layer to walk it; a broken one is left to composition to report."""
-        try:
-            return Sdf.Layer.FindOrOpen(identifier)
-        except Exception:
-            return None
-
     def _raise_if_outside(self, root: str, outside: List[OutsidePath]) -> None:
         if not outside:
             return
@@ -501,11 +501,53 @@ class CompositionSandbox:
         )
 
 
+def open_arc_layers(root_layer: "Sdf.Layer", reads: Dict[str, "stage_files.Stamp"]) -> List["Sdf.Layer"]:
+    """Open the layers ``root_layer``'s sublayers, references and payloads name, transitively, before composing.
+
+    For a load that walks no sandbox (none given, or the sandbox is off).
+    Each file pxr reads is stamped just before the read
+    (``stage_files.open_layer``), so a write that lands while the load runs
+    shows as a change; composition then finds these layers in pxr's
+    registry instead of reading the files after the stamps. Composition arcs
+    in every variant are followed, anchored and resolved as composition does
+    (under the resolver context ``Usd.Stage.Open`` binds for the root); a
+    layer composition opens beyond them (a value clip) is not opened here.
+
+    Args:
+        root_layer: The opened root layer.
+        reads: Where the stamps are recorded, by real path.
+
+    Returns:
+        The layers opened, for the caller to hold while it composes.
+    """
+    held: List["Sdf.Layer"] = []
+    seen = {root_layer.identifier}
+    queue: List["Sdf.Layer"] = [root_layer]
+    context = Ar.GetResolver().CreateDefaultContextForAsset(root_layer.identifier)
+    with Ar.ResolverContextBinder(context):
+        while queue:
+            layer = queue.pop(0)
+            for authored in sorted(_composition_arcs(layer)):
+                try:
+                    identifier = layer.ComputeAbsolutePath(authored) if authored else ""
+                except Exception:
+                    continue
+                if not identifier or not _is_layer_path(identifier):
+                    continue
+                child = stage_files.open_layer(identifier, reads)
+                if child is not None and child.identifier not in seen:
+                    seen.add(child.identifier)
+                    held.append(child)
+                    queue.append(child)
+    return held
+
+
 __all__ = [
     "CompositionSandbox",
     "MAX_REPORTED_PATHS",
     "OutsidePath",
     "UNREAL_OBJECT_PATH",
     "is_unreal_content_path",
+    "open_arc_layers",
     "unreal_content_paths",
 ]
