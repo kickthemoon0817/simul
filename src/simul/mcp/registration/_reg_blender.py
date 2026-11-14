@@ -212,6 +212,13 @@ from ..schemas.simready import (
     SimReadyValidateRequest,
     SimReadyValidateResponse,
 )
+from ...utils.script_result import (
+    SCRIPT_ERROR,
+    printed_json_object,
+    reported_error_type,
+    reported_failure_message,
+    script_reported_failure,
+)
 from ._constraints import from_request_model
 from ._helpers import surface_tool, with_param_descriptions
 
@@ -223,6 +230,36 @@ ToolWrapper = Callable[..., Coroutine[Any, Any, ToolResult]]
 # Called with the open session (and the validated request when the tool has a
 # request model); returns the payload.
 SessionCall = Callable[..., Dict[str, Any]]
+
+
+def _execute_script(session: Any, **arguments: Any) -> Dict[str, Any]:
+    """Run an agent's script; it fails when it raised or printed ``"success": false``.
+
+    The printed output stays text in ``output``, so nothing the script prints
+    under ``error`` or ``*_error`` can fail the call. A script that raised is
+    a ``ScriptError``, as on the other backends (``TimeoutError`` when it
+    outran its timeout). A script that reports a failure itself does so as
+    the other backends' scripts do: its whole output is one JSON object with
+    ``"success": false``, whose ``error`` (and ``error_type``, default
+    ``ScriptError``) the failed call carries.
+    """
+    payload: Dict[str, Any] = session.execute_script(**arguments)
+    if payload.get("error"):
+        if payload.get("error_type"):
+            return payload
+        raised = error_types.TIMEOUT_ERROR if payload.get("timed_out") else SCRIPT_ERROR
+        return {**payload, "success": False, "error_type": raised}
+    if payload.get("output_truncated"):
+        return payload
+    printed = printed_json_object(payload.get("output"))
+    if printed is None or not script_reported_failure(printed):
+        return payload
+    return {
+        **payload,
+        "success": False,
+        "error": reported_failure_message(printed),
+        "error_type": reported_error_type(printed),
+    }
 
 
 @dataclass(frozen=True)
@@ -722,7 +759,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Uses Blender UI APIs, not physical key/click events or arbitrary button lookup. "
             "Requires attached mode; does not launch Blender or execute arbitrary scripts."
         ),
-        hints=ADDITIVE,
+        # Destructive: its set_property action writes the active object's transform.
+        hints=DESTRUCTIVE,
         operation="control_ui",
         request=BlenderUIRequest,
         response=BlenderUIResponse,
@@ -916,7 +954,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "after the placement (or its evaluated pose did not change), override_check is "
             "'skipped' and placement_overridden null."
         ),
-        hints=IDEMPOTENT,
+        # Destructive: moves a camera object.
+        hints=OVERWRITING,
         operation="set_camera_view",
         request=BlenderSetCameraViewRequest,
         response=BlenderSetCameraViewResponse,
@@ -953,7 +992,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "placement (or whose evaluated pose did not change), override_check is 'skipped' "
             "and placement_overridden null."
         ),
-        hints=IDEMPOTENT,
+        # Destructive: moves and re-clips a camera object.
+        hints=OVERWRITING,
         operation="focus_on_object",
         request=BlenderFocusOnObjectRequest,
         response=BlenderFocusOnObjectResponse,
@@ -981,10 +1021,15 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             f"max_frames (default {SEQUENCE_FRAMES_DEFAULT}, at most {SEQUENCE_FRAMES_MAX}) and "
             f"starts no frame after {SEQUENCE_TIME_BUDGET_SECONDS:g} s, since Blender is busy "
             "meanwhile; then complete is false and next_start_frame says where to continue. "
+            "Frame files already in output_dir with the same numbers are replaced. Each frame is "
+            "a frame change, so frame-change handlers run and an unbaked rigid-body cache "
+            "fills; the current frame is set again afterwards. "
             "In attached mode, briefly show an agent eye badge and border pulse after success. "
             "Agent annotations are excluded from the captured images."
         ),
-        hints=READ_ONLY,
+        # Writes files and replaces same-numbered frames in a caller-chosen
+        # folder; each call without output_dir writes a new folder.
+        hints=DESTRUCTIVE,
         operation="capture_viewport_sequence",
         request=BlenderCaptureSequenceRequest,
         response=BlenderCaptureSequenceResponse,
@@ -1283,7 +1328,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Insert a keyframe on an object property: its current value, or value; "
             "optionally the interpolation and key type."
         ),
-        hints=ADDITIVE,
+        # Destructive: replaces an existing key at that frame.
+        hints=DESTRUCTIVE,
         operation="insert_keyframe",
         params={
             "interpolation": Param(Optional[BlenderKeyframeInterpolation]),
@@ -1338,7 +1384,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Insert many keyframes in one call: for each property, a value per frame "
             "(up to 10 000 keys), with an optional interpolation and key type."
         ),
-        hints=ADDITIVE,
+        # Destructive: replaces existing keys at those frames.
+        hints=DESTRUCTIVE,
         operation="insert_keyframes",
         request=BlenderInsertKeyframesRequest,
         response=BlenderInsertKeyframesResponse,
@@ -1451,9 +1498,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "400 000 body-frames). pose_source and simulated_for_frame say whether the "
             "pose is the simulation's for this frame; frames past the cache end hold "
             "the bodies at its last frame (past_cache_end). rigid_body_cache reports "
-            "the cache range and bake state."
+            "the cache range and bake state. Not read-only by default: stepping runs "
+            "frame-change handlers and fills the unbaked cache, as "
+            "get_blender_object_trajectory does; step_simulation=false only reads."
         ),
-        hints=READ_ONLY,
+        # Steps the scene by default, like get_blender_object_trajectory.
+        hints=IDEMPOTENT,
         operation="get_physics_state",
         request=BlenderGetPhysicsStateRequest,
         response=BlenderGetPhysicsStateResponse,
@@ -1574,10 +1624,14 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "a cut sets output_truncated=true and output_total_chars to the full length. "
             "Write larger results to a file and return its path instead. Anything the script "
             "raises, including SystemExit from sys.exit(), is reported in error and never "
-            "ends Blender. In attached mode each call is one undo step."
+            "ends Blender. What the script prints is data, so an error or *_error key in "
+            "printed JSON does not fail the call; it fails only when the script raises or "
+            "its whole output is one JSON object with \"success\": false (its error is "
+            "the message). In attached mode each call is one undo step."
         ),
         hints=DESTRUCTIVE,
         operation="execute_script",
+        call=_execute_script,
         request=BlenderExecuteScriptRequest,
         response=BlenderExecuteScriptResponse,
         script=True,
@@ -1714,7 +1768,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "and changes nothing on failure; an existing root name is refused unless "
             "reuse_root=true. Optionally stores semantic labels on the root."
         ),
-        hints=ADDITIVE,
+        # Destructive: re-parents existing objects.
+        hints=DESTRUCTIVE,
         operation="setup_simready_hierarchy",
         request=SimReadySetupHierarchyRequest,
         response=SimReadySetupHierarchyResponse,

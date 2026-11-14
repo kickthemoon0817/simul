@@ -12,7 +12,14 @@ Every tool returns a JSON object. A failure is sent with MCP `isError: true`
 and carries `success: false`, an `error_type` and an `error` message; see
 [Errors](#errors) for the types. Parameter bounds and choices are in each
 tool's input schema (`minimum`, `maximum`, `enum`), and a value outside them
-is refused with `ValidationError` before the tool runs.
+is refused with `ValidationError` before the tool runs. A list's items carry
+their own bounds (`items`, or `prefixItems` where each position differs, as
+`read_isaac_aovs`'s `[width, height]` does), and every advertised `default`
+satisfies its own schema. A few choices are matched in any case by the tool
+(`configure_isaac_physics_scene`'s `solver_type` and `broadphase_type`,
+`import_blender_file`'s `file_format`, ...): the `enum` lists the canonical
+spelling, which is what a client that validates against the schema sends,
+and the tool also takes other cases.
 
 Results are strict JSON: a non-finite float is sent as the string
 `"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token.
@@ -2294,7 +2301,9 @@ Behaviour worth knowing:
   captures through another camera without changing the scene camera or the
   view. `capture_blender_viewport_sequence` writes JPEG files and returns their
   paths, at most `max_frames` (50, at most 100) per call and no new frame after
-  10 s, with `next_start_frame` to continue.
+  10 s, with `next_start_frame` to continue. It replaces frame files of the
+  same numbers already in `output_dir`, so it is annotated destructive, not
+  read-only.
 - `get_blender_viewport_info` reports, besides the render settings, `view3d`:
   the attached window's largest 3D View (the one captures use) with its
   `view_matrix` (world to view), `eye_location`, `view_perspective`, `lens`,
@@ -2890,7 +2899,8 @@ Behaviour worth knowing:
   (`rigid_body_cache.is_baked`).
 - `get_blender_physics_state` steps an unbaked simulation from the cache start
   to the current frame before reading the pose (`step_simulation`, default
-  true, at most 400 000 frames x bodies), as playback would: an unbaked
+  true, at most 400 000 frames x bodies), as playback would, so like
+  `get_blender_object_trajectory` it is not read-only: an unbaked
   simulation advances one frame at a time, so after `set_blender_frame` jumped
   from 1 to 48 a falling body still sat at its starting pose. Frames Blender has
   cached are read, not simulated again. `pose_source` says where the pose comes
@@ -2943,6 +2953,34 @@ Behaviour worth knowing:
 | Tool | Purpose |
 |---|---|
 | `get_tool_usage_stats` | Per-tool call counts, success rates and durations for the calling MCP session; `scope="server"` counts every session's calls. The recent call log (`include_recent`, `limit` 1 to 200) is always the caller's own, because records carry parameters, file paths and agent labels. Operators read every session with `simul stats`; clearing it is operator-only: `simul stats --reset` |
+
+## Script results
+
+What an agent's own script prints is data, on every backend
+(`execute_isaac_script`, `execute_unreal_script`, `execute_blender_script`,
+`simul isaac exec`, `simul unreal exec`). A call fails only when:
+
+- the script **raises** (`error_type: ScriptError`, the exception named in
+  `details.exception_type` where the engine reports it), or
+- the script **prints `"success": false`** in its JSON object. Its `error`
+  becomes the message, as text (an object or a number as its JSON); without
+  one, the message lists the object's non-null `*_error` keys as
+  `key: value; ...`. `error_type` is `ScriptError` unless the object names
+  another. The rule is the same on all three backends and both `exec`
+  commands.
+
+Any other key, `error` and `*_error` included, is returned as printed:
+`{"position_error": 0.002}` is a successful call carrying a metric, and
+`{"error": 0.0}` keeps its `0.0`. A `success` value other than `false` reads
+as success. Isaac returns the JSON object the whole output is; Unreal the
+first JSON object printed on its own line; Blender keeps the printed text in
+`output` and fails the call only when that whole output is one JSON object
+with `"success": false`. The skills' error-safe template
+(`{"success": False, "error": str(e)}` in an `except`) follows this rule.
+
+simul's own granular tools work differently: their generated scripts report
+a failure under `error`, or a partial one under a `*_error` key such as
+`timeline_error`, and the envelope reads those keys (`EngineError` below).
 
 ## Errors
 
@@ -3062,9 +3100,13 @@ Arguments that do not fit the input schema are refused before the tool runs,
 but through the same envelope as every other failure: the call spends a
 rate-limit token and is recorded in the usage log and the audit log. A call to
 a tool that is not registered is a `NotFoundError`, recorded and rate limited
-under `<unknown tool>` with the name it gave in the record's parameters. The
-audit row of every call states the envelope's outcome, `error_type` included
-(see [Audit log](configuration.md#audit-log)).
+under `<unknown tool>` with the name it gave in the record's parameters; its
+audit row names it `<unknown tool>` too, with the name given in
+`extra.requested_tool`. The audit row of every call states the envelope's
+outcome, `error_type` included (see [Audit log](configuration.md#audit-log)).
+A tool's own argument check (one the schema cannot state, such as a minimum
+above its maximum) names the parameter in `details.errors[].field` as the
+schema's refusals do.
 
 A call the client cancels may still have run: cancelling the request does not
 stop the engine. Its usage and audit rows say `cancelled` and `executed`:
@@ -3080,10 +3122,23 @@ rule on every backend, pinned for all tools by
 
 - **read-only**: changes nothing, a capture that only returns the image
   included (`capture_blender_viewport`);
-- **destructive**: overwrites or deletes existing state or files, or runs
-  arbitrary code (`capture_isaac_viewport` deletes the oldest captures in its
-  directory, so it is destructive; `capture_unreal_viewport` writes a new
-  screenshot and is only additive);
+- **destructive**: can overwrite or delete existing state or files, with any
+  of its arguments, or runs arbitrary code. `capture_isaac_viewport` deletes
+  the oldest captures in its directory and `capture_blender_viewport_sequence`
+  replaces same-numbered frame files, so both are destructive;
+  `capture_unreal_viewport` writes a new screenshot and is only additive.
+  `insert_blender_keyframe` replaces a key already at that frame,
+  `add_isaac_collision` an authored approximation and `create_isaac_physics_scene`
+  an existing scene's gravity, so they are destructive too. Moving a camera that
+  is scene content (a Blender camera object, Isaac's active viewport camera,
+  which can be a stage camera prim) is destructive; moving an editor's own view
+  (Unreal's level viewport, a Blender 3D View) and runtime control (play,
+  pause, step, the current frame) are not. A tool with several actions takes
+  the hint of its most destructive one: `control_unreal_ui` and
+  `control_blender_ui` are destructive because `set_property` edits a
+  transform. Every tool that is not read-only states `destructiveHint`,
+  `false` included, because a client reads a missing one as `true`; a
+  read-only tool leaves it out;
 - **idempotent**: repeating the call with the same arguments changes nothing
   more (a set, a delete, a save or export to the same path, a focus); a
   create, a step, a capture that writes a new file or an edit that compounds

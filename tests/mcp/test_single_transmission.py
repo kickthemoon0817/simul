@@ -98,10 +98,11 @@ def test_no_tool_declares_the_dead_permissive_output_schema(
 
 
 def test_annotations_drop_constant_noise(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hints equal to a client's assumed default are omitted, never emitted.
+    """Hints equal to the MCP spec's default are omitted: idempotentHint=false, openWorldHint=true.
 
-    destructiveHint=false rode on 84 tools while saying nothing; the same goes
-    for idempotentHint=false and openWorldHint=true.
+    destructiveHint is the exception: its spec default is true, so a tool that
+    is not read-only always states it, false included (round-2 audit m-1),
+    and a read-only tool, for which the spec gives it no meaning, never does.
     """
     instance = _make_server(monkeypatch)
 
@@ -117,7 +118,10 @@ def test_annotations_drop_constant_noise(monkeypatch: pytest.MonkeyPatch) -> Non
         assert "readOnlyHint" in dumped
         assert dumped.get("idempotentHint") is not False
         assert dumped.get("openWorldHint") is not True
-        assert dumped.get("destructiveHint") is not False
+        if dumped["readOnlyHint"]:
+            assert "destructiveHint" not in dumped
+        else:
+            assert isinstance(dumped["destructiveHint"], bool)
 
 
 class _StubAdapter:

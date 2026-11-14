@@ -95,8 +95,11 @@ def test_audit_rows_record_the_real_outcome(
         ("load_usd_file", "error", "SandboxError", None),
         ("load_usd_file", "error", "ValidationError", None),
         ("load_usd_file", "error", "RateLimitError", "rate_limited"),
-        ("no_such_tool", "error", "NotFoundError", None),
+        # Named as the usage row names it, the name given kept aside (round-2 m-9).
+        ("<unknown tool>", "error", "NotFoundError", None),
     ]
+    assert audit_rows[-1]["extra"] == {"requested_tool": "no_such_tool"}
+    assert all("extra" not in row for row in audit_rows[:4])
     tool_rows = audit_rows[:4]
     assert {row["session"] for row in tool_rows} == {tool_rows[0]["agent_id"]}
     assert tool_rows[0]["session"].startswith("session-")

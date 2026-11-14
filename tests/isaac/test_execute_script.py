@@ -159,16 +159,39 @@ def test_bridge_enabled_sends_raw_scripts_through_the_bridge() -> None:
     assert client.execute_vscode_only.await_count == 0
 
 
-def test_a_script_error_payload_is_not_stamped_successful() -> None:
-    """Generated scripts report failure as {"error": ...}; do not contradict it."""
+def test_error_keys_an_agent_script_prints_are_data() -> None:
+    """A robotics metric named *_error, or an ``error`` residual, is no failure (round-2 B-1)."""
+    printed = {"position_error": 0.002, "orientation_error": 0.01, "error": 0.0, "joint": "elbow"}
+    tools, _ = _tools(ScriptResult(success=True, output=json.dumps(printed)))
+
+    result = asyncio.run(tools.execute_script("print(...)"))
+
+    assert result == {**printed, "success": True}
+
+
+def test_an_agent_script_fails_the_call_by_printing_success_false() -> None:
     tools, _ = _tools(
-        ScriptResult(success=True, output=json.dumps({"error": "No stage is currently open"}))
+        ScriptResult(
+            success=True,
+            output=json.dumps({"success": False, "error": "No stage is currently open", "tried": 3}),
+        )
     )
 
     result = asyncio.run(tools.execute_script("print(...)"))
 
-    assert result["error"] == "No stage is currently open"
-    assert result.get("success") is not True, "stamped success onto an error payload"
+    assert result == {
+        "success": False,
+        "error": "No stage is currently open",
+        "error_type": "ScriptError",
+        "tried": 3,
+    }
+
+
+def test_a_printed_success_other_than_false_reads_as_success() -> None:
+    """``success`` is the envelope's flag: only ``false`` fails the call."""
+    for printed in ({"success": True}, {"success": None}, {"success": "no"}, {"success": 0}):
+        tools, _ = _tools(ScriptResult(success=True, output=json.dumps(printed)))
+        assert asyncio.run(tools.execute_script("print(...)"))["success"] is True, printed
 
 
 def test_raw_stdout_is_preserved_for_json_emitting_scripts() -> None:

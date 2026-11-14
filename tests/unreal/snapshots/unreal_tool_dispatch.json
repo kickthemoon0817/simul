@@ -5085,7 +5085,7 @@
      "details": {
       "errors": [
        {
-        "field": null,
+        "field": "mode",
         "message": "Invalid mode 'Bogus'. Must be one of ['EvaluateStatement', 'ExecuteFile', 'ExecuteStatement']",
         "type": "value_error"
        }

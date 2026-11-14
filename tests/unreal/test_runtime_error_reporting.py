@@ -124,13 +124,25 @@ def test_script_json_is_returned_as_printed(monkeypatch: pytest.MonkeyPatch) -> 
         "LogOutput": [{"Type": "Info", "Output": "noise\n"}, {"Type": "Info", "Output": '{"count": 4}\n'}],
     }))
 
-    assert asyncio.run(session.execute_script("...")) == {"count": 4}
+    assert asyncio.run(session.execute_script("...")) == {"count": 4, "success": True}
 
 
-def test_script_json_error_stays_a_script_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_error_keys_the_script_prints_are_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A metric named *_error, or an ``error`` value, does not fail the call (round-2 B-1)."""
     session = _session(monkeypatch, _python({
         "ReturnValue": True,
-        "LogOutput": [{"Type": "Info", "Output": '{"error": "bad input"}'}],
+        "LogOutput": [{"Type": "Info", "Output": '{"position_error": 0.002, "error": 0.0}'}],
+    }))
+
+    result = asyncio.run(session.execute_script("..."))
+
+    assert result == {"position_error": 0.002, "error": 0.0, "success": True}
+
+
+def test_a_printed_success_false_is_a_script_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session(monkeypatch, _python({
+        "ReturnValue": True,
+        "LogOutput": [{"Type": "Info", "Output": '{"success": false, "error": "bad input"}'}],
     }))
 
     result = asyncio.run(session.execute_script("..."))

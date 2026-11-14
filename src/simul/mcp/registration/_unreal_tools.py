@@ -576,8 +576,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Execute arbitrary Python code inside the Unreal Engine editor. "
             "Use for operations not covered by other tools. The code runs via "
-            "PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return "
-            "structured data. Each call starts in a fresh namespace with unreal "
+            "PythonScriptLibrary.ExecutePythonCommandEx. Print a JSON object to return "
+            "structured data: the first one printed comes back as the result, its keys as "
+            "data, so an error or *_error key (a position_error metric) does not fail the "
+            "call; it fails only when the script raises or prints \"success\": false. "
+            "Each call starts in a fresh namespace with unreal "
             "imported, and every name it binds is discarded when it ends, returned "
             "or raised: nothing carries over to the next call (pass values back in "
             "as code), and a callback it registers must import what it uses inside "
@@ -621,6 +624,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealUIResponse,
         read_only=False,
+        destructive=True,
         method="control_ui",
         params=(
             ToolParam(

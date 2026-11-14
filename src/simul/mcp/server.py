@@ -467,9 +467,15 @@ def _validation_errors(
 
 
 def _summarize_validation_errors(errors: List[Dict[str, Any]]) -> str:
-    """Join per-field errors into one message: ``field: message; ...``."""
+    """Join per-field errors into one message: ``field: message; ...``.
+
+    A message that already starts by naming its field (a tool's own check:
+    ``stiffness must be >= 0``) is not prefixed with it again.
+    """
     return "; ".join(
-        f"{error['field']}: {error['message']}" if error.get("field") else str(error["message"])
+        f"{error['field']}: {error['message']}"
+        if error.get("field") and error_types.field_named_by(str(error["message"])) != error["field"]
+        else str(error["message"])
         for error in errors
     )
 
@@ -1816,6 +1822,9 @@ class SimulMCPServer(LoggerMixin):
                     executed=executed,
                 )
                 note_call_outcome(
+                    # The name the call is recorded under: <unknown tool> for
+                    # a made-up one, as in the usage row.
+                    tool=tool_name,
                     status=status or ("ok" if success else "error"),
                     error_type=None if success else error_type,
                     agent_id=recorded_agent,
@@ -1850,12 +1859,15 @@ class SimulMCPServer(LoggerMixin):
                 payload = await self._call_outcome(
                     tool_name, run, request_model, request_kwargs, response_model, input_echo
                 )
-                if payload.get("success") is False:
+                # ``success`` decides, as it decides isError: a successful
+                # script result may carry the script's own ``error`` key.
+                failed = payload.get("success") is False
+                if failed:
                     normalize_error_payload(payload)
-                error = payload.get("error")
+                error = payload.get("error") if failed else None
                 record(
                     (time.monotonic() - started) * 1000,
-                    payload.get("success") is not False and not error,
+                    not failed,
                     str(error) if error else None,
                     error_type=payload.get("error_type"),
                 )
@@ -1874,11 +1886,11 @@ class SimulMCPServer(LoggerMixin):
                 record(duration, False, "cancelled_before_start", status="cancelled", executed=False)
             elif isinstance(drained, CancelledOutcome) and drained.payload is not None:
                 outcome = drained.payload
-                failed = outcome.get("success") is False or bool(outcome.get("error"))
+                failed = outcome.get("success") is False
                 record(
                     duration,
                     not failed,
-                    str(outcome.get("error") or "") or None,
+                    (str(outcome.get("error") or "") or None) if failed else None,
                     status="cancelled",
                     error_type=outcome.get("error_type"),
                     executed=drained.executed,
@@ -2465,11 +2477,14 @@ class SimulMCPServer(LoggerMixin):
     ) -> Optional[Any]:
         """Build the MCP annotations for one tool.
 
-        Every hint the call site computes is preserved: a hint is omitted only
-        when it equals the value a client assumes for a missing hint
-        (destructive and idempotent false, open world true), so nothing is
-        dropped and the listing stays small. readOnlyHint is always emitted
-        because auto-approval policies key on it.
+        Every hint the call site computes is preserved. readOnlyHint is always
+        emitted because auto-approval policies key on it, and so is
+        destructiveHint on every tool that is not read-only: the MCP spec's
+        default for a missing one is true, so leaving it off an additive tool
+        told spec-following clients it was destructive. A read-only tool
+        leaves it off (the spec gives it meaning only for a tool that is not
+        read-only), as it leaves off a hint equal to the spec's default
+        (idempotent false, open world true).
 
         Args:
             read_only: The tool does not modify its environment.
@@ -2483,8 +2498,8 @@ class SimulMCPServer(LoggerMixin):
             not expose the model.
         """
         annotations: Dict[str, Any] = {"readOnlyHint": read_only}
-        if destructive:
-            annotations["destructiveHint"] = True
+        if not read_only:
+            annotations["destructiveHint"] = destructive
         if idempotent:
             annotations["idempotentHint"] = True
         if not open_world:

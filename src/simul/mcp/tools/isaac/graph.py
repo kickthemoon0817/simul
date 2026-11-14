@@ -545,6 +545,7 @@ class OmniGraphMixin:
             "refused (SandboxError): a connected value never passes the sandbox."
         ),
         read_only=False,
+        destructive=True,
         idempotent=True,
     )
     async def connect_isaac_graph_nodes(

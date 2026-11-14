@@ -36,9 +36,11 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
 ) -> None:
     """The packaged default YAML should load without ISAAC_SIM_PATH set."""
     monkeypatch.delenv("ISAAC_SIM_PATH", raising=False)
-    # tests/conftest.py points the log files away from ~/.simul for the suite.
+    # tests/conftest.py points the log files away from ~/.simul for the suite,
+    # and a developer's SIMUL_HOME would move the ~/.simul defaults with them.
     monkeypatch.delenv("LOGGING__FILE_PATH", raising=False)
     monkeypatch.delenv("LOGGING__AUDIT_PATH", raising=False)
+    monkeypatch.delenv("SIMUL_HOME", raising=False)
 
     settings = load_settings(resource_filesystem_path("config", "default.yaml"))
 
