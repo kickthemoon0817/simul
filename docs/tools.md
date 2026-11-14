@@ -736,8 +736,11 @@ Notes:
   [configuration.md](configuration.md#script-execution).
 - `ping_isaac` does not wait for a call already running on the instance and
   reports `busy` when one is. A call the client cancels keeps the instance
-  until Isaac Sim has finished it (the bridge is asked to interrupt it first);
-  see [isaac-sim.md](isaac-sim.md#transports).
+  until Isaac Sim has finished it (the bridge is asked to interrupt it first),
+  and so does a call whose reply timed out: other calls get `InstanceBusy`
+  (`details.reason: "finishing_timed_out_call"`) until the engine is done,
+  and `ping_isaac` reports `held_after_timeout`; see
+  [isaac-sim.md](isaac-sim.md#transports).
 - `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
   return `ClaimStoreError` when the claim could not be saved. Calling
   `claim_isaac_instance` again with the same `agent_id` after a reconnect or
@@ -3250,7 +3253,7 @@ script the bridge stopped at its timeout (`TimeoutError`).
 | `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
 | `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
 | `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a non-domain exception, a reply that does not parse or does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
-| `InstanceBusy` | The Isaac instance is serving another call; a Blender instance is busy (`attach_blender_window`) or its bridge holds as many waiting requests as it takes (`bridge_busy`) | Retry shortly |
+| `InstanceBusy` | The Isaac instance is serving another call, or is still finishing one whose reply timed out (`details.reason: "finishing_timed_out_call"`); a Blender instance is busy (`attach_blender_window`) or its bridge holds as many waiting requests as it takes (`bridge_busy`) | Retry shortly |
 | `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
 
 Domain types of the server:

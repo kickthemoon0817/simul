@@ -205,7 +205,7 @@ def test_brief_does_not_pay_for_a_prim_count_traversal(
     client = _FakeClient(8226)
     requests: List[Any] = []
 
-    async def _bridge_request(action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _bridge_request(action: str, payload: Dict[str, Any], **_options: Any) -> Dict[str, Any]:
         requests.append((action, payload))
         return {"status": "ok", "payload": {"stage_url": "omniverse://x.usd"}}
 

@@ -32,6 +32,8 @@ jobs:
   fresh-install:
     name: Fresh install (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # Runs the unit tests: a hung test fails the job instead of holding the runner.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

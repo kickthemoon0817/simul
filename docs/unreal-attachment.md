@@ -205,6 +205,14 @@ open arbitrary menus, address asset-editor tabs, or dismiss modal dialogs. A bus
 editor can time out. Mutations are not automatically retried; a timeout after dispatch
 means the operation may have executed, so inspect before retrying.
 
+The editor runs Remote Control's Python on its game thread, one request at a time,
+and keeps running a request after simul stops waiting for it. A request sent
+meanwhile queues behind it, so it can time out too and then run after it was
+reported failed. Unlike Isaac Sim, where the server keeps the instance after a
+timeout until the engine has finished, simul does not hold the editor yet. After a
+`TimeoutError`, wait until `ping_unreal` answers without `busy: true` before
+sending more work.
+
 ```sh
 simul unreal detach
 ```

@@ -469,7 +469,9 @@ def test_a_stalled_lock_holder_costs_one_short_wait(
 
     assert len(path.read_text().splitlines()) == 20
     assert elapsed < 0.5, elapsed
-    assert capsys.readouterr().err.count("another process holds its lock") == 1
+    # One try, then a short pause: a busy lock is not worth a warning.
+    assert handler._contended == 1
+    assert "lock" not in capsys.readouterr().err
 
 
 def test_a_rotation_that_fails_still_writes_the_record(

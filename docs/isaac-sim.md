@@ -177,6 +177,26 @@ A stopped timeline is not flagged: USD then holds the authored state, which
 
   Every timeout reply says so. Check the state (`get_isaac_stage_info`,
   `get_isaac_runtime_info`) before retrying a timed-out call.
+- **After a timeout the instance stays held.** Kit runs one script at a
+  time on its main thread and runs the next request only after the one that
+  timed out, so a call sent meanwhile would wait behind it, time out too and
+  then run after being reported failed. The server therefore keeps the
+  instance until Isaac Sim has finished: a probe queues behind the
+  timed-out request (a trivial script on the stock socket; the bridge's
+  `get_runtime_info`, polled until it is no longer busy) and its answer
+  releases the instance. Other calls wait up to `server.timeout` and then
+  get `InstanceBusy` with `details.reason: "finishing_timed_out_call"`,
+  `timed_out_tool` and `busy_for_seconds`. `ping_isaac` does not wait for
+  the instance and reports `held_after_timeout`, though on the stock socket
+  its own probe answers only once the script has ended. A claim the
+  timed-out call's agent holds is kept alive while the hold lasts. Only the
+  timed-out call's own timeout starts a hold: the `list_isaac_instances`
+  probes, which run beside the call holding the instance, never do. The hold ends after
+  `ISAAC_SIM__HOLD_AFTER_TIMEOUT` seconds (default 300) at most, with a
+  warning in the log; `0` turns it off. On the stock sockets a coroutine
+  script that awaits frames leaves the main thread free between frames, so
+  the probe can answer while that script still runs; only the bridge
+  reports it.
 - **5.x stock socket size limit.** Isaac Sim 5.1's `isaacsim.code_editor.vscode`
   has no framing: it runs every chunk of bytes it receives as a separate
   script, replies to the first and closes the connection. A script that
@@ -208,8 +228,10 @@ A stopped timeline is not flagged: USD then holds the authored state, which
   recorded with `cancelled: true, executed: true` and the engine's own
   outcome (a script that finished is a success), or `executed: "unknown"`
   when the connection failed or timed out first. Waiting for the engine is
-  bounded by the transport's timeout, which can also delay a server that is
-  stopping.
+  bounded by the transport's timeout; a timeout there leaves the instance
+  held as above. A server that is stopping waits at most
+  `SERVER__SHUTDOWN_TIMEOUT` seconds (default 5) for the engine, then logs
+  which call it stopped waiting for and records it `executed: "unknown"`.
 - **Ping while busy.** `ping_isaac` does not wait for a call already running
   on the instance; its `busy` field says one is. A synchronous script blocks
   the stock socket and the bridge alike, so a ping during one can fail even
