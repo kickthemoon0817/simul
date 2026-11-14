@@ -1152,7 +1152,7 @@ class IsaacSocketClient:
         except asyncio.TimeoutError:
             raise TimeoutError(
                 f"Connection to Isaac bridge at {endpoint} timed out after "
-                f"{self._bridge_timeout_seconds}s."
+                f"{self._bridge_timeout_seconds}s; {action!r} was not sent."
             )
         except (ConnectionRefusedError, OSError) as exc:
             raise ConnectionRefusedError(
