@@ -50,7 +50,14 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # complete: false), where an older add-on counted frames x bodies and let a bake that outlasts
 # the client's timeout through; delete_object removes the constraints joining the object
 # first, and the tools that step frames refuse while a constraint has lost a body.
-PROTOCOL_VERSION = 14
+# Version 15: the bake estimate costs rigid bodies by what they touch and a convex hull by its
+# hull's vertices, and refuses only above 3 times its budget; bake_simulation scope "all" stops
+# at the 22 s deadline too (complete: false); export_simready_usd writes the asset at the
+# rigid-body cache start (pose_frame); get_physics_state resumes at the cached frame; the frame
+# tools refuse only constraints the simulation stepped with a body that is gone. A protocol-14
+# add-on would keep the old meaning silently: a shifted-limit export, a draped-cloth bake that
+# outlasts the client's timeout, and a 6-link arm refused at 38 s.
+PROTOCOL_VERSION = 15
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 #: Capability an add-on lists under ``capabilities`` in its discovery record:

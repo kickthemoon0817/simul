@@ -577,6 +577,15 @@ class SimReadyExportResponse(BaseModel):
     issues: Optional[List[SimReadyValidationIssue]] = Field(
         None, description="Validation issues (cut at 50; null when not run)"
     )
+    pose_frame: Optional[int] = Field(
+        None,
+        description=(
+            "The frame whose pose, and joint frames, the asset was written at: the "
+            "rigid-body simulation's start when the simulation had moved exported bodies "
+            "(the scene's frame is restored afterwards, and a warning says so), else the "
+            "current frame"
+        ),
+    )
     warnings: List[str] = Field(
         default_factory=list,
         description="Physics or layout problems worth fixing (cut at 50)",

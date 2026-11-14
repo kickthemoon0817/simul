@@ -1033,14 +1033,16 @@ def test_a_bake_is_refused_while_a_constraint_has_lost_a_body(blender: Any, loss
     carrier = fake.add(_object("RBC_Base_Link", "EMPTY"))
     carrier.rigid_body_constraint = SimpleNamespace(object1=base, object2=link)
     fake.world.constraints.all_objects.append(carrier)
+    blender_runtime._note_built_constraints(fake.scene)  # a frame change stepped it
     if loss == "deleted":
         carrier.rigid_body_constraint.object2 = None
+        del fake.objects["Link"]
     else:
         link.rigid_body = None
 
     with pytest.raises(
         blender_runtime.RefusedOperation,
-        match="^The bake is refused: .* Save the file first .* may still crash Blender once",
+        match="^The bake is refused: .* may crash .* Save the file first",
     ) as refused:
         session.bake_simulation(1, 50)
 
@@ -1049,9 +1051,36 @@ def test_a_bake_is_refused_while_a_constraint_has_lost_a_body(blender: Any, loss
         "constraints": ["RBC_Base_Link"],
     }
     assert fake.calls == [] and fake.world.point_cache.is_baked is False
-    carrier.rigid_body_constraint.object2 = link
-    link.rigid_body = link.rigid_body or _rigid_body("ACTIVE")
+    if loss == "rigid_body_removed":
+        # A rigid body added again is a new Bullet body: the built constraint still
+        # points at the freed one.
+        link.rigid_body = _rigid_body("ACTIVE")
+        with pytest.raises(blender_runtime.RefusedOperation):
+            session.bake_simulation(1, 50)
+    # A file load builds nothing, so the saved file opened again steps.
+    blender_runtime._forget_built_constraints("")
     session.bake_simulation(1, 50)
+    assert fake.world.point_cache.is_baked is True
+
+
+@pytest.mark.parametrize("loss", ["deleted", "rigid_body_removed"])
+def test_a_constraint_the_simulation_never_stepped_bakes(blender: Any, loss: str) -> None:
+    """Round-3 audit (R3-BL-03): a constraint whose object was gone whenever the simulation
+    stepped (one being set up, one saved after its body was deleted) was never built in
+    Bullet and bakes safely; the guard refused it, and every bake after reopening the file."""
+    fake, session = blender
+    base, link = fake.body("Base"), fake.body("Link")
+    carrier = fake.add(_object("RBC_Base_Link", "EMPTY"))
+    carrier.rigid_body_constraint = SimpleNamespace(object1=base, object2=link)
+    fake.world.constraints.all_objects.append(carrier)
+    if loss == "deleted":
+        carrier.rigid_body_constraint.object2 = None
+        del fake.objects["Link"]
+    else:
+        link.rigid_body = None
+
+    session.bake_simulation(1, 50)
+
     assert fake.world.point_cache.is_baked is True
 
 
