@@ -2338,7 +2338,7 @@ class BlenderRuntimeSession:
                 refused only if it also needs a back-reference, an atomic group, a
                 possessive quantifier, a conditional or a lookaround that itself
                 backtracks for long, which that search lacks, or if it is longer
-                than 512 characters.
+                than 512 characters (``details.code`` ``pattern_too_long``).
             object_type: Blender object type filter (MESH, LIGHT, etc.), in any case.
             max_results: Maximum number of results.
             offset: How many matching objects to skip, as next_offset gives it.
@@ -5962,7 +5962,7 @@ class BlenderRuntimeSession:
                     for candidates in _gltf_reads(main)
                     for candidate in candidates
                 )
-            except (OSError, ValueError, TypeError, AttributeError) as exc:
+            except (OSError, ValueError, TypeError, AttributeError, struct.error) as exc:
                 logger.warning("Could not list the files %s refers to: %s", main.name, exc)
         texture_dirs = {str(folder / name) for name in _EXPORT_TEXTURE_DIRS}
         return [
