@@ -176,7 +176,7 @@ def test_timeout_never_retries_and_script_gate_precedes_transport(
     # B1-23: a script that may still run reports timed_out, as in embedded mode.
     timed_out = BlenderConnection(settings).execute_script("pass", timeout=0.1)
     assert timed_out["timed_out"] is True
-    assert timed_out["error"].startswith("TimeoutError: script did not finish within 0.1s.")
+    assert timed_out["error"].startswith("Script did not finish within 0.1s.")
     assert timed_out["details"] == {"executed": None}
     assert request.call_count == 2
     assert request.call_args.args[2] == 0.1
@@ -958,7 +958,8 @@ def test_a_script_past_its_timeout_reports_timed_out_as_in_embedded_mode(
 
     assert payload["success"] is False
     assert payload["timed_out"] is True
-    assert payload["error"].startswith("TimeoutError: script did not finish within 0.2s.")
+    assert payload["error"].startswith("Script did not finish within 0.2s.")
+    assert payload["error_type"] == "TimeoutError"
     assert payload["duration_seconds"] == 0.2
     assert payload["details"] == {"executed": executed}
 
@@ -1138,6 +1139,47 @@ def test_a_request_expired_in_the_queue_says_it_did_not_run(
     assert payload["error_type"] == "TimeoutError"
     assert payload["details"]["executed"] is False
     assert "not executed" in payload["error"]
+
+
+@pytest.mark.parametrize(
+    "sent",
+    [
+        "Cannot parent 'P' to 'C': 'C' is a descendant of 'P'",
+        # An add-on up to 0.1.13 put the class in front of the message.
+        "ValidationError: Cannot parent 'P' to 'C': 'C' is a descendant of 'P'",
+    ],
+)
+def test_a_refusal_inside_blender_names_its_class_once(
+    settings: Settings,
+    advertised: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_fastmcp: Any,
+    caplog: pytest.LogCaptureFixture,
+    sent: str,
+) -> None:
+    """R2-BLA-02/03: the error read "ValidationError: …" and the log "ValueError: ValueError: …"."""
+    from simul.blender_bridge.protocol import BridgeRemoteError
+
+    _attached(settings, advertised, monkeypatch)
+    details = {"code": "parent_loop", "field": "parent_name"}
+    monkeypatch.setattr(
+        BridgeWire,
+        "request",
+        Mock(side_effect=BridgeRemoteError(sent, "ValidationError", dict(details))),
+    )
+    server = SimulMCPServer(settings, backends={"blender"})
+    tool = next(t for t in server.mcp.tools if t.name == "set_blender_object_parent")
+    with caplog.at_level("ERROR"):
+        payload = json.loads(
+            asyncio.run(tool.func(child_name="P", parent_name="C")).content[0].text
+        )
+
+    message = "Cannot parent 'P' to 'C': 'C' is a descendant of 'P'"
+    assert payload["error"] == message
+    assert payload["error_type"] == "ValidationError"
+    assert payload["details"]["code"] == "parent_loop"
+    logged = [r.getMessage() for r in caplog.records if "set_blender_object_parent" in r.getMessage()]
+    assert logged == [f"Tool set_blender_object_parent failed: ValidationError: {message}"]
 
 
 @pytest.mark.parametrize(("attempts", "says"), [(1, "before starting get_frame ("), (4, "on each of 4 attempts")])

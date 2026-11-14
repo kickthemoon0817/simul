@@ -597,7 +597,8 @@ def test_blender_attached_bpy_failure(
     }
     monkeypatch.setattr(BlenderAttachments, "_hello", lambda self, target: hello)
     BlenderAttachments(settings).attach()
-    remote = f"RuntimeError: Failed to add rigid body to 'Cube': {POLL_FAILED}"
+    # The add-on's message without its class, which is the error_type (R2-BLA-03).
+    remote = f"Failed to add rigid body to 'Cube': {POLL_FAILED}"
 
     def reply(endpoint: Any, payload: Any, timeout: float) -> Dict[str, Any]:
         raise BridgeRemoteError(remote, "RuntimeError", {})

@@ -698,16 +698,20 @@ class BlenderBridge:
             # with PyErr_Print, which exits the process on SystemExit, and
             # unregisters the timer, which would stop the bridge, on any other.
             message = exception_message(exc)
-            logger.error("Blender bridge request %s failed: %s", request_id, message)
+            error_type = exception_type_name(exc)
+            logger.error(
+                "Blender bridge request %s failed: %s: %s", request_id, error_type, message
+            )
             return {
                 "request_id": request_id,
                 "success": False,
                 # Notes carry context such as the object a bpy operator was
-                # adding a rigid body to; str(exc) alone would drop it.
-                "error": f"{exception_type_name(exc)}: {message}",
+                # adding a rigid body to; str(exc) alone would drop it. The
+                # class goes in error_type only, as on the other backends.
+                "error": message,
                 # A declared error_type (ValidationError for a refused pattern)
                 # is what envelopes report; any other exception is its class.
-                "error_type": exception_type_name(exc),
+                "error_type": error_type,
                 "details": getattr(exc, "details", {}),
             }
 

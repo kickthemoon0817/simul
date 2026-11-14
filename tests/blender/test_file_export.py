@@ -1053,6 +1053,43 @@ def test_usd_textures_are_reported_as_written(
     ]
 
 
+@pytest.mark.parametrize(("name", "fmt"), [("model.gltf", "GLTF"), ("mesh.obj", "OBJ"), ("part.stl", "STL")])
+def test_files_written_lists_only_what_the_exporter_wrote(
+    fake: FakeBlender, session: Any, tmp_path: Path, name: str, fmt: str
+) -> None:
+    """A file another program changed in the folder during the export was listed too.
+
+    The exporter's own files are the file, its .bin or .mtl, and the images a
+    .gltf names; as #360 did for export_simready_usd.
+    """
+    _scene(fake)
+    (tmp_path / "notes.log").write_text("before\n")
+    operators = {"GLTF": fake.ops.export_scene.gltf, "OBJ": fake.ops.wm.obj_export, "STL": fake.ops.wm.stl_export}
+    operator = operators[fmt]
+    write = operator.run
+
+    def write_and_meanwhile(kwargs: Dict[str, Any]) -> None:
+        write(kwargs)
+        path = Path(kwargs["filepath"])
+        if fmt == "GLTF":
+            (tmp_path / "wood.png").write_bytes(b"\x89PNG")
+            document = json.loads(path.read_text())
+            path.write_text(json.dumps({**document, "images": [{"uri": "wood.png"}]}))
+        (tmp_path / "notes.log").write_text("another program wrote this meanwhile\n")
+        (tmp_path / "other.png").write_bytes(b"\x89PNG not the export's")
+
+    operator.run = write_and_meanwhile
+
+    result = session.export_file(str(tmp_path / name), fmt)
+
+    expected = {
+        "GLTF": ["model.gltf", "model.bin", "wood.png"],
+        "OBJ": ["mesh.obj", "mesh.mtl"],
+        "STL": ["part.stl"],
+    }[fmt]
+    assert result["files_written"] == [str(tmp_path / file) for file in expected]
+
+
 def test_an_export_that_writes_no_file_is_an_error(
     fake: FakeBlender, session: Any, tmp_path: Path
 ) -> None:

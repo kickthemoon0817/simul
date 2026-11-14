@@ -169,7 +169,8 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             assert main_thread["return_value"] == "True"
             # B1-10: sys.exit() in a script ends the script, not the user's Blender.
             exited = client.execute_script("import sys\nprint('done')\nsys.exit(0)")
-            assert exited["error"].startswith("SystemExit: 0."), exited
+            assert exited["error"].startswith("The script called sys.exit() or exit() with 0,"), exited
+            assert exited["details"] == {"exception_type": "SystemExit"}, exited
             assert exited["output"] == "done\n"
             time.sleep(0.5)
             assert process.poll() is None

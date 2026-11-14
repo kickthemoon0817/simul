@@ -727,3 +727,36 @@ def test_an_older_addon_still_lists_keyframes_and_samples_trajectories(
     ]
     assert paged["success"] is False and "offset" in paged["error"]
     assert bone["success"] is False and "bone_name" in bone["error"]
+
+
+def test_a_pattern_over_512_characters_is_refused_with_pattern_too_long(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-BLA-01: the schema's max_length refused it first, with no details.code.
+
+    docs/tools.md promises ``pattern_too_long``, which
+    get_unreal_actor_by_semantic_label returns for the same pattern. The
+    schema still advertises the limit.
+    """
+    from simul.adapters import blender_runtime
+
+    monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+    monkeypatch.setattr(
+        blender_runtime, "bpy", SimpleNamespace(app=SimpleNamespace(version=(5, 0, 1)))
+    )
+    session = blender_runtime.BlenderRuntimeSession()
+    instance = _strict_server(monkeypatch, session, "embedded")  # type: ignore[arg-type]
+
+    async def _schema() -> dict:
+        async with Client(instance.mcp) as client:
+            tools = await client.list_tools()
+        return next(t for t in tools if t.name == "search_blender_objects").input_schema
+
+    refused = _call(instance, "search_blender_objects", {"name_pattern": "a" * 513})
+    advertised = asyncio.run(_schema())["properties"]["name_pattern"]["anyOf"][0]
+
+    assert refused["success"] is False
+    assert refused["error_type"] == "ValidationError"
+    assert refused["details"]["code"] == "pattern_too_long"
+    assert refused["error"].startswith("name_pattern is 513 characters long; at most 512")
+    assert advertised == {"maxLength": 512, "type": "string"}

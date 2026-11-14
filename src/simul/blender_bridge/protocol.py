@@ -106,9 +106,17 @@ class ProtocolMismatch(BridgeProtocolError):
 
 
 class BridgeRemoteError(RuntimeError):
-    """A rejected operation, with the remote policy diagnostic preserved."""
+    """A rejected operation, with the remote policy diagnostic preserved.
+
+    The message is the add-on's without the ``<error_type>: `` prefix that
+    add-ons up to simul 0.1.13 put in front of it: the class is reported in
+    ``error_type`` (and ``details.exception_type``), not in the text.
+    """
 
     def __init__(self, message: str, remote_type: str, details: dict[str, Any]) -> None:
+        prefix = f"{remote_type}: "
+        if isinstance(message, str) and message.startswith(prefix):
+            message = message[len(prefix):]
         super().__init__(message)
         self.remote_type = remote_type
         self.details = details
