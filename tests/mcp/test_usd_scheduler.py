@@ -291,3 +291,48 @@ def test_a_call_waiting_on_a_file_being_written_fails_with_stage_busy() -> None:
     assert "save_usd_stage" in busy["error"]
     assert "never" not in [label for label, _, _ in recorder.intervals]
     assert scheduler._file_locks == {} and scheduler._stage_locks == {}
+
+
+def test_run_between_writes_waits_out_a_write_past_the_timeout() -> None:
+    """Releasing an ended session's stages (USD round-3 B2, m6) never overlaps a write and is never refused."""
+    recorder = Recorder()
+
+    async def scenario() -> Any:
+        scheduler = USDCallScheduler(0.1)
+        write = asyncio.create_task(scheduler.run("edit", recorder.work("edit", 0.4), writes=True))
+        await asyncio.sleep(0.05)
+        released = await scheduler.run_between_writes("release", recorder.work("release", 0.05))
+        await write
+        return released
+
+    released = _run(scenario())
+
+    assert released == {"success": True, "label": "release"}
+    assert not recorder.overlaps("edit", "release")
+
+
+def test_a_release_does_not_hold_other_reads_behind_a_slow_read() -> None:
+    """Review of #363: a release taken exclusively queued every later read behind the slowest running one.
+
+    With server.timeout 1 s, session C's small read got StageBusy while A ran
+    a 1.6 s summary and B disconnected. The release now runs beside reads.
+    """
+    recorder = Recorder()
+
+    async def scenario() -> Dict[str, Any]:
+        scheduler = USDCallScheduler(0.3)
+        slow = asyncio.create_task(scheduler.run("summary", recorder.work("summary", 1.0), stage_key="A"))
+        await asyncio.sleep(0.05)
+        release = asyncio.create_task(scheduler.run_between_writes("release", recorder.work("release", 0.05)))
+        await asyncio.sleep(0.05)
+        started = time.monotonic()
+        quick = await scheduler.run("info", recorder.work("info", 0), stage_key="C")
+        latency = time.monotonic() - started
+        await asyncio.gather(slow, release)
+        return {"quick": quick, "latency": latency}
+
+    outcome = _run(scenario())
+
+    assert outcome["quick"] == {"success": True, "label": "info"}
+    assert outcome["latency"] < 0.25
+    assert recorder.overlaps("summary", "release") and recorder.overlaps("summary", "info")

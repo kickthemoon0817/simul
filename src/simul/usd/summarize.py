@@ -235,7 +235,8 @@ class SceneSummarizer(LoggerMixin):
         total_prims = scan["total_prims"]
         stage_info = self.usd_reader.get_stage_info(stage, prim_count=total_prims)
 
-        scene_bbox = BBoxCache(stage).get_stage_bbox()
+        bounds = BBoxCache(stage)
+        scene_bbox = bounds.get_stage_bbox()
         scene_bbox_dict = scene_center = scene_size = scene_volume = scene_size_meters = None
         if scene_bbox:
             scene_bbox_dict = bbox_to_dict(scene_bbox)
@@ -268,7 +269,7 @@ class SceneSummarizer(LoggerMixin):
             root_prim_paths=stage_info.root_prims[:_LISTED_PATHS],
             root_prim_count=len(stage_info.root_prims),
             scene_size_meters=scene_size_meters,
-            warnings=unit_warnings(stage),
+            warnings=unit_warnings(stage) + bounds.problems,
         )
         self.logger.info(f"Generated scene summary: {total_prims} prims, {summary.root_prim_count} root prims")
         return summary

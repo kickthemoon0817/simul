@@ -384,10 +384,11 @@ def _paged_lists(payload: Dict[str, Any], paging: PagedList) -> List[Tuple[Tuple
     return found
 
 
-def _compact_item(item: Any) -> Any:
+def _compact_item(item: Any, keep: Tuple[str, ...] = ()) -> Any:
     """Shrink one oversized page entry to what identifies it.
 
-    A mapping keeps its identifying keys and its small values and says which
+    A mapping keeps its identifying keys, the keys the tool names in
+    ``keep`` (``PagedList.keep_keys``) and its small values, and says which
     keys it dropped; anything else becomes a marker. The entry still occupies
     its position, so the caller can page past it and fetch it on its own.
     """
@@ -397,7 +398,7 @@ def _compact_item(item: Any) -> Any:
     kept: Dict[str, Any] = {}
     dropped: List[str] = []
     for key, value in item.items():
-        if key in _IDENTITY_KEYS or _encoded_size(value) <= _COMPACT_VALUE_BYTES:
+        if key in _IDENTITY_KEYS or key in keep or _encoded_size(value) <= _COMPACT_VALUE_BYTES:
             kept[key] = value
         else:
             dropped.append(key)
@@ -461,7 +462,7 @@ def _trim_page(
                 break
             if not pages[index]:
                 continue
-            small = _compact_item(pages[index][0])
+            small = _compact_item(pages[index][0], paging.keep_keys)
             current -= item_sizes[index][0] - _encoded_size(small)
             pages[index] = [small]
             compacted.append(_dotted(lists[index][0] + (0,)))

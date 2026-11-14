@@ -13,7 +13,8 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List
+from types import SimpleNamespace
+from typing import Any, Dict, List
 
 import pytest
 
@@ -21,6 +22,7 @@ pytest.importorskip("pxr", reason="pxr library not available")
 
 from simul.adapters.headless_usd import HeadlessUSDSession  # noqa: E402
 from simul.config import Settings, USDConfig  # noqa: E402
+from simul.usd import validation  # noqa: E402
 from simul.usd.validation import (  # noqa: E402
     USDLoadError,
     ValidationReport,
@@ -206,6 +208,113 @@ class TestContentProblems:
         stage.GetRootLayer().Save()
 
         assert "NestedRigidBody" not in _codes(_validate(path))
+
+
+_BROKEN_ROBOT = """#usda 1.0
+(
+    defaultPrim = "W"
+    upAxis = "Z"
+    metersPerUnit = 1
+)
+
+def Xform "W"
+{
+    def Cube "Body" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = -5
+        float3 physics:diagonalInertia = (-1, 0, 0)
+    }
+
+    def Shader "Tex"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./missing_texture.png@
+    }
+%s}
+"""
+# physics:body0 authored as an attribute where USD expects a relationship.
+_UNREADABLE_JOINT = """
+    def PhysicsRevoluteJoint "Bad"
+    {
+        custom string physics:body0 = "/W/Body"
+    }
+"""
+
+
+def _validator(name: str) -> Any:
+    return SimpleNamespace(GetMetadata=lambda: SimpleNamespace(name=name))
+
+
+class _FakeContext:
+    """A ValidationContext that, like pxr's, raises for all when one validator raises."""
+
+    sizes: List[int] = []
+
+    def __init__(self, validators: List[Any]) -> None:
+        self.names = [validator.GetMetadata().name for validator in validators]
+        _FakeContext.sizes.append(len(self.names))
+
+    def Validate(self, stage: Any) -> List[str]:
+        if "bad" in self.names:
+            raise RuntimeError("@/x/robot.usda@</W/Bad.physics:body0> is not a relationship")
+        return [f"finding of {name}" for name in self.names]
+
+
+class TestValidatorFailures:
+    """USD round-3 B1: one validator pxr cannot finish used to drop every finding, and is_valid came back true."""
+
+    def test_the_other_validators_findings_survive(self, tmp_path: Path) -> None:
+        clean = tmp_path / "base.usda"
+        clean.write_text(_BROKEN_ROBOT % "")
+        broken = tmp_path / "malformed.usda"
+        broken.write_text(_BROKEN_ROBOT % _UNREADABLE_JOINT)
+
+        before = _validate(clean)
+        report = _validate(broken)
+
+        assert report.is_valid is False
+        assert set(_codes(before)) == {"MassInvalidValues", "InertiaInvalidValues", "UnresolvableDependency"}
+        assert set(_codes(report)) == set(_codes(before)) | {"ValidatorFailed"}
+        failure = _issue(report, "ValidatorFailed")
+        assert failure["source"] == "usdPhysicsValidators:PhysicsJointChecker"
+        assert "/W/Bad.physics:body0 is not a relationship" in failure["message"]
+        assert "pxrInternal" not in failure["message"] and "@" not in failure["message"]
+        assert failure["location"]["prim_path"] == "/W/Bad"
+        assert failure["location"]["property_path"] == "/W/Bad.physics:body0"
+        assert failure["location"]["layer"] == str(broken.resolve())
+
+    def test_the_fresh_process_reports_the_same(self, tmp_path: Path) -> None:
+        broken = tmp_path / "malformed.usda"
+        broken.write_text(_BROKEN_ROBOT % _UNREADABLE_JOINT)
+
+        here = _validate(broken)
+        fresh = validation._validate_in_fresh_process(str(broken.resolve()), USD, None)
+
+        assert fresh.problem is None
+        assert fresh.is_valid is False
+        assert sorted(issue.to_dict()["code"] for issue in fresh.issues) == sorted(
+            issue.code for issue in here.issues
+        )
+
+    def test_one_pass_unless_a_validator_raises(self) -> None:
+        fake = SimpleNamespace(ValidationContext=_FakeContext)
+        _FakeContext.sizes = []
+
+        clean_errors, clean_failures = validation._run_validators(fake, [_validator("a"), _validator("b")], None)
+        clean_sizes = list(_FakeContext.sizes)
+        _FakeContext.sizes = []
+        errors, failures = validation._run_validators(
+            fake, [_validator("a"), _validator("bad"), _validator("b")], None
+        )
+
+        assert (clean_errors, clean_failures, clean_sizes) == (["finding of a", "finding of b"], [], [2])
+        assert errors == ["finding of a", "finding of b"]
+        assert _FakeContext.sizes == [3, 1, 1, 1]
+        (failure,) = failures
+        assert (failure.severity, failure.code, failure.source) == ("error", "ValidatorFailed", "bad")
+        assert failure.to_dict()["location"]["property_path"] == "/W/Bad.physics:body0"
 
 
 class TestUsdzRules:

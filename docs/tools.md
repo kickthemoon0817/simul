@@ -97,7 +97,11 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   can read (the prim's own, then its ancestors'), and `warnings` names the
   property and its layer (`UnreadableProperty`, `location.layer`). `get_mesh_info` and
   `get_prim_subtree` (per prim, with `include_properties`) report such
-  properties the same way.
+  properties the same way. A PointInstancer whose `prototypes` is authored
+  as an attribute is left out of every bound (`get_prim_info`'s `bbox`,
+  `get_bounding_box`, `summarize_scene`'s scene bounds), which then cover
+  the rest of the prim's subtree, with an `UnreadableProperty` warning
+  naming the instancer.
 - **Traversal and counts.** Every listing walks the composed stage with one
   rule: active, defined, loaded, non-abstract prims, plus the instance
   proxies inside instanceable prims. So `load_usd_file`'s `total_prims`,
@@ -149,7 +153,9 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
     that brings it in, and value clips through their `times` and `active`
     (with or without a manifest). Mapping offsets costs the stage's arcs, not
     its prims; finding clip sets reads each layer's prim specs once (about
-    0.25 s per 200,000 prims);
+    0.25 s per 200,000 prims), and only the attributes a clip set's manifest
+    declares (the one it authors, else the one pxr generates from its clip
+    layers) are asked for samples, however large the clipped prim;
   - `warnings` for layers whose authored `upAxis` or `metersPerUnit` differs
     from the stage's (USD rescales and reorients nothing), one entry per
     mismatch and value with `layer_count` and up to 5 example `layers`;
@@ -202,7 +208,14 @@ parse error). The checks, in order:
   `InvertedJointLimits`, plus pxr's UsdPhysics validators (dangling joint
   bodies, nested articulation roots, invalid mass and inertia).
 - pxr's UsdValidation validators, listed in `validators`; the usdz package
-  rules (alignment, compression, file types) run only for a `.usdz`.
+  rules (alignment, compression, file types) run only for a `.usdz`. A
+  validator that stops with an error (pxr cannot read a property it checks,
+  such as a `physics:body0` authored as an attribute) is a `ValidatorFailed`
+  error naming it (`source`) and pxr's reason, located at that property:
+  its checks did not run, so the file is not valid. The other validators'
+  findings are still reported. They run in one pass over the stage; only
+  when that pass stops with an error does each validator run on its own,
+  which costs about twice as long.
 
 The checks read the files as they are on disk. pxr keeps one in-memory copy
 of each file per process and gives it to every stage that opens the file,
@@ -307,6 +320,7 @@ source paths.
   `float`, `drive:angular:physics:stiffness` without
   `PhysicsDriveAPI:angular` a `float` (any multiple-apply instance name
   matches its template), with the schema's allowed tokens and variability.
+  A later write to such an attribute is held to the same allowed tokens.
   The edit succeeds with an `UnappliedSchemaAttribute` entry in `warnings`
   naming the API to apply, since USD and simulators ignore the value until
   it is applied; no simul tool applies API schemas yet. A prim type's
@@ -389,7 +403,10 @@ and unsaved edits are lost when the server exits.
   outside after a reread anyway (a file swapped between the check and the
   reread) is unloaded. A load that reads files, or a reload, runs alone,
   after the running calls finish, since rereading a shared file changes
-  stages other calls may be reading.
+  stages other calls may be reading. A shared file pxr already held when
+  the load began, with nothing on record about which content of it that
+  copy holds (clip layers a read opened after its stage loaded), is reread
+  once by the next load that composes it, then tracked like the others.
 - **Stages belong to the MCP session that loaded them.** Another session
   gets `NotFoundError` for the id and cannot read or edit the stage. Stage
   ids are random, not derived from the path. A stdio server has one
@@ -400,7 +417,9 @@ and unsaved edits are lost when the server exits.
 - **When a session ends, its stages are unloaded.** An initialize-handshake
   connection that closes takes its stages with it, unsaved edits included
   (the server logs a warning naming the stages that had unsaved edits).
-  Save or export before disconnecting. Stages of a session whose end the
+  The unload runs beside other sessions' reads, but waits for any load,
+  reload or edit running or queued before it, so it never overlaps one
+  and holds up no other session. Save or export before disconnecting. Stages of a session whose end the
   server cannot observe (stdio's single session, the anonymous scope) stay
   until they are unloaded or the server exits.
 - **`list_usd_stages`** shows the session's stages, whether each has
