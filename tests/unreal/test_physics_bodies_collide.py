@@ -26,7 +26,7 @@ from typing import Any, Dict, List
 import pytest
 
 from simul.adapters._unreal_scripts import INCOMPATIBLE_BODY
-from tests.unreal.physics_editor import Editor, physics_session
+from tests.unreal.physics_editor import Editor, Enum, physics_session
 
 
 def run(coroutine: Any) -> Dict[str, Any]:
@@ -189,8 +189,8 @@ def test_a_failed_bulk_setup_puts_the_responses_back(monkeypatch: pytest.MonkeyP
 
 
 EDITS = {
-    # Each part is attached to the actor's root, so simulating one detaches it.
-    "enable_physics": {"allow_detach": True},
+    # Each part is attached to the actor's root; simulating one keeps it there (R3-B1).
+    "enable_physics": {},
     "set_collision": {"collision_preset": "BlockAll"},
     "set_physics_params": {"mass": 5.0},
 }
@@ -240,16 +240,17 @@ def test_an_unknown_component_name_is_refused(monkeypatch: pytest.MonkeyPatch, m
     assert editor.writes == []
 
 
-def test_a_part_attached_to_the_root_needs_allow_detach(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_refusal_names_the_part(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #359: the refusal names the part, not only the actor."""
     editor = Editor()
     robot = editor.multi_part_actor("Robot")
+    robot.components[-1]._mobility = Enum("STATIC")
     session = physics_session(monkeypatch, editor)
 
-    refused = run(session.enable_physics(robot.get_path_name(), component_name="Part0"))
+    refused = run(session.enable_physics(robot.get_path_name(), component_name="Part1", make_movable=False))
 
-    assert codes(refused) == ["ATTACHED"]
-    # The refusal names the part, not only the actor (review of #359).
-    assert refused["error"].startswith("Cannot simulate physics on Robot (component Part0): ")
+    assert codes(refused) == ["NOT_MOVABLE"]
+    assert refused["error"].startswith("Cannot simulate physics on Robot (component Part1): ")
 
 
 def test_the_editor_only_sprite_is_no_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -281,7 +282,8 @@ def test_bulk_setup_points_a_multi_part_actor_to_the_per_part_tool(monkeypatch: 
     by_path = {entry["actor_path"]: entry for entry in result["details"]["failed"]}
     ambiguous, bare = by_path[robot.get_path_name()], by_path[empty.get_path_name()]
     assert ambiguous["problems"] == ["AMBIGUOUS_COMPONENT"]
-    assert "enable_unreal_physics and component_name (Part0, Part1)" in ambiguous["error"]
+    assert "enable_unreal_physics and component_name" in ambiguous["error"]
+    assert ambiguous["error"].endswith("its parts: Part0, Part1")
     assert "pass component_name" not in ambiguous["error"]
     assert bare["problems"] == ["NO_PRIMITIVE_COMPONENT"]
 

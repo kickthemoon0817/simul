@@ -167,7 +167,10 @@ class StaticMesh(UObject):
 
 
 class SceneComponent(UObject):
-    pass
+    parent: Optional["SceneComponent"] = None
+
+    def get_attach_parent(self) -> Optional["SceneComponent"]:
+        return self.parent
 
 
 class MeshComponent(SceneComponent):
@@ -248,6 +251,9 @@ class Actor(UObject):
             component.owner = self  # type: ignore[attr-defined]
         self.root_component: Any = self.components[0] if mesh_root else SceneComponent(path + ".Root")
         self.root_component.owner = self
+        for component in self.components:
+            if component is not self.root_component:
+                component.parent = self.root_component
         self.exported = exported
 
     def get_world(self) -> World:
@@ -686,6 +692,7 @@ class Editor:
         return SimpleNamespace(
             Actor=Actor,
             MeshComponent=MeshComponent,
+            PrimitiveComponent=MeshComponent,
             DynamicMeshComponent=DynamicMeshComponent,
             StaticMeshComponent=StaticMeshComponent,
             MaterialInterface=MaterialInterface,
@@ -1779,6 +1786,27 @@ def test_a_dynamic_mesh_actor_exported_without_its_mesh_is_a_warning(editor: Sim
         + ". convert_unreal_mesh_format with target_format static_mesh and replace_actor true makes them "
         "StaticMeshActors, which export with their geometry."
     ]
+    assert result["components_left_out"] == []
+
+
+def test_parts_not_under_their_actor_s_root_are_named_as_left_out(editor: SimpleNamespace) -> None:
+    """Round-3 audit R3-B1: a part detached inside its actor (as enable_unreal_physics's
+    allow_detach did) was left out of the stage, which held an empty Xform, and the
+    export said success with no warning."""
+    robot = LEVEL + "Robot"
+    actor = Actor(robot, editor.fake.world, editor.fake,
+                  meshes={"Chassis": ("Default",), "Arm": ("Default",), "Wheel": ("Default",)}, mesh_root=False)
+    chassis, arm, wheel = actor.components
+    chassis.parent, arm.parent, wheel.parent = None, chassis, chassis
+    editor.fake.actors[robot] = actor
+
+    result = _run(editor.session.export_usd([CUBE, robot], str(editor.tmp_path / "out" / "robot.usda")))
+
+    assert result["components_left_out"] == [{"actor_path": robot, "components": ["Chassis", "Arm", "Wheel"]}]
+    (warning,) = result["warnings"]
+    assert warning.startswith("Unreal's USD exporter writes an actor's components from its root component down")
+    assert robot + ": Chassis, Arm, Wheel" in warning
+    assert "attach_to_component(actor.root_component" in warning
 
 
 # ---------------------------------------------------------------------------

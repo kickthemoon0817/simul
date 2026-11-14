@@ -765,7 +765,11 @@ def exec_script(
     try:
         raw_result = asyncio.run(_closing(session, session._execute_python(code, mode=mode)))
     except Exception as e:
-        fail(str(e), type(e).__name__)
+        # An UnrealError carries the shared error type the MCP tools report
+        # (TimeoutError, not its class name UnrealTimeoutError).
+        from simul.utils.errors import exception_type_name
+
+        fail(str(e), exception_type_name(e))
 
     # UE's PythonScriptLibrary.ExecutePythonCommandEx returns:
     #   ReturnValue: bool  — true iff the Python script ran without raising
