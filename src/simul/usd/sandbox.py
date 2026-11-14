@@ -166,7 +166,40 @@ def _composition_arcs(layer: "Sdf.Layer") -> Set[str]:
     An expression-valued one (`` `"${DIR}/a.usd"` ``) is evaluated with the
     layer's expression variables, as ``ExtractExternalReferences`` reports it.
     """
-    arcs = set(layer.GetCompositionAssetDependencies())
+    return _with_expression_values(layer, set(layer.GetCompositionAssetDependencies()))
+
+
+#: Most prim specs ``open_arc_layers`` visits in one walk, over every layer, to
+#: tell the arcs authored inside variant sets from the others (Python visits
+#: about 100 000 a second). Past it, the remaining layers' arcs are all
+#: opened, as when variants are followed.
+VARIANT_SCAN_BUDGET = 10_000
+
+
+def _arcs_outside_variants(layer: "Sdf.Layer", budget: List[int]) -> Optional[Set[str]]:
+    """The sublayer, reference and payload asset paths ``layer`` authors outside every variant.
+
+    Prim specs are visited down from the root prims, never into a variant
+    set. ``budget[0]`` counts down the specs visited; None once it runs out
+    (the caller then treats every arc as outside).
+    """
+    found: Set[str] = set(layer.subLayerPaths)
+    stack = list(layer.rootPrims)
+    while stack:
+        if budget[0] <= 0:
+            return None
+        budget[0] -= 1
+        prim = stack.pop()
+        if prim.hasReferences:
+            found.update(item.assetPath for item in prim.referenceList.GetAddedOrExplicitItems())
+        if prim.hasPayloads:
+            found.update(item.assetPath for item in prim.payloadList.GetAddedOrExplicitItems())
+        stack.extend(prim.nameChildren)
+    return _with_expression_values(layer, found)
+
+
+def _with_expression_values(layer: "Sdf.Layer", arcs: Set[str]) -> Set[str]:
+    """``arcs`` plus the value of each expression-valued one, under ``layer``'s expression variables."""
     expression = getattr(Sdf, "VariableExpression", None)
     if expression is None:
         return arcs
@@ -501,7 +534,9 @@ class CompositionSandbox:
         )
 
 
-def open_arc_layers(root_layer: "Sdf.Layer", reads: Dict[str, "stage_files.Stamp"]) -> List["Sdf.Layer"]:
+def open_arc_layers(
+    root_layer: "Sdf.Layer", reads: Dict[str, "stage_files.Stamp"], *, variants: bool = True
+) -> List["Sdf.Layer"]:
     """Open the layers ``root_layer``'s sublayers, references and payloads name, transitively, before composing.
 
     For a load that walks no sandbox (none given, or the sandbox is off).
@@ -509,13 +544,23 @@ def open_arc_layers(root_layer: "Sdf.Layer", reads: Dict[str, "stage_files.Stamp
     (``stage_files.open_layer``), so a write that lands while the load runs
     shows as a change; composition then finds these layers in pxr's
     registry instead of reading the files after the stamps. Composition arcs
-    in every variant are followed, anchored and resolved as composition does
-    (under the resolver context ``Usd.Stage.Open`` binds for the root); a
-    layer composition opens beyond them (a value clip) is not opened here.
+    are anchored and resolved as composition does (under the resolver
+    context ``Usd.Stage.Open`` binds for the root); a layer composition
+    opens beyond them (a value clip) is not opened here.
+
+    With ``variants`` False, an arc authored only inside variant sets is
+    stamped (``stage_files.stamp_unread``) but not opened: only the selected
+    variant's layers are composed, and opening every variant's made an
+    8-variant asset load 2.9 times slower (round-5 audit m1). Composition
+    then reads the selected one after its stamp, and what that layer names
+    is read unrecorded (``HeadlessUSDSession``'s rule for unrecorded reads).
+    Telling the arcs apart visits prim specs in Python, at most
+    ``VARIANT_SCAN_BUDGET`` over the walk; past it every arc is opened.
 
     Args:
         root_layer: The opened root layer.
         reads: Where the stamps are recorded, by real path.
+        variants: Open the layers arcs inside variant sets name too.
 
     Returns:
         The layers opened, for the caller to hold while it composes.
@@ -523,16 +568,26 @@ def open_arc_layers(root_layer: "Sdf.Layer", reads: Dict[str, "stage_files.Stamp
     held: List["Sdf.Layer"] = []
     seen = {root_layer.identifier}
     queue: List["Sdf.Layer"] = [root_layer]
+    budget = [VARIANT_SCAN_BUDGET]
     context = Ar.GetResolver().CreateDefaultContextForAsset(root_layer.identifier)
     with Ar.ResolverContextBinder(context):
         while queue:
             layer = queue.pop(0)
-            for authored in sorted(_composition_arcs(layer)):
+            arcs = _composition_arcs(layer)
+            inside: Set[str] = set()
+            if not variants and arcs - set(layer.subLayerPaths):
+                outside = _arcs_outside_variants(layer, budget)
+                if outside is not None:
+                    inside = arcs - outside
+            for authored in sorted(arcs):
                 try:
                     identifier = layer.ComputeAbsolutePath(authored) if authored else ""
                 except Exception:
                     continue
                 if not identifier or not _is_layer_path(identifier):
+                    continue
+                if authored in inside:
+                    stage_files.stamp_unread(identifier, reads)
                     continue
                 child = stage_files.open_layer(identifier, reads)
                 if child is not None and child.identifier not in seen:
@@ -547,6 +602,7 @@ __all__ = [
     "MAX_REPORTED_PATHS",
     "OutsidePath",
     "UNREAL_OBJECT_PATH",
+    "VARIANT_SCAN_BUDGET",
     "is_unreal_content_path",
     "open_arc_layers",
     "unreal_content_paths",

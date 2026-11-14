@@ -157,6 +157,30 @@ def open_layer(identifier: str, reads: Optional[Dict[str, Stamp]] = None) -> Opt
     return layer
 
 
+def stamp_unread(identifier: str, reads: Dict[str, Stamp]) -> None:
+    """Stamp the file ``identifier`` names before composition reads it, without reading it here.
+
+    For a layer a load may not use (one an unselected variant names): its
+    stamp is recorded under its resolved path as ``open_layer`` records it,
+    so if composition does read it later the stamp still predates the read.
+    Nothing is recorded for a layer pxr already holds, which composition
+    does not read.
+
+    Args:
+        identifier: An anchored layer identifier, as composition opens it.
+        reads: Where the stamp is recorded.
+    """
+    try:
+        if Sdf.Layer.Find(identifier):
+            return
+        path = Sdf.Layer.SplitIdentifier(identifier)[0]
+        resolved = str(Ar.GetResolver().Resolve(path)) if path else ""
+    except Exception:
+        return
+    if resolved:
+        reads.setdefault(resolved, stamp(resolved))
+
+
 def open_private_root(identifier: str) -> Sdf.Layer:
     """Open ``identifier`` (a resolved path or a URL) as a root layer no other stage shares.
 

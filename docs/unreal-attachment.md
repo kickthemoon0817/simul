@@ -226,10 +226,19 @@ the machine: it is also recorded under `$SIMUL_HOME/holds/` (the editor's
 `host:port`, the timed-out call, the holding server's pid and an expiry), and
 another simul server sends that editor nothing while the record is live, answering
 `InstanceBusy` with `details.held_by` naming the holder's pid, until the holder
-sees the editor answer and removes it. A record whose server exited, or that is
-past its expiry, is ignored. The servers must share `SIMUL_HOME` (default
-`~/.simul`); another client of Remote Control is not covered and still queues
-behind the request.
+sees the editor answer and removes it. A record past its expiry is removed. A
+server that stops while it holds the editor leaves its record `released`, and
+one that crashed or was killed leaves it as it was (a holder counts as gone when
+its pid has exited or, by the process start time the record keeps, names
+another process): the next simul server about to send that editor a request
+takes the hold over, sends its own `GET /remote/info` first, and goes ahead if
+the editor answers within a second; otherwise the request gets `InstanceBusy`
+(`details.adopted_from` names the server it came from) and that server holds the
+editor until it answers, within the original limit. A record exists only once an
+answer has timed out, so a request another server sends while the first one is
+still running still queues behind it; nothing covers that. The servers must
+share `SIMUL_HOME` (default `~/.simul`); another client of Remote Control is not
+covered and still queues behind the request.
 
 ```sh
 simul unreal detach
