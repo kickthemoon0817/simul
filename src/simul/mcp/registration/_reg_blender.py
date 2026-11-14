@@ -212,6 +212,7 @@ from ..schemas.simready import (
     SimReadyValidateRequest,
     SimReadyValidateResponse,
 )
+from ...utils.regex_guard import MAX_PATTERN_LENGTH
 from ...utils.script_result import (
     SCRIPT_ERROR,
     printed_json_object,
@@ -858,8 +859,16 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         request=BlenderSearchObjectsRequest,
         response=BlenderSearchObjectsResponse,
         added_params=("offset",),
-        # The regex guard's own work grows with the pattern.
-        params={"name_pattern": Param(Optional[Annotated[str, Field(max_length=512)]])},
+        # The limit is advertised, not enforced by the schema: the regex guard
+        # refuses a longer pattern with details.code "pattern_too_long", as
+        # get_unreal_actor_by_semantic_label does, before any other work.
+        params={
+            "name_pattern": Param(
+                Optional[
+                    Annotated[str, Field(json_schema_extra={"maxLength": MAX_PATTERN_LENGTH})]
+                ]
+            )
+        },
     ),
     BlenderTool(
         name="summarize_blender_scene",

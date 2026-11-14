@@ -114,7 +114,10 @@ unmodified, so there `open_blender_file` opens without the check.
 
 `execute_blender_script` reports anything the script raises in `error`, with
 the output printed before it, `SystemExit` from `sys.exit()` and
-`KeyboardInterrupt` included. Raised past the bridge, `sys.exit()` ended the
+`KeyboardInterrupt` included; the exception's class is in
+`details.exception_type`. A refusal raised inside Blender reaches the client
+the same way: its class is the `error_type` (or `details.exception_type`),
+never a prefix of `error`. Raised past the bridge, `sys.exit()` ended the
 user's Blender: Blender prints an exception that escapes a timer with
 `PyErr_Print`, which exits the process on `SystemExit`.
 

@@ -155,7 +155,9 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
     its prims; finding clip sets reads each layer's prim specs once (about
     0.25 s per 200,000 prims), and only the attributes a clip set's manifest
     declares (the one it authors, else the one pxr generates from its clip
-    layers) are asked for samples, however large the clipped prim;
+    layers) are asked for samples, however large the clipped prim. That
+    includes an instanceable asset animated by clips, whose attributes pxr
+    reads through instance proxies;
   - `warnings` for layers whose authored `upAxis` or `metersPerUnit` differs
     from the stage's (USD rescales and reorients nothing), one entry per
     mismatch and value with `layer_count` and up to 5 example `layers`;
@@ -211,8 +213,10 @@ parse error). The checks, in order:
   rules (alignment, compression, file types) run only for a `.usdz`. A
   validator that stops with an error (pxr cannot read a property it checks,
   such as a `physics:body0` authored as an attribute) is a `ValidatorFailed`
-  error naming it (`source`) and pxr's reason, located at that property:
-  its checks did not run, so the file is not valid. The other validators'
+  error naming it (`source`) and pxr's reason, located at that property
+  (`location.layer` names its file, spaces in the path included): its
+  checks did not run, so the file is not valid. The message quotes up to
+  three of pxr's reasons and counts the rest. The other validators'
   findings are still reported. They run in one pass over the stage; only
   when that pass stops with an error does each validator run on its own,
   which costs about twice as long.
@@ -231,7 +235,9 @@ large scene is most of the check. `usd.validation_timeout_seconds` (default
 process killed by a signal is pxr crashing on the file, reported as an
 `OpenFailed` error. If the process cannot start or ends without a result,
 the check runs in the server process anyway, with a `ValidatedInMemoryCopy`
-warning naming the files whose copies it used. Unsaved edits are never part
+warning naming the files whose copies it used. pxr cannot always list the
+copies it holds while another session's stages are being unloaded; the
+check then runs in the fresh process too. Unsaved edits are never part
 of the check: an `info` issue `UnsavedEdits` names each stage of the calling
 session with unsaved edits to a checked file. Save or export them and
 validate the written file to check them.
@@ -394,6 +400,16 @@ and unsaved edits are lost when the server exits.
   edits do not show through it until `save_usd_stage` and a
   `reload_usd_stage`. Mapping that arc onto the private root would need a
   custom asset resolver; the load lists a `SelfReference` warning instead.
+- **What counts as changed on disk.** Each file's modification time, size
+  and inode are recorded just before pxr reads it (at a load, a reread or a
+  reload), never after. A file another program writes while a load reads it
+  is therefore reread before the load returns, or listed in
+  `changed_on_disk` (and `save_usd_stage` refuses to overwrite it), instead
+  of passing for current with its old content. A file composition reads
+  that the load did not open ahead of it (a value clip, with the sandbox
+  off) is reread once if it was modified within two seconds of the load's
+  start. When a load rereads a shared file, every stage composing it shows
+  the new content and stops listing it.
 - **Rereads stay in the sandbox.** A changed sublayer or referenced file is
   shared, and rereading it updates every stage that composes it, including
   other sessions' stages. So its new content is read into a throwaway layer
@@ -2250,8 +2266,9 @@ Behaviour worth knowing:
   parent's transform, and a child without a previous parent keeps its own
   values. `keep_transform: false` clears the parent inverse instead, so the
   child's values become relative to the parent and it moves. A parent that is
-  the child itself or one of its descendants is refused (Blender ignores such
-  a parent without an error).
+  the child itself or one of its descendants is refused with
+  `error_type: "ValidationError"` and `details.code` `self_parent` or
+  `parent_loop` (Blender ignores such a parent without an error).
 - `create_blender_object` puts the object in the active collection, as
   Blender's Add menu does. When that collection, or one holding it, is
   excluded from the view layer, hidden or disabled in viewports, the object
@@ -2285,7 +2302,10 @@ Behaviour worth knowing:
   Blender will not remove. `warnings` names both, and Blender's Delete runs as
   before. Deleting the empty of a constraint the simulation stepped with a body
   that is now gone is refused (`RefusedOperation`, `ConstraintWithoutBody`),
-  since Blender's Delete reads the freed body too.
+  since Blender's Delete reads the freed body too. Stepping then stays refused
+  until the file is saved and opened again (opening it may crash Blender once
+  while it frees the broken constraint); the reopened file steps normally, and
+  the constraint can be removed or given two rigid bodies there.
 - `list_blender_scene_objects` and `search_blender_objects` return a page:
   `count` objects from `offset`, `total` matching, and `next_offset` for the
   next page (`null` after the last; `truncated` says whether more follow). A
@@ -2782,9 +2802,10 @@ Behaviour worth knowing:
   used to overwrite `model.glb`). For GLTF the extension picks the layout: `.glb`
   is GLB, `.gltf` is `GLTF_SEPARATE` (a `.bin` and textures beside it);
   `gltf_format: "GLTF_EMBEDDED"` writes one `.gltf` with its data inline. The
-  reply's `files_written` lists every file the export created or changed in
-  that folder (and its `textures/` or newly created subfolders), `file_path`
-  first. An existing `.bin` or `.mtl` beside the file that the file being
+  reply's `files_written` lists the files the exporter wrote: `file_path`
+  first, then its `.bin` or `.mtl`, the images a `.gltf` names and the
+  textures in `textures/`. Another file that changed in the folder during the
+  export (a log being written) is not listed. An existing `.bin` or `.mtl` beside the file that the file being
   replaced does not refer to is not overwritten unless
   `overwrite_companion_files: true`; texture files a `GLTF_SEPARATE` export
   writes replace files of the same name. Missing folders are created for every
@@ -3229,8 +3250,9 @@ Behaviour worth knowing:
   cut at 300 000 bytes of JSON, which printable ASCII never reaches but heavily
   non-ASCII output can, with the same report. Write larger results to a file
   and return its path. Anything the script raises, `SystemExit` from
-  `sys.exit()` and `KeyboardInterrupt` included, comes back in `error`; it
-  never ends Blender.
+  `sys.exit()` and `KeyboardInterrupt` included, comes back in `error` (the
+  message; its class is `details.exception_type`, as on Isaac); it never ends
+  Blender.
 
 ## Server
 

@@ -396,7 +396,7 @@
           "name_pattern": {
             "anyOf": [{"maxLength": 512, "type": "string"}, {"type": "null"}],
             "default": null,
-            "description": "Python regular expression searched for in each object name. One that Python's re could search for long, such as (\\w+)+ or .*.*.*x, is searched in time linear in the name instead; it is refused only if it also needs a back-reference, an atomic group, a possessive quantifier, a conditional or a lookaround that itself backtracks for long, which that search lacks, or if it is longer than 512 characters."
+            "description": "Python regular expression searched for in each object name. One that Python's re could search for long, such as (\\w+)+ or .*.*.*x, is searched in time linear in the name instead; it is refused only if it also needs a back-reference, an atomic group, a possessive quantifier, a conditional or a lookaround that itself backtracks for long, which that search lacks, or if it is longer than 512 characters (``details.code`` ``pattern_too_long``)."
           },
           "object_type": {
             "anyOf": [{"type": "string"}, {"type": "null"}],

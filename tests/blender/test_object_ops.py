@@ -635,6 +635,8 @@ def test_delete_object_leaves_a_constraint_whose_other_body_is_gone(
     assert result["removed_constraints"] == []
     assert "deleted or lost its rigid body after the simulation stepped" in result["warnings"][0]
     assert "may crash Blender" in result["warnings"][0]
+    # Round-3 audit (R3-BL-03): a file load builds nothing, so reopening lifts the refusal.
+    assert "the reopened file steps normally" in result["warnings"][0]
     assert "Link" not in world.objects
 
 
@@ -732,7 +734,10 @@ def test_delete_object_goes_ahead_when_a_constraint_cannot_be_removed(world: Wor
 
     assert result["removed_constraints"] == []
     assert "constraint_remove.poll() failed" in result["warnings"][0]
-    assert "stepping again is refused until the file is saved" in result["warnings"][0]
+    assert (
+        "Once the simulation has stepped such a constraint, stepping again may crash "
+        "Blender and stays refused until the file is saved and opened again"
+    ) in result["warnings"][0]
     assert "Link" not in world.objects
     assert joint["carrier"].rigid_body_constraint is not None
 

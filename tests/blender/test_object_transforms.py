@@ -450,11 +450,11 @@ def test_set_object_parent_without_keep_transform_moves_the_child_with_the_paren
 
 
 @pytest.mark.parametrize(
-    "child_name, parent_name, message",
+    "child_name, parent_name, message, code",
     [
-        ("P", "C", "loop"),
-        ("P", "G", "loop"),
-        ("C", "C", "its own parent"),
+        ("P", "C", "loop", "parent_loop"),
+        ("P", "G", "loop", "parent_loop"),
+        ("C", "C", "its own parent", "self_parent"),
     ],
 )
 def test_set_object_parent_refuses_a_parent_loop(
@@ -462,17 +462,22 @@ def test_set_object_parent_refuses_a_parent_loop(
     child_name: str,
     parent_name: str,
     message: str,
+    code: str,
 ) -> None:
-    """Blender refuses such a parent without an error; the tool replied success."""
+    """Blender refuses such a parent without an error; the tool replied success.
+
+    R2-BLA-02: the refusal carries a details.code like the other Blender refusals.
+    """
     parent, child = _parent_and_child()
     child.parent = parent
     grandchild = _object("G", parent=child)
     session = make_session(parent, child, grandchild)
     parents: List[Any] = [obj.parent for obj in (parent, child, grandchild)]
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(blender_runtime.ValidationError, match=message) as refused:
         session.set_object_parent(child_name, parent_name)
 
+    assert refused.value.details == {"code": code, "field": "parent_name"}
     assert [obj.parent for obj in (parent, child, grandchild)] == parents
 
 

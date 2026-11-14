@@ -412,13 +412,13 @@ class BlenderSearchObjectsRequest(BaseModel):
 
     name_pattern: Optional[str] = Field(
         None,
-        max_length=512,
         description=(
             "Python regular expression searched for in each object name; one that Python's "
             "re could backtrack on for long, such as (\\w+)+ or .*.*.*x, is searched in "
             "linear time instead, and refused only when it also needs a back-reference, "
             "an atomic group, a possessive quantifier, a conditional or a lookaround that "
-            "backtracks itself, as in (?=.*.*.*\\d)"
+            "backtracks itself, as in (?=.*.*.*\\d), or when it is longer than 512 "
+            "characters (details.code pattern_too_long)"
         ),
     )
     object_type: Optional[str] = Field(
@@ -1974,8 +1974,9 @@ class BlenderExportFileResponse(BaseModel):
     files_written: List[str] = Field(
         default_factory=list,
         description=(
-            "Every file the export created or changed, file_path first: a glTF's .bin and "
-            "textures, an OBJ's .mtl, USD textures"
+            "The files the exporter wrote, file_path first: a glTF's .bin and the images "
+            "the .gltf names, an OBJ's .mtl, USD textures. Other files that changed in the "
+            "folder meanwhile are not listed"
         ),
     )
     object_count: Optional[int] = Field(
