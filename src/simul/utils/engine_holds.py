@@ -26,6 +26,13 @@ before it sends it anything:
 - A record of this process counts only while the hold that wrote it is still
   running (``_IN_PROCESS``), so a hold whose event loop ended without
   withdrawing it (a test, a CLI run) is not mistaken for a live one.
+- A short-lived process (``simul unreal exec``) that exits while its hold
+  still runs hands the record over instead of removing it (``hand_over``):
+  the record then belongs to the engine endpoint, counts until it expires
+  whatever its process does, and the first keeper that sees the engine answer
+  a request sent after the call timed out removes it (``clear_handed_over``).
+  Withdrawing it let the next command queue behind the timed-out call (round-4
+  audit m2).
 
 Reading and writing records is best effort: a hold that cannot be published
 is logged and kept in its own server, and a directory that cannot be read
@@ -109,6 +116,9 @@ class SharedHold:
         host: The host it runs on.
         details: What else the backend records about the call (Unreal: its
             route and whether it may change the editor).
+        handed_over: The holding process exited while the engine may still
+            run the call (a short-lived ``simul unreal exec``), and left the
+            record for whoever calls the engine next (``hand_over``).
     """
 
     backend: str
@@ -119,6 +129,7 @@ class SharedHold:
     pid: int
     host: str
     details: Tuple[Tuple[str, Any], ...] = ()
+    handed_over: bool = False
 
     def info(self) -> Dict[str, Any]:
         """Describe the hold as the refusals and status tools report it.
@@ -126,14 +137,18 @@ class SharedHold:
         Returns:
             ``timed_out_tool``, the backend's ``details``,
             ``busy_for_seconds``, ``hold_limit_seconds`` and ``held_by``
-            (the other server's ``pid``).
+            (the other server's ``pid``, and ``exited: true`` for a record
+            it handed over).
         """
+        holder: Dict[str, Any] = {"pid": self.pid}
+        if self.handed_over:
+            holder["exited"] = True
         return {
             "timed_out_tool": self.tool,
             **dict(self.details),
             "busy_for_seconds": round(max(0.0, time.time() - self.since), 1),
             "hold_limit_seconds": round(max(0.0, self.expires_at - self.since), 3),
-            "held_by": {"pid": self.pid},
+            "held_by": holder,
         }
 
 
@@ -150,6 +165,7 @@ def _as_hold(data: Dict[str, Any]) -> Optional[SharedHold]:
             pid=int(data["pid"]),
             host=str(data["host"]),
             details=tuple(sorted(details.items())) if isinstance(details, dict) else (),
+            handed_over=data.get("handed_over") is True,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -248,6 +264,35 @@ class SharedHolds:
                 exc,
             )
 
+    def hand_over(self, record: Optional[Path]) -> None:
+        """Leave a record ``publish`` wrote for whoever calls the engine next, as this process stops.
+
+        A short-lived process (``simul unreal exec``) whose call timed out
+        exits while the engine may still run it. Withdrawing its record let
+        the next command send its own call into the same queue, so the record
+        stays, marked ``handed_over``: it no longer depends on this process,
+        counts for every keeper until it expires (its start plus the hold
+        limit) and is removed early by the first keeper that sees the engine
+        answer a request sent after the call timed out (``clear_handed_over``).
+        Nothing happens for None; a record that cannot be rewritten is
+        withdrawn, as before.
+
+        Args:
+            record: The record ``publish`` returned.
+        """
+        if record is None:
+            return
+        _IN_PROCESS.pop(record.name, None)
+        try:
+            data = BridgeFiles.read(record, max_bytes=MAX_RECORD_BYTES)
+            hold = _as_hold(data)
+            if hold is None or time.time() >= hold.expires_at:
+                raise ValueError("no hold left to hand over")
+            BridgeFiles.write(record, {**data, "handed_over": True})
+        except (OSError, ValueError) as exc:
+            logger.debug("Withdrawing the hold record %s rather than handing it over (%s)", record, exc)
+            self.withdraw(record)
+
     def foreign(self, endpoint: str) -> Optional[SharedHold]:
         """The live hold another simul server keeps on ``endpoint``, or None.
 
@@ -260,7 +305,36 @@ class SharedHolds:
         holds = self._live_records(endpoint)
         return min(holds, key=lambda hold: hold.since) if holds else None
 
-    def _live_records(self, endpoint: str) -> List[SharedHold]:
+    def handed_over(self, endpoint: str) -> List[SharedHold]:
+        """The live records on ``endpoint`` that an exited process handed over (``hand_over``)."""
+        return [hold for hold in self._live_records(endpoint) if hold.handed_over]
+
+    def clear_handed_over(self, endpoint: str, answered_after: float) -> int:
+        """Remove the handed-over records on ``endpoint`` the engine has finished.
+
+        The engine runs requests in the order they arrive, so an answer to a
+        request sent at ``answered_after`` means it has finished every call
+        that timed out before then.
+
+        Args:
+            endpoint: The engine's ``endpoint_key``.
+            answered_after: ``time.time()`` when the answered request was sent.
+
+        Returns:
+            How many records were removed.
+        """
+        removed = 0
+        for path, hold in self._records(endpoint):
+            if hold.handed_over and hold.since <= answered_after:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    continue
+                removed += 1
+        return removed
+
+    def _records(self, endpoint: str) -> List[Tuple[Path, SharedHold]]:
+        """Every readable record of another keeper on ``endpoint``, live or not."""
         prefix = self._prefix(endpoint)
         try:
             names = [
@@ -270,24 +344,28 @@ class SharedHolds:
             ]
         except OSError:
             return []  # no directory yet: nothing was ever held
-        now = time.time()
-        live: List[SharedHold] = []
+        found: List[Tuple[Path, SharedHold]] = []
         for name in names:
             parts = name[len(prefix):].split(".")
             if len(parts) != 4 or parts[1] == self._token:
                 continue  # not a record, or one of this keeper's own
             path = self._dir / name
             try:
-                data = BridgeFiles.read(path, max_bytes=MAX_RECORD_BYTES)
+                hold = _as_hold(BridgeFiles.read(path, max_bytes=MAX_RECORD_BYTES))
             except (OSError, ValueError):
                 continue  # gone meanwhile, another user's, or damaged
-            hold = _as_hold(data)
-            if hold is None or hold.backend != self.backend or hold.endpoint != endpoint:
-                continue
-            if self._is_live(hold, name, now):
+            if hold is not None and hold.backend == self.backend and hold.endpoint == endpoint:
+                found.append((path, hold))
+        return found
+
+    def _live_records(self, endpoint: str) -> List[SharedHold]:
+        now = time.time()
+        live: List[SharedHold] = []
+        for path, hold in self._records(endpoint):
+            if self._is_live(hold, path.name, now):
                 live.append(hold)
             else:
-                _IN_PROCESS.pop(name, None)
+                _IN_PROCESS.pop(path.name, None)
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:
@@ -298,6 +376,8 @@ class SharedHolds:
     def _is_live(hold: SharedHold, name: str, now: float) -> bool:
         if now >= hold.expires_at:
             return False
+        if hold.handed_over:
+            return True  # its process has exited on purpose; the expiry bounds it
         if hold.host != _HOST:
             return True  # another machine's process cannot be checked; it expires
         if hold.pid == os.getpid():

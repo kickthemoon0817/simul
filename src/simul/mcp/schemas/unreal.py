@@ -1319,6 +1319,15 @@ class UnrealControlSimulationResponse(BaseModel):
             "already ran (start then resumes it) and for the other actions"
         ),
     )
+    editor_camera_restored: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "For stop: the level viewport camera put back where it was before the Play session "
+            "({location, rotation}), as Unreal leaves the player camera's last view there; null when "
+            "no Play session started by this tool saved one (Simulate keeps the camera)"
+        ),
+    )
+    warning: Optional[str] = Field(None, description="Why the editor camera could not be put back")
 
 
 class UnrealGetSimulationStatusResponse(BaseModel):
@@ -1694,6 +1703,22 @@ class UnrealImportUsdResponse(BaseModel):
     actors_without_collision_count: int = Field(
         0, description="Added actors with a mesh simulated bodies pass through, every one counted"
     )
+    stage_geometry_prims: Optional[int] = Field(
+        None,
+        description=(
+            "Geometry prims in the stage (under prims_to_import), skeletal meshes and point instancers left "
+            "out; fewer mesh_components than these with use_prim_kinds_for_collapsing true means Unreal "
+            "merged prims into one mesh, which warnings says. Null when the editor cannot read the stage"
+        ),
+    )
+    left_over_assets: List[str] = Field(
+        default_factory=list,
+        description=(
+            "With replace_existing: the first 20 assets an earlier import left in the folder that this one "
+            "did not make again; they are left as they are"
+        ),
+    )
+    left_over_assets_count: int = Field(0, description="Every such left-over asset, counted")
 
 
 class UnrealExportUsdResponse(BaseModel):

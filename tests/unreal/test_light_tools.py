@@ -12,7 +12,9 @@ test_unreal_runtime.py); this runs the editor script itself.
 from __future__ import annotations
 
 import asyncio
+import copy
 import io
+import itertools
 import sys
 import traceback
 from contextlib import redirect_stdout
@@ -32,11 +34,19 @@ class Color:
         self.r, self.g, self.b, self.a = r, g, b, a
 
 
-class LightComponentBase:
+_trash = itertools.count(1)
+
+
+class ActorComponent:
+    pass
+
+
+class LightComponentBase(ActorComponent):
     PROPERTIES = ("intensity", "light_color", "cast_shadows")
 
     def __init__(self, owner: "Actor", **values: Any) -> None:
         self.owner = owner
+        self.name = "LightComponent0"
         self.values: Dict[str, Any] = {
             "intensity": 3.14,
             "light_color": Color(),
@@ -55,9 +65,25 @@ class LightComponentBase:
     def set_editor_property(self, name: str, value: Any) -> None:
         self.writes.append((name, value, self.owner.editor.open))
         self.values[name] = self.clamps[name](value) if name in self.clamps else value
+        if self.owner.blueprint and self.owner.root_component is self:
+            # PostEditChangeProperty re-runs a Blueprint actor's construction script (UE 5.7.4): a new
+            # component of the same name carries the edit, and this one is renamed and left out.
+            replacement = copy.copy(self)
+            replacement.values, replacement.writes = dict(self.values), []
+            self.name = f"TRASH_{type(self).__name__}_{next(_trash)}"
+            self.owner.root_component = replacement
+
+    def get_owner(self) -> "Actor":
+        return self.owner
+
+    def get_name(self) -> str:
+        return self.name
+
+    def modify(self, always_mark_dirty: bool = True) -> bool:
+        return True
 
     def get_path_name(self) -> str:
-        return self.owner.get_path_name() + ".LightComponent0"
+        return self.owner.get_path_name() + "." + self.name
 
     def get_class(self) -> SimpleNamespace:
         return SimpleNamespace(get_name=lambda: type(self).__name__)
@@ -93,6 +119,7 @@ class SkyLightComponent(LightComponentBase):
 class Actor:
     def __init__(self, editor: "Editor", name: str, component_class: type) -> None:
         self.editor, self.name = editor, name
+        self.blueprint = False
         self.root_component = component_class(self)
 
     def get_path_name(self) -> str:
@@ -146,6 +173,7 @@ class Editor:
 
         return SimpleNamespace(
             Actor=Actor,
+            ActorComponent=ActorComponent,
             LightComponentBase=LightComponentBase,
             LightComponent=LightComponent,
             DirectionalLightComponent=DirectionalLightComponent,
@@ -353,3 +381,22 @@ def test_an_edit_during_pie_warns(monkeypatch: pytest.MonkeyPatch) -> None:
     result = run(session.set_light_params(light.get_path_name(), intensity=10.0))
 
     assert "does not see" in result["warning"]
+
+
+def test_a_blueprint_light_takes_every_value_on_its_live_component(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each write re-runs a Blueprint actor's construction script, which replaces the light component
+    (round-4 audit R4-M1's sweep): the second value went to the replaced one, and the read-back too."""
+    editor = Editor()
+    light = editor.light("BP_Lamp_C_0", PointLightComponent)
+    light.blueprint = True
+    original = light.root_component
+    session = _session(monkeypatch, editor)
+
+    result = run(session.set_light_params(light.get_path_name(), intensity=5000.0, cast_shadows=False))
+
+    assert "error" not in result, result
+    live = light.root_component
+    assert live is not original and original.name.startswith("TRASH_")
+    assert (live.values["intensity"], live.values["cast_shadows"]) == (5000.0, False)
+    assert result["component_path"] == light.get_path_name() + ".LightComponent0"
+    assert result["current"]["intensity"] == 5000.0 and result["current"]["cast_shadows"] is False

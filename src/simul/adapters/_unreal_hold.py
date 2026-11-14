@@ -20,7 +20,12 @@ Each hold is also recorded for the other simul servers on the machine
 stdio server, and a server that knew nothing of another's hold sent its own
 request into the same queue (round-3 audit M3-2). A request to an editor
 another server holds is refused with ``InstanceBusy`` before anything is sent,
-until that server sees the editor answer again.
+until that server sees the editor answer again. A ``simul unreal exec`` whose
+script timed out exits at once, so it hands its record over as it closes
+(``EditorHolds.close(hand_over=True)``): the next command or server asks the
+editor first (``take_over``), and either finds it done and removes the record
+or holds it in turn, within the record's expiry. Withdrawing the record on exit
+let the next command queue behind the timed-out script (round-4 audit m2).
 """
 
 from __future__ import annotations
@@ -85,12 +90,15 @@ class EditorHold:
         request: The request that timed out.
         task: The probe that ends the hold once the editor answers.
         record: The hold's record for the other simul servers, or None.
+        limit: Its limit in seconds when it is not ``EditorHolds.limit``:
+            a hold taken over from a record keeps that record's.
     """
 
     endpoint: str
     request: TimedOutRequest
     task: "Optional[asyncio.Task[None]]" = None
     record: Optional[Path] = None
+    limit: Optional[float] = None
 
 
 def _shared_key(endpoint: str) -> Optional[str]:
@@ -186,7 +194,12 @@ class EditorHolds:
 
         The editor answers in arrival order, so an answer to a request sent
         after the hold began means it has finished the request that timed out.
+        The same answer ends a hold an exited simul process handed over
+        (``take_over``).
         """
+        key = _shared_key(endpoint)
+        if key is not None:
+            self._shared.clear_handed_over(key, time.time() - (time.monotonic() - sent_at))
         hold = self.get(endpoint)
         if hold is None or sent_at < hold.request.since:
             return
@@ -216,8 +229,84 @@ class EditorHolds:
             "timed_out_route": request.route,
             "changes_state": request.changes_state,
             "busy_for_seconds": round(time.monotonic() - request.since, 1),
-            "hold_limit_seconds": self.limit,
+            "hold_limit_seconds": self._limit(hold),
         }
+
+    def _limit(self, hold: EditorHold) -> float:
+        return hold.limit if hold.limit is not None else self.limit
+
+    async def take_over(self, host: str, port: int, headers: Mapping[str, str], wait: float) -> None:
+        """Hold the editor here when an exited simul process left its hold behind (``hand_over``).
+
+        A ``simul unreal exec`` whose script timed out exits while the editor
+        may still run it, and leaves its record for the next call. Before this
+        session sends anything it asks the editor (``GET /remote/info``, at
+        most ``wait`` seconds): an answer means the editor has finished the
+        call, so the record is removed and the request goes ahead; no answer
+        means it still runs, so this keeper holds the editor itself, with the
+        record's start and limit, until it answers. Does nothing while this
+        keeper holds the editor already or no handed-over record names it.
+
+        Args:
+            host: The editor's host.
+            port: Its Remote Control port.
+            headers: Headers the probe sends (the passphrase).
+            wait: Longest wait for the editor's answer, in seconds.
+        """
+        endpoint = f"{host}:{port}"
+        key = _shared_key(endpoint)
+        if key is None or self.get(endpoint) is not None:
+            return
+        left = self._shared.handed_over(key)
+        if not left:
+            return
+        oldest = min(left, key=lambda record: record.since)
+        sent = time.time()
+        outcome = await editor_answer(host, port, headers, min(wait, max(0.0, oldest.expires_at - sent)))
+        if self.get(endpoint) is not None:
+            return  # another call of this keeper took it over meanwhile
+        if outcome != "timeout":
+            removed = self._shared.clear_handed_over(key, sent)
+            logger.info(
+                "The editor at %s %s, so it has finished %s, which a simul process that has exited left "
+                "held; %d record(s) removed",
+                endpoint,
+                "answered" if outcome == "answered" else "takes no connections",
+                oldest.tool,
+                removed,
+            )
+            return
+        details = dict(oldest.details)
+        request = TimedOutRequest(
+            call=oldest.tool,
+            route=str(details.get("timed_out_route", "")),
+            changes_state=bool(details.get("changes_state", True)),
+            since=time.monotonic() - (time.time() - oldest.since),
+        )
+        limit = max(0.0, oldest.expires_at - oldest.since)
+        hold = EditorHold(endpoint=endpoint, request=request, limit=limit)
+        task = asyncio.get_running_loop().create_task(self._wait_for_editor(hold, host, port, dict(headers)))
+        hold.task = task
+        task.add_done_callback(lambda _task: self._end(hold))
+        self._holds[endpoint] = hold
+        hold.record = self._shared.publish(
+            key,
+            request.call,
+            oldest.since,
+            limit,
+            live=lambda: not task.done() and not task.get_loop().is_closed(),
+            details={"timed_out_route": request.route, "changes_state": request.changes_state},
+        )
+        if hold.record is not None:
+            # The probe that ends this hold was sent after every handed-over call on the editor.
+            self._shared.clear_handed_over(key, sent)
+        logger.warning(
+            "The editor at %s is still running %s, which a simul process that has exited left held; "
+            "holding it here until it answers (at most %.0fs more)",
+            endpoint,
+            oldest.tool,
+            max(0.0, oldest.expires_at - time.time()),
+        )
 
     def refusal(self, endpoint: str) -> Optional[UnrealError]:
         """The InstanceBusy error for a request to a held editor, or None when it is not held."""
@@ -230,12 +319,14 @@ class EditorHolds:
             else "it only reads, but the editor serves nothing else until it ends"
         )
         holder = info.get("held_by")
-        whose = (
-            f" for another simul server on this machine (pid {holder.get('pid')})"
-            if isinstance(holder, dict)
-            else ""
-        )
-        ends = "that server sees the editor answer" if whose else "the editor answers"
+        if not isinstance(holder, dict):
+            whose, ends = "", "the editor answers"
+        elif holder.get("exited"):
+            whose = f" for a simul command that has exited (pid {holder.get('pid')})"
+            ends = "a simul call sees the editor answer"
+        else:
+            whose = f" for another simul server on this machine (pid {holder.get('pid')})"
+            ends = "that server sees the editor answer"
         return UnrealError(
             f"The editor at {endpoint} is still running {info['timed_out_tool']}{whose}, whose answer timed "
             f"out {info['busy_for_seconds']:.0f}s ago ({effect}). Remote Control runs one request at a "
@@ -246,15 +337,37 @@ class EditorHolds:
             details={"editor": endpoint, "reason": HOLD_REASON, **info},
         )
 
-    def close(self) -> None:
-        """Release every hold, with a warning naming its call (the server is stopping)."""
+    def close(self, hand_over: bool = False) -> None:
+        """Release every hold, with a warning naming its call (the server or command is stopping).
+
+        Args:
+            hand_over: Leave each hold's record for the next simul call
+                instead of removing it (``SharedHolds.hand_over``): for a
+                short-lived command's session, which nothing outlives to end
+                its hold, so that the next command or server refuses the
+                editor until it has finished the call or the hold expires.
+        """
         for hold in list(self._holds.values()):
-            logger.warning(
-                "Released the Unreal editor at %s while it may still be running %s, which timed out %.0fs ago",
-                hold.endpoint,
-                hold.request.call,
-                time.monotonic() - hold.request.since,
-            )
+            ago = time.monotonic() - hold.request.since
+            if hand_over and hold.record is not None:
+                record, hold.record = hold.record, None
+                self._shared.hand_over(record)
+                logger.warning(
+                    "The Unreal editor at %s may still be running %s, which timed out %.0fs ago: the next "
+                    "simul call refuses it (InstanceBusy) until it has finished, at most %.0fs more "
+                    "(unreal.hold_after_timeout)",
+                    hold.endpoint,
+                    hold.request.call,
+                    ago,
+                    max(0.0, self._limit(hold) - ago),
+                )
+            else:
+                logger.warning(
+                    "Released the Unreal editor at %s while it may still be running %s, which timed out %.0fs ago",
+                    hold.endpoint,
+                    hold.request.call,
+                    ago,
+                )
             self._end(hold)
             if hold.task is not None and not hold.task.get_loop().is_closed():
                 hold.task.cancel()
@@ -267,7 +380,7 @@ class EditorHolds:
 
     async def _wait_for_editor(self, hold: EditorHold, host: str, port: int, headers: Dict[str, str]) -> None:
         """Wait, up to the limit, for the editor to answer a probe queued behind the timed-out request."""
-        remaining = self.limit - (time.monotonic() - hold.request.since)
+        remaining = self._limit(hold) - (time.monotonic() - hold.request.since)
         outcome = await editor_answer(host, port, headers, remaining)
         waited = time.monotonic() - hold.request.since
         if outcome == "answered":

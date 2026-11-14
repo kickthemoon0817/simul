@@ -115,7 +115,8 @@ def test_script_without_json_succeeds_with_its_output(monkeypatch: pytest.Monkey
 
     result = asyncio.run(session.execute_script("print('hello')"))
 
-    assert result == {"success": True, "output": "hello\n"}
+    # Round-4 m6: the warning comes back beside the output as stderr; it used to be dropped.
+    assert result == {"success": True, "output": "hello\n", "stderr": "careful\n"}
 
 
 def test_script_json_is_returned_as_printed(monkeypatch: pytest.MonkeyPatch) -> None:

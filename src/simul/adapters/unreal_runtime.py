@@ -137,8 +137,10 @@ from ._unreal_scripts import (
     PHYSICS_STATE,
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
+    RESTORE_EDITOR_CAMERA,
     ROBOTICS_SCENE_ANALYSIS,
     SAVE_ASSETS,
+    SAVE_EDITOR_CAMERA,
     SCENE_GRAPH,
     SCENE_SUMMARY,
     SET_ACTOR_PARENT,
@@ -2177,6 +2179,9 @@ class UnrealRuntimeSession(LoggerMixin):
         elif attached:
             self._load_attachment()  # the editor a hold is kept for
         if not probe:
+            # A hold a `simul unreal exec` left as it exited is ended or held here first (take_over).
+            passphrase = {"Passphrase": self._passphrase_md5} if self._passphrase_md5 else {}
+            await self._holds.take_over(self.host, self.port, passphrase, self.ping_timeout)
             held = self._holds.refusal(self._endpoint)
             if held is not None:
                 raise held
@@ -3092,7 +3097,10 @@ class UnrealRuntimeSession(LoggerMixin):
         That object is the script's data: an ``error`` or ``*_error`` key in
         it (a ``position_error`` metric) does not fail the call. The script
         fails it by raising or by printing ``"success": false``
-        (``apply_script_success``).
+        (``apply_script_success``). Beside ``output``, ``stderr`` holds what
+        it wrote to ``sys.stderr`` or logged as a warning or an error
+        (``unreal.log_warning``), when there is any; a JSON object the script
+        printed comes back as it printed it, with nothing added.
 
         Args:
             code: Python source code.
@@ -3100,16 +3108,13 @@ class UnrealRuntimeSession(LoggerMixin):
 
         Returns:
             The script's JSON object with ``success`` set, ``result``/``output``
-            fields, or a ``ScriptError`` envelope when the Python raised, with
-            ``output`` holding what it printed before it raised.
+            (and ``stderr``) fields, or a ``ScriptError`` envelope when the
+            Python raised, with ``output`` holding what it printed before it
+            raised.
         """
         raw = await self._execute_python(code, mode=mode)
-        info = [
-            str(entry.get("Output", ""))
-            for entry in raw.get("LogOutput") or []
-            if isinstance(entry, dict) and entry.get("Type") == "Info"
-        ]
-        output = "".join(info)
+        entries = [entry for entry in raw.get("LogOutput") or [] if isinstance(entry, dict)]
+        output = "".join(str(entry.get("Output", "")) for entry in entries if entry.get("Type") == "Info")
         failure = self._python_failure(raw)
         if failure is not None:
             refusal = self._attached_refusal({"error": failure})
@@ -3117,11 +3122,18 @@ class UnrealRuntimeSession(LoggerMixin):
                 return refusal
             # What the script printed before it raised: the error alone lost it.
             return {**self._script_error(failure), **({"output": output} if output else {})}
+        # Unreal logs sys.stderr's writes as Error entries and unreal.log_warning's as Warning entries;
+        # only the Info ones are output, so a script that ran was reported without them (round-4 m6).
+        stderr = "".join(
+            str(entry.get("Output", "")) for entry in entries if entry.get("Type") in ("Warning", "Error")
+        )
+        printed: Dict[str, Any] = {"stderr": stderr} if stderr else {}
         if mode == "EvaluateStatement":
-            return {"success": True, "result": raw.get("CommandResult"), "output": output}
+            return {"success": True, "result": raw.get("CommandResult"), "output": output, **printed}
         parsed = self._first_json_object(raw)
         if parsed is None:
-            return {"success": True, "output": output}
+            return {"success": True, "output": output, **printed}
+        # The JSON object is the script's data, returned as it printed it, so nothing is added to it.
         return apply_script_success(parsed)
 
     @staticmethod
@@ -6124,8 +6136,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         ``start`` begins Simulate In Editor by default: the level runs and its
         physics steps with no player, the level viewport keeps the editor
         camera. ``mode`` "play" begins a Play session instead, in the level
-        viewport: the game mode spawns and possesses the player's pawn, and
-        when it stops Unreal puts the game camera's last view in the viewport.
+        viewport: the game mode spawns and possesses the player's pawn. When
+        it stops Unreal leaves the game camera's last view in the viewport, so
+        ``stop`` puts back the editor camera ``start`` saved
+        (``editor_camera_restored``; round-4 audit m3).
         Starting a session that runs resumes it if paused and otherwise leaves
         it as it is, whichever mode it runs in; the other actions leave a
         session already in their state unchanged. While either mode runs the
@@ -6185,11 +6199,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "details": {"code": "SIMULATION_NOT_RUNNING", "hint": SIMULATION_START_HINT},
             }
         started = action == "start" and not status["is_playing"]
+        stopping = action == "stop" and status["is_playing"]
         if started:
-            command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)." + (
-                "editor_play_simulate()" if mode == "simulate" else "editor_request_begin_play()"
+            # The editor camera, put back when the session stops (SAVE_EDITOR_CAMERA).
+            command = (
+                f"args = {{'save': {mode == 'play'!r}}}\n"
+                + SAVE_EDITOR_CAMERA
+                + "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)."
+                + ("editor_play_simulate()" if mode == "simulate" else "editor_request_begin_play()")
             )
-        elif action == "stop" and status["is_playing"]:
+        elif stopping:
             command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_end_play()"
         elif action in {"start", "pause", "resume"} and status["is_paused"] != (
             action == "pause"
@@ -6229,6 +6248,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 result: Dict[str, Any] = {"action": action, "state": state}
                 if action == "start":
                     result["mode"] = mode if started else None
+                if stopping:
+                    result.update(await self._restore_editor_camera())
                 return result
             if asyncio.get_running_loop().time() >= deadline:
                 return {
@@ -6237,6 +6258,30 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                     "error": f"PIE did not reach {target}; current state: {state}",
                 }
             await asyncio.sleep(0.1)
+
+    async def _restore_editor_camera(self) -> Dict[str, Any]:
+        """Put the level viewport camera back where it was before the Play session that just stopped.
+
+        Returns:
+            ``editor_camera_restored`` (the camera put back, or None when no
+            Play session saved one: Simulate keeps it), and a ``warning`` when
+            putting it back failed.
+        """
+        try:
+            restored = await self._execute_json_script(RESTORE_EDITOR_CAMERA)
+        except Exception as exc:  # the session stopped either way
+            restored = {"error": str(exc) or type(exc).__name__}
+        if restored.get("error"):
+            return {
+                "editor_camera_restored": None,
+                "warning": (
+                    "Could not put the level viewport camera back where it was before Play ("
+                    + str(restored["error"])
+                    + "): Unreal leaves the player camera's last view there, so an editor-view capture may "
+                    "show the world origin; set_unreal_camera_view or focus_unreal_on_actor moves it"
+                ),
+            }
+        return {"editor_camera_restored": restored.get("restored")}
 
     async def get_simulation_status(self) -> Dict[str, Any]:
         """
@@ -8549,8 +8594,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         when the session is garbage-collected.
         """
         if self._owns_holds:
-            # A session of its own: nothing outlives it to end its hold.
-            self._holds.close()
+            # A session of its own (simul unreal exec): nothing outlives it to end its hold, so its
+            # record is left for the next simul call, which ends it once the editor answers.
+            self._holds.close(hand_over=True)
         if self._session is not None and not self._session.closed:
             await self._session.close()
         self._session = None
@@ -8574,7 +8620,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         ``async with``) instead.
         """
         if self._owns_holds:
-            self._holds.close()
+            self._holds.close(hand_over=True)
         if self._session is None or self._session.closed:
             self._session = None
             return

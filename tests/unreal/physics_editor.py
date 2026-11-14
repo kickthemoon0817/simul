@@ -42,6 +42,7 @@ silent one.
 
 from __future__ import annotations
 
+import copy
 import io
 import itertools
 import struct
@@ -237,6 +238,10 @@ class Body:
     def set_editor_property(self, name: str, value: Any) -> None:
         assert name in self.values, name
         self._set[name] = value
+        if self._component is not None:
+            # A field written on the component's own struct notifies the component as a property write
+            # does, which re-runs a Blueprint actor's construction script (UE 5.7.4).
+            self._component.set_editor_property("body_instance", Body(values=self.values))
 
     def copy(self) -> "Body":
         return Body(values=self.values)
@@ -259,6 +264,12 @@ class SceneComponent(ActorComponent):
     def get_path_name(self) -> str:
         assert self.owner is not None
         return self.owner.get_path_name() + "." + self.name
+
+    def get_owner(self) -> Optional["Actor"]:
+        return self.owner
+
+    def get_attach_parent(self) -> Optional["SceneComponent"]:
+        return None
 
     def get_class(self) -> "Class":
         return Class(type(self).__name__)
@@ -299,6 +310,8 @@ class PrimitiveComponent(SceneComponent):
         # A body whose simulate flag never takes (the fake's stand-in for an
         # engine refusal the checks do not foresee).
         self.refuses_simulation = False
+        # A body whose simulate flag, once set, the Details panel write cannot clear (putting it back fails).
+        self.sticky_simulation = False
         # Motion: velocity in cm/s, the force pending for the next step, and
         # every force and impulse call, as (kind, vector, location).
         self.velocity = Vector()
@@ -572,11 +585,18 @@ class PrimitiveComponent(SceneComponent):
             self.preset = values.pop("collision_profile_name")
             self.collision = values.pop("collision_enabled").name
             self.responses = values.pop("collision_responses")
-            if self.refuses_simulation:
+            if self.refuses_simulation or (self.sticky_simulation and self.body["simulate_physics"]):
                 values["simulate_physics"] = self.body["simulate_physics"]
             self.body = values
+            self._edited()
             return
         raise AttributeError(f"{type(self).__name__} has no property {name!r}")
+
+    def _edited(self) -> None:
+        """PostEditChangeProperty: a Blueprint actor of the editor world re-runs its construction script."""
+        owner = self.owner
+        if owner is not None and owner.blueprint and not owner.simulation and self in owner.components:
+            owner.rerun_construction()
 
 
 class StaticMeshComponent(PrimitiveComponent):
@@ -609,6 +629,7 @@ class StaticMeshComponent(PrimitiveComponent):
             self.modify()
             self._write(name)
             self.use_default_collision = bool(value)
+            self._edited()
             return
         super().set_editor_property(name, value)
 
@@ -641,6 +662,7 @@ class DynamicMeshComponent(PrimitiveComponent):
 
 
 _guids = itertools.count(1)
+_trash = itertools.count(6)
 
 
 class Actor:
@@ -671,8 +693,34 @@ class Actor:
         self.level: Optional[str] = None
         # Destroyed: still findable, but SystemLibrary.is_valid is False.
         self.destroyed = False
+        # A Blueprint actor whose components its construction script makes (rerun_construction).
+        self.blueprint = False
         if root is not None:
             root.owner = self
+
+    def rerun_construction(self) -> None:
+        """Re-run the construction script, as a component property write does on a Blueprint actor (UE 5.7.4).
+
+        Every component is replaced by a new one of the same name that carries its state (Unreal's
+        component instance data), attached as the old one was; the old one is renamed
+        ``TRASH_<class>_<n>`` and left out of the actor, its owner unchanged.
+        """
+        made: Dict[int, Any] = {}
+        for old in self.components:
+            new = copy.copy(old)
+            for field in ("body", "responses"):
+                if hasattr(old, field):
+                    setattr(new, field, dict(getattr(old, field)))
+            made[id(old)] = new
+            old.name = f"TRASH_{type(old).__name__}_{next(_trash)}"
+        for new in made.values():
+            parent = getattr(new, "parent", None)
+            if parent is not None and id(parent) in made:
+                new.parent = made[id(parent)]
+        self.components = [made[id(old)] for old in self.components]
+        if self.root_component is not None:
+            self.root_component = made.get(id(self.root_component), self.root_component)
+        self.editor.reruns += 1
 
     def get_path_name(self) -> str:
         if self.level is not None:
@@ -766,6 +814,10 @@ class Editor:
         self.tickers: Dict[int, Callable[[float], Any]] = {}
         self.ticker_ids = itertools.count(1)
         self.started_modes: List[str] = []
+        # Construction-script reruns of Blueprint actors (Actor.rerun_construction).
+        self.reruns = 0
+        # The level viewport camera: location, and rotation as (pitch, yaw, roll).
+        self.camera: Tuple[List[float], List[float]] = ([-458.0, 1300.0, 440.0], [-20.0, 30.0, 0.0])
 
     # -- building the level ---------------------------------------------------------
     def cube(
@@ -820,6 +872,22 @@ class Editor:
             part.parent = parts[parent] if isinstance(parent, str) else parent
             parts[name] = part
             actor.components.append(part)
+        return actor
+
+    def blueprint_crate(self, label: str = "Crate") -> Actor:
+        """A Blueprint actor (BP_Crate_C) built in the Blueprint editor: DefaultSceneRoot and a Movable cube
+        StaticMeshComponent "Mesh" under it, both made by its construction script."""
+        actor = self.multi_part_actor(label, parts=0)
+        actor.class_name, actor.blueprint = "BP_Crate_C", True
+        mesh = StaticMeshComponent(self, "Mesh", Mesh(CUBE), mobility="MOVABLE", preset="BlockAllDynamic")
+        mesh.owner, mesh.parent = actor, actor.root_component
+        actor.components.append(mesh)
+        return actor
+
+    def blueprint_robot(self, label: str = "Robot") -> Actor:
+        """``robot`` built as a Blueprint: Chassis, Arm and Wheel made by its construction script."""
+        actor = self.robot(label)
+        actor.class_name, actor.blueprint = "BP_Robot_C", True
         return actor
 
     def dynamic_mesh_actor(self, label: str, simple: int = 0) -> Actor:
@@ -924,7 +992,13 @@ class Editor:
         self.started_modes.append(mode)
         self.start()
 
+    def set_camera(self, location: Vector, rotation: Rotator) -> None:
+        self.camera = (location.as_list(), [rotation.pitch, rotation.yaw, rotation.roll])
+
     def stop(self) -> None:
+        if self.started_modes and self.started_modes[-1] == "play":
+            # Unreal leaves the player camera's last view in the level viewport (UE 5.7.4).
+            self.camera = ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
         self.pie = False
         self.paused = False
         for path in [p for p, a in self.actors.items() if a.simulation]:
@@ -965,11 +1039,13 @@ class Editor:
             return
         if self.open is not None:
             self.open["modified"].append(component.get_path_name())
+            # By object: a construction-script rerun's replacement has the path of the one it replaced.
+            self.open.setdefault("objects", []).append(component)
         self.dirty = True
 
     def write(self, component: PrimitiveComponent, what: str) -> None:
-        recorded = (
-            self.open is not None and component.get_path_name() in self.open["modified"]
+        recorded = self.open is not None and any(
+            obj is component for obj in self.open.get("objects", [])
         )
         self.writes.append((component.get_path_name(), what, recorded))
 
@@ -1013,6 +1089,8 @@ class Editor:
             "UnrealEditorSubsystem": SimpleNamespace(
                 get_editor_world=lambda: None if editor.pie else editor.editor_world,
                 get_game_world=lambda: editor.pie_world if editor.pie else None,
+                get_level_viewport_camera_info=lambda: (Vector(*editor.camera[0]), Rotator(*editor.camera[1])),
+                set_level_viewport_camera_info=editor.set_camera,
             ),
             # GWorld, the editor world wherever Remote Control runs a script,
             # which editor_world() falls back on during PIE.
@@ -1106,6 +1184,7 @@ class Editor:
             GameplayStatics=gameplay,
             GuidLibrary=guids,
             Vector=Vector,
+            Rotator=Rotator,
             SystemLibrary=SimpleNamespace(is_valid=is_valid),
             PhysicsSettings=SimpleNamespace(
                 get_default_object=lambda: physics_settings
@@ -1146,9 +1225,10 @@ def physics_session(
     """A session whose editor Python runs here against ``editor``."""
     monkeypatch.setitem(sys.modules, "unreal", editor.module())
     # The editor-side modules a script keeps (the force ticker) live in this editor.
-    from simul.adapters._unreal_scripts import FORCE_MODULE
+    from simul.adapters._unreal_scripts import EDITOR_CAMERA_MODULE, FORCE_MODULE
 
     monkeypatch.delitem(sys.modules, FORCE_MODULE, raising=False)
+    monkeypatch.delitem(sys.modules, EDITOR_CAMERA_MODULE, raising=False)
     monkeypatch.setattr(unreal_runtime, "UNREAL_AVAILABLE", True)
     monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
     session = unreal_runtime.UnrealRuntimeSession(Settings())

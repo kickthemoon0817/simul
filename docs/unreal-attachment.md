@@ -227,7 +227,14 @@ the machine: it is also recorded under `$SIMUL_HOME/holds/` (the editor's
 another simul server sends that editor nothing while the record is live, answering
 `InstanceBusy` with `details.held_by` naming the holder's pid, until the holder
 sees the editor answer and removes it. A record whose server exited, or that is
-past its expiry, is ignored. The servers must share `SIMUL_HOME` (default
+past its expiry, is ignored. A `simul unreal exec` whose script timed out exits
+at once, so it leaves its record behind, marked `handed_over` (and `held_by`
+carries `exited: true`): it counts until its expiry whatever its process does,
+and the next simul call, a command or a server, first sends `GET /remote/info`
+for at most `UNREAL__PING_TIMEOUT` seconds. An answer means the editor has
+finished the script, so that call removes the record and goes ahead; no answer
+means it still runs, so the call is refused with `InstanceBusy` and its own
+process holds the editor in turn, within the same expiry. The servers must share `SIMUL_HOME` (default
 `~/.simul`); another client of Remote Control is not covered and still queues
 behind the request.
 
