@@ -30,6 +30,7 @@ import weakref
 from contextlib import asynccontextmanager, redirect_stdout
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List
+from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import web
@@ -39,8 +40,11 @@ from simul.adapters._unreal_python import (
     RUNNER_MODULE,
     console_runs_python,
     isolate,
+    isolate_request,
     python_command,
+    remote_route,
     runner_command,
+    unisolated_commands,
     unwrap,
     unwrap_command,
 )
@@ -645,3 +649,360 @@ def test_unwrap_restores_what_isolate_sent() -> None:
 
     assert sent["parameters"]["ExecutionMode"] == "ExecuteFile"
     assert unwrap(sent) == {**body, "parameters": {**body["parameters"], "PythonCommand": "check()\nx"}}
+
+
+# -- every Python command on the wire runs in the runner, in a batch too ---------
+
+
+def _python_in_commands(value: Any) -> List[str]:
+    """Every PythonCommand string anywhere in a request body, at any depth, whatever calls it."""
+    if isinstance(value, dict):
+        found = [v for k, v in value.items() if str(k).lower() == "pythoncommand" and isinstance(v, str)]
+        return found + [c for v in value.values() for c in _python_in_commands(v)]
+    if isinstance(value, list):
+        return [c for v in value for c in _python_in_commands(v)]
+    return []
+
+
+@asynccontextmanager
+async def recording_batch(session: UnrealRuntimeSession) -> AsyncIterator[List[Dict[str, Any]]]:
+    """Point ``session`` at a Remote Control that records every body and answers each batch part with 200."""
+    sent: List[Dict[str, Any]] = []
+
+    async def answer(request: web.Request) -> web.Response:
+        body = await request.json()
+        sent.append({"path": request.path, "body": body})
+        parts = body.get("Requests", []) if request.path == "/remote/batch" else []
+        return web.json_response({"Responses": [
+            {"RequestId": part["RequestId"], "ResponseCode": 200,
+             "ResponseBody": {"ReturnValue": True, "LogOutput": [{"Type": "Info", "Output": "{}"}]}}
+            for part in parts
+        ], "ReturnValue": True, "LogOutput": []})
+
+    session._session = None
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", answer)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    session._base_url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+    try:
+        yield sent
+    finally:
+        await session.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_set_actor_property_sends_no_python_past_the_runner() -> None:
+    """Round 2 B1, checked on the wire: the property write's batch embedded its value in raw ExecuteFile
+    commands, and _http_request isolated only /remote/object/call."""
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            session._execute_json_script = AsyncMock(  # type: ignore[method-assign]
+                return_value={"target_class": "StaticMeshActor", "container": "array", "replaceable": True})
+            await session.set_actor_property("/Game/M.M:PersistentLevel.A", "Tags", '["see setup.py first"]')
+
+    assert [request for request in sent if request["path"] == "/remote/batch"], sent
+    commands = [command for request in sent for command in _python_in_commands(request["body"])]
+    # Each is a runner command, whose source travels base64-encoded: the
+    # value's "setup.py first" never reaches Unreal's ExecuteFile parsing.
+    assert commands and all(unwrap_command(command) is not None for command in commands)
+    assert not any(".py" in command for command in commands)
+    assert any("see setup.py first" in unwrap_command(command)[1] for command in commands)  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_any_batch_the_session_sends_has_its_python_isolated() -> None:
+    call = {"objectPath": PYTHON_LIBRARY, "functionName": "ExecutePythonCommandEx",
+            "parameters": {"PythonCommand": "print('see my.py first')", "ExecutionMode": "ExecuteFile"}}
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            await session._http_put("/remote/batch", {"Requests": [
+                {"RequestId": 1, "URL": "/remote/object/call?x=1", "Verb": "PUT", "Body": call},
+                {"RequestId": 2, "URL": "/REMOTE/OBJECT/CALL/", "Verb": "PUT", "Body": call},
+                {"RequestId": 3, "URL": "/remote/object/property", "Verb": "PUT", "Body": {"objectPath": "a"}},
+            ]})
+
+    (request,) = sent
+    parts = request["body"]["Requests"]
+    for part in parts[:2]:
+        assert unwrap_command(part["Body"]["parameters"]["PythonCommand"]) == (
+            "exec", "print('see my.py first')", "")
+    assert parts[2]["Body"] == {"objectPath": "a"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/remote/object/call", "/remote/batch"])
+async def test_a_python_command_to_anything_but_the_library_is_never_sent(path: str) -> None:
+    """A PythonCommand python_command does not recognise would go out as it is: refused instead."""
+    call = {"objectPath": "/Script/PythonScriptPlugin.PythonScriptLibrary", "functionName": "ExecutePythonCommandEx",
+            "parameters": {"PythonCommand": "pkg = unreal.Probe()"}}
+    body = call if path == "/remote/object/call" else {
+        "Requests": [{"RequestId": 1, "URL": "/remote/object/call", "Verb": "PUT", "Body": call}]}
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            with pytest.raises(Exception) as raised:
+                await session._http_put(path, body)
+
+    assert getattr(raised.value, "error_type", None) == "ValidationError"
+    assert raised.value.details["code"] == "python_outside_runner"  # type: ignore[attr-defined]
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_batch_operations_refuses_a_python_command_to_anything_but_the_library() -> None:
+    async with editor() as (session, fake):
+        result = await session.batch_operations([{
+            "URL": "/remote/object/call", "Verb": "PUT",
+            "Body": {"objectPath": "/Game/M.M:PersistentLevel.A", "functionName": "ExecutePythonCommand",
+                     "parameters": {"PythonCommand": "pkg = 1"}},
+        }])
+
+    assert (result["success"], result["error_type"]) == (False, "ValidationError")
+    assert "operation 0 passes a PythonCommand" in result["error"]
+    assert fake.commands == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batched", [False, True])
+async def test_a_python_command_to_a_preset_function_is_never_sent(batched: bool) -> None:
+    """Review of #355: a preset can expose ExecutePythonCommandEx; its route names no object to recognise."""
+    route = "/remote/preset/Tools/function/RunPython"
+    call = {"Parameters": {"PythonCommand": "pkg = unreal.Probe()"}, "GenerateTransaction": False}
+    path, body = (route, call) if not batched else (
+        "/remote/batch", {"Requests": [{"RequestId": 1, "URL": route + "?x=1", "Verb": "PUT", "Body": call}]})
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            with pytest.raises(Exception) as raised:
+                await session._http_put(path, body)
+            # A preset function that passes no PythonCommand goes out as it is.
+            await session._http_put(route, {"Parameters": {"Speed": 2}})
+
+    assert raised.value.details["code"] == "python_outside_runner"  # type: ignore[attr-defined]
+    assert sent == [{"path": route, "body": {"Parameters": {"Speed": 2}}}]
+    assert unisolated_commands("/remote/preset/Tools/property/Speed", {"Parameters": {"PythonCommand": "x"}}) == []
+
+
+def test_isolate_request_leaves_other_requests_alone_and_refuses_what_python_command_refuses() -> None:
+    body = {"objectPath": "/Game/M.M:PersistentLevel.A", "propertyName": "Tags"}
+    assert isolate_request("/remote/object/property", body) is body
+    assert isolate_request("/remote/batch", {"Requests": "not a list"}) == {"Requests": "not a list"}
+    console = {"objectPath": KISMET, "functionName": "ExecuteConsoleCommand",
+               "parameters": {"Command": "py pkg = 1"}}
+    with pytest.raises(ValueError, match="operation 1: A py console command"):
+        isolate_request("/remote/batch", {"Requests": [
+            {"URL": "/remote/object/property", "Body": body},
+            {"URL": "/remote/object/call", "Body": console},
+        ]})
+    assert unisolated_commands("/remote/object/property", {"parameters": {"PythonCommand": "x"}}) == []
+
+
+# -- Unreal's log is written to disk once per call, not once per line ------------
+
+
+class UnrealLogger(io.BufferedIOBase):
+    """unreal_core._Logger: each write is one log entry; flush writes the whole log to disk (GLog->Flush)."""
+
+    def __init__(self, kind: str, entries: List[Any], flushes: List[str]) -> None:
+        self.log_func = lambda text: entries.append((kind, text))
+        self.flush_func = lambda: flushes.append(kind)
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, b: Any) -> None:  # type: ignore[override]
+        self.log_func(bytes(b).decode("utf-8"))
+
+    def flush(self) -> None:
+        self.flush_func()
+
+
+@pytest.fixture
+def unreal_streams(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Installs sys.stdout and sys.stderr as unreal_core makes them; returns (entries, flushes, stdout, stderr).
+
+    Called from the test body: pytest's own capture swaps sys.stdout back in
+    after fixtures are set up.
+    """
+
+    def install() -> Any:
+        entries: List[Any] = []
+        flushes: List[str] = []
+        stdout = io.TextIOWrapper(UnrealLogger("Info", entries, flushes), encoding="utf-8", line_buffering=True)
+        stderr = io.TextIOWrapper(UnrealLogger("Error", entries, flushes), encoding="utf-8", line_buffering=True)
+        monkeypatch.setattr(sys, "stdout", stdout)
+        monkeypatch.setattr(sys, "stderr", stderr)
+        monkeypatch.setitem(sys.modules, "unreal", SimpleNamespace(log=lambda text: entries.append(("Info", text))))
+        return entries, flushes, stdout, stderr
+
+    return install
+
+
+SCRIPT = ("import sys\nfor i in range(3):\n    print(i)\nunreal.log('direct')\nsys.stderr.write('e\\n')\n"
+          "print({'a': 1}, end='')\nprint()\nsys.stdout.write('tail')\n")
+
+
+def test_the_runner_makes_the_same_log_entries_and_writes_the_log_once(unreal_streams: Any) -> None:
+    entries, flushes, stdout, stderr = unreal_streams()
+    exec(compile(SCRIPT, "<string>", "exec"), {"unreal": sys.modules["unreal"]})  # noqa: S102 - as Unreal ran it
+    stdout.flush()
+    plain, plain_flushes = list(entries), len(flushes)
+    entries.clear()
+    flushes.clear()
+
+    exec(runner_command(SCRIPT, "exec"), {})  # noqa: S102 - the command the editor runs
+
+    # The same entries in the same order, the unfinished last line included;
+    # Unreal flushed its log to disk after every line, the runner once.
+    assert entries == plain
+    assert plain_flushes >= 5 and len(flushes) == 1  # either stream's flush writes the whole log
+    assert sys.stdout is stdout and sys.stderr is stderr
+
+
+def test_a_raise_still_logs_what_was_printed_and_restores_the_streams(unreal_streams: Any) -> None:
+    entries, flushes, stdout, stderr = unreal_streams()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        exec(runner_command("print('before')\nraise RuntimeError('boom')\n", "exec"), {})  # noqa: S102
+
+    assert entries == [("Info", "before\n")] and flushes == ["Info"]
+    assert sys.stdout is stdout and sys.stderr is stderr
+
+
+def test_a_call_that_prints_nothing_does_not_write_the_log(unreal_streams: Any) -> None:
+    entries, flushes, stdout, stderr = unreal_streams()
+
+    assert eval(runner_command("1 + 1", "eval"), {}) == 2  # noqa: S307 - the command the editor runs
+
+    assert entries == [] and flushes == []
+
+
+def test_a_stream_the_script_installs_stays_and_others_are_left_alone(unreal_streams: Any) -> None:
+    entries, flushes, stdout, stderr = unreal_streams()
+    exec(runner_command("import io, sys\nsys.stdout = io.StringIO()\n", "exec"), {})  # noqa: S102
+
+    assert isinstance(sys.stdout, io.StringIO) and sys.stderr is stderr
+    mine = sys.stdout
+    exec(runner_command("print('kept')\n", "exec"), {})  # noqa: S102
+
+    assert mine.getvalue() == "kept\n" and entries == []
+
+
+DETACH = "import io, sys\nsys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')\nprint('mine')\n"
+
+
+def test_a_script_that_rewraps_stdout_succeeds_and_keeps_its_output_in_its_call(unreal_streams: Any) -> None:
+    """Review of #355: after sys.stdout.detach() the swapped stream had no buffer, and the restore raised
+    AttributeError: a call that ran reported a ScriptError, its namespace was not cleared and its output
+    came out in the next call."""
+    entries, flushes, stdout, stderr = unreal_streams()
+    namespace: Dict[str, Any] = {}
+
+    exec(runner_command(DETACH, "exec"), namespace)  # noqa: S102 - must not raise
+
+    assert entries == [("Info", "mine\n")] and len(flushes) == 1
+    # The stream the script installed stays (as the stream a script installs always does).
+    assert sys.stdout is not stdout and sys.stderr is stderr
+    entries.clear()
+    flushes.clear()
+
+    exec(runner_command("import sys\nprint('next')\nsys.stdout.write('tail')\n", "exec"), {})  # noqa: S102
+
+    # The next call's output is its own, and Unreal's log is written once for it.
+    assert entries == [("Info", "next\n"), ("Info", "tail")] and len(flushes) == 1
+
+
+def test_the_namespace_is_cleared_whatever_the_script_did_to_the_streams(unreal_streams: Any) -> None:
+    unreal_streams()
+    sys.modules["unreal"].Probe = Probe  # type: ignore[attr-defined]
+
+    exec(runner_command(DETACH + "sys.stderr = None\npkg = unreal.Probe()\n", "exec"), {})  # noqa: S102
+
+    assert len(Probe.alive) == 0 and sys.stderr is None
+
+
+# -- a path below a route is that route ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "route"),
+    [
+        ("/remote/object/call", "/remote/object/call"),
+        ("/Remote/Object/Call/x?y=1", "/remote/object/call"),
+        ("/remote/object/call/x/y/", "/remote/object/call"),
+        ("/remote/batch/x", "/remote/batch"),
+        ("/remote/preset/Tools/function/RunPython/x", "/remote/preset/tools/function/runpython"),
+        ("/remote/object/callx", "/remote/object/callx"),
+        ("/remote/object/property/x", "/remote/object/property/x"),
+    ],
+)
+def test_remote_route_folds_a_path_below_a_route_into_it(url: str, route: str) -> None:
+    """Re-review of #355: Unreal hands /remote/object/call/x to the object call handler and /remote/batch/x
+    to the batch handler, which never read the rest of the path; simul compared routes exactly."""
+    assert remote_route(url) == route
+
+
+def _library_call(code: str) -> Dict[str, Any]:
+    return {"objectPath": PYTHON_LIBRARY, "functionName": "ExecutePythonCommandEx",
+            "parameters": {"PythonCommand": code, "ExecutionMode": "ExecuteFile"}}
+
+
+@pytest.mark.asyncio
+async def test_python_sent_to_a_path_below_the_object_call_route_runs_in_the_runner() -> None:
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            result = await session.batch_operations([
+                {"URL": "/remote/object/call/x", "Verb": "PUT", "Body": _library_call("print('see setup.py first')")},
+            ])
+
+    assert result.get("success", True) is True, result
+    (request,) = sent
+    (part,) = request["body"]["Requests"]
+    assert unwrap_command(part["Body"]["parameters"]["PythonCommand"]) == ("exec", "print('see setup.py first')", "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "message"),
+    [
+        (
+            {"URL": "/remote/object/call/x", "Verb": "PUT",
+             "Body": {"objectPath": KISMET, "functionName": "ExecuteConsoleCommand",
+                      "parameters": {"WorldContextObject": "", "Command": "py pkg = 1"}}},
+            "py console command",
+        ),
+        (
+            {"URL": "/remote/batch/x", "Verb": "PUT",
+             "Body": {"Requests": [{"RequestId": 7, "URL": "/remote/object/call", "Verb": "PUT",
+                                    "Body": _library_call("pkg = 1")}]}},
+            "a batch cannot contain another",
+        ),
+        (
+            {"URL": "/remote/preset/Tools/function/RunPython/x", "Verb": "PUT",
+             "Body": {"Parameters": {"PythonCommand": "pkg = 1"}}},
+            "passes a PythonCommand",
+        ),
+    ],
+)
+async def test_a_path_below_a_route_is_refused_as_the_route_is(operation: Dict[str, Any], message: str) -> None:
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            result = await session.batch_operations([operation])
+
+    assert (result["success"], result["error_type"]) == (False, "ValidationError")
+    assert message in result["error"] and sent == []
+
+
+@pytest.mark.asyncio
+async def test_raw_python_in_a_batch_nested_below_the_batch_route_is_never_sent() -> None:
+    nested = {"Requests": [{"RequestId": 1, "URL": "/remote/batch/x", "Verb": "PUT", "Body": {"Requests": [
+        {"RequestId": 7, "URL": "/remote/object/call/y", "Verb": "PUT", "Body": _library_call("pkg = 1")}]}}]}
+    async with editor() as (session, fake):
+        async with recording_batch(session) as sent:
+            with pytest.raises(Exception) as raised:
+                await session._http_put("/remote/batch", nested)
+
+    assert raised.value.details["code"] == "python_outside_runner"  # type: ignore[attr-defined]
+    assert sent == []
