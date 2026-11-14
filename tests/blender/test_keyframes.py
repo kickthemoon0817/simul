@@ -16,6 +16,7 @@ functions each version ships.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -1207,12 +1208,16 @@ class TestDeleteKeyframe:
         assert ball.calls == []
 
     def test_reports_a_locked_fcurve(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        ball = keyed_ball(BLENDER_5_0, FCurve("location", 2, 1), locked=True)
+        curve = FCurve("location", 2, 1)
+        curve.lock = True
+        ball = keyed_ball(BLENDER_5_0, curve, locked=True)
         session = session_on(monkeypatch, BLENDER_5_0, ball)
         with pytest.raises(
-            ValueError, match=r"no keyframe on location\[2\] at frame 1 .* locked"
-        ):
+            blender_runtime.ValidationError,
+            match=r"location\[2\] at frame 1 is on a locked F-curve",
+        ) as refused:
             session.delete_keyframe("Ball", "location", 1, index=2)
+        assert refused.value.details["code"] == "KeyframeLocked"
         assert channel_summary(session.get_keyframes("Ball")) == [
             ("location", 2, 1, [1, 1])
         ]
@@ -1783,3 +1788,126 @@ class TestInsertKeyframes:
             session.insert_keyframes("Ball", [{}], interpolation="SMOOTH")
         with pytest.raises(ValueError, match="Invalid keyframe_type"):
             session.insert_keyframes("Ball", [{}], keyframe_type="KEY")
+
+
+# -- round 2 of the audit: key values, sub-frame deletion, missing things ------------
+
+
+class TestKeyValuesFitAnFCurve:
+    """m-1: NaN was keyed as NaN and inf as 3.4e38; a key value must be finite and fit float32."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [[math.nan, 0.0, 0.0], [math.inf, 0.0, 0.0], [1e39, 0.0, 0.0], [0.0, -3.5e38, 0.0]],
+        ids=["nan", "inf", "1e39", "-3.5e38"],
+    )
+    def test_insert_keyframe_refuses_the_value_before_keying(
+        self, monkeypatch: pytest.MonkeyPatch, value: List[float]
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0)
+        ball.location = [1.0, 2.0, 3.0]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        with pytest.raises(ValueError, match="is not a finite number of at most 3.402823e"):
+            session.insert_keyframe("Ball", "location", 10, value=value)
+
+        assert ball.calls == []
+        assert ball.location == [1.0, 2.0, 3.0]
+
+    def test_insert_keyframes_refuses_the_value_before_keying(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        channel = {"data_path": "location", "index": 0, "frames": [1, 2], "values": [math.nan, 1]}
+
+        with pytest.raises(ValueError, match=r"channels\[0\]: .*nan is not a finite number"):
+            session.insert_keyframes("Ball", [channel])
+
+        assert ball.calls == []
+
+    def test_the_largest_float32_is_keyed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        session.insert_keyframe("Ball", "location", 10, index=0, value=3.4028234663852886e38)
+
+        assert channel_summary(session.get_keyframes("Ball")) == [("location", 0, 1, [10, 10])]
+
+    @pytest.mark.parametrize("value", [math.nan, math.inf, [0.0, math.nan, 0.0]])
+    def test_the_request_models_refuse_non_finite_values(self, value: Any) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
+        from simul.mcp.schemas.blender import (
+            BlenderInsertKeyframeRequest,
+            BlenderKeyframeChannelData,
+        )
+
+        with pytest.raises(PydanticValidationError):
+            BlenderInsertKeyframeRequest(
+                object_name="Ball", data_path="location", frame=1, value=value
+            )
+        with pytest.raises(PydanticValidationError):
+            BlenderKeyframeChannelData(data_path="location", frames=[1], values=[value])
+        with pytest.raises(PydanticValidationError):
+            BlenderKeyframeChannelData(data_path="location", frames=[math.nan], values=[1.0])
+
+
+class TestDeleteKeyframeRound2:
+    def test_deletes_a_sub_frame_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """m-2: frame was an integer, so a key insert_keyframes made at 10.25 could not go."""
+        from simul.mcp.schemas.blender import (
+            BlenderDeleteKeyframeRequest,
+            BlenderDeleteKeyframeResponse,
+        )
+
+        ball = keyed_ball(BLENDER_5_0, FCurve("location", 0, 1, 10.25))
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        request = BlenderDeleteKeyframeRequest(
+            object_name="Ball", data_path="location", frame=10.25, index=0
+        )
+
+        deleted = session.delete_keyframe("Ball", "location", request.frame, index=0)
+
+        assert deleted == {"object_name": "Ball", "data_path": "location", "frame": 10.25}
+        assert BlenderDeleteKeyframeResponse(success=True, **deleted).frame == 10.25
+        assert channel_summary(session.get_keyframes("Ball")) == [("location", 0, 1, [1, 1])]
+        # A whole frame is still reported as one.
+        whole = session.delete_keyframe("Ball", "location", 1.0, index=0)
+        assert whole["frame"] == 1 and isinstance(whole["frame"], int)
+
+    def test_a_missing_key_or_animation_is_not_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """m-6: the error vocabulary's NotFoundError, with details.code."""
+        ball = keyed_ball(BLENDER_5_0, FCurve("location", 0, 1))
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        with pytest.raises(blender_runtime.NotFoundError) as missing:
+            session.delete_keyframe("Ball", "location", 7, index=0)
+        assert missing.value.details == {
+            "code": "keyframe_not_found",
+            "object_name": "Ball",
+            "data_path": "location",
+            "frame": 7,
+        }
+        still = keyed_ball(BLENDER_5_0)
+        still.animation_data = None
+        session = session_on(monkeypatch, BLENDER_5_0, still)
+        with pytest.raises(blender_runtime.NotFoundError) as unanimated:
+            session.delete_keyframe("Ball", "location", 1)
+        assert unanimated.value.details["code"] == "not_animated"
+
+
+def test_a_missing_bone_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """m-6: get_keyframes' bone filter names a bone the armature lacks."""
+    session = session_on(monkeypatch, BLENDER_5_0, rig(BLENDER_5_0, 2))
+
+    with pytest.raises(blender_runtime.NotFoundError, match="has no bone 'B999'") as missing:
+        session.get_keyframes("Rig", bone_name="B999")
+
+    assert missing.value.details == {
+        "code": "bone_not_found",
+        "object_name": "Rig",
+        "bone_name": "B999",
+    }

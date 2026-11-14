@@ -581,7 +581,7 @@ def test_physics_state_does_not_step_past_the_work_budget(
     for index in range(10):
         _body(scene, "Drop" if index == 0 else f"B{index}")
     _, session = blender(scene)
-    monkeypatch.setattr(blender_runtime.BlenderRuntimeSession, "_STEP_WORK_BUDGET", 400)
+    monkeypatch.setattr(blender_runtime.BlenderRuntimeSession, "_STEP_SECONDS_BUDGET", 0.01)
     scene.frame_set(100)
     scene.frames.clear()
 
@@ -589,7 +589,48 @@ def test_physics_state_does_not_step_past_the_work_budget(
 
     assert scene.frames == []
     assert state["pose_source"] == "unknown"
-    assert "exceeds 400 body-frames" in state["warning"]
+    assert (
+        "stepping 100 frames of 10 bodies is estimated at 0.1 s, over the 0.01 s of "
+        "simulation a call runs unasked" in state["warning"]
+    )
+
+
+def test_physics_state_does_not_step_while_a_constraint_has_lost_a_body(blender: Any) -> None:
+    """Stepping an outdated cache from its start rebuilds Blender's world, which crashed it
+    with a constraint left pointing at a deleted body; reading the pose as it is stays safe."""
+    scene = _world_scene()
+    drop = _body(scene, "Drop")
+    carrier = SimpleNamespace(
+        name="RBC_Drop_Gone", rigid_body_constraint=SimpleNamespace(object1=drop, object2=None)
+    )
+    scene.rigidbody_world.constraints = SimpleNamespace(all_objects=[carrier])
+    _, session = blender(scene)
+    scene.frame_set(40)
+    scene.frames.clear()
+
+    with pytest.raises(blender_runtime.RefusedOperation, match="step_simulation=false") as refused:
+        session.get_physics_state("Drop")
+
+    assert refused.value.details["constraints"] == ["RBC_Drop_Gone"]
+    assert scene.frames == []
+    assert session.get_physics_state("Drop", step_simulation=False)["pose_source"] == "unknown"
+
+
+def test_physics_state_counts_substeps_toward_the_budget(blender: Any) -> None:
+    """10 bodies over 99 frames fit unless each frame takes 32 767 substeps (172 s)."""
+    scene = _world_scene()
+    for index in range(10):
+        _body(scene, "Drop" if index == 0 else f"B{index}")
+    scene.rigidbody_world.substeps_per_frame = 32_767
+    _, session = blender(scene)
+    scene.frame_set(100)
+    scene.frames.clear()
+
+    state = session.get_physics_state("Drop")
+
+    assert scene.frames == []
+    assert state["pose_source"] == "unknown"
+    assert "is estimated at 171.9 s" in state["warning"]
 
 
 @pytest.mark.parametrize(
@@ -833,3 +874,28 @@ def test_set_world_refuses_invalid_settings_before_changing_anything(
 def test_world_request_bounds(arguments: Dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         BlenderSetRigidBodyWorldRequest(**arguments)
+
+
+def test_physics_state_stepping_stops_at_its_deadline(
+    blender: Any, frozen_clock: List[float]
+) -> None:
+    """Review of #360: whatever the estimate, stepping stops after 22 s and says so."""
+    scene = _world_scene()
+    _body(scene, "Drop")
+    _, session = blender(scene)
+    scene.frame_set(100)
+    scene.frames.clear()
+    stepping = scene.frame_set
+
+    def slow_frame(frame: int) -> None:
+        frozen_clock[0] += 1.0
+        stepping(frame)
+
+    scene.frame_set = slow_frame  # type: ignore[method-assign]
+
+    state = session.get_physics_state("Drop")
+
+    assert scene.frames == [*range(1, 24), 100]
+    assert (state["pose_source"], state["simulated_for_frame"]) == ("unknown", False)
+    assert state["stepped_frames"] == 23
+    assert "stopped at frame 23 after 22 s" in state["warning"]

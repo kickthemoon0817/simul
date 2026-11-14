@@ -1921,7 +1921,7 @@
         "session_calls": [
           {
             "method": "delete_keyframe",
-            "arguments": {"object_name": "'Cube'", "data_path": "'location'", "frame": "10", "index": "-1"}
+            "arguments": {"object_name": "'Cube'", "data_path": "'location'", "frame": "10.0", "index": "-1"}
           }
         ],
         "response": {"checked_against": "BlenderDeleteKeyframeResponse"},
@@ -1932,7 +1932,7 @@
         "session_calls": [
           {
             "method": "delete_keyframe",
-            "arguments": {"object_name": "'Cube'", "data_path": "'location'", "frame": "10", "index": "2"}
+            "arguments": {"object_name": "'Cube'", "data_path": "'location'", "frame": "10.0", "index": "2"}
           }
         ],
         "response": {"checked_against": "BlenderDeleteKeyframeResponse"},

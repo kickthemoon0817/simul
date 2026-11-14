@@ -1004,7 +1004,11 @@ def test_a_bake_over_the_work_budget_needs_allow_long_bake(blender: Any) -> None
         session.bake_simulation(1, 1000)
     session.bake_simulation(1, 1000, allow_long_bake=True)
 
-    assert "1000000 body-frames" in str(refused.value)
+    # 1 000 bodies at 10 substeps and 10 solver iterations: 53 ms a frame.
+    assert "is estimated at 53.0 s" in str(refused.value)
+    assert "1000 rigid bodies at 10 substeps and 10 solver iterations" in str(refused.value)
+    assert refused.value.details["code"] == "BakeOverBudget"
+    assert refused.value.details["frames_that_fit"] == 226
     assert "BLENDER__CONNECTION_TIMEOUT" in str(refused.value)
     assert fake.world.point_cache.is_baked is True
 
@@ -1017,6 +1021,38 @@ def test_a_bake_over_the_frame_budget_needs_allow_long_bake(blender: Any) -> Non
         session.bake_simulation(1, 1_000_000)
 
     assert fake.calls == []
+
+
+@pytest.mark.parametrize("loss", ["deleted", "rigid_body_removed"])
+def test_a_bake_is_refused_while_a_constraint_has_lost_a_body(blender: Any, loss: str) -> None:
+    """A constraint simulated before one of its bodies went points at the freed body, and the
+    bake's restart crashed Blender 5.0.1 in btDiscreteDynamicsWorld::removeConstraint (every
+    time under MallocScribble); Blender clears the constraint's object, which is what shows."""
+    fake, session = blender
+    base, link = fake.body("Base"), fake.body("Link")
+    carrier = fake.add(_object("RBC_Base_Link", "EMPTY"))
+    carrier.rigid_body_constraint = SimpleNamespace(object1=base, object2=link)
+    fake.world.constraints.all_objects.append(carrier)
+    if loss == "deleted":
+        carrier.rigid_body_constraint.object2 = None
+    else:
+        link.rigid_body = None
+
+    with pytest.raises(
+        blender_runtime.RefusedOperation,
+        match="^The bake is refused: .* Save the file first .* may still crash Blender once",
+    ) as refused:
+        session.bake_simulation(1, 50)
+
+    assert refused.value.details == {
+        "code": "ConstraintWithoutBody",
+        "constraints": ["RBC_Base_Link"],
+    }
+    assert fake.calls == [] and fake.world.point_cache.is_baked is False
+    carrier.rigid_body_constraint.object2 = link
+    link.rigid_body = link.rigid_body or _rigid_body("ACTIVE")
+    session.bake_simulation(1, 50)
+    assert fake.world.point_cache.is_baked is True
 
 
 def test_a_small_bake_runs_without_confirmation(blender: Any) -> None:
@@ -1166,3 +1202,34 @@ def test_a_constraint_in_a_hidden_collection_says_where_its_empty_went(
     assert any(
         "constraint empty was created in the scene" in w for w in result["warnings"]
     )
+
+
+# -- review of #360: a deadline the estimate cannot miss ------------------------
+
+
+def test_a_bake_stops_at_its_deadline_and_keeps_what_it_baked(
+    blender: Any, frozen_clock: List[float]
+) -> None:
+    """300 spheres estimated at 1.6 s froze Blender for 50 s past the 30 s timeout. Each
+    frame here takes a second: the bake stops after 22 and bakes frames 1-23."""
+    fake, session = blender
+    fake.body("Drop")
+    stepping = fake.scene.frame_set
+
+    def slow_frame(frame: int) -> None:
+        frozen_clock[0] += 1.0
+        stepping(frame)
+
+    fake.scene.frame_set = slow_frame
+
+    result = session.bake_simulation(1, 100)
+
+    assert result["complete"] is False
+    assert (result["frame_start"], result["frame_end"]) == (1, 23)
+    assert fake.world.point_cache.is_baked is True
+    assert result["warnings"][0].startswith("The bake stopped at frame 23 of 1-100 after")
+    assert "allow_long_bake=true" in result["warnings"][0]
+
+    frozen_clock[0] = 0.0
+    confirmed = session.bake_simulation(1, 100, allow_long_bake=True)
+    assert confirmed["complete"] is True and confirmed["frame_end"] == 100

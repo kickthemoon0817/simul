@@ -597,3 +597,40 @@ class TestDeclarations:
         playback = hints["play_blender_animation"]
         assert (trajectory.read_only, trajectory.idempotent) == (False, True)
         assert (playback.read_only, playback.idempotent) == (False, True)
+
+
+class TestConstraintWithoutBody:
+    """Review of #360: moving from a simulation's first frame to the next crashed Blender
+    5.0.1 once a jointed body was deleted (frame 1 to 2 with set_frame, in the lane's run)."""
+
+    @staticmethod
+    def _broken(scene: Any) -> None:
+        carrier = SimpleNamespace(
+            name="RBC_Base_Link",
+            rigid_body_constraint=SimpleNamespace(object1=None, object2=SimpleNamespace()),
+        )
+        scene.rigidbody_world = SimpleNamespace(
+            enabled=True, constraints=SimpleNamespace(all_objects=[carrier])
+        )
+
+    def test_set_frame_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        session, scene, _ = _blender(monkeypatch)
+        self._broken(scene)
+
+        with pytest.raises(blender_runtime.RefusedOperation, match="^Changing the frame is refused"):
+            session.set_frame(2)
+
+        assert scene.frame_current == 1
+
+    @pytest.mark.parametrize("action", ["play", "reverse"])
+    def test_playback_is_refused_but_stopping_is_not(
+        self, monkeypatch: pytest.MonkeyPatch, action: str
+    ) -> None:
+        session, scene, playback = _blender(monkeypatch)
+        self._broken(scene)
+
+        with pytest.raises(blender_runtime.RefusedOperation, match="^Playback is refused"):
+            session.play_animation(action)
+
+        assert playback.calls == []
+        assert _state(session.play_animation("stop")) == (False, None, False, 1)

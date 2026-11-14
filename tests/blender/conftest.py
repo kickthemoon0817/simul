@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from types import ModuleType
-from typing import Iterator
+from typing import Iterator, List
 
 import pytest
 
@@ -99,3 +99,18 @@ def fbx_parser(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     monkeypatch.setitem(sys.modules, "io_scene_fbx", package)
     monkeypatch.setitem(sys.modules, "io_scene_fbx.parse_fbx", module)
     return module
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> List[float]:
+    """``blender_runtime``'s ``time.monotonic``, which a test moves by hand: ``clock[0] += 1``."""
+    import time as real_time
+    from types import SimpleNamespace
+
+    clock = [0.0]
+    monkeypatch.setattr(
+        blender_runtime,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], strftime=real_time.strftime),
+    )
+    return clock

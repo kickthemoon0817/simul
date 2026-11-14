@@ -526,8 +526,9 @@ def _author_physics(
 ) -> None:
     """Rigid bodies, mass, colliders and physics materials from the objects' metadata.
 
-    ``is_rigid_body``, ``mass_kg`` and ``density`` apply to the object's own
-    prim. ``collider_type`` and the friction/restitution values also apply to
+    ``is_rigid_body`` (with ``is_kinematic``, kinematicEnabled), ``mass_kg``
+    and ``density`` apply to the object's own prim. ``collider_type`` and the
+    friction/restitution values also apply to
     the meshes of descendants that set none of their own, like an inherited
     material binding, so one call on an asset root makes all its meshes collide.
     ``jointed`` holds the prim path pairs a joint joins: a rigid body nested in
@@ -538,6 +539,7 @@ def _author_physics(
 
     meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
     rigid_bodies: List[str] = []
+    kinematic_bodies: List[str] = []
     mass_prims: List[str] = []
     colliders: List[str] = []
     approximations: Dict[str, str] = {}
@@ -584,8 +586,17 @@ def _author_physics(
         physics = _physics(entry)
 
         if _truthy(physics.get("is_rigid_body")):
-            UsdPhysics.RigidBodyAPI.Apply(prim).CreateRigidBodyEnabledAttr(True)
+            body_api = UsdPhysics.RigidBodyAPI.Apply(prim)
+            body_api.CreateRigidBodyEnabledAttr(True)
             rigid_bodies.append(str(prim.GetPath()))
+            if _truthy(physics.get("is_kinematic")):
+                body_api.CreateKinematicEnabledAttr(True)
+                kinematic_bodies.append(str(prim.GetPath()))
+        elif _truthy(physics.get("is_kinematic")):
+            warnings.append(
+                f"{name}: is_kinematic is set but is_rigid_body is not, so no kinematic "
+                "body is exported; set is_rigid_body too"
+            )
         mass = _number(physics.get("mass_kg"), "mass_kg", name, report)
         density = _number(physics.get("density"), "density", name, report)
         if mass is not None or density is not None:
@@ -663,7 +674,11 @@ def _author_physics(
                     "between them"
                 )
         for collider, approximation in approximations.items():
-            if approximation == "none" and Sdf.Path(collider).HasPrefix(path):
+            if (
+                approximation == "none"
+                and body not in kinematic_bodies
+                and Sdf.Path(collider).HasPrefix(path)
+            ):
                 warnings.append(
                     f"{collider}: a triangle-mesh collider (collider_type none/mesh) on the "
                     f"dynamic body {body} is not simulated by PhysX; use convexHull or "
@@ -671,6 +686,7 @@ def _author_physics(
                 )
 
     report["rigid_bodies"] = rigid_bodies
+    report["kinematic_bodies"] = kinematic_bodies
     report["mass_prims"] = mass_prims
     report["colliders"] = colliders
     report["physics_materials"] = sorted(
