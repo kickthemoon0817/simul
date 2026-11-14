@@ -954,6 +954,7 @@ class ExplorationMixin:
             "the framing call reported success; otherwise a warning says why."
         ),
         read_only=False,
+        destructive=True,
         idempotent=True,
     )
     async def focus_isaac_viewport(self, prim_path: str) -> Dict[str, Any]:

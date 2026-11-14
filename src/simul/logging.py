@@ -994,8 +994,9 @@ def current_request_id() -> Optional[str]:
 def note_call_outcome(**fields: Any) -> None:
     """Tell the audit row of the call in progress how it ended.
 
-    Called by the MCP server's envelope with ``status``, ``error_type``,
-    ``agent_id``, ``session`` and ``reason``; a no-op outside a tool call.
+    Called by the MCP server's envelope with ``tool`` (the name the call is
+    recorded under), ``status``, ``error_type``, ``agent_id``, ``session``
+    and ``reason``; a no-op outside a tool call.
     """
     outcome = _CALL_OUTCOME_VAR.get()
     if outcome is not None:
@@ -1065,13 +1066,19 @@ def _tool_call_context(tool_name: str) -> Iterator[Dict[str, Any]]:
                 outcome.setdefault("error_type", derived.get("error_type"))
             if status == "cancelled" and "executed" not in outcome:
                 outcome["executed"] = "unknown"
+            # The envelope names the call as its usage row does: a tool that
+            # is not registered is <unknown tool>, the name given kept aside.
+            recorded_tool = str(outcome.get("tool") or tool_name)
             try:
                 emit_audit(
-                    tool=tool_name,
+                    tool=recorded_tool,
                     request_id=request_id,
                     duration_ms=duration_ms,
                     status=status,
                     error_class=error_class,
+                    extra=(
+                        {"requested_tool": tool_name} if recorded_tool != tool_name else None
+                    ),
                     error_type=outcome.get("error_type"),
                     agent_id=outcome.get("agent_id"),
                     session=outcome.get("session"),

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ._pxr import Usd, UsdGeom, UsdShade
+from .pxr_errors import bound_material_path
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import monitor_performance
@@ -68,6 +69,7 @@ class MeshInfo:
     sampled_time_range: Optional[List[float]] = None
     note: Optional[str] = None
     consistently_oriented: Optional[bool] = None
+    warnings: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -474,22 +476,24 @@ def mesh_attributes(mesh: UsdGeom.Mesh) -> MeshAttributes:
     return MeshAttributes(normals_source, uv_sets, has_colors, has_tangents)
 
 
-def bound_material(prim: Usd.Prim, purpose: str = "") -> Optional[str]:
-    """Path of the material ``UsdShade.MaterialBindingAPI`` resolves for ``prim``, or None."""
-    api = UsdShade.MaterialBindingAPI(prim)
-    material, _relationship = (
-        api.ComputeBoundMaterial(purpose) if purpose else api.ComputeBoundMaterial()
-    )
-    return material.GetPath().pathString if material else None
+def bound_material(
+    prim: Usd.Prim, purpose: str = "", problems: Optional[List[Dict[str, Any]]] = None
+) -> Optional[str]:
+    """Path of the material ``UsdShade.MaterialBindingAPI`` resolves for ``prim``, or None.
+
+    A binding pxr cannot resolve (a ``material:binding`` authored as an
+    attribute) is None, with a warning in ``problems``.
+    """
+    return bound_material_path(prim, purpose, problems)
 
 
-def physics_material(prim: Usd.Prim) -> Optional[str]:
+def physics_material(prim: Usd.Prim, problems: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
     """The material bound for physics, when it carries ``PhysicsMaterialAPI``.
 
     A ``physics`` binding falls back to the all-purpose (visual) binding, which
     only counts as a physics material when it has physics properties.
     """
-    path = bound_material(prim, "physics")
+    path = bound_material(prim, "physics", problems)
     if path is None:
         return None
     material = prim.GetStage().GetPrimAtPath(path)
@@ -646,8 +650,9 @@ class MeshOperations(LoggerMixin):
                     "faces' vertex order to measure it."
                 )
         attributes = mesh_attributes(mesh)
-        subsets = self._get_geometry_subsets(mesh_prim)
-        own_material = bound_material(mesh_prim)
+        problems: List[Dict[str, Any]] = []
+        subsets = self._get_geometry_subsets(mesh_prim, problems=problems)
+        own_material = bound_material(mesh_prim, problems=problems)
         materials = [own_material] if own_material else []
         for subset in subsets:
             if subset.get("material") and subset["material"] not in materials:
@@ -674,12 +679,13 @@ class MeshOperations(LoggerMixin):
             subsets=subsets,
             normals_source=attributes.normals_source,
             uv_sets=attributes.uv_sets,
-            physics_material=physics_material(mesh_prim),
+            physics_material=physics_material(mesh_prim, problems),
             points_time_samples=mesh.GetPointsAttr().GetNumTimeSamples(),
             time_code=time_code_value(time),
             measured=not unsampled,
             sampled_time_range=sampled_range,
             note=note,
+            warnings=problems,
         )
 
     # The helpers below take arrays as the per-face implementation did and run
@@ -721,7 +727,10 @@ class MeshOperations(LoggerMixin):
         return [material] if material else []
 
     def _get_geometry_subsets(
-        self, mesh_prim: Usd.Prim, index_preview: int = DEFAULT_ARRAY_PREVIEW
+        self,
+        mesh_prim: Usd.Prim,
+        index_preview: int = DEFAULT_ARRAY_PREVIEW,
+        problems: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Describe the mesh's GeomSubset children, with each material subset's bound material.
 
@@ -746,7 +755,7 @@ class MeshOperations(LoggerMixin):
             if indices.get("truncated"):
                 entry['indices_truncated'] = True
             if family == UsdShade.Tokens.materialBind:
-                entry['material'] = bound_material(child)
+                entry['material'] = bound_material(child, problems=problems)
             subsets.append(entry)
         return subsets
 
@@ -782,6 +791,7 @@ def mesh_info_to_dict(info: MeshInfo) -> Dict[str, Any]:
         "measured": info.measured,
         "sampled_time_range": info.sampled_time_range,
         "note": info.note,
+        "warnings": info.warnings,
     }
 
 

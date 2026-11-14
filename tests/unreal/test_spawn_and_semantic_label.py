@@ -22,6 +22,7 @@ import ast
 import io
 import json
 import logging
+import re
 import sys
 import traceback
 from contextlib import asynccontextmanager, contextmanager, redirect_stdout
@@ -33,13 +34,16 @@ import pytest
 from aiohttp import web
 from fastmcp import Client
 
-from simul.adapters.unreal_runtime import (
-    UnrealRuntimeSession,
-    _exponential_regex_construct,
-)
+from simul.adapters.unreal_runtime import UnrealRuntimeSession
 from simul.config import Settings
 from simul.mcp.server import SimulMCPServer
-from simul.utils.regex_guard import RegexRefused
+from simul.utils.regex_guard import (
+    UNREAL_TAG_LENGTH,
+    RegexRefused,
+)
+from simul.utils.regex_guard import (
+    exponential_regex_construct as _exponential_regex_construct,
+)
 
 PYTHON_LIBRARY = "/Script/PythonScriptPlugin.Default__PythonScriptLibrary"
 ACTOR_SUBSYSTEM = "/Script/UnrealEd.Default__EditorActorSubsystem"
@@ -837,14 +841,9 @@ async def test_semantic_label_lookup_counts_matches_past_max_results(
     [
         ({"match_mode": "fuzzy"}, "match_mode must be one of exact, contains, regex"),
         ({"label": "chair(", "match_mode": "regex"}, "not a valid regular expression"),
-        (
-            {"label": r"^(\w+)+_light$", "match_mode": "regex"},
-            "a quantifier inside a repeated group",
-        ),
-        (
-            {"label": "(a|ab)*c", "match_mode": "regex"},
-            "alternatives inside a repeated group",
-        ),
+        # re backtracks on it, and the linear-time search has no atomic group.
+        ({"label": r"(?>a+)+b", "match_mode": "regex"}, "an atomic group, which the linear-time search"),
+        ({"label": "x" * 513, "match_mode": "regex"}, "at most 512 are searched"),
         ({"max_results": 0}, "max_results must be between 1 and 5000"),
         ({"offset": -1}, "offset must be 0 or more"),
     ],
@@ -875,11 +874,12 @@ async def test_semantic_label_lookup_refuses_bad_input_before_any_request(
         (r"(ab{2})+", False),
     ],
 )
-def test_regex_mode_refuses_only_repeated_groups_that_can_split_a_tag(
+def test_the_bound_flags_only_repeated_groups_that_can_split_a_tag(
     pattern: str, refused: bool
 ) -> None:
-    """The search runs on the editor's game thread, where nothing interrupts
-    it. A failing search for a repeated group that can match the same text in
+    """Which patterns re may search (the others go to the linear-time search).
+
+    A failing search for a repeated group that can match the same text in
     several ways tries every split of the tag: ^(\\w+)+_light$ takes over a
     second on a 26-character tag and doubles with each further character."""
     assert (_exponential_regex_construct(pattern) is not None) is refused
@@ -889,38 +889,69 @@ def test_regex_mode_refuses_only_repeated_groups_that_can_split_a_tag(
 @pytest.mark.parametrize(
     "label",
     [
-        # Review: the guard analysed these case-sensitively for 255 characters,
-        # while the editor compiles with IGNORECASE and tags reach 1023: A*a*A*x
-        # took 191 s on one tag, [A-Z]*[a-z]*[A-Z]*[a-z]*x 82 s.
+        # re backtracks on each for long on a 1023-character tag under
+        # IGNORECASE (A*a*A*x took 191 s on one tag, [A-Z]*[a-z]*[A-Z]*[a-z]*x
+        # 82 s): refused until round 2, now searched in time linear in the tag,
+        # as Blender's add-on searches object names.
         "A*a*A*x",
         "[A-Z]*[a-z]*[A-Z]*[a-z]*x",
         ".*.*x",
         ".*a.*a.*x",
         r".*(.*)?(.*)?.*x",
         r"[a-z]*[0-9]*[a-z]*[0-9]*[a-z]*x",
+        r"^(\w+)+_light$",
+        "(a|ab)*c",
+        # re bounds these.
+        r"^chair_\d+$",
+        r".*leg.*",
+        r"left.*front",
+        r"^(?:left|right)_arm$",
     ],
 )
-async def test_semantic_label_regex_is_guarded_as_the_editor_searches_it(label: str) -> None:
-    session = UnrealRuntimeSession(Settings())
-    session._execute_python = AsyncMock()
-
-    with pytest.raises(RegexRefused) as refused:
-        await session.get_actor_by_semantic_label(label=label, match_mode="regex")
-    session._execute_python.assert_not_called()
-    assert refused.value.error_type == "ValidationError"
-    assert refused.value.details["code"] == "regex_backtracking"
-    assert "1023-character" in str(refused.value)
-    assert "contains mode" in str(refused.value)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("label", [r"^chair_\d+$", r".*leg.*", r"left.*front", r"^(?:left|right)_arm$"])
-async def test_semantic_label_regex_that_is_bounded_reaches_the_editor(label: str) -> None:
+async def test_semantic_label_regex_reaches_the_editor_with_the_matcher(label: str) -> None:
     session = UnrealRuntimeSession(Settings())
     session._execute_json_script = AsyncMock(return_value={"actors": []})
 
     await session.get_actor_by_semantic_label(label=label, match_mode="regex")
-    session._execute_json_script.assert_awaited_once()
+
+    (script,), _ = session._execute_json_script.await_args
+    assert "def simul_regex_guard():" in script and f"'tag_length': {UNREAL_TAG_LENGTH}" in script
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        (r"(\w+)+_leg$", ["leg"]),
+        (".*c.*h.*r", ["chair", "leg"]),
+        ("^(w|wo)+od$", ["leg"]),
+        ("(t|ta)*ble", ["table"]),
+    ],
+)
+async def test_a_pattern_re_would_backtrack_on_is_searched_in_linear_time_in_the_editor(
+    editor: Editor, label: str, expected: List[str]
+) -> None:
+    """Round 2: the editor ran Python's re, so these were refused; Blender searched them already."""
+    assert _exponential_regex_construct(label, re.IGNORECASE, UNREAL_TAG_LENGTH) is not None
+    actors = tag_level(editor)
+    async with remote_control(editor) as rc:
+        payload = await call_tool(
+            rc.settings, "get_unreal_actor_by_semantic_label", {"label": label, "match_mode": "regex"}
+        )
+
+    assert payload["success"] is True, payload
+    assert [entry["path"] for entry in payload["actors"]] == [actors[key].path for key in expected]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_pattern_never_reaches_the_editor() -> None:
+    session = UnrealRuntimeSession(Settings())
+    session._execute_python = AsyncMock()
+
+    with pytest.raises(RegexRefused) as refused:
+        await session.get_actor_by_semantic_label(label=r"(?>\w+)+_light", match_mode="regex")
+    session._execute_python.assert_not_called()
+    assert (refused.value.error_type, refused.value.details["code"]) == ("ValidationError", "regex_backtracking")
 
 
 # ---------------------------------------------------------------------------

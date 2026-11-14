@@ -239,10 +239,11 @@ def test_each_tool_call_leaves_one_audit_record(
         audit_logger.setLevel(previous_level)
 
     audits = [record.audit for record in records if hasattr(record, "audit")]
-    assert [audit["tool"] for audit in audits] == [
-        "ping_isaac",
-        "no_such_tool",
-        "ping_isaac",
+    # An unknown tool is named as in its usage row, the name given kept aside.
+    assert [(audit["tool"], audit.get("extra")) for audit in audits] == [
+        ("ping_isaac", None),
+        ("<unknown tool>", {"requested_tool": "no_such_tool"}),
+        ("ping_isaac", None),
     ]
 
 

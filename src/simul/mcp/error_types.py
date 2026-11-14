@@ -377,6 +377,33 @@ _BPY_ENUM = re.compile(
 _BPY_FIELD = re.compile(r"(?P<field>[A-Za-z_][\w.]{0,127})\s{0,8}=\s{0,8}\w{1,64}:\s{0,8}$")
 _BPY_FIELD_WINDOW = 200
 _QUOTED = re.compile(r"'([^'\\\n]{0,256})'")
+# A tool's own argument check names the parameter first:
+#   stiffness must be >= 0, got -1.0
+#   min_position_iterations (5) exceeds max_position_iterations (2)
+#   Invalid mode 'Foo'. Must be one of [...]
+# Matched at the start only, with bounded runs, so it costs a few characters.
+_LEADING_FIELD = re.compile(
+    r"(?:Invalid|Unknown|Unsupported)\s(?P<named>[a-z_][a-z0-9_]{0,63})\s['\"(]"
+    r"|(?P<field>[a-z_][a-z0-9_]{0,63}(?:\.[a-z_][a-z0-9_]{0,63}){0,4})"
+    r"(?:\s\([^)\n]{0,64}\))?"
+    r"\s(?:must|should|cannot|can't|is\snot|is\srequired|exceeds|has\sto)\b"
+)
+
+
+def field_named_by(message: str) -> Optional[str]:
+    """The parameter a tool's own argument check names at the start of its message, or None.
+
+    Args:
+        message: The ValidationError message (``stiffness must be >= 0``).
+
+    Returns:
+        The parameter (``stiffness``), or None when the message does not
+        start by naming one.
+    """
+    match = _LEADING_FIELD.match(message)
+    if match is None:
+        return None
+    return match.group("named") or match.group("field")
 
 
 def is_known(name: Optional[str]) -> bool:
@@ -548,16 +575,19 @@ def exception_fields(exc: BaseException) -> Dict[str, Any]:
 def errors_from_message(message: str) -> List[Dict[str, Any]]:
     """Describe a ValidationError that has only a message as one ``details.errors`` entry.
 
-    A bpy enum refusal (``enum "BOXX" not found in ('BOX', 'SPHERE')``) also
-    gets its ``field`` when the message names it, the ``constraint`` with the
-    choices, the ``input`` given and the closest choice as ``suggestion``.
+    The entry's ``field`` is the parameter the message starts by naming, as a
+    tool's own argument check words it (``stiffness must be >= 0``,
+    ``Invalid mode 'Foo'``), else None. A bpy enum refusal
+    (``enum "BOXX" not found in ('BOX', 'SPHERE')``) also gets its ``field``
+    when the message names it, the ``constraint`` with the choices, the
+    ``input`` given and the closest choice as ``suggestion``.
 
     Args:
         message: The error message; only its first ``MAX_MESSAGE_CHARS`` are
             read, and kept.
     """
     message = bounded_message(message)
-    entry: Dict[str, Any] = {"field": None, "message": message, "type": "value_error"}
+    entry: Dict[str, Any] = {"field": field_named_by(message), "message": message, "type": "value_error"}
     match = _BPY_ENUM.search(message, 0, MAX_MESSAGE_CHARS)
     if match is not None:
         choices = _QUOTED.findall(match.group("choices"))

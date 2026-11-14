@@ -246,7 +246,10 @@ Hard rules for Claude:
   script JSON through `apply_success_from_error`: an explicit `success` is
   trusted; otherwise an `error` key or any non-null `*_error` key marks the
   call failed. A script reporting a domain failure should emit `error`
-  (or set `success: false`).
+  (or set `success: false`). Agent-authored scripts (`execute_*_script`,
+  `simul isaac|unreal exec`) do not follow that rule: what they print is
+  data, and they fail only by raising or printing `"success": false`
+  (`simul.utils.script_result`, docs/tools.md "Script results").
 - `simul` CLI exit codes: `1` = the operation failed (the JSON payload
   has `success: false` — read it, it's not an infrastructure failure),
   `2` = bad invocation (invalid arguments).

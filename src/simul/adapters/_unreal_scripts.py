@@ -5,8 +5,10 @@ These use the Python API so UObject references and world transforms do not
 depend on Remote Control's property-description wire format.
 """
 
+import hashlib
 import textwrap
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 from ._unreal_errors import (
     ATTACHMENT_NOT_APPLIED,
@@ -1868,8 +1870,46 @@ actor = actor_at(args["actor_path"])
 print(json.dumps(dict(actor_info(actor), **hierarchy(actor, args["listed_children"]), pie_active=pie_active())))
 """)
 
-# Expects ``args`` = {"label", "match_mode", "offset", "max_results",
-# "budget", "listed_children"}. Semantic labels are actor tags. Matching
+
+def regex_searcher_helpers() -> str:
+    """Source defining ``simul_regex_guard()``: ``simul.utils.regex_guard`` as a module in the editor.
+
+    The module's own source, so the editor searches a tag exactly as the
+    session checked the pattern and as Blender's add-on searches a name
+    (``name_searcher``: ``re`` when it bounds the search, else a Thompson-NFA
+    simulation linear in the tag). It is installed in the editor's
+    ``sys.modules`` under a name with the source's digest, once per editor
+    process and source, and needs only the standard library.
+    """
+    global _REGEX_SEARCHER_HELPERS
+    if _REGEX_SEARCHER_HELPERS is None:
+        from ..utils import regex_guard
+
+        source = Path(regex_guard.__file__).read_text(encoding="utf-8")
+        name = "_simul_regex_guard_" + hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+        _REGEX_SEARCHER_HELPERS = f"""
+import sys, types
+
+def simul_regex_guard():
+    module = sys.modules.get({name!r})
+    if type(module) is not types.ModuleType:
+        module = types.ModuleType({name!r})
+        sys.modules[{name!r}] = module
+        try:
+            exec(compile({source!r}, "<simul regex_guard>", "exec"), module.__dict__)
+        except BaseException:
+            sys.modules.pop({name!r}, None)
+            raise
+    return module
+"""
+    return _REGEX_SEARCHER_HELPERS
+
+
+_REGEX_SEARCHER_HELPERS: Optional[str] = None
+
+# Expects ``args`` = {"label", "match_mode", "tag_length", "offset",
+# "max_results", "budget", "listed_children"}, after regex_searcher_helpers in
+# regex mode. Semantic labels are actor tags. Matching
 # ignores case, as Unreal's tag comparison (FName) does: "exact" compares whole
 # tags, "contains" looks for the label inside a tag and "regex" searches each
 # tag for the regular expression. Every match is counted; one page of them,
@@ -1878,11 +1918,13 @@ print(json.dumps(dict(actor_info(actor), **hierarchy(actor, args["listed_childre
 FIND_ACTORS_BY_TAG = ACTOR_HELPERS + SCENE_READ_HELPERS + in_function("""
 label, mode = args["label"], args["match_mode"]
 if mode == "regex":
-    pattern = re.compile(label, re.IGNORECASE)
+    # regex_searcher_helpers' module: re when it bounds the search, else a
+    # search linear in the tag, as Blender's add-on searches object names.
+    search = simul_regex_guard().name_searcher(label, re.IGNORECASE, args["tag_length"], subject="label")
 
 def matches(tag):
     if mode == "regex":
-        return pattern.search(tag) is not None
+        return search(tag)
     if mode == "contains":
         return label.lower() in tag.lower()
     return tag.lower() == label.lower()
@@ -1898,8 +1940,14 @@ print(json.dumps(dict({"actors": entries, "count": len(entries), "total_matches"
                       **world_partition_state({actor.get_path_name() for actor in actors}))))
 """)
 
+#: Most components a scene graph node lists with ``include_components``; its
+#: ``component_count`` counts them all, and ``list_unreal_actor_components``
+#: pages through them.
+GRAPH_COMPONENTS = 50
+
 # Expects ``args`` = {"root_path", "max_depth", "include_components",
-# "class_filter", "include_subclasses", "offset", "max_results", "budget"}.
+# "listed_components", "class_filter", "include_subclasses", "offset",
+# "max_results", "budget"}.
 # The attachment hierarchy of the level actors: an actor's parent is the
 # actor its root component is attached to (get_attach_parent_actor), and an
 # actor attached to nothing, or to an actor the level does not list, is a top
@@ -1916,8 +1964,10 @@ print(json.dumps(dict({"actors": entries, "count": len(entries), "total_matches"
 # kept actor below the root, whatever the page and max_depth. Components, with
 # include_components, are each actor's components with their class and the
 # component of the same actor they are attached to (None for the root and for
-# components that are not scene components). While PIE runs the editor world is
-# read (level_actors) and pie_active says so.
+# components that are not scene components), the first listed_components of
+# them, with component_count counting them all and components_truncated when
+# that is more (an actor with 1,502 components made a 160 KB page). While PIE
+# runs the editor world is read (level_actors) and pie_active says so.
 SCENE_GRAPH = ACTOR_HELPERS + SCENE_READ_HELPERS + in_function("""
 actors = level_actors()
 listed = {actor.get_path_name() for actor in actors}
@@ -1945,14 +1995,15 @@ def kept_children(actor):
 
 def components_of(actor):
     root = actor.root_component
+    found = list(actor.get_components_by_class(unreal.ActorComponent))
     listed_components = []
-    for component in actor.get_components_by_class(unreal.ActorComponent):
+    for component in found[:args["listed_components"]]:
         attach = component.get_attach_parent() if isinstance(component, unreal.SceneComponent) else None
         listed_components.append({
             "name": component.get_name(), "class_name": component.get_class().get_name(),
             "is_root": component == root,
             "attach_parent": attach.get_name() if attach is not None and component != root else None})
-    return listed_components
+    return listed_components, len(found)
 
 def node(actor, depth, max_depth):
     below = kept_children(actor)
@@ -1961,7 +2012,9 @@ def node(actor, depth, max_depth):
     if filtering:
         entry["matches_filter"] = matches_class(actor.get_class())
     if args["include_components"]:
-        entry["components"] = components_of(actor)
+        entry["components"], entry["component_count"] = components_of(actor)
+        if entry["component_count"] > len(entry["components"]):
+            entry["components_truncated"] = True
     if depth < max_depth:
         entry["children"] = [node(child, depth + 1, max_depth) for child in below]
     elif below:

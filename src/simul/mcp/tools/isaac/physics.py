@@ -622,6 +622,7 @@ class PhysicsMixin:
         name="add_isaac_rigid_body",
         description="Apply RigidBodyAPI to a prim, optionally making it kinematic.",
         read_only=False,
+        destructive=True,
     )
     async def add_isaac_rigid_body(
         self,
@@ -671,6 +672,7 @@ class PhysicsMixin:
             "when there is no geometry."
         ),
         read_only=False,
+        destructive=True,
     )
     async def add_isaac_collision(
         self,
@@ -886,6 +888,7 @@ class PhysicsMixin:
             "configure_isaac_physics_scene."
         ),
         read_only=False,
+        destructive=True,
         idempotent=True,
     )
     async def create_isaac_physics_scene(

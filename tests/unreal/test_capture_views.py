@@ -238,6 +238,7 @@ class Editor:
         self.shots.mkdir(parents=True)
         self.pie: Optional[str] = None  # None, "play" or "simulate"
         self.panes_drawing = 1
+        self.shots_unfinished = False
         self.noise = False
         self.counter = 0
         self.commands: List[Tuple[str, str]] = []
@@ -331,8 +332,16 @@ class Editor:
     # -- HighResShot ------------------------------------------------------------
 
     def next_shot(self) -> str:
-        self.counter += 1
-        return str(self.shots / f"HighresScreenshot{self.counter:05d}.png")
+        """FFileHelper::GenerateNextBitmapFilename: after the last number while its file is there,
+        else the first free one, so a number whose PNG was removed is given again."""
+        def numbered(index: int) -> Path:
+            return self.shots / f"HighresScreenshot{index:05d}.png"
+
+        index = self.counter + 1 if numbered(self.counter).exists() else 0
+        while numbered(index).exists():
+            index += 1
+        self.counter = index
+        return str(numbered(index))
 
     def shot_target(self, command: str, viewport: Tuple[int, int]) -> Tuple[str, Tuple[int, int]]:
         """Where a HighResShot writes, and at what size: ``filename=`` names the file, else it is numbered."""
@@ -343,6 +352,10 @@ class Editor:
 
     def high_res_shot(self, command: str, color: Tuple[int, int, int], viewport: Tuple[int, int]) -> None:
         path, size = self.shot_target(command, viewport)
+        if self.shots_unfinished:
+            # A shot still being written: the PNG has no IEND chunk yet.
+            Path(path).write_bytes(b"\x89PNG\r\n\x1a\n")
+            return
         write_png(path, size, color, noise=self.noise)
 
     def editor_console_command(self, command: str) -> None:
@@ -829,8 +842,9 @@ async def test_a_png_over_the_inline_cap_is_inlined_as_jpeg_or_as_a_scaled_copy(
     assert png_images == [] and "pass format \"jpeg\", or pass inline_max_size" in png["inline_skipped"]
     assert png["size_bytes"] > unreal_runtime.MAX_INLINE_CAPTURE_BYTES
     assert jpeg["path"].endswith(".jpg") and jpeg["format"] == "jpeg"
-    # The JPEG replaces the PNG HighResShot wrote.
-    assert not Path(jpeg["path"]).with_suffix(".png").exists()
+    # The JPEG replaces the PNG HighResShot wrote, whose number Unreal then
+    # gave the next shot; the JPEG keeps its own name.
+    assert scaled["path"] == re.sub(r"_[0-9a-f]+\.jpg$", ".png", jpeg["path"])
     assert jpeg_images[0].mime_type == "image/jpeg" and jpeg["size_bytes"] < png["size_bytes"]
     with Image.open(jpeg["path"]) as written:
         assert (written.format, written.size) == ("JPEG", (640, 360))
@@ -839,6 +853,89 @@ async def test_a_png_over_the_inline_cap_is_inlined_as_jpeg_or_as_a_scaled_copy(
         assert copy.size == (160, 90)
     with Image.open(scaled["path"]) as full:
         assert full.size == (640, 360)
+
+
+@pytest.mark.asyncio
+async def test_a_later_jpeg_capture_never_overwrites_an_earlier_ones_file(editor: Editor) -> None:
+    """Round 2, live on UE 5.7.4: the JPEG conversion removed HighresScreenshot00004.png, Unreal numbered
+    the next shot 00004 again, and its JPEG replaced the earlier capture's HighresScreenshot00004.jpg."""
+    request = {"resolution_x": 64, "resolution_y": 36, "format": "jpeg", "view": "editor"}
+    async with remote_control(editor) as settings:
+        first, _ = await call_tool(settings, "capture_unreal_viewport", request)
+        kept = Path(first["path"]).read_bytes()
+        second, _ = await call_tool(settings, "capture_unreal_viewport", {**request, "resolution_x": 32,
+                                                                          "resolution_y": 18})
+
+    assert first["success"] is True and second["success"] is True, (first, second)
+    # Both shots had the same number; each JPEG has its own name.
+    numbers = {Path(capture["path"]).name.split("_")[0] for capture in (first, second)}
+    assert numbers == {"HighresScreenshot00000"}
+    assert first["path"] != second["path"] and Path(first["path"]).read_bytes() == kept
+    with Image.open(second["path"]) as image:
+        assert image.size == (32, 18)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("begun", [False, True])
+async def test_a_shot_past_the_deadline_says_where_unreal_may_still_write_it(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, begun: bool
+) -> None:
+    """Round 2: a 16384x16384 shot ran past the fixed 15 s deadline, the error carried no pending_path,
+    and Unreal wrote the file minutes later."""
+    monkeypatch.setattr(unreal_runtime, "_CAPTURE_BASE_SECONDS", 0.3)
+    editor.panes_drawing = 1 if begun else 0
+    editor.shots_unfinished = begun
+    request = {"resolution_x": 64, "resolution_y": 36, "view": "editor", "format": "jpeg"}
+    async with remote_control(editor) as settings:
+        late, _ = await call_tool(settings, "capture_unreal_viewport", request)
+
+    assert (late["success"], late["error_type"]) == (False, "CaptureError")
+    assert "cannot cancel the shot" in late["error"] and "as a PNG" in late["error"]
+    details = late["details"]
+    assert details["pending_dir"].rstrip("/") == str(editor.shots) and details["deadline_s"] == 0.3
+    assert details["pending_path"] == (str(editor.shots / "HighresScreenshot00000.png") if begun else None)
+    assert sys.modules[CAPTURE_LOCK_MODULE].owner is None
+
+
+@pytest.mark.asyncio
+async def test_a_poll_the_editor_runs_after_the_call_gave_up_leaves_the_png(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #355: polls queued while the editor rendered ran after the call had failed, converted the late
+    shot to this call's JPEG and deleted the PNG the error named (HighresScreenshot00003_<token>.jpg, live)."""
+    monkeypatch.setattr(unreal_runtime, "_CAPTURE_BASE_SECONDS", 0.3)
+    editor.shots_unfinished = True
+    polls: List[str] = []
+    run_python = editor.run_python
+
+    def recording(code: str) -> Dict[str, Any]:
+        if "size_wanted" in script_source(code):
+            polls.append(code)
+        return run_python(code)
+
+    editor.run_python = recording  # type: ignore[method-assign]
+    request = {"resolution_x": 64, "resolution_y": 36, "view": "editor", "format": "jpeg"}
+    async with remote_control(editor) as settings:
+        late, _ = await call_tool(settings, "capture_unreal_viewport", request)
+    assert late["error_type"] == "CaptureError" and polls
+
+    # The shot lands; a poll that was queued behind it runs, before the call's lock release would.
+    png = editor.shots / "HighresScreenshot00000.png"
+    write_png(str(png), (64, 36), EDITOR_BLUE)
+    token = re.search(r"lock\.owner == '([0-9a-f]+)'", script_source(polls[-1]))[1]  # type: ignore[index]
+    sys.modules[CAPTURE_LOCK_MODULE].owner = token
+    reply = run_python(polls[-1])
+
+    assert png.exists() and not list(editor.shots.glob("*.jpg"))
+    shown = json.loads(reply["LogOutput"][-1]["Output"].split("@@SIMUL_SCREENSHOT@@", 1)[1])
+    assert (shown["path"], shown["pending"]) == ("", str(png))
+
+
+def test_the_capture_deadline_grows_with_the_pixels() -> None:
+    assert unreal_runtime.capture_deadline(None) == 15.0
+    assert unreal_runtime.capture_deadline((1920, 1080)) == pytest.approx(15.52, abs=0.01)
+    # 16384x16384 took 24 s on UE 5.7.4, 30 s as JPEG.
+    assert unreal_runtime.capture_deadline((16384, 16384)) == pytest.approx(82.1, abs=0.1)
 
 
 @pytest.mark.asyncio

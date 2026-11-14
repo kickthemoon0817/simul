@@ -45,6 +45,12 @@ def apply_success_from_error(payload: dict[str, Any]) -> dict[str, Any]:
       - Otherwise, set ``success`` to ``True`` iff ``error`` and every key
         ending in ``_error`` are absent or ``None``.
 
+    The rule is for payloads simul builds, whose scripts emit those keys on
+    purpose. What an agent's own script prints (``execute_*_script``, the
+    ``exec`` commands) is data, so those tools set ``success`` themselves
+    first (``simul.utils.script_result.apply_script_success``) and this
+    helper leaves it alone.
+
     Returns the same dict for chaining; mutation is in place because
     every caller already has the dict in hand.
     """

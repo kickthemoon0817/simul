@@ -14,12 +14,16 @@ kinds of lock before a call starts:
 
 - an access lock for the whole backend: any number of reads at once, or one
   write (``create_prim``, ``update_prim_attributes``, ``delete_prim``, and
-  ``load_usd_file`` and ``reload_usd_stage``, which may reread a shared
-  layer in place) alone. Callers queue in arrival order, so a waiting write
-  is not starved by a stream of reads;
+  ``load_usd_file`` and ``reload_usd_stage`` when they reread files, since
+  a shared layer may be reread in place) alone. Callers queue in arrival
+  order, so a waiting write is not starved by a stream of reads;
 - a lock per stage, held by every other call bound to that stage. Reads on
   one stage share per-stage state that is not thread-safe, such as its
-  bounding-box cache.
+  bounding-box cache;
+- a lock per file, held by a call that writes that file (``save_usd_stage``
+  on the stage's own file, ``export_usd_stage`` on its destination), so two
+  saves of one file from different stages, or a save and an export to it,
+  run one after the other and the second sees the first's write.
 
 A call waits at most ``server.timeout`` seconds for its locks and otherwise
 fails with ``StageBusy``, so nothing queues forever behind a slow call.
@@ -137,27 +141,36 @@ class USDCallScheduler:
     def __init__(self, wait_timeout: float) -> None:
         self._wait_timeout = float(wait_timeout)
         self._access = _AccessLock()
-        # Per-stage lock and the number of calls holding or waiting for it;
-        # the entry goes once that reaches zero, so ids that name no stage
-        # leave nothing behind.
+        # Per-stage and per-file locks, each with the number of calls holding
+        # or waiting for it; an entry goes once that reaches zero, so ids and
+        # paths that name nothing leave nothing behind.
         self._stage_locks: Dict[str, List[Any]] = {}
+        self._file_locks: Dict[str, List[Any]] = {}
 
     @property
     def wait_timeout(self) -> float:
         return self._wait_timeout
 
-    def _claim_stage_lock(self, stage_key: str) -> asyncio.Lock:
-        entry = self._stage_locks.get(stage_key)
+    @staticmethod
+    def _claim(locks: Dict[str, List[Any]], key: str) -> asyncio.Lock:
+        entry = locks.get(key)
         if entry is None:
-            entry = self._stage_locks[stage_key] = [asyncio.Lock(), 0]
+            entry = locks[key] = [asyncio.Lock(), 0]
         entry[1] += 1
         return entry[0]
 
-    def _drop_stage_lock(self, stage_key: str) -> None:
-        entry = self._stage_locks[stage_key]
+    @staticmethod
+    def _unclaim(locks: Dict[str, List[Any]], key: str) -> None:
+        entry = locks[key]
         entry[1] -= 1
         if entry[1] == 0:
-            del self._stage_locks[stage_key]
+            del locks[key]
+
+    def _claim_stage_lock(self, stage_key: str) -> asyncio.Lock:
+        return self._claim(self._stage_locks, stage_key)
+
+    def _drop_stage_lock(self, stage_key: str) -> None:
+        self._unclaim(self._stage_locks, stage_key)
 
     async def run(
         self,
@@ -166,8 +179,12 @@ class USDCallScheduler:
         *,
         stage_key: Optional[str] = None,
         writes: bool = False,
+        file_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run ``work`` on a worker thread once its locks are held.
+
+        Locks are taken in one order (backend, stage, file) and a call holds
+        at most one of each, so two calls cannot wait on each other.
 
         Args:
             tool_name: The tool, for the busy message and the log.
@@ -175,7 +192,9 @@ class USDCallScheduler:
             stage_key: The stage the call is bound to, or None for a call
                 that touches no loaded stage.
             writes: Whether the call edits a stage. A write runs alone, so it
-                needs no stage lock.
+                needs no stage or file lock.
+            file_key: The file the call writes (``stage_files.file_identity``), or None.
+                Calls writing one file run one at a time.
 
         Returns:
             The payload ``work`` returned, or a ``StageBusy`` envelope when the
@@ -194,32 +213,47 @@ class USDCallScheduler:
                 + ". Retry shortly.",
                 waited_seconds=self._wait_timeout,
             )
-        key = stage_key if stage_key is not None and not writes else None
-        stage_lock = self._claim_stage_lock(key) if key is not None else None
+        held: List[Tuple[Dict[str, List[Any]], str, asyncio.Lock]] = []
 
         def release() -> None:
-            if key is not None and stage_lock is not None:
-                stage_lock.release()
-                self._drop_stage_lock(key)
+            for locks, key, lock in reversed(held):
+                lock.release()
+                self._unclaim(locks, key)
+            held.clear()
             self._access.release(writes)
 
-        if stage_lock is not None and key is not None:
+        wanted = [] if writes else [
+            (self._stage_locks, stage_key, "stage"),
+            (self._file_locks, file_key, "file"),
+        ]
+        for locks, key, kind in wanted:
+            if key is None:
+                continue
+            lock = self._claim(locks, key)
             try:
-                acquired = await self._acquire_stage(stage_lock, max(deadline - loop.time(), 0.0))
+                acquired = await self._acquire_stage(lock, max(deadline - loop.time(), 0.0))
             except BaseException:
-                self._drop_stage_lock(key)
-                self._access.release(writes)
+                self._unclaim(locks, key)
+                release()
                 raise
             if not acquired:
-                self._drop_stage_lock(key)
-                self._access.release(writes)
+                self._unclaim(locks, key)
+                release()
+                if kind == "stage":
+                    return stage_busy(
+                        f"Stage {key!r} is busy with another call (a slow call, or one "
+                        f"whose client gave up, is still running); {tool_name} waited "
+                        f"{self._wait_timeout:g} s. Retry shortly.",
+                        stage_id=key,
+                        waited_seconds=self._wait_timeout,
+                    )
                 return stage_busy(
-                    f"Stage {key!r} is busy with another call (a slow call, or one "
-                    f"whose client gave up, is still running); {tool_name} waited "
+                    f"Another call is writing the same file; {tool_name} waited "
                     f"{self._wait_timeout:g} s. Retry shortly.",
-                    stage_id=key,
+                    file_key=key,
                     waited_seconds=self._wait_timeout,
                 )
+            held.append((locks, key, lock))
 
         try:
             future = loop.run_in_executor(None, work)
@@ -233,7 +267,10 @@ class USDCallScheduler:
                 "%s was cancelled; its pxr work finishes in the background and keeps "
                 "%s locked until then",
                 tool_name,
-                f"stage {key!r}" if key else "the USD backend",
+                ", ".join(
+                    f"stage {key!r}" if locks is self._stage_locks else key for locks, key, _ in held
+                )
+                or "the USD backend",
             )
             raise
         finally:

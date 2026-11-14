@@ -273,7 +273,7 @@
         },
         "required": ["agent_control"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_info": {
@@ -304,7 +304,7 @@
           }
         }
       },
-      "annotations": {"readOnlyHint": false, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "list_blender_scene_objects": {
@@ -581,7 +581,7 @@
         },
         "required": ["location", "rotation_euler"]
       },
-      "annotations": {"readOnlyHint": false, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_camera_info": {
@@ -626,7 +626,7 @@
         },
         "required": ["object_name"]
       },
-      "annotations": {"readOnlyHint": false, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_viewport_info": {
@@ -640,7 +640,7 @@
     "capture_blender_viewport_sequence": {
       "name": "capture_blender_viewport_sequence",
       "title": "Capture Blender Viewport Sequence",
-      "description": "Capture a frame range as JPEG files, each made like capture_blender_viewport with the same method and camera_name (the 3D View when attached, a camera render in embedded mode), and return their paths: frames [{frame, file_path}], output_dir (default a new folder in the sandbox's capture directory), width and height. end_frame must not be before start_frame. One call captures at most max_frames (default 50, at most 100) and starts no frame after 10 s, since Blender is busy meanwhile; then complete is false and next_start_frame says where to continue. In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured images.",
+      "description": "Capture a frame range as JPEG files, each made like capture_blender_viewport with the same method and camera_name (the 3D View when attached, a camera render in embedded mode), and return their paths: frames [{frame, file_path}], output_dir (default a new folder in the sandbox's capture directory), width and height. end_frame must not be before start_frame. One call captures at most max_frames (default 50, at most 100) and starts no frame after 10 s, since Blender is busy meanwhile; then complete is false and next_start_frame says where to continue. Frame files already in output_dir with the same numbers are replaced. Each frame is a frame change, so frame-change handlers run and an unbaked rigid-body cache fills; the current frame is set again afterwards. In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured images.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -708,7 +708,7 @@
         },
         "required": ["start_frame", "end_frame"]
       },
-      "annotations": {"readOnlyHint": true, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "create_blender_object": {
@@ -752,7 +752,7 @@
         },
         "required": ["object_type"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "delete_blender_object": {
@@ -795,7 +795,7 @@
           }
         }
       },
-      "annotations": {"readOnlyHint": false, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_object_transform": {
@@ -904,7 +904,15 @@
             "description": "Material name; Material_<object> when omitted."
           },
           "base_color": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {
+                "items": {"maximum": 1, "minimum": 0, "type": "number"},
+                "maxItems": 4,
+                "minItems": 3,
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
             "default": null,
             "description": "RGB or RGBA in [0, 1]; the alpha becomes the Principled Alpha, and below 1 the material renders blended."
           },
@@ -924,7 +932,10 @@
             "description": "Slot to put the material in; the slot count adds one."
           },
           "face_indices": {
-            "anyOf": [{"items": {"type": "integer"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"minimum": 0, "type": "integer"}, "minItems": 1, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Mesh faces to assign the material to."
           },
@@ -994,7 +1005,7 @@
         },
         "required": ["object_name", "modifier_type"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "apply_blender_modifier": {
@@ -1044,7 +1055,15 @@
             "description": "Light power in watts (irradiance in W/m² for SUN), >= 0."
           },
           "color": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {
+                "items": {"minimum": 0, "type": "number"},
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Light color RGB [r, g, b], each >= 0."
           },
@@ -1167,7 +1186,7 @@
         },
         "required": ["file_path", "file_format"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "export_blender_file": {
@@ -1296,7 +1315,7 @@
         },
         "required": ["frame"]
       },
-      "annotations": {"readOnlyHint": false, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_frame": {
@@ -1349,7 +1368,7 @@
           }
         }
       },
-      "annotations": {"readOnlyHint": false, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "insert_blender_keyframe": {
@@ -1406,7 +1425,7 @@
         },
         "required": ["object_name", "data_path", "frame"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "delete_blender_keyframe": {
@@ -1604,7 +1623,7 @@
         },
         "required": ["object_name", "channels"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "setup_blender_rigid_body": {
@@ -1672,7 +1691,14 @@
             "description": "Collision margin in meters, 0-1; omitted keeps Blender's automatic margin for a new body."
           },
           "collision_collections": {
-            "anyOf": [{"items": {"type": "integer"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {
+                "items": {"maximum": 19, "minimum": 0, "type": "integer"},
+                "maxItems": 20,
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Collision collections (0-19) the body is in; bodies collide only when they share one. A new body is in 0."
           },
@@ -1777,7 +1803,7 @@
         },
         "required": ["field_type"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_force_field_info": {
@@ -1885,7 +1911,7 @@
         },
         "required": ["constraint_type", "object1_name", "object2_name"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_constraint_info": {
@@ -1904,7 +1930,7 @@
     "get_blender_physics_state": {
       "name": "get_blender_physics_state",
       "title": "Get Blender Physics State",
-      "description": "Get an object's world pose and rigid-body state at the current frame. An unbaked simulation advances one frame at a time, so after a frame jump a body sits where it was last simulated: by default the scene first steps from the cache start to the current frame, as playback would (when that is estimated at 16 s or less). pose_source and simulated_for_frame say whether the pose is the simulation's for this frame; frames past the cache end hold the bodies at its last frame (past_cache_end). rigid_body_cache reports the cache range and bake state.",
+      "description": "Get an object's world pose and rigid-body state at the current frame. An unbaked simulation advances one frame at a time, so after a frame jump a body sits where it was last simulated: by default the scene first steps from the cache start to the current frame, as playback would (when that is estimated at 16 s or less). pose_source and simulated_for_frame say whether the pose is the simulation's for this frame; frames past the cache end hold the bodies at its last frame (past_cache_end). rigid_body_cache reports the cache range and bake state. Not read-only by default: stepping runs frame-change handlers and fills the unbaked cache, as get_blender_object_trajectory does; step_simulation=false only reads.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1918,7 +1944,7 @@
         },
         "required": ["object_name"]
       },
-      "annotations": {"readOnlyHint": true, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_object_trajectory": {
@@ -1989,7 +2015,7 @@
         },
         "required": ["object_name", "start_frame", "end_frame"]
       },
-      "annotations": {"readOnlyHint": false, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_trajectories": {
@@ -2070,7 +2096,7 @@
         },
         "required": ["targets", "start_frame", "end_frame"]
       },
-      "annotations": {"readOnlyHint": false, "idempotentHint": true},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "bake_blender_simulation": {
@@ -2201,7 +2227,7 @@
     "execute_blender_script": {
       "name": "execute_blender_script",
       "title": "Execute Blender Script",
-      "description": "Execute arbitrary Python code inside Blender with access to bpy. Assign to __result__ to return a value. Printed output comes back in output, cut to its first max_output_chars characters (default 32000, at most 100000), or earlier when they exceed 300000 bytes of JSON (heavily non-ASCII output); a cut sets output_truncated=true and output_total_chars to the full length. Write larger results to a file and return its path instead. Anything the script raises, including SystemExit from sys.exit(), is reported in error and never ends Blender. In attached mode each call is one undo step.",
+      "description": "Execute arbitrary Python code inside Blender with access to bpy. Assign to __result__ to return a value. Printed output comes back in output, cut to its first max_output_chars characters (default 32000, at most 100000), or earlier when they exceed 300000 bytes of JSON (heavily non-ASCII output); a cut sets output_truncated=true and output_total_chars to the full length. Write larger results to a file and return its path instead. Anything the script raises, including SystemExit from sys.exit(), is reported in error and never ends Blender. What the script prints is data, so an error or *_error key in printed JSON does not fail the call; it fails only when the script raises or its whole output is one JSON object with \"success\": false (its error is the message). In attached mode each call is one undo step.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -2236,23 +2262,32 @@
           "name": {"description": "Desired object name.", "minLength": 1, "type": "string"},
           "vertices": {
             "description": "Vertex positions, each exactly [x, y, z] finite numbers of at most 3.4e38 in size.",
-            "items": {"items": {"type": "number"}, "type": "array"},
+            "items": {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+            "minItems": 1,
             "type": "array"
           },
           "edges": {
             "default": [],
             "description": "Loose edges as [v0, v1] pairs of two different vertices; face edges are made from the faces.",
-            "items": {"items": {"type": "integer"}, "type": "array"},
+            "items": {
+              "items": {"minimum": 0, "type": "integer"},
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
             "type": "array"
           },
           "faces": {
             "default": [],
             "description": "Faces as lists of three or more vertex indices, each vertex once and each vertex set once.",
-            "items": {"items": {"type": "integer"}, "type": "array"},
+            "items": {"items": {"minimum": 0, "type": "integer"}, "minItems": 3, "type": "array"},
             "type": "array"
           },
           "location": {
-            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "anyOf": [
+              {"items": {"type": "number"}, "maxItems": 3, "minItems": 3, "type": "array"},
+              {"type": "null"}
+            ],
             "default": null,
             "description": "Optional world-space origin [x, y, z]."
           },
@@ -2264,7 +2299,7 @@
         },
         "required": ["name", "vertices"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "clean_blender_mesh": {
@@ -2773,7 +2808,7 @@
         },
         "required": ["root_name", "child_names"]
       },
-      "annotations": {"readOnlyHint": false},
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     }
   }

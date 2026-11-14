@@ -89,8 +89,12 @@ and `Origin` headers against loopback, the bound address and
 `server.allowed_hosts` / `allowed_origins` (the DNS-rebinding defense), and
 requires `Authorization: Bearer <token>` when `SERVER__AUTH_TOKEN_FILE` is
 set. A non-loopback `server.host` without `--allow-public` exits 2 with
-`error_type: InsecureTransport` before anything listens. The banner prints the
-listener URL, the guard's host list and whether a token is required. See
+`error_type: InsecureTransport` before anything listens. A server that cannot
+listen exits 1: `error_type: AddressInUse` when another process holds
+`server.host:server.port`, `StartupError` for any other startup failure (the
+log line above it says why), with `details.host`, `port` and `transport`. The
+banner prints the listener URL, the guard's host list and whether a token is
+required. See
 [configuration.md](configuration.md#network-transports-http-and-sse).
 
 ```bash
@@ -147,7 +151,7 @@ lifecycle.
 | `open-stage`, `save-stage`, `new-stage` | Stage files |
 | `start`, `stop`, `pause`, `step [COUNT]`, `reset` | Simulation control |
 | `capture [OUTPUT] [--width] [--height] [--eye x,y,z] [--target x,y,z]` | Viewport to an image file |
-| `viewport-info`, `read-aovs`, `list-aovs`, `list-render-vars` | Viewport and render data |
+| `viewport-info`, `read-aovs`, `list-aovs`, `list-render-vars` | Viewport and render data; `read-aovs --width` takes 1 to 3840 and `--height` 1 to 2160 pixels, and a value outside them exits 1 with `ValidationError` (it is no longer clamped) |
 | `get-carb-settings`, `set-carb-settings key=value ...` | Carbonite settings |
 | `list-extensions`, `enable-extension`, `disable-extension` | Extension manager |
 | `logs [--level] [-n N] [--source] [--search]`, `set-log-level` | Isaac Sim console log |
@@ -175,6 +179,12 @@ bad invocation, and sends nothing to Isaac Sim when:
   that encoding can't decode is refused the same way, and the error names the
   encoding. Pass such a script in a `.py` file or on stdin, which are always
   read as UTF-8.
+
+A JSON object the script prints is its result, and its keys are data: an
+`error` or `*_error` key (a `position_error` metric) does not fail the
+command. `exec` exits 1 when the script raised or printed `"success": false`
+(with `error_type: ScriptError` unless it printed its own); see
+[tools.md](tools.md#script-results).
 
 ## `simul unreal`
 
@@ -219,7 +229,9 @@ locally.
 
 `exec` runs its code as `execute_unreal_script` does, in a fresh namespace
 that is discarded when the call ends; see
-[tools.md](tools.md#unreal-engine).
+[tools.md](tools.md#unreal-engine). It prints what the script printed and
+exits 1 when the script raised or its first printed JSON object says
+`"success": false` ([script results](tools.md#script-results)).
 
 ## `simul blender`
 

@@ -13,7 +13,14 @@ Every tool returns a JSON object. A failure is sent with MCP `isError: true`
 and carries `success: false`, an `error_type` and an `error` message; see
 [Errors](#errors) for the types. Parameter bounds and choices are in each
 tool's input schema (`minimum`, `maximum`, `enum`), and a value outside them
-is refused with `ValidationError` before the tool runs.
+is refused with `ValidationError` before the tool runs. A list's items carry
+their own bounds (`items`, or `prefixItems` where each position differs, as
+`read_isaac_aovs`'s `[width, height]` does), and every advertised `default`
+satisfies its own schema. A few choices are matched in any case by the tool
+(`configure_isaac_physics_scene`'s `solver_type` and `broadphase_type`,
+`import_blender_file`'s `file_format`, ...): the `enum` lists the canonical
+spelling, which is what a client that validates against the schema sends,
+and the tool also takes other cases.
 
 Results are strict JSON: a non-finite float is sent as the string
 `"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token.
@@ -83,7 +90,14 @@ draws on: one outside it fails the call with `SandboxError` listing them (see
   An array attribute carries its `length` and first `array_preview`
   elements (default 16, up to 10000), so a million-point mesh costs a few
   KB; `attribute_filter` takes glob patterns, `time_code` reads animated
-  values.
+  values. A property pxr cannot read, such as a `material:binding` or
+  `physics:body0` a file authors as an attribute where USD expects a
+  relationship, does not fail the read: a relationship pxr cannot read is
+  left out, a material binding falls back to the nearest direct binding pxr
+  can read (the prim's own, then its ancestors'), and `warnings` names the
+  property and its layer (`UnreadableProperty`, `location.layer`). `get_mesh_info` and
+  `get_prim_subtree` (per prim, with `include_properties`) report such
+  properties the same way.
 - **Traversal and counts.** Every listing walks the composed stage with one
   rule: active, defined, loaded, non-abstract prims, plus the instance
   proxies inside instanceable prims. So `load_usd_file`'s `total_prims`,
@@ -190,6 +204,25 @@ parse error). The checks, in order:
 - pxr's UsdValidation validators, listed in `validators`; the usdz package
   rules (alignment, compression, file types) run only for a `.usdz`.
 
+The checks read the files as they are on disk. pxr keeps one in-memory copy
+of each file per process and gives it to every stage that opens the file,
+so a loaded stage (any session's) may hold a copy of the file, or of one it
+draws on, that is older than the file. Once the stage is composed, and
+before any check runs, each copy that was already in memory is compared
+with its file. When all of them match, the check runs in the server process
+as usual. When one changed since it was read, the whole check runs in a
+fresh process instead. That costs the time to start Python and pxr (a few
+tenths of a second) plus composing the file a second time, which for a
+large scene is most of the check. `usd.validation_timeout_seconds` (default
+300) caps that process; past it the call fails with `TimeoutError`. A
+process killed by a signal is pxr crashing on the file, reported as an
+`OpenFailed` error. If the process cannot start or ends without a result,
+the check runs in the server process anyway, with a `ValidatedInMemoryCopy`
+warning naming the files whose copies it used. Unsaved edits are never part
+of the check: an `info` issue `UnsavedEdits` names each stage of the calling
+session with unsaved edits to a checked file. Save or export them and
+validate the written file to check them.
+
 `load_usd_file` fails with `error_type: LoadError` and `details.reason` set
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
@@ -205,10 +238,14 @@ Every successful response carries `success: true`, like the other backends.
 The pxr work of each call runs on a worker thread, so a slow call does not
 hold up the server. Reads run concurrently, one at a time per stage, and an
 edit (`create_prim`, `update_prim_attributes`, `delete_prim`), a
-`load_usd_file` and a `reload_usd_stage` run alone, because pxr does not
-allow a write alongside reads of the same layers (a load or reload may reread
-a shared file in place). `save_usd_stage`, `export_usd_stage` and
-`unload_usd_stage` hold their stage like a read. A
+`load_usd_file` that reads files and a `reload_usd_stage` run alone, because
+pxr does not allow a write alongside reads of the same layers (a load or
+reload may reread a shared file in place). A `load_usd_file` that hands back
+a stage the session already holds, clean and current, reads nothing from
+disk and holds that stage like a read. `save_usd_stage`, `export_usd_stage`
+and `unload_usd_stage` hold their stage like a read, and a save or export
+also holds the file it writes, so two calls writing one file run one after
+the other. A
 call that cannot start within `server.timeout` seconds (default 30) fails
 with `StageBusy`; retry it. Python cannot stop pxr mid-call, so a call the
 client cancels or times out still finishes in the background and holds its
@@ -231,7 +268,9 @@ Edit errors use the same types as the lookups above. Invalid input is a
 that fails after the checks passed is an
 `EngineError` with `details.rolled_back: true`. A refusal that an explicit flag
 overrides is a `RefusedOperation` naming the flag in `details.override`, and
-an edit USD cannot express is an `UnsupportedOperation`.
+an edit USD cannot express is an `UnsupportedOperation`. Any other pxr error
+is an `EngineError` carrying pxr's reason, without its C++ function names and
+source paths.
 
 - **Paths** must be absolute prim paths (`/World/Box`). A relative path, a
   property path (`/World/Box.size`), a trailing `/` or an invalid prim name
@@ -251,12 +290,45 @@ an edit USD cannot express is an `UnsupportedOperation`.
   prim metadata through USD's API; other metadata keys are refused rather
   than written as attributes. One error (`details.code: InvalidAttribute`)
   lists every rejected key with its reason in `details.problems`.
+- **Relationships the prim does not have** are not editable here. A new
+  name that an API schema, or for a namespaced name a prim type, declares a
+  relationship (`physics:body0` on a prim that is not a joint,
+  `skel:skeleton`, `physics:filteredPairs`, `collection:<name>:includes`,
+  and every `material:binding` name, including `material:binding:physics`)
+  is refused: written as an attribute, pxr could no longer read it. So is a
+  relationship a layer authors as an attribute where pxr refuses it (the
+  prim's own schema declares the relationship, or it is a
+  `material:binding`); the reason names that layer. The problem carries
+  `code: RelationshipNotEditable`; when every rejected key is such a
+  relationship the error is an `UnsupportedOperation` with that
+  `details.code`.
+- **Attributes of a schema the prim lacks** take the schema's type, not one
+  guessed from the value: `physics:mass` without `PhysicsMassAPI` is a
+  `float`, `drive:angular:physics:stiffness` without
+  `PhysicsDriveAPI:angular` a `float` (any multiple-apply instance name
+  matches its template), with the schema's allowed tokens and variability.
+  The edit succeeds with an `UnappliedSchemaAttribute` entry in `warnings`
+  naming the API to apply, since USD and simulators ignore the value until
+  it is applied; no simul tool applies API schemas yet. A prim type's
+  declaration types only a namespaced name (`physics:axis` on an Xform, with
+  a warning; a `primvars:` name such as `primvars:displayColor` without
+  one, since descendants inherit it). Plain names (`axis`, `size`, `type`,
+  `camera`) and `inputs:` / `outputs:` names are not typed by prim types:
+  they stay custom attributes, typed by `attribute_types` or the value. On a
+  Shader, Material or NodeGraph no schema types `inputs:` / `outputs:` (the
+  shading node does), so a light API's `inputs:color` or `inputs:intensity`
+  is typed and warned about only on other prims.
 - **Values** are converted to the attribute's type: JSON numbers widen
   (`45` into a `float`, ints into a `double3`), an integer type refuses a
   fraction, vectors are lists (`[x, y, z]`), quaternions are `[w, x, y, z]`
   with the real part first, matrices are a list of rows or the flat
   row-major list, assets are path strings, and arrays are lists of their
-  element's form.
+  element's form. A `float`, `double` or `half` (alone or inside a vector,
+  quaternion or matrix) also takes `"Infinity"`, `"-Infinity"` and `"NaN"`,
+  as the reads report them, so an unlimited joint limit round-trips; a
+  `timecode` stays finite. A finite number its precision cannot hold
+  (`1e39` for a `float`, `70000` for a `half`) is refused rather than
+  stored as infinity.
 - **Transform ops**: a new `xformOp:<type>[:<suffix>]` (`translate`,
   `scale`, `rotateX`..`rotateZYX`, `orient`, `transform`) is created with the
   op's value type (`double3` translate, `float3` scale, `quatf` orient,
@@ -276,7 +348,9 @@ an edit USD cannot express is an `UnsupportedOperation`.
   `time_code`. A sample is also refused when the attribute's animation comes
   from a weaker layer (a sublayer or a referenced asset): USD takes all of an
   attribute's samples from the strongest layer that has any, so one sample
-  in the root layer would replace that whole animation.
+  in the root layer would replace that whole animation. The same holds for
+  value clips: a sample is refused when the attribute's value at that time
+  comes from clips, since an authored sample outranks every clip.
 - **`delete_prim`** refuses `/`, and the stage's default prim unless
   `allow_root_delete=true`. It also refuses a prim the delete cannot remove
   because opinions outside the root layer keep it alive: a sublayer defines
@@ -299,7 +373,13 @@ and unsaved edits are lost when the server exits.
   same `stage_id` while that stage has no unsaved edits and none of its
   files changed on disk. Otherwise the load opens a fresh stage from disk
   (rereading changed sublayers and references first), and the older stage
-  keeps its id and its edits.
+  keeps its id and its edits. One case follows from the private root: a file
+  that references, payloads or sublayers itself by file name
+  (`@./self.usda@</W/Proto>`, not the internal `</W/Proto>`) reads that arc
+  from its shared layer, the file as it is on disk, so the stage's unsaved
+  edits do not show through it until `save_usd_stage` and a
+  `reload_usd_stage`. Mapping that arc onto the private root would need a
+  custom asset resolver; the load lists a `SelfReference` warning instead.
 - **Rereads stay in the sandbox.** A changed sublayer or referenced file is
   shared, and rereading it updates every stage that composes it, including
   other sessions' stages. So its new content is read into a throwaway layer
@@ -307,9 +387,9 @@ and unsaved edits are lost when the server exits.
   sandbox, nothing is reread, the stages keep the old content, and the load
   or reload fails with `SandboxError` naming the file. A stage that reaches
   outside after a reread anyway (a file swapped between the check and the
-  reread) is unloaded. A load or reload runs alone, after the running calls
-  finish, since rereading a shared file changes stages other calls may be
-  reading.
+  reread) is unloaded. A load that reads files, or a reload, runs alone,
+  after the running calls finish, since rereading a shared file changes
+  stages other calls may be reading.
 - **Stages belong to the MCP session that loaded them.** Another session
   gets `NotFoundError` for the id and cannot read or edit the stage. Stage
   ids are random, not derived from the path. A stdio server has one
@@ -329,21 +409,46 @@ and unsaved edits are lost when the server exits.
   must be writable inside the sandbox. It refuses a `.usdz` root, which is a
   read-only package; export it instead. It also refuses a file that changed
   on disk after the stage read it, unless `overwrite_external_changes=true`.
-  `files_written` lists what was written; a stage with no unsaved edits
-  writes nothing.
+  Another stage's save of the same file counts as such a change: saves of
+  one file run one at a time, however each path spells it (case, or Unicode
+  NFC and NFD, on a filesystem that ignores them), so when two sessions save
+  it at once the second is refused instead of overwriting the first. Only
+  the root file is
+  written, so a sublayer or referenced file that changed on disk stays
+  listed in `changed_on_disk` after the save, and a later load of the file
+  rereads it. `files_written` lists what was written; a stage with no
+  unsaved edits writes nothing.
 - **`export_usd_stage`** writes a new `.usda`, `.usdc`, `.usd` or `.usdz`
   file (sandboxed, and refused if it exists unless `overwrite=true`). By
   default it writes the root layer with its composition arcs, and
   re-anchors relative asset paths (sublayers, references, textures) so they
   resolve from the new location. `flatten=true` writes the composed stage
-  as one layer. A `.usdz` is packaged with the files it depends on. The
-  stage stays bound to its own file and keeps its unsaved state.
+  as one layer. A `.usdz` is packaged with the files it depends on. A stage
+  loaded from a `.usdz` exports without `flatten` too. Its root layer keeps
+  drawing on the files inside the package: a `.usda` gets paths such as
+  `./pkg.usdz[inner_sub.usda]`, and a `.usdz` carries the original package
+  nested inside it. The file is written under a temporary name beside the
+  destination and moved
+  into place in one step, so a reader never sees half a file, and without
+  `overwrite` the destination is claimed exclusively: of two exports to one
+  new path, one succeeds and the other is refused. A relative `file_path`
+  resolves against `security.relative_path_base`, as for `load_usd_file`.
+  The stage stays bound to its own file and keeps its unsaved state.
 - **`reload_usd_stage`** rereads the root file and any changed sublayer or
-  referenced file, each held to the sandbox first as above. A reread that
-  fails is an `EngineError` with `details.code: ReloadFailed` (a failed save
-  or export says `SaveFailed`).
+  referenced file, each held to the sandbox first as above. Every file is
+  read and checked before anything is reread, so a refusal leaves the stage
+  as it was, unsaved edits included. A root file that cannot be reread is
+  an `EngineError` with `details.code: ReloadFailed` (a failed save or
+  export says `SaveFailed`). A changed sublayer or referenced file that pxr
+  cannot parse now is listed in `failed_files` with pxr's reason instead;
+  it keeps its previous content and stays in `changed_on_disk`. A load of a
+  file that composes it lists a `FileNotReread` warning, and while the file
+  stays the same a repeated load returns the same stage.
   **`unload_usd_stage`** closes the stage. Both refuse a stage with unsaved
   edits unless `discard_unsaved=true`.
+- **A session that ends during a load** gets no stage: the load checks the
+  session is still open as it registers the stage, so a disconnect mid-load
+  does not leave a stage that nothing can reach.
 
 ## Isaac Sim
 
@@ -398,6 +503,8 @@ Notes:
   to an `asset` or `asset[]` attribute goes through the file sandbox
   (`security.allowed_paths`) like `create_isaac_light`'s `texture_file` and
   is written resolved; one outside it is `SandboxError` and nothing is set.
+  `create_isaac_prim`'s `attributes` and `set_isaac_material_property` follow
+  the same rule; a refused `create_isaac_prim` creates nothing.
 - `query_isaac_typed_prims` resolves `type_name` through the schema registry
   (`UsdPhysics.RevoluteJoint`, `PhysicsRevoluteJoint`,
   `UsdPhysics.RigidBodyAPI`, any `pxr` module) and refuses a name that
@@ -531,7 +638,12 @@ Notes:
   sandbox, needs `overwrite=true` for URL targets, and refuses while the
   timeline is playing or paused unless `allow_while_playing=true`.
 - `set_isaac_graph_node_values` fails when any attribute fails, still
-  reporting what was set. With script execution disabled, the graph, import
+  reporting what was set. A path for an asset-typed input, or a string for an
+  input named like a file location (`inputs:path`, `inputs:outputDir`; not
+  `inputs:robotPath`), must be inside the file sandbox; otherwise it is
+  `SandboxError` and nothing is set. `set_isaac_prim_attribute` holds a graph
+  node's inputs to the same rule, and while the sandbox is on
+  `connect_isaac_graph_nodes` refuses a connection into such an input. With script execution disabled, the graph, import
   and extension tools refuse code-running nodes (ScriptNode,
   omni.warp.WarpKernel, Replicator script nodes), code attributes,
   connections into them and the script extensions
@@ -591,7 +703,11 @@ Notes:
   Carb's `set(path, dict)` replaces the whole subtree. Dict values are checked
   key by key, and `.`/`..` segments are refused. With script execution off it
   also refuses `/app/scripting`. It refuses `/persistent` keys, which Kit
-  saves for later sessions, unless `allow_persistent=true`.
+  saves for later sessions, unless `allow_persistent=true`. A string for a
+  key named like a file location (`/log/file`, `/app/exts/folders`; not
+  `/log/fileLogLevel`), in a dict, a list or by list index too, must be inside
+  the file sandbox, judged as a write; otherwise the call is `SandboxError`
+  and nothing is applied.
   `get_isaac_carb_settings` reads `auth_token` values back as `***`, and
   `get_isaac_logs` redacts the python_server token that 6.0.1 logs at Info
   level (`redacted_lines` counts the lines).
@@ -675,7 +791,10 @@ Behaviour worth knowing:
   `root_path`). `total_actors` and `total_depth` describe the whole tree. A
   `class_filter` keeps the matching actors and the actors above them, which
   carry `matches_filter: false`; `include_components` adds each actor's
-  components (name, class, root flag, the component it is attached to).
+  components (name, class, root flag, the component it is attached to), the
+  first 50 of them, with `component_count` counting them all and
+  `components_truncated` (plus a warning naming the actor) when it has more:
+  `list_unreal_actor_components` pages through those.
 - In a World Partition map the editor loads only some regions' actors, and
   the scene reads see only loaded actors. `summarize_unreal_scene`,
   `list_unreal_actors`, `get_unreal_actor_by_semantic_label` and
@@ -1601,7 +1720,18 @@ Behaviour worth knowing:
   HighResShot writes into a JPEG beside it in the editor (about a tenth of the
   size: a 640x360 capture is about 27 KB), and `inline_max_size` inlines a copy
   scaled to that many pixels on its longer side while the file keeps full
-  size; the JPEG replaces the PNG. `view` picks what is captured, and the
+  size; the JPEG replaces the PNG and carries the call's token in its name
+  (`HighresScreenshot00004_<token>.jpg`), because Unreal gives the removed
+  PNG's number to its next shot. The call waits for the file up to 15 s plus
+  0.25 s per megapixel (82 s for 16384x16384, which a headless UE 5.7.4
+  editor wrote in 24 s, 30 s as JPEG): rendering a large shot holds the
+  editor. Past that it fails with `CaptureError`, and since Unreal cannot
+  cancel the shot, `details.pending_path` names the file Unreal has begun to
+  write (null until one appears: an editor shot's number is chosen when its
+  pane draws), `details.pending_dir` the directory it lands in and
+  `details.deadline_s` the wait. A late shot stays a PNG even with
+  `format: "jpeg"`: a poll the editor runs after the call's deadline (one
+  queued while it rendered) converts nothing. `view` picks what is captured, and the
   reply says which (`view`, `pie_active`): `editor` is the level editor
   viewport, whose camera `set_unreal_camera_view` moves; `game` is the
   player's view during a Play In Editor session (HighResShot run in the game
@@ -1845,9 +1975,42 @@ Behaviour worth knowing:
 - Every Python call simul makes runs in a namespace of its own, and that
   namespace is cleared when the call ends, whether it returns or raises. This
   covers its own tools, `execute_unreal_script`, `simul unreal exec`, and
-  `batch_unreal_operations` calls to `ExecutePythonCommandEx` or
-  `ExecutePythonCommand`. (`call_unreal_actor_function` takes only actors of
-  the level open in the editor, so it never reaches the Python library.)
+  calls to `ExecutePythonCommandEx` or `ExecutePythonCommand` inside any
+  `/remote/batch`, `batch_unreal_operations`' and the batch
+  `set_unreal_actor_property` sends alike. (`call_unreal_actor_function` takes
+  only actors of the level open in the editor, so it never reaches the Python
+  library.) The session refuses, with a `ValidationError`
+  (`details.code: "python_outside_runner"`), to send a `/remote/object/call`
+  or a Remote Control preset function call
+  (`/remote/preset/<preset>/function/<function>`), on its own or inside a
+  `/remote/batch`, whose parameters pass a `PythonCommand` that is not the
+  runner's, whatever object or function it names: a preset can expose
+  `ExecutePythonCommandEx` under a name of its own. A path below one of
+  these routes counts as the route, because Unreal hands
+  `/remote/object/call/x` to the object call handler and `/remote/batch/x`
+  to the batch handler: such a call runs in the runner, a `py` console
+  command there is refused, and `batch_unreal_operations` refuses
+  `/remote/batch/x` as a batch inside a batch. Those are the routes
+  that pass function parameters; Python the editor runs some other way (a
+  Blueprint, an editor utility) is outside what simul sends. The property
+  write's batch used to embed the value in commands sent past the runner, so
+  a value naming a `.py` file followed by a space (a tag `see setup.py
+  first`) was written but reported as failed, and left the editor's undo
+  transaction open for the rest of the session. A write whose closing step
+  did not run in its batch is now decided and closed by a request of its
+  own, which the reply's `warning` says (or that the batch had closed it
+  already), and a failed write's reply reads back what Unreal holds.
+  - **Printing is cheap.** While a call runs, Unreal's `sys.stdout` and
+    `sys.stderr` are replaced by streams that make the same log entries in the
+    same order without writing Unreal's log to disk after every line, which
+    took about 11 ms a line (400 printed lines: 4.8 s, now 0.04 s); the log is
+    written once when the call ends. A last line the script leaves without a
+    newline is part of that call's output, not the next call's. A stream the
+    script installs itself stays installed after the call, as before; one it
+    wraps around the swapped stream's buffer
+    (`sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding="utf-8")`)
+    keeps writing to Unreal's log, and what it holds when the call ends is
+    that call's output.
   - **Why it matters.** UE 5.7 runs all literal Python in one dict that every
     call and the editor's own Python console share, and `FileExecutionScope`
     applies only to `.py` files. A name a script leaves there keeps its object
@@ -2190,7 +2353,9 @@ Behaviour worth knowing:
   captures through another camera without changing the scene camera or the
   view. `capture_blender_viewport_sequence` writes JPEG files and returns their
   paths, at most `max_frames` (50, at most 100) per call and no new frame after
-  10 s, with `next_start_frame` to continue.
+  10 s, with `next_start_frame` to continue. It replaces frame files of the
+  same numbers already in `output_dir`, so it is annotated destructive, not
+  read-only.
 - `get_blender_viewport_info` reports, besides the render settings, `view3d`:
   the attached window's largest 3D View (the one captures use) with its
   `view_matrix` (world to view), `eye_location`, `view_perspective`, `lens`,
@@ -2842,7 +3007,8 @@ Behaviour worth knowing:
 - `get_blender_physics_state` steps an unbaked simulation from the cache start
   to the current frame before reading the pose (`step_simulation`, default
   true, when the frames to simulate are estimated at 16 s or less, as for a
-  bake), as playback would: an unbaked
+  bake), as playback would, so like `get_blender_object_trajectory` it is not
+  read-only: an unbaked
   simulation advances one frame at a time, so after `set_blender_frame` jumped
   from 1 to 48 a falling body still sat at its starting pose. Frames Blender has
   cached are read, not simulated again. `pose_source` says where the pose comes
@@ -2872,10 +3038,15 @@ Behaviour worth knowing:
   quantifiers in a row goes to the linear-time search without being bounded,
   and one over 512 characters is refused with `details.code:
   "pattern_too_long"`.
-  `get_unreal_actor_by_semantic_label` searches tags in the editor with `re`
-  and `re.IGNORECASE`, so in regex mode it refuses the patterns that bound does
-  not allow for a 1023-character tag under IGNORECASE (`.*.*x`, `A*a*x`,
-  `\w*(?=\w*\d)`), with the same error; contains mode takes any label.
+  `get_unreal_actor_by_semantic_label` in regex mode searches each tag in the
+  editor with the same `name_searcher` (the module's own source, installed in
+  the editor's `sys.modules` once per editor process and simul version), under
+  `re.IGNORECASE` and bounded for a 1023-character tag: `re` when the bound
+  allows it, the linear-time search otherwise (`.*.*x`, `A*a*x`, `(\w+)+`).
+  Both backends therefore take the same patterns, with the same errors and the
+  same 512-character cap, except one that needs what only `re` has (a
+  back-reference, say) and that `re` is bounded on for Blender's 255-character
+  names but not for a 1023-character tag; contains mode takes any label.
 - `execute_blender_script` returns the first `max_output_chars` characters of
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a
@@ -2895,6 +3066,34 @@ Behaviour worth knowing:
 | Tool | Purpose |
 |---|---|
 | `get_tool_usage_stats` | Per-tool call counts, success rates and durations for the calling MCP session; `scope="server"` counts every session's calls. The recent call log (`include_recent`, `limit` 1 to 200) is always the caller's own, because records carry parameters, file paths and agent labels. Operators read every session with `simul stats`; clearing it is operator-only: `simul stats --reset` |
+
+## Script results
+
+What an agent's own script prints is data, on every backend
+(`execute_isaac_script`, `execute_unreal_script`, `execute_blender_script`,
+`simul isaac exec`, `simul unreal exec`). A call fails only when:
+
+- the script **raises** (`error_type: ScriptError`, the exception named in
+  `details.exception_type` where the engine reports it), or
+- the script **prints `"success": false`** in its JSON object. Its `error`
+  becomes the message, as text (an object or a number as its JSON); without
+  one, the message lists the object's non-null `*_error` keys as
+  `key: value; ...`. `error_type` is `ScriptError` unless the object names
+  another. The rule is the same on all three backends and both `exec`
+  commands.
+
+Any other key, `error` and `*_error` included, is returned as printed:
+`{"position_error": 0.002}` is a successful call carrying a metric, and
+`{"error": 0.0}` keeps its `0.0`. A `success` value other than `false` reads
+as success. Isaac returns the JSON object the whole output is; Unreal the
+first JSON object printed on its own line; Blender keeps the printed text in
+`output` and fails the call only when that whole output is one JSON object
+with `"success": false`. The skills' error-safe template
+(`{"success": False, "error": str(e)}` in an `except`) follows this rule.
+
+simul's own granular tools work differently: their generated scripts report
+a failure under `error`, or a partial one under a `*_error` key such as
+`timeline_error`, and the envelope reads those keys (`EngineError` below).
 
 ## Errors
 
@@ -3014,9 +3213,13 @@ Arguments that do not fit the input schema are refused before the tool runs,
 but through the same envelope as every other failure: the call spends a
 rate-limit token and is recorded in the usage log and the audit log. A call to
 a tool that is not registered is a `NotFoundError`, recorded and rate limited
-under `<unknown tool>` with the name it gave in the record's parameters. The
-audit row of every call states the envelope's outcome, `error_type` included
-(see [Audit log](configuration.md#audit-log)).
+under `<unknown tool>` with the name it gave in the record's parameters; its
+audit row names it `<unknown tool>` too, with the name given in
+`extra.requested_tool`. The audit row of every call states the envelope's
+outcome, `error_type` included (see [Audit log](configuration.md#audit-log)).
+A tool's own argument check (one the schema cannot state, such as a minimum
+above its maximum) names the parameter in `details.errors[].field` as the
+schema's refusals do.
 
 A call the client cancels may still have run: cancelling the request does not
 stop the engine. Its usage and audit rows say `cancelled` and `executed`:
@@ -3032,10 +3235,23 @@ rule on every backend, pinned for all tools by
 
 - **read-only**: changes nothing, a capture that only returns the image
   included (`capture_blender_viewport`);
-- **destructive**: overwrites or deletes existing state or files, or runs
-  arbitrary code (`capture_isaac_viewport` deletes the oldest captures in its
-  directory, so it is destructive; `capture_unreal_viewport` writes a new
-  screenshot and is only additive);
+- **destructive**: can overwrite or delete existing state or files, with any
+  of its arguments, or runs arbitrary code. `capture_isaac_viewport` deletes
+  the oldest captures in its directory and `capture_blender_viewport_sequence`
+  replaces same-numbered frame files, so both are destructive;
+  `capture_unreal_viewport` writes a new screenshot and is only additive.
+  `insert_blender_keyframe` replaces a key already at that frame,
+  `add_isaac_collision` an authored approximation and `create_isaac_physics_scene`
+  an existing scene's gravity, so they are destructive too. Moving a camera that
+  is scene content (a Blender camera object, Isaac's active viewport camera,
+  which can be a stage camera prim) is destructive; moving an editor's own view
+  (Unreal's level viewport, a Blender 3D View) and runtime control (play,
+  pause, step, the current frame) are not. A tool with several actions takes
+  the hint of its most destructive one: `control_unreal_ui` and
+  `control_blender_ui` are destructive because `set_property` edits a
+  transform. Every tool that is not read-only states `destructiveHint`,
+  `false` included, because a client reads a missing one as `true`; a
+  read-only tool leaves it out;
 - **idempotent**: repeating the call with the same arguments changes nothing
   more (a set, a delete, a save or export to the same path, a focus); a
   create, a step, a capture that writes a new file or an edit that compounds

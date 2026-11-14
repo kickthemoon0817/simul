@@ -243,7 +243,22 @@ def run_or_exit(
     error = result.get("error")
     if not error and (allow_partial or result.get("success") is not False):
         return result
+    exit_with_failure(result, show_traceback=show_traceback)
 
+
+def exit_with_failure(result: Dict[str, Any], *, show_traceback: bool = False) -> NoReturn:
+    """Report a failed payload and exit 1, as ``run_or_exit`` does.
+
+    JSON mode writes the whole payload with ``success: false`` (and
+    ``error_type``, default ``Error``, beside a top-level ``error``); human
+    mode prints the error in red, or the ``*_error`` keys when there is no
+    ``error``.
+
+    Args:
+        result: The failed payload.
+        show_traceback: In human mode, print ``details.traceback`` in a panel.
+    """
+    error = result.get("error")
     if error:
         error_type = result.get("error_type", "Error")
         if is_json_mode():

@@ -607,14 +607,23 @@ class UnrealSceneSummaryResponse(BaseModel):
 class UnrealExecuteScriptResponse(BaseModel):
     """Whatever JSON object a script printed, with the envelope's status fields.
 
-    The script decides the shape, so every key it emitted is kept.
+    The script decides the shape, so every key it emitted is kept, with its
+    value as printed: an ``error`` it printed is its data (a residual of
+    ``0.0``), not a failure.
     """
 
     model_config = ConfigDict(extra="allow")
 
-    success: bool = Field(True, description="Whether the script ran and printed JSON")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
+    success: bool = Field(
+        True,
+        description='False only when the script raised or printed "success": false',
+    )
+    error: Optional[Any] = Field(
+        None,
+        description=(
+            "The failure message when success is False; otherwise whatever the script "
+            "printed under error"
+        ),
     )
 
 
@@ -1788,7 +1797,8 @@ class UnrealQuerySceneGraphResponse(BaseModel):
             "The tree: the level (class_name World) or the root_path actor, with name, path, "
             "class_name, child_count and children; each actor nests the same way, with "
             "children_truncated when its children are below max_depth, matches_filter with a "
-            "class_filter, and components with include_components"
+            "class_filter, and components (the first 50) with component_count and, when it has more, "
+            "components_truncated with include_components"
         ),
     )
     total_actors: int = Field(

@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from ...schemas.common import ErrorResponse
 from ._shared import (
+    ASSET_SANDBOX_CORE,
     BIND_MATERIAL_CORE,
     DEFINE_MATERIAL_CORE,
     TRAVERSAL_PREDICATE_CORE,
@@ -93,7 +94,7 @@ USD_PREVIEW_SURFACE_INPUTS: Dict[str, str] = {
 
 # Sets one surface-shader input with the value converted to the input's type.
 # Defines _set_material_input(stage, material_path, name, value, allow_unknown,
-# asset_value, asset_denial).
+# asset_checks). Needs ASSET_SANDBOX_CORE.
 SET_MATERIAL_INPUT_CORE = """\
     import difflib
 
@@ -174,7 +175,7 @@ SET_MATERIAL_INPUT_CORE = """\
             return [float(c) for c in value]
         return value
 
-    def _set_material_input(stage, material_path, name, value, allow_unknown, asset_value=None, asset_denial=None):
+    def _set_material_input(stage, material_path, name, value, allow_unknown, asset_checks=None):
         prim = stage.GetPrimAtPath(material_path)
         if not prim.IsValid() or not prim.IsA(UsdShade.Material):
             return {"error": "Material not found: " + material_path, "error_type": "NotFoundError"}
@@ -235,18 +236,16 @@ SET_MATERIAL_INPUT_CORE = """\
             shader_input = shader.CreateInput(name, getattr(Sdf.ValueTypeNames, type_name))
             created = True
             type_name = str(shader_input.GetTypeName())
-        if type_name.lower() == "asset" and isinstance(value, str):
+        if isinstance(value, str):
             # A file the renderer will read is checked against the read
             # sandbox, as create_isaac_light checks its texture_file; the
-            # path written is the one the check resolved.
+            # path written is the one the check resolved. Other values get
+            # _coerce's type error.
+            value, asset_denial = _sandboxed_asset(shader_input.GetTypeName(), value, asset_checks)
             if asset_denial is not None:
                 if created:
                     shader.GetPrim().RemoveProperty(shader_input.GetAttr().GetName())
-                denied = dict(asset_denial)
-                denied.update({"material_path": material_path, "property_name": name})
-                return denied
-            if asset_value is not None:
-                value = asset_value
+                return _denied(asset_denial, material_path=material_path, property_name=name)
         try:
             coerced = _coerce(value, type_name)
         except ValueError as exc:
@@ -539,14 +538,9 @@ class MaterialsMixin:
         if not property_name or not property_name.strip():
             return ErrorResponse(error="property_name is empty", error_type="ValidationError").model_dump()
         # Whether a string is a file path depends on the input's type, which
-        # only Isaac knows, so both outcomes go along and the script uses the
-        # one that applies: the denial for an asset input, else the value.
-        asset_value: Optional[str] = None
-        asset_denial: Optional[Dict[str, Any]] = None
-        if isinstance(value, str) and value:
-            asset_denial = self._sandbox_denial(value)
-            if asset_denial is None:
-                asset_value = self._path_policy.authorize(value)
+        # only Isaac knows, so the sandbox's verdict goes along and the script
+        # applies it to an asset input.
+        asset_checks = self._asset_value_checks([value])
         script = _compose_script(
             """\
             import json
@@ -555,6 +549,7 @@ class MaterialsMixin:
             """,
             f"OMNIPBR_INPUTS = {_pyval(OMNIPBR_INPUTS)}\n"
             f"USD_PREVIEW_SURFACE_INPUTS = {_pyval(USD_PREVIEW_SURFACE_INPUTS)}\n",
+            ASSET_SANDBOX_CORE,
             SET_MATERIAL_INPUT_CORE,
             f"""\
             stage = omni.usd.get_context().get_stage()
@@ -564,7 +559,7 @@ class MaterialsMixin:
                 value = json.loads({_pyval(json.dumps(value))})
                 print(json.dumps(_set_material_input(
                     stage, {_pyval(material_path)}, {_pyval(property_name.strip())}, value,
-                    {_pyval(bool(allow_unknown_input))}, {_pyval(asset_value)}, {_pyval(asset_denial)}
+                    {_pyval(bool(allow_unknown_input))}, {_pyval(asset_checks)}
                 )))
             """,
         )

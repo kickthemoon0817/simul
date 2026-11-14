@@ -578,6 +578,90 @@ def test_exec_json_printing_script_still_works(monkeypatch) -> None:
     assert payload["output"] == '{"x": 1}\n'
 
 
+def test_exec_printed_error_metrics_are_data(monkeypatch) -> None:
+    """A position_error metric or an error residual is no failure (round-2 B-1)."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [{"Type": "Info", "Output": '{"position_error": 0.002, "error": 0.0}\n'}],
+            "CommandResult": "",
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('{...}')"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert "error" not in payload
+
+
+def test_exec_printed_success_false_exits_1(monkeypatch) -> None:
+    """The script reports a failure as on every backend: by printing success false."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [
+                {"Type": "Info", "Output": "step 1\n"},
+                {"Type": "Info", "Output": '{"success": false, "error": "target unreachable"}\n'},
+            ],
+            "CommandResult": "",
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('{...}')"])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is False
+    assert payload["return_value"] is True
+    assert payload["error"] == "target unreachable"
+    assert payload["error_type"] == "ScriptError"
+
+
+def test_exec_keeps_a_printed_error_type_and_lists_error_keys(monkeypatch) -> None:
+    """As isaac exec and execute_unreal_script word it."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [
+                {"Type": "Info", "Output": '{"success": false, "pose_error": 0.4, "error_type": "InvalidState"}\n'},
+            ],
+            "CommandResult": "",
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('{...}')"])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert (payload["error"], payload["error_type"]) == ("pose_error: 0.4", "InvalidState")
+
+
+def test_exec_maps_an_unknown_printed_error_type_to_its_family(monkeypatch) -> None:
+    """A type outside the vocabulary is EngineError, the name kept, as the MCP tool sends it."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [
+                {"Type": "Info", "Output": '{"success": false, "error": "no grip", "error_type": "GripFailure"}\n'},
+            ],
+            "CommandResult": "",
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('{...}')"])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert (payload["error"], payload["error_type"]) == ("no grip", "EngineError")
+    assert payload["details"] == {"exception_type": "GripFailure"}
+
+
 def test_exec_concatenates_multi_line_log_output(monkeypatch) -> None:
     """Multiple Info log lines join in order; Warning/Error entries route
     to their own streams instead of being silently dropped."""

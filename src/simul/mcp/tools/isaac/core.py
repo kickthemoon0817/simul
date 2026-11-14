@@ -4,7 +4,8 @@ import json
 from typing import Any, Dict, List, Optional
 
 from ... import error_types
-from ...registration._helpers import apply_success_from_error, utf8_byte_length
+from ....utils.script_result import apply_script_success
+from ...registration._helpers import utf8_byte_length
 from ...schemas.common import ErrorResponse
 from ._shared import (
     MAX_SCRIPT_BYTES,
@@ -111,8 +112,11 @@ class CoreToolsMixin:
         description=(
             "Execute arbitrary Python code inside a running Isaac Sim application. The code "
             "runs in Kit's Python scope with full access to omni.*, pxr.*, and isaacsim.* "
-            "APIs. stdout is captured and returned. For structured results, print JSON via "
-            "json.dumps(). Executions are not isolated: every transport runs scripts in one "
+            "APIs. stdout is captured and returned. For structured results, print one JSON "
+            "object via json.dumps(): its keys come back as the result and are data, so an "
+            "error or *_error key (a position_error metric) does not fail the call. The call "
+            "fails only when the script raises or prints \"success\": false. Executions are "
+            "not isolated: every transport runs scripts in one "
             "shared namespace, so globals a script defines persist into later calls, "
             "including other agents' calls on the same instance. Import what you use in "
             "every script, keep helpers in functions, and don't depend on leftover globals. "
@@ -215,12 +219,12 @@ class CoreToolsMixin:
             except json.JSONDecodeError:
                 parsed = None
             if isinstance(parsed, dict):
-                # A generated script reports failure as {"error": ...} or a
-                # partial one as {"<section>_error": ...}; stamping success onto
-                # that contradicts it, and the caller reading "success" is
-                # usually an LLM that will believe the flag. Same rule as the
-                # granular tools' script path.
-                apply_success_from_error(parsed)
+                # The agent's printed object is its data: a position_error
+                # metric or an {"error": 0.0} residual is not a failure. The
+                # script reports one by raising or by printing
+                # "success": false. (simul's own scripts keep the error-key
+                # rule; their path is _execute_json_script.)
+                apply_script_success(parsed)
                 if keep_raw_output:
                     parsed.setdefault("output", result.output)
                 return parsed

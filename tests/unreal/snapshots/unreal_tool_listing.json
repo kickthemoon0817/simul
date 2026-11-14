@@ -84,7 +84,7 @@
   {
    "name": "capture_unreal_viewport",
    "title": "Capture Unreal Viewport",
-   "description": "Capture a viewport screenshot via HighResScreenshot and return its path on the editor host. Pass inline=true to also receive the image itself as an image content block; captures above the inline size cap return the path alone, unless format jpeg or inline_max_size makes them fit. view picks the level editor viewport or, during Play In Editor, the player's game view; the reply says which (view, pie_active).",
+   "description": "Capture a viewport screenshot via HighResScreenshot and return its path on the editor host. Pass inline=true to also receive the image itself as an image content block; captures above the inline size cap return the path alone, unless format jpeg or inline_max_size makes them fit. view picks the level editor viewport or, during Play In Editor, the player's game view; the reply says which (view, pie_active). Waits up to 15 s plus 0.25 s per megapixel; past that a CaptureError's details.pending_path / pending_dir say where Unreal may still write the shot.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -149,7 +149,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": null,
     "openWorldHint": null
    },
@@ -162,7 +162,7 @@
   {
    "name": "execute_unreal_script",
    "title": "Execute Unreal Script",
-   "description": "Execute arbitrary Python code inside the Unreal Engine editor. Use for operations not covered by other tools. The code runs via PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return structured data. Each call starts in a fresh namespace with unreal imported, and every name it binds is discarded when it ends, returned or raised: nothing carries over to the next call (pass values back in as code), and a callback it registers must import what it uses inside itself. Never keep an unreal package or world, or an object that refers to one, in sys.modules, a module attribute or a registered callback: the next map change aborts the editor. UE 5.7 hazard: do not leave a reference to an unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) in a reference cycle (a class attribute or a method's default argument puts it in one); a later garbage collection, including the editor's own on autosave, crashes the editor. Call them inline. For granular CLI operations see: simul unreal --help",
+   "description": "Execute arbitrary Python code inside the Unreal Engine editor. Use for operations not covered by other tools. The code runs via PythonScriptLibrary.ExecutePythonCommandEx. Print a JSON object to return structured data: the first one printed comes back as the result, its keys as data, so an error or *_error key (a position_error metric) does not fail the call; it fails only when the script raises or prints \"success\": false. Each call starts in a fresh namespace with unreal imported, and every name it binds is discarded when it ends, returned or raised: nothing carries over to the next call (pass values back in as code), and a callback it registers must import what it uses inside itself. Never keep an unreal package or world, or an object that refers to one, in sys.modules, a module attribute or a registered callback: the next map change aborts the editor. UE 5.7 hazard: do not leave a reference to an unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) in a reference cycle (a class attribute or a method's default argument puts it in one); a later garbage collection, including the editor's own on autosave, crashes the editor. Call them inline. For granular CLI operations see: simul unreal --help",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -324,7 +324,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": true,
     "idempotentHint": null,
     "openWorldHint": null
    },
@@ -839,7 +839,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": true,
     "openWorldHint": null
    },
@@ -945,7 +945,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": null,
     "openWorldHint": null
    },
@@ -1043,7 +1043,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": true,
     "openWorldHint": null
    },
@@ -1095,7 +1095,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": true,
     "openWorldHint": null
    },
@@ -1163,7 +1163,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": null,
     "openWorldHint": null
    },
@@ -1462,7 +1462,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": null,
     "openWorldHint": null
    },
@@ -1654,7 +1654,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": null,
     "openWorldHint": null
    },
@@ -1910,7 +1910,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": null,
     "openWorldHint": null
    },
@@ -2158,7 +2158,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": null,
     "openWorldHint": null
    },
@@ -2690,7 +2690,7 @@
      },
      "include_components": {
       "default": false,
-      "description": "Give each actor its components: name, class, is_root, attach_parent.",
+      "description": "Give each actor its components: name, class, is_root, attach_parent; the first 50, with component_count counting them all (list_unreal_actor_components pages the rest).",
       "type": "boolean"
      },
      "class_filter": {
@@ -2846,7 +2846,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": null,
     "openWorldHint": null
    },
@@ -2859,7 +2859,7 @@
   {
    "name": "get_unreal_actor_by_semantic_label",
    "title": "Get Unreal Actor By Semantic Label",
-   "description": "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case. One page at a time: total_matches counts every match, and next_offset is where the next page starts.",
+   "description": "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case. A regex (at most 512 characters) that Python's re could backtrack on, such as (\\w+)+ or .*left.*front.*x, is searched in time linear in the tag, as search_blender_objects does. One page at a time: total_matches counts every match, and next_offset is where the next page starts.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2870,7 +2870,7 @@
      },
      "match_mode": {
       "default": "exact",
-      "description": "exact (a tag equals label), contains (a tag contains label) or regex (label is a Python regular expression searched for in each tag, ignoring case; a pattern whose failing search can run for long on a 1023-character tag is refused, such as a repeated group that holds a quantifier or alternatives, as in (\\w+)+, or two quantifiers that can divide the same characters between them, as in .*.*x or A*a*x); every mode ignores case.",
+      "description": "exact (a tag equals label), contains (a tag contains label) or regex (label is a Python regular expression, at most 512 characters, searched for in each tag, ignoring case, as Blender's add-on searches object names: with re when its failing search on a 1023-character tag is bounded, otherwise, as for (\\w+)+ or .*left.*front.*x, in time linear in the tag; a pattern that needs both is refused); every mode ignores case.",
       "enum": [
        "exact",
        "contains",
@@ -2982,7 +2982,7 @@
    "annotations": {
     "title": null,
     "readOnlyHint": false,
-    "destructiveHint": null,
+    "destructiveHint": false,
     "idempotentHint": null,
     "openWorldHint": null
    },

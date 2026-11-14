@@ -532,7 +532,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "inline size cap return the path alone, unless format jpeg or "
             "inline_max_size makes them fit. view picks the level editor "
             "viewport or, during Play In Editor, the player's game view; the "
-            "reply says which (view, pie_active)."
+            "reply says which (view, pie_active). Waits up to 15 s plus 0.25 s "
+            "per megapixel; past that a CaptureError's details.pending_path / "
+            "pending_dir say where Unreal may still write the shot."
         ),
         response=UnrealCaptureViewportResponse,
         read_only=False,
@@ -576,8 +578,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Execute arbitrary Python code inside the Unreal Engine editor. "
             "Use for operations not covered by other tools. The code runs via "
-            "PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return "
-            "structured data. Each call starts in a fresh namespace with unreal "
+            "PythonScriptLibrary.ExecutePythonCommandEx. Print a JSON object to return "
+            "structured data: the first one printed comes back as the result, its keys as "
+            "data, so an error or *_error key (a position_error metric) does not fail the "
+            "call; it fails only when the script raises or prints \"success\": false. "
+            "Each call starts in a fresh namespace with unreal "
             "imported, and every name it binds is discarded when it ends, returned "
             "or raised: nothing carries over to the next call (pass values back in "
             "as code), and a callback it registers must import what it uses inside "
@@ -621,6 +626,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         response=UnrealUIResponse,
         read_only=False,
+        destructive=True,
         method="control_ui",
         params=(
             ToolParam(
@@ -2097,7 +2103,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 "include_components",
                 bool,
                 False,
-                description="Give each actor its components: name, class, is_root, attach_parent.",
+                description=(
+                    "Give each actor its components: name, class, is_root, attach_parent; the first 50, with "
+                    "component_count counting them all (list_unreal_actor_components pages the rest)."
+                ),
             ),
             ToolParam(
                 "class_filter",
@@ -2231,6 +2240,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="get_unreal_actor_by_semantic_label",
         description=(
             "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case. "
+            "A regex (at most 512 characters) that Python's re could backtrack on, such as (\\w+)+ or "
+            ".*left.*front.*x, is searched in time linear in the tag, as search_blender_objects does. "
             "One page at a time: total_matches counts every match, and next_offset is where the next "
             "page starts."
         ),
