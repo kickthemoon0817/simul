@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -328,6 +329,25 @@ def test_connection_refused_resets_detected_protocol() -> None:
 
     client = asyncio.run(scenario())
     assert client.socket_protocol == "auto"
+
+
+def test_bridge_connect_timeout_says_the_request_was_not_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connect that times out names the request and says it never left, so a retry is safe."""
+
+    async def _never_connects(*_args: Any, **_kwargs: Any) -> Any:
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(asyncio, "open_connection", _never_connects)
+    client = IsaacSocketClient(
+        bridge_host="127.0.0.1",
+        bridge_port=1,
+        prefer_bridge=True,
+        fallback_to_vscode=False,
+        bridge_timeout_seconds=0.05,
+    )
+    with pytest.raises(TimeoutError) as excinfo:
+        asyncio.run(client.bridge_request("ping", {}))
+    assert "'ping' was not sent" in str(excinfo.value)
 
 
 def test_bridge_read_timeout_names_endpoint_and_timeout() -> None:
