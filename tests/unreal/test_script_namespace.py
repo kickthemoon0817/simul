@@ -368,7 +368,7 @@ async def test_the_json_print_protocol_and_the_three_modes_are_unchanged() -> No
         statement = await session.execute_script("unreal.events.append('x') or 7", mode="ExecuteStatement")
         quiet = await session.execute_script("value = 3", mode="ExecuteStatement")
 
-    assert printed == {"count": 4}
+    assert printed == {"count": 4, "success": True}
     assert evaluated == {"success": True, "result": "42", "output": ""}
     # A statement's value is printed, as the editor's console prints it, but
     # not kept in builtins._ (sys.displayhook's cache would hold it).

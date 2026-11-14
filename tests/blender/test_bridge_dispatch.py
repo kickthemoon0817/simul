@@ -626,6 +626,9 @@ def test_every_operation_is_classified_for_undo(bridge_module: Any) -> None:
                 # Step through frames and fill caches, but restore the frame.
                 "get_object_trajectory",
                 "get_trajectories",
+                "get_physics_state",
+                # Also writes only its frame files.
+                "capture_viewport_sequence",
                 "open_blend_file",
                 "play_animation",
                 "save_blend_file",

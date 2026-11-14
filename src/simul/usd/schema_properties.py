@@ -97,8 +97,17 @@ class SchemaProperty:
         return next(d for d in self.declarations if d.type_name == type_name)
 
     def declared_by(self, limit: int = 3) -> str:
-        """Name the declaring schemas for a message, API schemas first."""
-        names = list(self.api_schemas) + list(self.prim_types)
+        """Name the declaring schemas for a message, API schemas first.
+
+        A prim type that inherits the property from another listed type
+        (PhysicsRevoluteJoint from PhysicsJoint) is left out for the latter.
+        """
+        types = {name: Usd.SchemaRegistry.GetTypeFromSchemaTypeName(name) for name in self.prim_types}
+        prim_types = [
+            name for name, type_ in types.items()
+            if not any(other != name and type_.IsA(base) for other, base in types.items())
+        ]
+        names = list(self.api_schemas) + prim_types
         shown = ", ".join(names[:limit])
         return shown + (f" and {len(names) - limit} more" if len(names) > limit else "")
 
@@ -133,7 +142,10 @@ def _index() -> Tuple[Dict[str, Tuple[Declaration, ...]], Tuple[Tuple[str, str, 
     """
     names: Dict[str, List[Declaration]] = {}
     templates: List[Tuple[str, str, str, Declaration]] = []
-    for type_ in Tf.Type.FindByName("UsdSchemaBase").GetAllDerivedTypes():
+    # Tf lists derived types in no stable order; sorted, every lookup and
+    # message is the same from run to run.
+    derived = Tf.Type.FindByName("UsdSchemaBase").GetAllDerivedTypes()
+    for type_ in sorted(derived, key=lambda t: t.typeName):
         schema = Usd.SchemaRegistry.GetSchemaTypeName(type_)
         definition = _definition(type_, schema) if schema else None
         if definition is None:

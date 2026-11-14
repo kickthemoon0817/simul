@@ -23,6 +23,7 @@ commands.  When stdout is not a TTY the CLI auto-detects JSON mode.
 """
 
 import asyncio
+import errno
 import json
 import os
 import signal
@@ -680,7 +681,16 @@ def server(
 
         logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
         _keep_fastmcp_home_in_state_dir()
-        if asyncio.run(_serve(settings, transport, backend_set)):
+        try:
+            stopped = asyncio.run(_serve(settings, transport, backend_set))
+        except SystemExit as exc:
+            # uvicorn exits 3 (its STARTUP_FAILURE) when it cannot listen,
+            # having only logged why; report it as every command reports a
+            # failure instead: exit 1, with the JSON envelope under --json.
+            if transport in NETWORK_TRANSPORTS and exc.code not in (0, None):
+                _fail_to_listen(settings.server.host, settings.server.port, transport)
+            raise
+        if stopped:
             logger.info("Stopped on SIGTERM")
             console.print("[yellow]Server stopped (SIGTERM)[/yellow]")
 
@@ -692,8 +702,41 @@ def server(
         console.print(f"[red]ConfigError: {escape(exc.message)}[/red]")
         raise typer.Exit(2)
     except Exception as e:
-        console.print(f"[red]Error starting server: {e}[/red]")
-        raise typer.Exit(1)
+        fail(f"Error starting server: {e}", "StartupError")
+
+
+def _address_in_use(host: str, port: int) -> bool:
+    """Whether another socket holds ``host:port``, probed by binding it as uvicorn does."""
+    try:
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    for family, kind, proto, _name, address in addresses:
+        with socket.socket(family, kind, proto) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(address)
+            except OSError as exc:
+                if exc.errno == errno.EADDRINUSE:
+                    return True
+    return False
+
+
+def _fail_to_listen(host: str, port: int, transport: str) -> NoReturn:
+    """Exit 1 because the HTTP/SSE server could not listen, saying why when the port is taken."""
+    details = {"host": host, "port": port, "transport": transport}
+    if _address_in_use(host, port):
+        fail(
+            f"Cannot listen on {host}:{port}: the address is already in use. Stop what holds it, "
+            "or pick another port with SERVER__PORT.",
+            "AddressInUse",
+            details,
+        )
+    fail(
+        f"The {transport} server could not start on {host}:{port}; the log above says why.",
+        "StartupError",
+        details,
+    )
 
 
 # ---------------------------------------------------------------------------

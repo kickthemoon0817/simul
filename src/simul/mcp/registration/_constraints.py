@@ -23,7 +23,7 @@ from __future__ import annotations
 import types
 import typing
 from dataclasses import dataclass
-from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Tuple, Union
+from typing import Annotated, Any, Callable, Dict, List, Literal, Mapping, Optional, Tuple, Union
 
 import annotated_types
 from pydantic import BaseModel, Field
@@ -57,7 +57,22 @@ class Choices:
     enforced: bool = True
 
 
-Constraint = Union[Bounds, Choices]
+@dataclass(frozen=True)
+class ItemBounds:
+    """Numeric limits of each item of a list parameter.
+
+    Attributes:
+        each: The bounds every item has.
+        positions: Bounds per position instead, for a fixed-length list whose
+            items differ (``[width, height]``); the list is then advertised as
+            exactly that many items.
+    """
+
+    each: Optional[Bounds] = None
+    positions: Tuple[Bounds, ...] = ()
+
+
+Constraint = Union[Bounds, Choices, ItemBounds]
 
 #: A count of results per page (``max_results = max(1, min(max_results, N))``).
 _PAGE = Bounds(ge=1, le=1000)
@@ -68,6 +83,10 @@ _UNIT = Bounds(ge=0.0, le=1.0)
 
 #: Isaac Sim viewport capture edge, ``MAX_CAPTURE_DIMENSION`` in the Isaac tools.
 ISAAC_MAX_CAPTURE_DIMENSION = 3840
+#: The largest AOV render product, [width, height] (``MAX_AOV_RESOLUTION``),
+#: and the PhysX solver iteration clamp (``MAX_SOLVER_ITERATIONS``).
+ISAAC_MAX_AOV_RESOLUTION = (3840, 2160)
+ISAAC_MAX_SOLVER_ITERATIONS = 255
 #: Unreal capture edge (``capture_viewport``) and the largest view aspect ratio
 #: (``FOCUS_MAX_ASPECT_RATIO``); the narrowest field of view Unreal renders
 #: (``FOCUS_MIN_FOV_DEGREES``).
@@ -120,7 +139,16 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         "max_widgets": Bounds(ge=1, le=2000),
     },
     "step_isaac_simulation": {"num_steps": Bounds(ge=1, le=1000)},
-    "read_isaac_aovs": {"num_frames": Bounds(ge=1, le=60)},
+    "read_isaac_aovs": {
+        "num_frames": Bounds(ge=1, le=60),
+        # [width, height], each edge its own limit.
+        "resolution": ItemBounds(
+            positions=(
+                Bounds(ge=1, le=ISAAC_MAX_AOV_RESOLUTION[0]),
+                Bounds(ge=1, le=ISAAC_MAX_AOV_RESOLUTION[1]),
+            )
+        ),
+    },
     "list_isaac_cameras": {"max_results": _PAGE, "offset": _OFFSET},
     "list_isaac_lights": {"max_results": _PAGE, "offset": _OFFSET},
     "get_isaac_subtree": {"max_results": _PAGE, "offset": _OFFSET},
@@ -154,6 +182,7 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
         ),
     },
     "create_isaac_object": {
+        "diffuse_color": ItemBounds(each=_UNIT),
         "collision": Choices(
             (
                 "none",
@@ -178,16 +207,30 @@ PARAM_CONSTRAINTS: Dict[str, Dict[str, Constraint]] = {
             )
         ),
     },
-    # The tool upper-cases both before checking, so any case is taken.
+    # The tool upper-cases both before checking, so any case is taken; the
+    # schema lists the canonical spelling.
     "configure_isaac_physics_scene": {
+        "time_steps_per_second": Bounds(ge=1),
         "solver_type": Choices(("TGS", "PGS"), enforced=False),
         "broadphase_type": Choices(("GPU", "MBP", "SAP"), enforced=False),
+        "min_position_iterations": Bounds(ge=1, le=ISAAC_MAX_SOLVER_ITERATIONS),
+        "max_position_iterations": Bounds(ge=1, le=ISAAC_MAX_SOLVER_ITERATIONS),
+        "min_velocity_iterations": Bounds(ge=0, le=ISAAC_MAX_SOLVER_ITERATIONS),
+        "max_velocity_iterations": Bounds(ge=0, le=ISAAC_MAX_SOLVER_ITERATIONS),
+    },
+    "set_isaac_physics_material": {
+        "static_friction": Bounds(ge=0.0),
+        "dynamic_friction": Bounds(ge=0.0),
+        "restitution": _UNIT,
     },
     "set_isaac_joint_drive": {
         "drive_axis": Choices(
             ("angular", "linear", "transX", "transY", "transZ", "rotX", "rotY", "rotZ")
         ),
         "drive_type": Choices(("force", "acceleration")),
+        "stiffness": Bounds(ge=0.0),
+        "damping": Bounds(ge=0.0),
+        "max_force": Bounds(ge=0.0),
     },
     "set_isaac_joint_limits": {
         "limit_axis": Choices(("transX", "transY", "transZ", "rotX", "rotY", "rotZ", "distance")),
@@ -348,23 +391,66 @@ def _base(annotation: Any) -> Any:
     return annotation
 
 
+def _map_inner(annotation: Any, change: Callable[[Any], Any]) -> Any:
+    """Replace the type inside ``annotation``'s ``Annotated`` and ``Optional`` layers, keeping the layers.
+
+    ``Optional[Annotated[List[float], validator]]`` becomes
+    ``Optional[Annotated[change(List[float]), validator]]``, so the change
+    lands on the value itself: a choice list on the string, not beside the
+    ``null`` an optional parameter defaults to.
+    """
+    if typing.get_origin(annotation) is Annotated:
+        base, *extras = typing.get_args(annotation)
+        return Annotated[(_map_inner(base, change), *extras)]
+    inner, optional = _optional_of(annotation)
+    if optional:
+        return Optional[_map_inner(inner, change)]
+    return change(annotation)
+
+
+def _split_metadata(annotation: Any) -> Tuple[Any, List[Any]]:
+    """Split an annotated type into its base and the range and length constraints it carries."""
+    carried: List[Any] = []
+    while typing.get_origin(annotation) is Annotated:
+        annotation, *extras = typing.get_args(annotation)
+        for extra in extras:
+            carried.extend(extra.metadata if isinstance(extra, FieldInfo) else [extra])
+    return annotation, [m for m in carried if isinstance(m, _COPIED_METADATA)]
+
+
+def _list_items(annotation: Any, constraint: ItemBounds) -> Any:
+    """``List[X]`` with ``constraint`` on each ``X``, or a fixed-length tuple of bounded positions."""
+    if typing.get_origin(annotation) is not list:
+        raise ValueError(f"item bounds need a list parameter, not {annotation!r}")
+    (item,) = typing.get_args(annotation) or (Any,)
+    if constraint.positions:
+        return Tuple[tuple(Annotated[item, bounds.field()] for bounds in constraint.positions)]
+    if constraint.each is None:
+        return annotation
+    return List[Annotated[item, constraint.each.field()]]  # type: ignore[valid-type]
+
+
 def apply(annotation: Any, constraint: Constraint) -> Any:
     """Return ``annotation`` carrying ``constraint``.
 
     Choices replace a ``str`` (or ``Optional[str]``) with a ``Literal`` of the
-    values when enforced, and add an advertised ``enum`` otherwise. Bounds are
-    attached as pydantic constraints, which apply to the value inside an
-    ``Optional``.
+    values when enforced, and add an advertised ``enum`` to the string
+    otherwise (inside an ``Optional``, so the schema's ``null`` default stays
+    valid). Bounds are attached as pydantic constraints, which apply to the
+    value inside an ``Optional``. Item bounds constrain each item of a list.
 
     A parameter that is already a ``Literal`` keeps its own choices: choices
     that differ would narrow (or widen) what the tool accepts behind its
     back, so they are refused.
 
     Raises:
-        ValueError: Choices for a ``Literal`` parameter that are not its own.
+        ValueError: Choices for a ``Literal`` parameter that are not its own,
+            or item bounds for a parameter that is not a list.
     """
     if isinstance(constraint, Bounds):
         return Annotated[annotation, constraint.field()]
+    if isinstance(constraint, ItemBounds):
+        return _map_inner(annotation, lambda inner: _list_items(inner, constraint))
     inner, optional = _optional_of(_base(annotation))
     if typing.get_origin(inner) is Literal:
         if set(typing.get_args(inner)) != set(constraint.values):
@@ -376,13 +462,48 @@ def apply(annotation: Any, constraint: Constraint) -> Any:
     if constraint.enforced:
         literal: Any = Literal[constraint.values]
         return Optional[literal] if optional else literal
-    return Annotated[annotation, Field(json_schema_extra={"enum": list(constraint.values)})]
+    advertised = Field(json_schema_extra={"enum": list(constraint.values)})
+    return _map_inner(annotation, lambda value: Annotated[value, advertised])
 
 
 def constrain(tool_name: str, param_name: str, annotation: Any) -> Any:
     """Return the parameter's annotation with its ``PARAM_CONSTRAINTS`` entry, if any."""
     constraint = PARAM_CONSTRAINTS.get(tool_name, {}).get(param_name)
     return annotation if constraint is None else apply(annotation, constraint)
+
+
+def _with_item_metadata(advertised: Any, modelled: Any) -> Optional[Any]:
+    """The advertised list type with the item constraints the model's list type carries.
+
+    Nested lists are followed level by level (a face is a list of vertex
+    indices, each at least 0), and each level's item type has to match the
+    advertised one once its constraints are stripped.
+
+    Args:
+        advertised: The advertised list type, without ``Annotated`` or
+            ``Optional`` layers.
+        modelled: The model field's list type, likewise.
+
+    Returns:
+        The constrained list type, or None when the two are not lists of the
+        same items.
+    """
+    if typing.get_origin(advertised) is not list or typing.get_origin(modelled) is not list:
+        return None
+    advertised_args, modelled_args = typing.get_args(advertised), typing.get_args(modelled)
+    if len(advertised_args) != 1 or len(modelled_args) != 1:
+        return None
+    item, metadata = _split_metadata(modelled_args[0])
+    advertised_item = _base(advertised_args[0])
+    if typing.get_origin(item) is list:
+        inner = _with_item_metadata(advertised_item, item)
+        if inner is None:
+            return None
+    elif _same_type(item, advertised_item):
+        inner = advertised_args[0]
+    else:
+        return None
+    return List[Annotated[(inner, *metadata)] if metadata else inner]  # type: ignore[misc]
 
 
 def from_request_model(
@@ -420,7 +541,12 @@ def from_request_model(
             return annotation
         annotation = apply(annotation, Choices(tuple(values)))
     elif not _same_type(modelled, advertised):
-        return annotation
+        # A list whose items the model bounds (``List[ColorFactor]`` behind an
+        # advertised ``List[float]``) takes those item bounds too.
+        items = _with_item_metadata(advertised, modelled)
+        if items is None:
+            return annotation
+        annotation = _map_inner(annotation, lambda _advertised: items)
     metadata = [m for m in [*carried, *field.metadata] if isinstance(m, _COPIED_METADATA)]
     if not metadata:
         return annotation

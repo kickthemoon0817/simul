@@ -296,6 +296,13 @@ on the sessionless protocol share one session (see
 other settings here cannot come from a working-directory `.env`; see
 [Where settings come from](#where-settings-come-from).
 
+A request body over 4 MiB is refused by the MCP SDK with a plain HTTP 413
+before simul reads it, on HTTP and SSE alike: the client gets a transport
+error rather than a JSON envelope, and the call has no usage or audit row.
+The limit is the SDK's default, and FastMCP does not expose it. Pass a large
+script's data or a large mesh as a file inside the sandbox and send its path
+instead.
+
 ### File sandbox
 
 MCP tools that read or write files only accept paths under
@@ -335,6 +342,41 @@ directory you share with it on purpose instead.
 
 Every allowed root admits reads and writes alike, so in a source checkout
 `examples/` and `tests/data/` are writable by the tools too.
+
+The Isaac Sim tools hold every caller value that becomes a file location in
+Kit to the same rules, so a free-form attribute or settings map is not a way
+around them:
+
+- A path for an `asset` or `asset[]` attribute or shader input is judged as
+  a read and written as the path the check resolved. This covers
+  `create_isaac_prim`'s `attributes`, `set_isaac_prim_attribute`,
+  `set_isaac_material_property`, an asset-typed input in
+  `set_isaac_graph_node_values`, and `create_isaac_light`'s `texture_file`.
+  Only Kit knows an attribute's type, so the server checks every string the
+  call carries and the script applies the verdict once the type is known. A
+  value the server did not check is refused.
+- An OmniGraph input or Carb key named like a file location is judged as a
+  write, because Kit may read or write it. Examples are `inputs:path`
+  (IsaacReadFilePath), `inputs:outputDir`, `inputs:usdPath`, `/log/file` and
+  `/app/exts/folders`. "Named like a file location" goes by the last word of
+  the last segment, split at camelCase and `_`:
+  - file, dir, folder, url or uri (singular or plural) counts;
+  - path counts only bare or after a file word such as usd, asset, output or
+    log;
+  - so `inputs:robotPath`, `inputs:renderProductPath`, `inputs:pathPattern`
+    and `/log/fileLogLevel` are not file locations.
+
+  `set_isaac_graph_node_values` and `set_isaac_carb_settings` refuse such a
+  value outside the sandbox and set nothing. Carb dict entries and list
+  elements are judged one by one, and an index key such as
+  `/app/exts/folders/0` by the name before the index.
+  `set_isaac_prim_attribute` applies the same rule to an input of a graph
+  node prim (an `OmniGraphNode` or any prim with a `node:type` attribute,
+  whatever its value). While the sandbox is on,
+  `connect_isaac_graph_nodes` refuses a connection into such an input,
+  because a value that comes from another node at run time is never checked.
+
+A refused value is a `SandboxError`, and nothing is created or set.
 
 For the headless USD tools the sandbox also covers everything a file draws
 on, not just the file named in the call. Before `load_usd_file` or
@@ -584,7 +626,9 @@ it, rotated copies included, with `simul stats --reset`.
 before it ran) or `cancelled`, with `executed` as in the usage row; an
 exception that escaped the tool adds `error_class`. `request_id` matches the
 call's usage row and the `[request_id tool]` prefix of its lines in
-`simul.log`. Each field is cut at 128 characters.
+`simul.log`. A call to a tool that is not registered is named
+`<unknown tool>`, as in its usage row, with the name it gave in
+`extra.requested_tool`. Each field is cut at 128 characters.
 
 Every server on the machine writes the same `audit.jsonl` and `simul.log`.
 They rotate together: each record is written under a lock on

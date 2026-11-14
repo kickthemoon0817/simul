@@ -224,6 +224,7 @@ class CameraMixin:
             "specific camera prim."
         ),
         read_only=False,
+        destructive=True,
         idempotent=True,
     )
     async def set_isaac_camera(
