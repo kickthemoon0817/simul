@@ -81,13 +81,22 @@ in `serverInfo.version`, the same one `simul version` prints. SIGTERM and
 SIGINT (Ctrl-C) stop the server cleanly over stdio and HTTP alike, whether
 or not the client has closed stdin: the adapters are closed (`Simul 3D MCP
 Server shut down` and `Stopped on SIGTERM` in the log), the logs are flushed
-and the process exits 0, within about half a second when no Isaac Sim call
-is in flight. Isaac calls running when the stop began, or that a client had
-cancelled, are waited for at most `SERVER__SHUTDOWN_TIMEOUT` seconds (default
-5), and the log names any it stopped waiting for; an instance held after a
-timed-out call is released at once. A signal during startup is
-kept until the server can stop; only one in the first ~0.1 s, while Python
-is still importing the CLI and nothing is open yet, ends it the default way.
+and the process exits 0, within about half a second when no call is in
+flight. Isaac calls running when the stop began, or that a client had
+cancelled, and USD or attached-Blender calls running on worker threads (which
+nothing can stop) are waited for at most `SERVER__SHUTDOWN_TIMEOUT` seconds
+(default 5) from the start of the stop, the same when the client closes stdin;
+the log names any it stopped waiting for, they are recorded
+`executed: "unknown"`, and the process exits 0 without them. A worker thread
+inside one long C call (pxr opening a large stage) keeps Python's interpreter
+lock, so nothing else in the process runs until the call returns; if it still
+holds it one second past the deadline, the process ends anyway with exit 1 and
+every thread's traceback on stderr. An instance held after a timed-out call is
+released at once. A second SIGTERM or SIGINT while
+the server is stopping ends it at once, exit `128 +` the signal (143, 130). A
+signal during startup is kept until the server can stop; only one in the first
+~0.1 s, while Python is still importing the CLI and nothing is open yet, ends
+it the default way.
 State (logs, usage log, sessions) goes under `$SIMUL_HOME` (default
 `~/.simul`), created on first write; see
 [configuration.md](configuration.md#state-directory-simul_home).

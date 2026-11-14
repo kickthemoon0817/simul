@@ -20,6 +20,7 @@ from ._shared import (
 )
 from .._meta import tool_meta
 from .graph import _script_execution_refusal, is_script_capable_node_type
+from .physics import mass_property_refusal
 
 # Largest script create_isaac_object sends in one round trip. Isaac Sim 5.1's
 # stock socket takes at most 32 KiB per script (less an auth-token header);
@@ -100,7 +101,8 @@ class CompoundMixin:
                 shapes (Cube, Sphere, ...) collide with their exact shape
                 whatever the value; an Xform has no geometry and fails the
                 step. Omit to add no collider.
-            mass: Mass in kg; applies MassAPI.
+            mass: Mass in kg, at least 0 (0 lets PhysX derive it); applies
+                MassAPI.
             material_path: Material to bind. Reused when it exists, created as
                 a UsdPreviewSurface material when it does not. Defaults to
                 "<parent>/Looks/<name>_Material" when diffuse_color is given.
@@ -139,6 +141,10 @@ class CompoundMixin:
                     error=f"{label} must have 3 components; got {len(vector)}. Nothing was created.",
                     error_type="ValidationError",
                 ).model_dump()
+        refusal = mass_property_refusal(mass=mass)
+        if refusal is not None:
+            refusal["error"] = refusal["error"].replace("Nothing was changed.", "Nothing was created.")
+            return refusal
         if material_path is None and diffuse_color is not None:
             parent, _, name = prim_path.rpartition("/")
             material_path = f"{parent}/Looks/{name}_Material"

@@ -69,7 +69,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             "loaded stage URL, simulation state, and active agent sessions with "
             "their purposes. Use this to find a free or compatible instance "
             "before starting work; unreachable instances report "
-            "instance_status 'unreachable'. "
+            "instance_status 'unreachable', and one still finishing a call whose reply "
+            "timed out reports 'busy' with held_after_timeout, without being probed. "
             + _CLAIM_MODE_SENTENCE[enforced]
         ),
         annotations=server._tool_annotations(
@@ -118,6 +119,19 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
                 # Open means this server is skipping the bridge after repeated
                 # transport failures and talking to the stock socket instead.
                 brief["bridge_circuit_open"] = client.bridge_circuit_open
+                held = brief.get("held_after_timeout")
+                if isinstance(held, dict):
+                    # Not probed: Isaac Sim is still finishing a call whose
+                    # reply timed out, and every call gets InstanceBusy until then.
+                    brief["instance_status"] = "busy"
+                    brief["compatibility"] = "blocked"
+                    brief["compatibility_score"] = 0.0
+                    brief["compatibility_reason"] = (
+                        f"Isaac Sim is still running {held.get('timed_out_tool')}, whose reply "
+                        f"timed out {float(held.get('busy_for_seconds') or 0):.0f}s ago; calls "
+                        "get InstanceBusy until it has finished."
+                    )
+                    return brief
                 if not brief.get("reachable"):
                     # Session bookkeeping says nothing about whether we can talk to
                     # the instance, so an empty session list must not read as

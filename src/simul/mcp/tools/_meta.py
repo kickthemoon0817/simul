@@ -62,6 +62,9 @@ class ToolMeta:
             usage record carries the code's digest instead of the code.
         bypasses_instance_lock: The tool skips the per-instance lock and the
             claim check because the call it acts on is the one holding them.
+        reports_hold: A status tool: while the instance is held after a
+            timed-out call it answers at once from the server's own state,
+            sending the engine nothing (``isaac_hold_report``).
         sandboxed_paths: Path parameters checked against the sandbox before
             the call is dispatched.
         deprecated_aliases: Extra parameters accepted under an old name.
@@ -77,6 +80,7 @@ class ToolMeta:
     open_world: bool = True
     script: bool = False
     bypasses_instance_lock: bool = False
+    reports_hold: bool = False
     sandboxed_paths: Tuple[SandboxedPath, ...] = ()
     deprecated_aliases: Tuple[DeprecatedAlias, ...] = ()
     hidden_parameters: FrozenSet[str] = frozenset()
@@ -92,6 +96,7 @@ def tool_meta(
     open_world: bool = True,
     script: bool = False,
     bypasses_instance_lock: bool = False,
+    reports_hold: bool = False,
     sandboxed_paths: Sequence[SandboxedPath] = (),
     deprecated_aliases: Sequence[DeprecatedAlias] = (),
     hidden_parameters: Sequence[str] = (),
@@ -111,6 +116,7 @@ def tool_meta(
         open_world: The tool talks to an external process or the network.
         script: The tool runs agent-authored code from its ``code`` parameter.
         bypasses_instance_lock: The tool skips the per-instance lock.
+        reports_hold: The tool answers from the server's state during a hold.
         sandboxed_paths: Path parameters checked before dispatch.
         deprecated_aliases: Extra parameters accepted under an old name.
         hidden_parameters: Implementation parameters the tool does not expose.
@@ -128,6 +134,7 @@ def tool_meta(
         open_world=open_world,
         script=script,
         bypasses_instance_lock=bypasses_instance_lock,
+        reports_hold=reports_hold,
         sandboxed_paths=tuple(sandboxed_paths),
         deprecated_aliases=tuple(deprecated_aliases),
         hidden_parameters=frozenset(hidden_parameters),

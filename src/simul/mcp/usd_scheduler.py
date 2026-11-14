@@ -46,6 +46,7 @@ import logging
 from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
+from . import worker_threads
 from .schemas.common import ErrorResponse
 
 _LOGGER = logging.getLogger(__name__)
@@ -260,7 +261,7 @@ class USDCallScheduler:
             held.append((locks, key, lock))
 
         try:
-            future = loop.run_in_executor(None, work)
+            future = worker_threads.submit(loop, tool_name, work)
         except BaseException:
             release()
             raise
@@ -307,7 +308,7 @@ class USDCallScheduler:
             self._access.release(False)
 
         try:
-            future = loop.run_in_executor(None, work)
+            future = worker_threads.submit(loop, name, work)
         except BaseException:
             release()
             raise

@@ -360,11 +360,23 @@ def check_prim_type(type_name: str) -> Usd.PrimDefinition:
         if suggestions
         else " Use a concrete type such as Xform, Scope, Mesh, Cube or Sphere."
     )
+    message = f"Cannot create a prim of type {type_name!r}: {reason}.{hint}"
+    # The refusal is about one argument, so it names it, as a schema
+    # refusal does (round-3 audit m3-3: details.errors[0].field was null).
+    error: Dict[str, Any] = {
+        "field": "prim_type",
+        "message": message,
+        "type": "value_error",
+        "input": type_name,
+    }
+    if suggestions:
+        error["suggestion"] = suggestions[0]
     raise USDEditError(
         UNKNOWN_PRIM_TYPE,
-        f"Cannot create a prim of type {type_name!r}: {reason}.{hint}",
+        message,
         prim_type=type_name,
         suggestions=suggestions or None,
+        errors=[error],
     )
 
 
