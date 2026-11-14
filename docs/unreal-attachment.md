@@ -221,7 +221,9 @@ they report it with `busy: true` and `held_after_timeout`, and an answer ends th
 hold. An editor that stops taking connections (it quit or crashed) ends it too.
 The hold lasts at most `UNREAL__HOLD_AFTER_TIMEOUT` seconds (default 300), after
 which the log warns and later calls queue behind the request again; `0` turns it
-off. A stopping server releases it at once.
+off. A stopping server releases it at once. The hold lives in the simul server
+process that saw the timeout: another simul server, or another client of Remote
+Control, sending to the same editor meanwhile still queues behind the request.
 
 ```sh
 simul unreal detach
