@@ -217,9 +217,32 @@ def _optional_text(value: str) -> Optional[str]:
     return value or None
 
 
-def _name_list(value: str) -> Optional[List[str]]:
-    """Comma-separated names, blanks dropped; an empty string means none."""
-    return [item.strip() for item in value.split(",") if item.strip()] if value else None
+def _list_items(value: Any) -> List[str]:
+    """Items given as a JSON array (or its text) or as comma-separated text, each stripped.
+
+    A JSON array given as text used to be split on its commas, into paths such
+    as ``["/Game/...`` that named nothing.
+
+    Raises:
+        ValueError: Text that starts with ``[`` but is not a JSON array of
+            strings, or a value that is neither text nor such an array.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if not text.startswith("["):
+            return [item.strip() for item in value.split(",")]
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"starts with '[' but is not a JSON array: {exc}") from None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"expected a JSON array of strings or comma-separated text, not {value!r}")
+    return [item.strip() for item in value]
+
+
+def _name_list(value: Any) -> Optional[List[str]]:
+    """Names as a JSON array or comma-separated text, blanks dropped; an empty string or array means none."""
+    return [item for item in _list_items(value) if item] if value else None
 
 
 #: ``component_name`` of the physics and collision tools, which edit or push one body.
@@ -235,9 +258,13 @@ _PHYSICS_COMPONENT = ToolParam(
 )
 
 
-def _path_list(value: str) -> List[str]:
-    """Comma-separated object paths, each stripped."""
-    return [item.strip() for item in value.split(",")]
+def _path_list(value: Any) -> List[str]:
+    """Object paths as a JSON array or comma-separated text, each stripped."""
+    return _list_items(value)
+
+
+#: A list of names or paths: a JSON array of strings, or comma-separated text.
+_NameList = Union[str, List[str]]
 
 
 def _floats(value: str) -> List[float]:
@@ -815,21 +842,21 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ),
             ToolParam(
                 "class_names",
-                str,
+                _NameList,
                 "",
                 description=(
-                    "Comma-separated asset classes, by name (StaticMesh, Material, Texture2D) or class path "
-                    "(/Script/Engine.StaticMesh). Empty matches every class."
+                    "Comma-separated (or a JSON array of) asset classes, by name (StaticMesh, Material, "
+                    "Texture2D) or class path (/Script/Engine.StaticMesh). Empty matches every class."
                 ),
                 convert=_name_list,
             ),
             ToolParam(
                 "package_paths",
-                str,
+                _NameList,
                 "",
                 description=(
-                    "Comma-separated content folders to search, such as /Game/Props. Empty searches every "
-                    "mounted content root."
+                    "Comma-separated (or a JSON array of) content folders to search, such as /Game/Props. "
+                    "Empty searches every mounted content root."
                 ),
                 convert=_name_list,
             ),
@@ -912,9 +939,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         params=(
             ToolParam(
                 "asset_paths",
-                str,
+                _NameList,
                 "",
-                description="Comma-separated asset paths whose packages to save, such as /Game/Materials/MI_Red.",
+                description=(
+                    "Comma-separated (or a JSON array of) asset paths whose packages to save, such as "
+                    "/Game/Materials/MI_Red."
+                ),
                 convert=_name_list,
             ),
             ToolParam(
@@ -1202,7 +1232,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="set_unreal_actor_transform",
         description=(
             "Set an actor's world location, rotation and/or scale. Each is optional; "
-            "one left out keeps its current value. Returns the transform read back."
+            "one left out keeps its current value. Returns the transform read back, and a warning "
+            "naming any part not attached under the actor's root, which did not move with it."
         ),
         response=UnrealSetActorTransformResponse,
         read_only=False,
@@ -1632,9 +1663,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "transaction that marks the map dirty. A Static body is made Movable unless make_movable "
             "is false; a body without physics collision, whose collision responses block no object type "
             "(an overlap preset such as OverlapAll, even with collision_enabled true), or without simple "
-            "collision geometry is refused (IncompatibleBody, with the reasons and the fix). Unreal "
-            "detaches a simulated body from its parent, so an attached one needs allow_detach. Returns "
-            "the body read back: physics_mode, mobility, collision, blocked_object_types and mass."
+            "collision geometry is refused (IncompatibleBody, with the reasons and the fix). The editor "
+            "actor keeps its hierarchy: in the simulation Unreal detaches an attached body from its parent "
+            "(simulation_detaches_from) and welds the parts attached under it that do not simulate into its "
+            "body (welded_parts), so a multi-part actor simulates as one body when its top part simulates. "
+            "Returns the body read back: physics_mode, mobility, collision, blocked_object_types and mass."
         ),
         response=UnrealEnablePhysicsResponse,
         read_only=False,
@@ -1669,16 +1702,6 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 description=(
                     "Make a Static or Stationary body Movable, which simulation and kinematic movement "
                     "need (reported as mobility_changed_from); false refuses such a body instead."
-                ),
-            ),
-            ToolParam(
-                "allow_detach",
-                bool,
-                False,
-                description=(
-                    "Let a body attached to a parent be detached from it as it starts simulating, "
-                    "keeping its world transform, as Unreal does (reported as detached_from; Undo "
-                    "reattaches it, turning physics off does not). False refuses an attached body."
                 ),
             ),
             _PHYSICS_COMPONENT,
@@ -1725,6 +1748,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "application point is a world location in cm, fixed in the world while the body moves. An "
             "impulse changes the velocity at once by impulse / mass; a force acts for one physics step "
             "unless duration keeps it on for that many seconds of physics time, in step with gravity. "
+            "A part welded into another's body (physics_mode welded) pushes that whole body (welded_to). "
             "Returns the copy acted on, its mass and the expected change of velocity."
         ),
         response=UnrealApplyForceResponse,
@@ -1802,9 +1826,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         params=(
             ToolParam(
                 "actor_paths",
-                str,
+                _NameList,
                 "",
-                description="Comma-separated editor actor paths (empty: none, select by tag or folder).",
+                description=(
+                    "Comma-separated (or a JSON array of) editor actor paths (empty: none, select by tag or "
+                    "folder)."
+                ),
                 convert=_name_list,
             ),
             ToolParam(
@@ -1838,7 +1865,6 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("enable", bool, True, description="As enable_unreal_physics: false turns physics off."),
             ToolParam("kinematic", bool, False, description="As enable_unreal_physics: kinematic, not simulated."),
             ToolParam("make_movable", bool, True, description="As enable_unreal_physics."),
-            ToolParam("allow_detach", bool, False, description="As enable_unreal_physics."),
             ToolParam(
                 "collision_preset",
                 str,
@@ -1865,9 +1891,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "or asleep, mass and center of mass. While a simulation runs each actor is read through "
             "its copy there (the editor world's actors stay where they were placed), otherwise in the "
             "editor world; world picks one. Editor and simulation paths are both accepted, and each "
-            "body lists both. A multi-part actor (several primitive components, none the root) has a "
-            "body per component, listed in components. Paged: total counts every body, next_offset "
-            "starts the next page."
+            "body lists both. A multi-part actor (several primitive components, none the root) lists each "
+            "part in components; a part welded into a simulating part's body reads physics_mode welded, "
+            "with welded_to naming it. Paged: total counts every body, next_offset starts the next page."
         ),
         response=UnrealPhysicsStateResponse,
         read_only=True,
@@ -1876,10 +1902,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         params=(
             ToolParam(
                 "actor_paths",
-                str,
+                _NameList,
                 "",
                 description=(
-                    "Comma-separated actor paths (editor or simulation paths); empty when tag_filter is given."
+                    "Comma-separated (or a JSON array of) actor paths (editor or simulation paths); empty when "
+                    "tag_filter is given."
                 ),
                 convert=_name_list,
             ),
@@ -2002,7 +2029,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "Export actors of the level being edited with the optional USDImporter plugin's "
             "LevelExporterUSD; actors_exported counts the actors the written stage has a prim for. Mesh and "
             "material files go to <output name>_assets beside the output. DynamicMeshActors export as empty "
-            "Xforms, reported in warnings."
+            "Xforms, and parts not attached under their actor's root are left out (components_left_out), "
+            "both reported in warnings."
         ),
         response=UnrealExportUsdResponse,
         read_only=False,
@@ -2012,8 +2040,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         params=(
             ToolParam(
                 "actor_paths",
-                str,
-                description="Comma-separated actor object paths to export.",
+                _NameList,
+                description="Comma-separated (or a JSON array of) actor object paths to export.",
                 convert=_path_list,
             ),
             ToolParam("output_path", str, description="Output USD file path; must be inside the sandbox."),
@@ -2146,10 +2174,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         params=(
             ToolParam(
                 "analysis_types",
-                str,
+                _NameList,
                 "",
                 description=(
-                    "Comma-separated analyses: traversability, graspability, collision_complexity. "
+                    "Comma-separated (or a JSON array of) analyses: traversability, graspability, "
+                    "collision_complexity. "
                     "Empty runs all three."
                 ),
                 convert=_name_list,
@@ -2456,10 +2485,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ),
             ToolParam(
                 "checks",
-                str,
+                _NameList,
                 "",
                 description=(
-                    "Comma-separated checks to run (closed, manifold, degenerate_triangles, orientation, "
+                    "Comma-separated (or a JSON array of) checks to run (closed, manifold, degenerate_triangles, "
+                    "orientation, "
                     "compact, normals, uvs); empty runs all."
                 ),
                 convert=_name_list,

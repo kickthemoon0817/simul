@@ -985,3 +985,50 @@ async def test_a_verdict_that_never_runs_says_what_unreal_holds() -> None:
         # What the reply says was written is what Unreal holds.
         assert (result["value"], result["applied"]) == (["x"], True)
         assert editor.objects[ACTOR].props["Tags"] == ["x"]
+
+
+# -- non-finite numbers and the arguments' encoding (round 3, R3-M2) ------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "spelled"),
+    [("NaN", "NaN"), ("Infinity", "Infinity"), ("-Infinity", "-Infinity"), ("1e400", "Infinity"),
+     ('{"X": 1, "Y": NaN, "Z": 0}', "NaN"), ("[1, [2, -Infinity]]", "-Infinity")],
+)
+async def test_a_number_that_is_not_finite_is_refused_before_anything_is_sent(value: str, spelled: str) -> None:
+    """R3-M2: "NaN" reached the batch's verdict as repr(nan), the name nan, which the
+    editor could not run, so the write's undo transaction stayed open and the next
+    move landed in it. Infinity and 1e400 failed in Remote Control and the reply
+    still warned of an open transaction."""
+    async with editor_session() as (session, editor):
+        with pytest.raises(unreal_runtime.UnrealValidationError) as raised:
+            await session.set_actor_property(MESH, "RelativeLocation", value)
+
+        assert raised.value.details["code"] == "non_finite_value"
+        assert raised.value.details["value"] == spelled
+        assert f"not {spelled} " in str(raised.value) and "Nothing was written" in str(raised.value)
+        assert editor.writes == [] and editor.depth == 0 and editor.history == []
+
+
+@pytest.mark.asyncio
+async def test_the_text_nan_given_as_a_json_string_is_written() -> None:
+    async with editor_session() as (session, editor):
+        result = await session.set_actor_property(ACTOR, "Tags", '["NaN", "Infinity"]')
+
+        assert result["applied"] is True and editor.objects[ACTOR].props["Tags"] == ["NaN", "Infinity"]
+
+
+def test_arguments_reach_the_editor_as_json_text() -> None:
+    """repr is not always Python source; the scripts parse a string literal of JSON."""
+    given = {"token": "t", "expected": {"X": 1.5, "quote": "a'b\"c", "py": "x.py\nnext"}}
+    source = unreal_runtime._json_args(given)
+    namespace: Dict[str, Any] = {}
+    exec(source, namespace)
+
+    assert namespace["args"] == given
+    assert "_simul_json.loads(" in source
+    with pytest.raises(ValueError):
+        unreal_runtime._json_args({"expected": float("nan")})
+    call = unreal_runtime._python_call("print(args)", {"token": "t"})
+    assert call["parameters"]["PythonCommand"].startswith("import json as _simul_json\nargs = _simul_json.loads(")

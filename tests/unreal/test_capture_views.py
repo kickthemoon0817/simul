@@ -216,8 +216,9 @@ class RenderTarget:
 
 
 class Texture:
-    def __init__(self, path: str) -> None:
-        self.path = path
+    def __init__(self, path: str, request: int = 0) -> None:
+        # request: the editor request that imported it, which during PIE cannot export it yet.
+        self.path, self.request = path, request
 
 
 def write_png(path: str, size: Tuple[int, int], color: Tuple[int, int, int], noise: bool = False) -> None:
@@ -261,6 +262,13 @@ class Editor:
         # Open transactions, outermost first, each with the changes recorded in it, and the undo history.
         self.open_transactions: List[Tuple[str, List[str]]] = []
         self.undo_history: List[Tuple[str, List[str]]] = []
+        # Editor requests run so far. During Play In Editor a PNG imported as a texture could not be
+        # exported in the request that imported it ("Invalid texture supplied"), and could once the
+        # editor had ticked (UE 5.7.4): texture_needs_a_tick models that; jpeg_export_fails fails
+        # every export.
+        self.requests = 0
+        self.texture_needs_a_tick = False
+        self.jpeg_export_fails = False
         self.camera = {"CameraLocation": {"X": -500.0, "Y": 0.0, "Z": 250.0},
                        "CameraRotation": {"Pitch": -15.0, "Yaw": 0.0, "Roll": 0.0}}
         self.actors: Dict[str, Actor] = {}
@@ -472,6 +480,10 @@ class Editor:
 
         def export_to_disk(texture: Any, path: str, options: Any) -> None:
             assert options.async_ is False
+            if isinstance(texture, Texture) and (
+                editor.jpeg_export_fails or (editor.texture_needs_a_tick and texture.request == editor.requests)
+            ):
+                raise RuntimeError("ImageWriteBlueprintLibrary: Invalid texture supplied.")
             if isinstance(texture, Texture):
                 image = Image.open(texture.path).convert("RGB")
             else:
@@ -508,7 +520,7 @@ class Editor:
             ImageWriteOptions=lambda: SimpleNamespace(),
             ImageWriteBlueprintLibrary=SimpleNamespace(export_to_disk=export_to_disk),
             RenderingLibrary=SimpleNamespace(
-                import_file_as_texture2d=lambda world, path: Texture(path),
+                import_file_as_texture2d=lambda world, path: Texture(path, editor.requests),
                 create_render_target2d=lambda world, width, height, fmt, color, mips: RenderTarget(width, height),
                 release_render_target2d=release_render_target2d,
             ),
@@ -545,6 +557,7 @@ class Editor:
 
     def run_python(self, code: str) -> Dict[str, Any]:
         """``ExecutePythonCommandEx`` in ExecuteFile mode; a capture's poll comes a frame later."""
+        self.requests += 1
         if "size_wanted" in script_source(code):
             self.draw_game_shot()
         output = io.StringIO()
@@ -567,10 +580,12 @@ def editor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Editor]:
     # The poll interval and the game view's wait, shortened for the suite.
     monkeypatch.setattr(unreal_runtime, "_CAPTURE_POLL_SECONDS", 0.01)
     monkeypatch.setattr(unreal_runtime, "_GAME_VIEW_WAIT_SECONDS", 0.2)
-    # The editor's capture lock lives in sys.modules, which the fake shares with the suite.
+    # The editor's capture lock and kept textures live in sys.modules, which the fake shares with the suite.
     sys.modules.pop(CAPTURE_LOCK_MODULE, None)
+    sys.modules.pop(unreal_runtime._JPEG_TEXTURE_MODULE, None)
     yield level
     sys.modules.pop(CAPTURE_LOCK_MODULE, None)
+    sys.modules.pop(unreal_runtime._JPEG_TEXTURE_MODULE, None)
 
 
 @asynccontextmanager
@@ -873,6 +888,42 @@ async def test_a_later_jpeg_capture_never_overwrites_an_earlier_ones_file(editor
     assert first["path"] != second["path"] and Path(first["path"]).read_bytes() == kept
     with Image.open(second["path"]) as image:
         assert image.size == (32, 18)
+
+
+@pytest.mark.asyncio
+async def test_a_jpeg_of_the_game_view_during_play_is_exported_by_the_next_poll(editor: Editor) -> None:
+    """Round 3, R3-M3: during Play In Editor the texture a poll imported could not be exported in that
+    poll ("Invalid texture supplied"), written() swallowed the error, and 6 of 10 captures failed with a
+    false "drew no screenshot". The next poll exports the texture the failed one kept."""
+    editor.pie = "play"
+    editor.texture_needs_a_tick = True
+    request = {"resolution_x": 64, "resolution_y": 36, "view": "game", "format": "jpeg", "inline": True}
+    async with remote_control(editor) as settings:
+        results = [await call_tool(settings, "capture_unreal_viewport", request) for _ in range(3)]
+
+    for payload, images in results:
+        assert payload["success"] is True, payload
+        assert payload["format"] == "jpeg" and payload["path"].endswith(".jpg") and payload["warnings"] == []
+        assert images[0].mime_type == "image/jpeg" and near(color_of(images[0]), GAME_RED)
+    assert not list(editor.shots.glob("*.png"))
+    assert getattr(sys.modules[unreal_runtime._JPEG_TEXTURE_MODULE], "textures") == {}
+
+
+@pytest.mark.asyncio
+async def test_a_jpeg_that_cannot_be_exported_returns_the_png_and_names_the_error(editor: Editor) -> None:
+    editor.pie = "play"
+    editor.jpeg_export_fails = True
+    request = {"resolution_x": 64, "resolution_y": 36, "view": "game", "format": "jpeg", "inline": True}
+    async with remote_control(editor) as settings:
+        payload, images = await call_tool(settings, "capture_unreal_viewport", request)
+
+    validated(UnrealCaptureViewportResponse, payload)
+    assert payload["success"] is True, payload
+    assert payload["format"] == "png" and payload["path"].endswith(".png") and Path(payload["path"]).exists()
+    assert payload["warnings"] == [
+        unreal_runtime.JPEG_FALLBACK_WARNING.format(error="ImageWriteBlueprintLibrary: Invalid texture supplied.")
+    ]
+    assert images[0].mime_type == "image/png" and near(color_of(images[0]), GAME_RED)
 
 
 @pytest.mark.asyncio

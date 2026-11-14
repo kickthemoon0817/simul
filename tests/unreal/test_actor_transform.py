@@ -60,14 +60,34 @@ class _Rotator:
         self.roll, self.pitch, self.yaw = roll, pitch, yaw
 
 
+class _Part:
+    """A primitive component: its name and attach parent."""
+
+    def __init__(self, name: str, parent: Any) -> None:
+        self.name, self.parent = name, parent
+
+    def get_name(self) -> str:
+        return self.name
+
+    def get_attach_parent(self) -> Any:
+        return self.parent
+
+    def get_editor_property(self, name: str) -> Any:
+        raise AttributeError(name)
+
+
 class _Actor:
     def __init__(self, path: str, has_root: bool = True) -> None:
         self.path = path
-        self.root_component = object() if has_root else None
+        self.root_component = _Part("Root", None) if has_root else None
+        self.parts: List[_Part] = []
         self.location = _Vector(10.0, 20.0, 30.0)
         self.rotation = _Rotator(pitch=10.0, yaw=20.0, roll=30.0)
         self.scale = _Vector(2.0, 3.0, 4.0)
         self.modified = 0
+
+    def get_components_by_class(self, cls: type) -> List[Any]:
+        return [part for part in [self.root_component, *self.parts] if isinstance(part, cls)]
 
     def modify(self) -> bool:
         self.modified += 1
@@ -120,6 +140,7 @@ def _fake_unreal(actor: _Actor, transactions: List[str]) -> SimpleNamespace:
 
     return SimpleNamespace(
         Actor=_Actor,
+        PrimitiveComponent=_Part,
         Vector=_Vector,
         Rotator=_Rotator,
         ScopedEditorTransaction=scoped_transaction,
@@ -179,7 +200,7 @@ def test_location_alone_keeps_rotation_and_scale(editor: SimpleNamespace) -> Non
         "rotation": [10.0, 20.0, 30.0],
         "scale": [2.0, 3.0, 4.0],
     }
-    assert result == {"actor_path": ACTOR, **_transform(editor.actor)}
+    assert result == {"actor_path": ACTOR, **_transform(editor.actor), "warning": None}
     assert len(editor.scripts) == 1  # write and read-back in one round trip
 
 
@@ -225,9 +246,23 @@ def test_all_components_are_written_in_one_undoable_transaction(editor: SimpleNa
 def test_nothing_given_reads_the_transform_back_without_writing(editor: SimpleNamespace) -> None:
     result = asyncio.run(editor.session.set_actor_transform(ACTOR))
 
-    assert result == {"actor_path": ACTOR, **_transform(editor.actor)}
+    assert result == {"actor_path": ACTOR, **_transform(editor.actor), "warning": None}
     assert editor.transactions == []
     assert editor.actor.modified == 0
+
+
+def test_a_move_names_the_parts_left_behind(editor: SimpleNamespace) -> None:
+    """Round-3 audit R3-B1: parts detached inside the actor stayed where they were
+    when it moved, and the move said nothing."""
+    chassis = _Part("Chassis", None)
+    editor.actor.parts = [chassis, _Part("Arm", chassis), _Part("Lamp", editor.actor.root_component)]
+
+    result = asyncio.run(editor.session.set_actor_transform(ACTOR, location=[0.0, 1200.0, 200.0]))
+
+    assert result["location"] == [0.0, 1200.0, 200.0]
+    assert result["warning"].startswith("Chassis, Arm are not attached under the actor's root component, so they did "
+                                        "not move with it.")
+    assert "attach_to_component(actor.root_component" in result["warning"]
 
 
 def test_a_rotation_read_back_normalised_is_not_a_failure(editor: SimpleNamespace) -> None:

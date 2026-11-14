@@ -217,19 +217,26 @@ class Body:
                  values: Optional[Dict[str, Any]] = None) -> None:
         self._component = component
         self._values = None if values is None else dict(values)
+        # Fields set on this struct, which reach the component when it is
+        # written back with set_editor_property("body_instance", ...).
+        self._set: Dict[str, Any] = {}
 
     @property
     def values(self) -> Dict[str, Any]:
         if self._values is not None:
-            return dict(self._values)
+            return dict(self._values, **self._set)
         component = self._component
         assert component is not None
         return dict(component.body, collision_profile_name=component.preset,
                     collision_enabled=Enum(component.collision),
-                    collision_responses=dict(component.responses))
+                    collision_responses=dict(component.responses), **self._set)
 
     def get_editor_property(self, name: str) -> Any:
         return self.values[name]
+
+    def set_editor_property(self, name: str, value: Any) -> None:
+        assert name in self.values, name
+        self._set[name] = value
 
     def copy(self) -> "Body":
         return Body(values=self.values)
@@ -354,10 +361,33 @@ class PrimitiveComponent(SceneComponent):
             # FBodyInstance::SetInstanceSimulatePhysics detaches a registered root body.
             self.parent._write("detach child")
             self.parent, self.socket = None, "None"
+            self.editor.detached.append(self.get_path_name())
         if not self.refuses_simulation:
             self.body["simulate_physics"] = bool(simulate)
 
+    def weld_root(self) -> Optional["PrimitiveComponent"]:
+        """In the play world, the simulating part above this one whose body Unreal welded it into."""
+        if not self.in_simulation() or self.body["simulate_physics"]:
+            return None
+        parent = self.parent
+        while isinstance(parent, PrimitiveComponent):
+            if parent.body["simulate_physics"] and parent.has_body():
+                return parent
+            parent = parent.parent
+        return None
+
+    def welded_parts(self) -> List["PrimitiveComponent"]:
+        owner = self.owner
+        if owner is None:
+            return []
+        return [c for c in owner.components
+                if isinstance(c, PrimitiveComponent) and c is not self and c.weld_root() is self]
+
     def is_simulating_physics(self) -> bool:
+        # A welded part's body is its weld root's (GetBodyInstance follows WeldParent).
+        root = self.weld_root()
+        if root is not None:
+            return root.is_simulating_physics()
         return bool(self.body["simulate_physics"]) and self.has_body()
 
     def moves(self) -> bool:
@@ -368,7 +398,7 @@ class PrimitiveComponent(SceneComponent):
             and self.collision in ("QUERY_AND_PHYSICS", "PHYSICS_ONLY")
         )
 
-    def get_mass(self) -> float:
+    def own_mass(self) -> float:
         if not self.has_body() or self._mobility.name != "MOVABLE":
             return 0.0
         if self.collision not in ("QUERY_AND_PHYSICS", "PHYSICS_ONLY"):
@@ -379,22 +409,35 @@ class PrimitiveComponent(SceneComponent):
             else self.base_mass
         )
 
+    def get_mass(self) -> float:
+        # A welded body's mass is its parts' masses added up (UE 5.7.4).
+        root = self.weld_root() or self
+        return root.own_mass() + sum(part.own_mass() for part in root.welded_parts())
+
+    def _target(self) -> "PrimitiveComponent":
+        # The setters and the force calls reach a welded part's weld root (GetBodyInstance).
+        return self.weld_root() or self
+
     def set_mass_override_in_kg(self, bone: str, mass: float, override: bool) -> None:
-        self._write("mass")
-        self.body["override_mass"] = bool(override)
-        self.body["mass_in_kg_override"] = f32(mass)
+        target = self._target()
+        target._write("mass")
+        target.body["override_mass"] = bool(override)
+        target.body["mass_in_kg_override"] = f32(mass)
 
     def set_linear_damping(self, value: float) -> None:
-        self._write("linear_damping")
-        self.body["linear_damping"] = f32(value)
+        target = self._target()
+        target._write("linear_damping")
+        target.body["linear_damping"] = f32(value)
 
     def set_angular_damping(self, value: float) -> None:
-        self._write("angular_damping")
-        self.body["angular_damping"] = f32(value)
+        target = self._target()
+        target._write("angular_damping")
+        target.body["angular_damping"] = f32(value)
 
     def set_enable_gravity(self, value: bool) -> None:
-        self._write("enable_gravity")
-        self.body["enable_gravity"] = bool(value)
+        target = self._target()
+        target._write("enable_gravity")
+        target.body["enable_gravity"] = bool(value)
 
     def is_gravity_enabled(self) -> bool:
         return bool(self.body["enable_gravity"])
@@ -433,6 +476,10 @@ class PrimitiveComponent(SceneComponent):
         self._kick(impulse)
 
     def _kick(self, impulse: Vector) -> None:
+        root = self.weld_root()
+        if root is not None:
+            root._kick(impulse)
+            return
         if self.moves():
             mass = self.get_mass()
             self.velocity = Vector(
@@ -460,7 +507,7 @@ class PrimitiveComponent(SceneComponent):
         self.pending_force = Vector()
 
     def get_physics_linear_velocity(self, bone: str = "None") -> Vector:
-        return self.velocity
+        return self._target().velocity
 
     def get_physics_angular_velocity_in_degrees(self, bone: str = "None") -> Vector:
         return self.angular
@@ -520,10 +567,13 @@ class PrimitiveComponent(SceneComponent):
         self.modify()
         self._write(name)
         if name == "body_instance":
+            # The Details panel's write: it keeps the attachment, unlike set_simulate_physics.
             values = dict(value.values)
             self.preset = values.pop("collision_profile_name")
             self.collision = values.pop("collision_enabled").name
             self.responses = values.pop("collision_responses")
+            if self.refuses_simulation:
+                values["simulate_physics"] = self.body["simulate_physics"]
             self.body = values
             return
         raise AttributeError(f"{type(self).__name__} has no property {name!r}")
@@ -711,6 +761,8 @@ class Editor:
         self.editor_world = World(MAP)
         self.pie_world = World(PIE_MAP)
         self.scripts: List[str] = []
+        # Components set_simulate_physics detached from their parent, by path.
+        self.detached: List[str] = []
         self.tickers: Dict[int, Callable[[float], Any]] = {}
         self.ticker_ids = itertools.count(1)
         self.started_modes: List[str] = []
@@ -754,6 +806,20 @@ class Editor:
             actor.components.append(part)
         actor.components.insert(0, root)
         self.actors[actor.get_path_name()] = actor
+        return actor
+
+    def robot(self, label: str = "Robot") -> Actor:
+        """An Actor built as add_unreal_component builds one: a SceneComponent root, Chassis under it and
+        Arm and Wheel under Chassis, each a Movable cube StaticMeshComponent."""
+        actor = self.multi_part_actor(label, parts=0)
+        root = actor.root_component
+        parts: Dict[str, Any] = {}
+        for name, parent in (("Chassis", root), ("Arm", "Chassis"), ("Wheel", "Chassis")):
+            part = StaticMeshComponent(self, name, Mesh(CUBE), mobility="MOVABLE", preset="BlockAllDynamic")
+            part.owner = actor
+            part.parent = parts[parent] if isinstance(parent, str) else parent
+            parts[name] = part
+            actor.components.append(part)
         return actor
 
     def dynamic_mesh_actor(self, label: str, simple: int = 0) -> Actor:
@@ -809,12 +875,23 @@ class Editor:
 
     def _multi_part_copy(self, actor: Actor) -> Actor:
         parts = [c for c in actor.components if isinstance(c, StaticMeshComponent)]
-        copy = self.multi_part_actor(actor.label, parts=len(parts), simulation=True)
+        copy = self.multi_part_actor(actor.label, parts=0, simulation=True)
         del self.actors[copy.get_path_name()]
         copy.name, copy.guid = actor.name, Guid(actor.guid.value)
-        for source, part in zip(parts, [c for c in copy.components if isinstance(c, StaticMeshComponent)]):
+        made: Dict[str, Any] = {copy.root_component.get_name(): copy.root_component}
+        for source in parts:
+            part = StaticMeshComponent(self, source.name, source.mesh, mobility=source.mobility.name,
+                                       preset=source.preset)
             part.collision, part.responses, part.body = source.collision, dict(source.responses), dict(source.body)
-            part._mobility = source.mobility
+            part.base_mass = source.base_mass
+            part.owner = copy
+            made[part.name] = part
+            copy.components.append(part)
+        for source in parts:
+            part = made[source.name]
+            parent = source.parent.get_name() if source.parent is not None else None
+            # As the simulation starts, Unreal detaches a simulating body from its parent (in the copy only).
+            part.parent = None if parent is None or part.body["simulate_physics"] else made.get(parent)
         copy.location = Vector(*actor.location.as_list())
         self.actors[copy.get_path_name()] = copy
         return copy
