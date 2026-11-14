@@ -505,6 +505,9 @@ PAGE_BUDGET_BYTES = 30_000
 _SCREENSHOT_SUBDIRS = ("MacEditor", "WindowsEditor", "LinuxEditor", "Mac", "Windows", "Linux")
 # Interval between screenshot polls; each poll is one cheap Remote Control call.
 _CAPTURE_POLL_SECONDS = 0.1
+#: Editor-side module holding the PNGs imported as textures whose JPEG export
+#: failed, for the next poll to export (see ``_take_high_res_shot``).
+_JPEG_TEXTURE_MODULE = "_simul_jpeg_textures_v1"
 #: Seconds a viewport capture waits for its file: this, plus
 #: ``_CAPTURE_SECONDS_PER_MEGAPIXEL`` for each million pixels. Rendering a
 #: HighResShot holds the editor's game thread, and a JPEG is converted inside a
@@ -569,6 +572,12 @@ GAME_VIEW_DID_NOT_DRAW = (
 GAME_VIEW_FELL_BACK_WARNING = (
     "Play In Editor runs, but its game viewport drew no screenshot (as during Simulate In Editor, which shows "
     "the simulation in the level editor viewport), so the level editor viewport was captured."
+)
+
+#: ``capture_viewport``'s warning when the shot could not be converted to JPEG in time.
+JPEG_FALLBACK_WARNING = (
+    "The screenshot could not be converted to JPEG before the capture deadline ({error}), so the PNG Unreal wrote "
+    "is returned at path, and format reads png."
 )
 
 #: ``capture_viewport``'s warning when several level viewport panes wrote a screenshot.
@@ -1366,16 +1375,44 @@ def _read_back(answer: Dict[str, Any], name: str) -> Dict[str, Any]:
     return {"warning": f"Wrote {name}, but Remote Control read back no value for it"}
 
 
+def _json_args(args: Dict[str, Any]) -> str:
+    """``args = ...`` for an editor script, the arguments carried as JSON text.
+
+    A value written as ``repr`` is not always Python source: ``repr`` of NaN
+    is ``nan``, which the editor read as an undefined name, so the script that
+    was to close a property write's undo transaction failed and left it open.
+    As JSON every value either round-trips or is refused here
+    (``allow_nan=False`` raises ``ValueError`` on NaN or infinity), and the
+    script only parses a string literal.
+    """
+    return f"import json as _simul_json\nargs = _simul_json.loads({json.dumps(args, allow_nan=False)!r})\n"
+
+
+def _non_finite(value: Any) -> Optional[str]:
+    """The first number in a parsed JSON value that is NaN or infinite, spelled as JSON text spells it, else None."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return "NaN" if math.isnan(value) else ("Infinity" if value > 0 else "-Infinity")
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list):
+        for item in value:
+            found = _non_finite(item)
+            if found is not None:
+                return found
+    return None
+
+
 def _python_call(script: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """A ``/remote/object/call`` body that runs ``script``, after ``args = {...}``, on the Python library.
+    """A ``/remote/object/call`` body that runs ``script``, after ``args = ...``, on the Python library.
 
     For the operations ``set_actor_property`` batches. Like every Python call
     the session sends, on its own or in a ``/remote/batch``, it runs in the
     runner (``_unreal_python.isolate_request``): in a namespace of its own,
     with its source base64-encoded, so a value it embeds that names a ``.py``
-    file is never read by Unreal as the path of a file to run.
+    file is never read by Unreal as the path of a file to run. ``args``
+    travels as JSON (``_json_args``).
     """
-    source = (f"args = {args!r}\n" if args is not None else "") + script
+    source = (_json_args(args) if args is not None else "") + script
     return {
         "objectPath": PYTHON_LIBRARY,
         "functionName": "ExecutePythonCommandEx",
@@ -2345,8 +2382,12 @@ class UnrealRuntimeSession(LoggerMixin):
     def _load_attachment(self) -> Dict[str, Any]:
         """Pin one attachment for this tool session; never fall back to host/port."""
         if self.settings.unreal.mode != "attached":
-            raise RuntimeError(
-                "Named editor control requires UNREAL__MODE=attached and simul unreal attach"
+            # A precondition, not an engine failure: it used to come back as
+            # EngineError (a RuntimeError).
+            raise UnrealError(
+                "Named editor control requires UNREAL__MODE=attached and simul unreal attach",
+                ATTACHMENT_REFUSED,
+                details={"code": "NOT_ATTACHED", "mode": self.settings.unreal.mode},
             )
         if self._attachment is None:
             from .unreal_connection import read_attachment
@@ -2973,19 +3014,23 @@ class UnrealRuntimeSession(LoggerMixin):
 
         Returns:
             The script's JSON object with ``success`` set, ``result``/``output``
-            fields, or a ``ScriptError`` envelope when the Python raised.
+            fields, or a ``ScriptError`` envelope when the Python raised, with
+            ``output`` holding what it printed before it raised.
         """
         raw = await self._execute_python(code, mode=mode)
-        failure = self._python_failure(raw)
-        if failure is not None:
-            refusal = self._attached_refusal({"error": failure})
-            return refusal if refusal is not None else self._script_error(failure)
         info = [
             str(entry.get("Output", ""))
             for entry in raw.get("LogOutput") or []
             if isinstance(entry, dict) and entry.get("Type") == "Info"
         ]
         output = "".join(info)
+        failure = self._python_failure(raw)
+        if failure is not None:
+            refusal = self._attached_refusal({"error": failure})
+            if refusal is not None:
+                return refusal
+            # What the script printed before it raised: the error alone lost it.
+            return {**self._script_error(failure), **({"output": output} if output else {})}
         if mode == "EvaluateStatement":
             return {"success": True, "result": raw.get("CommandResult"), "output": output}
         parsed = self._first_json_object(raw)
@@ -3752,7 +3797,7 @@ if lock.owner == {token!r}:
         editor_command = f"HighResShot {size_argument}"
         game_command = f"HighResShot {size_argument} filename={tagged}"
         prelude = CAPTURE_LOCK_HELPERS + f"""
-import os, base64, json, struct, unreal
+import os, base64, json, struct, sys, types, unreal
 SUBDIRS = {_SCREENSHOT_SUBDIRS!r}
 
 def shot_root():
@@ -3882,38 +3927,69 @@ else:
     started = [path for path in numbered_shots() if path not in existing]
 written = [path for path in started if complete(path)
            and (size_wanted is None or png_size(path) == size_wanted)]
+
+def shot_payload(path, size, written):
+    shot = {{'path': path, 'size_bytes': size, 'others': len(written) - 1, 'written': written}}
+    if size and inline_limit and size <= inline_limit:
+        with open(path, 'rb') as stream:
+            shot['image_base64'] = base64.b64encode(stream.read()).decode()
+    elif size and inline_limit:
+        shot['inline_skipped'] = (
+            'Capture is %d bytes, above the %d byte inline cap. Read the file at path, lower the '
+            'resolution, pass format "jpeg", or pass inline_max_size to inline a smaller copy.'
+            % (size, inline_limit))
+    return shot
+
+def jpeg_textures():
+    # The PNGs imported as textures whose JPEG export failed, by path, kept for the next poll.
+    module = sys.modules.get({_JPEG_TEXTURE_MODULE!r})
+    if module is None:
+        module = types.ModuleType({_JPEG_TEXTURE_MODULE!r})
+        module.textures = {{}}
+        sys.modules[{_JPEG_TEXTURE_MODULE!r}] = module
+    return module.textures
+
 # What Unreal has begun to write, for a capture that runs out of time.
 payload = {{'path': '', 'size_bytes': 0, 'pending': max(started, key=os.path.getmtime) if started else None}}
 if written and not (late and quality is not None):
     target = max(written, key=os.path.getmtime)
     path, size = target, os.path.getsize(target)
     if quality is not None:
-        world = editor_world() or unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
-        texture = unreal.RenderingLibrary.import_file_as_texture2d(world, target)
         # A numbered PNG removed below frees its number, which Unreal gives
         # the next shot (FFileHelper::GenerateNextBitmapFilename), so its
         # JPEG carries this call's token: a later capture's JPEG of the same
         # number used to overwrite this one's.
-        path = os.path.splitext(target)[0] + ('' if {game_shot!r} else '_' + {token!r}) + '.jpg'
-        options = unreal.ImageWriteOptions()
-        options.format = unreal.DesiredImageFormat.JPG
-        options.compression_quality = quality
-        options.async_ = False
-        options.overwrite_file = True
-        unreal.ImageWriteBlueprintLibrary.export_to_disk(texture, path, options)
-        size = os.path.getsize(path) if os.path.isfile(path) else 0
-        if size:
+        jpeg = os.path.splitext(target)[0] + ('' if {game_shot!r} else '_' + {token!r}) + '.jpg'
+        textures = jpeg_textures()
+        texture = textures.pop(target, None)
+        try:
+            if texture is None:
+                world = editor_world() or unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+                texture = unreal.RenderingLibrary.import_file_as_texture2d(world, target)
+            options = unreal.ImageWriteOptions()
+            options.format = unreal.DesiredImageFormat.JPG
+            options.compression_quality = quality
+            options.async_ = False
+            options.overwrite_file = True
+            unreal.ImageWriteBlueprintLibrary.export_to_disk(texture, jpeg, options)
+            if not (os.path.isfile(jpeg) and os.path.getsize(jpeg)):
+                raise RuntimeError('the JPEG export wrote no file at ' + jpeg)
+        except Exception as exc:
+            # During Play In Editor a texture imported in this request is not
+            # ready to export yet ("Invalid texture supplied"); once the editor
+            # has ticked it is (UE 5.7.4), so the next poll exports it.
+            if texture is not None:
+                for stale in list(textures)[:-7]:
+                    textures.pop(stale, None)
+                textures[target] = texture
+            payload['fallback'] = dict(shot_payload(target, size, written),
+                                       jpeg_error=str(exc) or type(exc).__name__)
+        else:
             os.remove(target)
-            written = [path if entry == target else entry for entry in written]
-    payload = {{'path': path, 'size_bytes': size, 'others': len(written) - 1, 'written': written}}
-    if size and inline_limit and size <= inline_limit:
-        with open(path, 'rb') as stream:
-            payload['image_base64'] = base64.b64encode(stream.read()).decode()
-    elif size and inline_limit:
-        payload['inline_skipped'] = (
-            'Capture is %d bytes, above the %d byte inline cap. Read the file at path, lower the '
-            'resolution, pass format "jpeg", or pass inline_max_size to inline a smaller copy.'
-            % (size, inline_limit))
+            written = [jpeg if entry == target else entry for entry in written]
+            path, size = jpeg, os.path.getsize(jpeg)
+    if 'fallback' not in payload:
+        payload = shot_payload(path, size, written)
 print({marker!r} + json.dumps(payload))
 """)
 
@@ -3926,8 +4002,13 @@ print({marker!r} + json.dumps(payload))
             # waited: what earlier waits of this call took at most, so that
             # the editor's give-up time, counted from before the trigger,
             # never comes after this wait's deadline.
+            # A poll whose JPEG export failed carries the PNG as "fallback":
+            # later polls retry the export (it failed during Play In Editor
+            # until the editor had ticked), and the PNG is returned, with the
+            # export's error, when none succeeds in time. A poll that failed
+            # outright is kept as poll_error for the reply's details.
             payload: Dict[str, Any] = {}
-            pending = None
+            pending = fallback = poll_error = None
             code = read_code(game_shot, waited + seconds)
             # Short first wait so UE's frame loop runs HighResShot, then poll.
             await asyncio.sleep(_CAPTURE_POLL_SECONDS)
@@ -3938,11 +4019,14 @@ print({marker!r} + json.dumps(payload))
                         await self._execute_python(code, mode="ExecuteFile", timeout=poll_timeout),
                         marker,
                     )
-                except Exception:
-                    payload = {}
+                except Exception as exc:
+                    payload, poll_error = {}, str(exc) or type(exc).__name__
                 pending = payload.get("pending") or pending
+                fallback = payload.pop("fallback", None) or fallback
                 if payload.get("path") or asyncio.get_event_loop().time() >= deadline:
-                    return {**payload, "pending": pending}
+                    if not payload.get("path") and fallback is not None:
+                        return {**fallback, "pending": pending}
+                    return {**payload, "pending": pending, "poll_error": poll_error}
                 await asyncio.sleep(_CAPTURE_POLL_SECONDS)
 
         fell_back = False
@@ -3952,12 +4036,15 @@ print({marker!r} + json.dumps(payload))
             # Simulate In Editor. Unreal cannot cancel the shot, so it may
             # still write it, under this call's name only.
             if view != "auto":
+                details = {"pending_path": snapshot.get("pending_path")}
+                if capture_payload.get("poll_error"):
+                    details["poll_error"] = capture_payload["poll_error"]
                 return {
                     "success": False,
                     "error_type": "InvalidState",
                     "error": GAME_VIEW_DID_NOT_DRAW,
                     "pie_active": bool(snapshot["pie_active"]),
-                    "details": {"pending_path": snapshot.get("pending_path")},
+                    "details": details,
                 }
             failed = await fire_in_editor()
             if failed is not None:
@@ -3965,20 +4052,24 @@ print({marker!r} + json.dumps(payload))
             taken, fell_back = "editor", True
             capture_payload = await written(seconds, False, waited=_GAME_VIEW_WAIT_SECONDS)
         pending = capture_payload.pop("pending", None)
+        poll_error = capture_payload.pop("poll_error", None)
         if not capture_payload.get("path") or not capture_payload.get("size_bytes"):
             # Unreal cannot cancel the shot: say where it lands, as the game
             # view's refusal does. An editor shot's number is chosen when its
             # pane draws, so until a file appears only the directory is known.
+            late_details: Dict[str, Any] = {
+                "pending_path": pending,
+                "pending_dir": snapshot.get("pending_dir"),
+                "deadline_s": round(seconds, 1),
+            }
+            if poll_error:
+                late_details["poll_error"] = poll_error
             return {
                 "success": False,
                 "error_type": "CaptureError",
                 "error": capture_late_error(resolution, seconds, jpeg_quality is not None),
                 "pie_active": bool(snapshot["pie_active"]),
-                "details": {
-                    "pending_path": pending,
-                    "pending_dir": snapshot.get("pending_dir"),
-                    "deadline_s": round(seconds, 1),
-                },
+                "details": late_details,
             }
         return {
             **capture_payload,
@@ -4005,7 +4096,12 @@ print({marker!r} + json.dumps(payload))
         (``Project/Saved/Screenshots/``), whose path on the editor host is
         returned; ``inline`` also returns the image. ``format`` "jpeg" converts
         the PNG HighResShot writes into a JPEG beside it, which is the file
-        returned, and is about a tenth of the size. ``view`` picks what is
+        returned, and is about a tenth of the size. During Play In Editor a
+        PNG imported as a texture cannot be exported in the same request
+        ("Invalid texture supplied", UE 5.7.4), so a poll whose export fails
+        keeps the texture for the next poll, which exports it; when no poll
+        manages it before the deadline the PNG is returned with ``format``
+        "png" and a warning naming the export's error. ``view`` picks what is
         captured (``_high_res_shot``): the level editor viewport, whose camera
         ``set_camera_view`` moves, or, during a Play In Editor session, the
         player's game view; ``auto`` takes the game view when the game
@@ -4036,7 +4132,8 @@ print({marker!r} + json.dumps(payload))
 
         Returns:
             ``path``, ``size_bytes``, ``resolution_x``, ``resolution_y``,
-            ``format``, ``view`` ("editor" or "game"), ``pie_active`` and
+            ``format`` (the file's: "png" when a JPEG conversion failed),
+            ``view`` ("editor" or "game"), ``pie_active`` and
             ``warnings``; with ``inline``, ``image_base64`` and
             ``inline_width`` / ``inline_height``, or ``inline_skipped``; or a
             CaptureError (past the deadline with ``details.pending_path``, the
@@ -4069,12 +4166,16 @@ print({marker!r} + json.dumps(payload))
             warnings.append(GAME_VIEW_FELL_BACK_WARNING)
         elif view == "editor" and shot["pie_active"]:
             warnings.append(EDITOR_VIEW_DURING_PLAY_WARNING)
+        taken_format = format
+        if shot.get("jpeg_error"):
+            taken_format = "png"
+            warnings.append(JPEG_FALLBACK_WARNING.format(error=shot["jpeg_error"]))
         result: Dict[str, Any] = {
             "path": shot["path"],
             "size_bytes": shot["size_bytes"],
             "resolution_x": resolution_x,
             "resolution_y": resolution_y,
-            "format": format,
+            "format": taken_format,
             "view": shot["view"],
             "pie_active": shot["pie_active"],
             "warnings": warnings,
@@ -4086,7 +4187,7 @@ print({marker!r} + json.dumps(payload))
         if "inline_skipped" in shot:
             result["inline_skipped"] = shot["inline_skipped"]
         if inline and inline_max_size:
-            result.update(await self._scaled_inline(result["path"], result["size_bytes"], format, jpeg_quality,
+            result.update(await self._scaled_inline(result["path"], result["size_bytes"], taken_format, jpeg_quality,
                                                     inline_max_size))
         return result
 
@@ -4827,7 +4928,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         Returns:
             Dictionary with actor_path and the location, rotation and scale
-            read back after the write. A ``ScriptError`` envelope when the
+            read back after the write, and ``warning`` naming the actor's
+            primitive components not attached under its root component, which
+            did not move with it (null when there are none). A ``ScriptError`` envelope when the
             actor cannot be found, and a ``TransformNotApplied`` error, with
             the read-back values attached, naming each given component that
             reads back different from what was written (an actor without a
@@ -4901,7 +5004,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             actor_path: Full path of the actor or component.
             property_name: Property name, as Unreal names it (Tags, bHidden).
             property_value: The value as JSON text; text that is not JSON is
-                taken as a string.
+                taken as a string. A number that is not finite (NaN,
+                Infinity, 1e400) is refused before anything is sent
+                (ValidationError ``non_finite_value``).
             generate_transaction: Whether the write can be undone.
 
         Returns:
@@ -4920,10 +5025,22 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             parsed_value = json.loads(property_value)
         except (json.JSONDecodeError, TypeError):
             parsed_value = property_value
+        non_finite = _non_finite(parsed_value)
+        if non_finite is not None:
+            # json.loads takes NaN, Infinity and -Infinity, and a number too
+            # large for a double (1e400) becomes infinity. Unreal has no such
+            # value to hold, and NaN once broke the script that closes the
+            # write's undo transaction, leaving it open.
+            raise UnrealValidationError(
+                f"property_value must hold finite numbers only, not {non_finite} (NaN, Infinity, or a number "
+                "too large for a double such as 1e400). Nothing was written; to write that text, give it as a "
+                'JSON string such as "\\"NaN\\""',
+                details={"code": "non_finite_value", "parameter": "property_value", "value": non_finite},
+            )
         result: Dict[str, Any] = {"actor_path": actor_path, "property_name": property_name}
 
         target = await self._execute_json_script(
-            f"args = {{'path': {actor_path!r}, 'name': {property_name!r}}}\n" + PROPERTY_TARGET,
+            _json_args({"path": actor_path, "name": property_name}) + PROPERTY_TARGET,
             expected_errors=(NOT_FOUND_ERROR, VALIDATION_ERROR),
         )
         if target.get("error"):
@@ -5168,9 +5285,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             ``{"error": ...}`` when it failed again.
         """
         try:
-            raw = await self._execute_python(
-                f"args = {{'token': {token!r}, 'expected': {value!r}}}\n" + PROPERTY_DECIDE
-            )
+            raw = await self._execute_python(_json_args({"token": token, "expected": value}) + PROPERTY_DECIDE)
         except UnrealError as exc:
             return {"error": f"{why}; deciding it again failed too: {exc}"}
         decided = self._parse_python_json(raw)
@@ -6034,7 +6149,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         enable: bool = True,
         kinematic: bool = False,
         make_movable: bool = True,
-        allow_detach: bool = False,
         component_name: str = "",
     ) -> Dict[str, Any]:
         """
@@ -6058,11 +6172,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         so a body that cannot take the mode is refused with nothing changed
         (``IncompatibleBody``, each reason in ``details.problems``).
 
-        Unreal detaches a body from its parent when it starts simulating,
-        keeping its world transform; turning physics off does not reattach
-        it. So an attached body is refused unless ``allow_detach`` is true;
-        then it is detached in the same transaction (Undo reattaches it) and
-        the reply names the parent in ``detached_from``.
+        In the editor world the simulate flag is written as the Details panel
+        writes it, so the editor actor keeps its hierarchy: a part of a
+        multi-part actor stays attached under its root, moves with the actor
+        and is exported with it. When a simulation starts, Unreal detaches
+        the play copy's body from its parent (``simulation_detaches_from``
+        names it) and welds into it the parts attached under it that do not
+        simulate, so they move as one rigid body (``welded_parts``; each such
+        part reads ``physics_mode`` "welded" with ``welded_to``). In the play
+        copy itself the runtime setter detaches an attached body at once
+        (``detached_from``); the editor actor is unchanged.
 
         A path in a running simulation (``UEDPIE_<n>_<map>``) edits the play
         copy, which is neither undoable nor saved. An editor path while Play
@@ -6077,8 +6196,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 simulated: physics collision on, not simulated.
             make_movable: Make a Static or Stationary body Movable, which both
                 physical modes need; False refuses such a body instead.
-            allow_detach: Let a simulated body attached to a parent be
-                detached from it, as Unreal does; False refuses it.
             component_name: The primitive component whose body to edit, by
                 name (StaticMeshComponent0) or path; empty picks the actor's
                 root primitive component, else its only one. An actor with
@@ -6088,13 +6205,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Returns:
             Dict with actor_path, world ("editor" or "simulation"),
             physics_enabled (the body simulates), physics_mode ("simulated",
-            "kinematic", "static" or "none" without physics collision) and
-            the body read back: component_path, simulate_physics, mobility,
-            collision_mode, collision_preset, blocked_object_types, mass_kg,
-            mass_override_kg, gravity_enabled, linear_damping,
-            angular_damping, attach_parent;
-            mobility_changed_from and detached_from when this call changed
-            them; warning. Or an IncompatibleBody envelope, or
+            "welded", "kinematic", "static" or "none" without physics
+            collision) and the body read back: component_path,
+            simulate_physics, mobility, collision_mode, collision_preset,
+            blocked_object_types, mass_kg, mass_override_kg, gravity_enabled,
+            linear_damping, angular_damping, attach_parent, welded_to,
+            welded_parts; mobility_changed_from when this call changed it;
+            simulation_detaches_from (editor world) or detached_from (play
+            copy); warning. Or an IncompatibleBody envelope, or
             PhysicsNotApplied when the body did not read back as asked (every
             value restored), or a ValidationError for a component_name the
             actor lacks or a multi-part actor without one.
@@ -6105,7 +6223,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "component_name": component_name or None,
             "mode": mode,
             "make_movable": bool(make_movable),
-            "allow_detach": bool(allow_detach),
             "transaction": "simul: enable physics" if enable else "simul: disable physics",
         }
         return await self._execute_json_script(
@@ -6196,7 +6313,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         simulation and the force acts there; with no simulation running the
         call is refused (``SimulationNotRunning``). The copy must simulate
         physics (``enable_physics`` on the editor actor before the simulation
-        starts).
+        starts), or be a part welded into the body of a part that does
+        (``physics_mode`` "welded"): Unreal's impulse on a welded part acts on
+        that whole body, so the force does, ``welded_to`` names the part and
+        ``mass_kg`` is the welded body's. A part that does neither is refused
+        (``IncompatibleBody``); when it is attached under another primitive
+        part the refusal names that part to simulate, whose body would weld it
+        in, not the part itself, which would leave its parent in the
+        simulation.
 
         Units are Unreal's by default: a force in kg cm/s^2 (1 N is 100) and an
         impulse in kg cm/s (1 N s is 100); ``units`` "si" takes newtons and
@@ -6237,7 +6361,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         Returns:
             Dict with actor_path, simulation_actor_path (the copy acted on),
-            component_path, world ("simulation"), force_applied,
+            component_path, welded_to, world ("simulation"), force_applied,
             force_vector (as given, in ``units``), units, force_vector_unreal
             (as applied), is_impulse, application ("impulse", "one_frame" or
             "continuous"), duration_s, mass_kg, expected_delta_v (cm/s: the
@@ -6331,6 +6455,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         which the reply's warning says. With no parameter given it only reads
         the body.
 
+        A part welded into another part's body (``physics_mode`` "welded") in
+        the running simulation is refused with nothing written
+        (``IncompatibleBody``, ``details.code`` WELDED): Unreal's setters
+        write that body's values, so a mass set on a welded part used to
+        become the other part's. In the editor world the part's own values
+        are written, and the warning says that once welded its mass adds to
+        the welded body's while its damping and gravity are the other part's.
+
         Args:
             actor_path: Full actor object path.
             mass: Mass override in kg, from 0.001 (Unreal's least) to 1e9.
@@ -6350,7 +6482,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             ``enable_physics`` reads it (mass_kg is the mass Unreal computes,
             0 for a Static body) and warning; or a PhysicsParamsNotApplied
             envelope naming a value that read back different (the others stay
-            written).
+            written), or an IncompatibleBody envelope for a welded part.
 
         Raises:
             ArgumentError: A value is not finite or out of its range (a
@@ -6377,7 +6509,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         enable: bool = True,
         kinematic: bool = False,
         make_movable: bool = True,
-        allow_detach: bool = False,
         collision_preset: Optional[str] = None,
         mass: Optional[float] = None,
         linear_damping: Optional[float] = None,
@@ -6412,7 +6543,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             enable: As ``enable_physics``: False stops the bodies simulating.
             kinematic: As ``enable_physics``: kinematic instead of simulated.
             make_movable: As ``enable_physics``.
-            allow_detach: As ``enable_physics``.
             collision_preset: A collision preset to set first, such as
                 PhysicsActor; empty keeps each actor's collision.
             mass: Mass override in kg, as ``set_physics_params``.
@@ -6425,7 +6555,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Returns:
             Dict with world ("editor"), mode, matched, configured_count,
             failed_count, configured (the first PHYSICS_BULK_LISTED: actor_path,
-            physics_mode, mobility_changed_from, detached_from, mass_kg),
+            physics_mode, mobility_changed_from, simulation_detaches_from,
+            mass_kg),
             failed (the first PHYSICS_BULK_LISTED: actor_path, error and, for a
             body that cannot take the mode, its problem codes) and warning; or
             an IncompatibleBody envelope listing the actors that cannot be set
@@ -6446,7 +6577,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "actor_filter": actor_filter or None,
             "mode": mode,
             "make_movable": bool(make_movable),
-            "allow_detach": bool(allow_detach),
             "preset": collision_preset or None,
             "values": _physics_values(mass, linear_damping, angular_damping, enable_gravity),
             "skip_failures": bool(skip_failures),
@@ -6499,11 +6629,13 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             degrees) and, for an actor with a root or single primitive
             component, component_path, physics_mode, linear_velocity (cm/s),
             angular_velocity (degrees/s), speed, awake (null unless it
-            simulates), mass_kg, center_of_mass (world cm), gravity_enabled
-            and simulate_physics. A multi-part actor (several primitive
-            components, none the root) has a body per component: those
-            fields are null, components holds each one's (the first 20, with
-            component_name and its world location and rotation),
+            simulates), mass_kg, center_of_mass (world cm), gravity_enabled,
+            simulate_physics and welded_to. A multi-part actor (several
+            primitive components, none the root) has no one body: those
+            fields are null, components holds each part's (the first 20, with
+            component_name and its world location and rotation; a part welded
+            into a simulating part's body reads physics_mode "welded", that
+            body's velocity and mass, and welded_to naming the part),
             components_total counts them and note says so; an actor without
             a primitive component has a note too. Unreal reports contacts
             only to hit-event handlers, so none are listed.

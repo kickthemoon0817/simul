@@ -548,14 +548,34 @@
       "type": "string"
      },
      "class_names": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       }
+      ],
       "default": "",
-      "description": "Comma-separated asset classes, by name (StaticMesh, Material, Texture2D) or class path (/Script/Engine.StaticMesh). Empty matches every class.",
-      "type": "string"
+      "description": "Comma-separated (or a JSON array of) asset classes, by name (StaticMesh, Material, Texture2D) or class path (/Script/Engine.StaticMesh). Empty matches every class."
      },
      "package_paths": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       }
+      ],
       "default": "",
-      "description": "Comma-separated content folders to search, such as /Game/Props. Empty searches every mounted content root.",
-      "type": "string"
+      "description": "Comma-separated (or a JSON array of) content folders to search, such as /Game/Props. Empty searches every mounted content root."
      },
      "max_results": {
       "default": 100,
@@ -650,9 +670,19 @@
     "additionalProperties": false,
     "properties": {
      "asset_paths": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       }
+      ],
       "default": "",
-      "description": "Comma-separated asset paths whose packages to save, such as /Game/Materials/MI_Red.",
-      "type": "string"
+      "description": "Comma-separated (or a JSON array of) asset paths whose packages to save, such as /Game/Materials/MI_Red."
      },
      "save_level": {
       "default": false,
@@ -1209,7 +1239,7 @@
   {
    "name": "set_unreal_actor_transform",
    "title": "Set Unreal Actor Transform",
-   "description": "Set an actor's world location, rotation and/or scale. Each is optional; one left out keeps its current value. Returns the transform read back.",
+   "description": "Set an actor's world location, rotation and/or scale. Each is optional; one left out keeps its current value. Returns the transform read back, and a warning naming any part not attached under the actor's root, which did not move with it.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1307,7 +1337,7 @@
       "type": "string"
      },
      "property_value": {
-      "description": "The value as JSON text; text that is not JSON is taken as a string.",
+      "description": "The value as JSON text; text that is not JSON is taken as a string. A number that is not finite (NaN, Infinity, 1e400) is refused before anything is sent (ValidationError ``non_finite_value``).",
       "type": "string"
      },
      "generate_transaction": {
@@ -1948,7 +1978,7 @@
   {
    "name": "enable_unreal_physics",
    "title": "Enable Unreal Physics",
-   "description": "Make an actor's body simulate physics (falls, takes forces), make it kinematic (physics collision, moved only by its transform), or turn physics off, in one undoable editor transaction that marks the map dirty. A Static body is made Movable unless make_movable is false; a body without physics collision, whose collision responses block no object type (an overlap preset such as OverlapAll, even with collision_enabled true), or without simple collision geometry is refused (IncompatibleBody, with the reasons and the fix). Unreal detaches a simulated body from its parent, so an attached one needs allow_detach. Returns the body read back: physics_mode, mobility, collision, blocked_object_types and mass.",
+   "description": "Make an actor's body simulate physics (falls, takes forces), make it kinematic (physics collision, moved only by its transform), or turn physics off, in one undoable editor transaction that marks the map dirty. A Static body is made Movable unless make_movable is false; a body without physics collision, whose collision responses block no object type (an overlap preset such as OverlapAll, even with collision_enabled true), or without simple collision geometry is refused (IncompatibleBody, with the reasons and the fix). The editor actor keeps its hierarchy: in the simulation Unreal detaches an attached body from its parent (simulation_detaches_from) and welds the parts attached under it that do not simulate into its body (welded_parts), so a multi-part actor simulates as one body when its top part simulates. Returns the body read back: physics_mode, mobility, collision, blocked_object_types and mass.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1970,11 +2000,6 @@
      "make_movable": {
       "default": true,
       "description": "Make a Static or Stationary body Movable, which simulation and kinematic movement need (reported as mobility_changed_from); false refuses such a body instead.",
-      "type": "boolean"
-     },
-     "allow_detach": {
-      "default": false,
-      "description": "Let a body attached to a parent be detached from it as it starts simulating, keeping its world transform, as Unreal does (reported as detached_from; Undo reattaches it, turning physics off does not). False refuses an attached body.",
       "type": "boolean"
      },
      "component_name": {
@@ -2061,7 +2086,7 @@
   {
    "name": "apply_unreal_force",
    "title": "Apply Unreal Force",
-   "description": "Apply a force or impulse to an actor's body in the running simulation (start it with control_unreal_simulation; the editor world's bodies never move, so the call is refused without one). Editor and simulation paths are both accepted. Units are Unreal's: force in kg cm/s^2 and impulse in kg cm/s (1 N or 1 N s is 100), or N and N s with units si; the application point is a world location in cm, fixed in the world while the body moves. An impulse changes the velocity at once by impulse / mass; a force acts for one physics step unless duration keeps it on for that many seconds of physics time, in step with gravity. Returns the copy acted on, its mass and the expected change of velocity.",
+   "description": "Apply a force or impulse to an actor's body in the running simulation (start it with control_unreal_simulation; the editor world's bodies never move, so the call is refused without one). Editor and simulation paths are both accepted. Units are Unreal's: force in kg cm/s^2 and impulse in kg cm/s (1 N or 1 N s is 100), or N and N s with units si; the application point is a world location in cm, fixed in the world while the body moves. An impulse changes the velocity at once by impulse / mass; a force acts for one physics step unless duration keeps it on for that many seconds of physics time, in step with gravity. A part welded into another's body (physics_mode welded) pushes that whole body (welded_to). Returns the copy acted on, its mass and the expected change of velocity.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2263,9 +2288,19 @@
     "additionalProperties": false,
     "properties": {
      "actor_paths": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       }
+      ],
       "default": "",
-      "description": "Comma-separated editor actor paths (empty: none, select by tag or folder).",
-      "type": "string"
+      "description": "Comma-separated (or a JSON array of) editor actor paths (empty: none, select by tag or folder)."
      },
      "tag": {
       "default": "",
@@ -2294,11 +2329,6 @@
      },
      "make_movable": {
       "default": true,
-      "description": "As enable_unreal_physics.",
-      "type": "boolean"
-     },
-     "allow_detach": {
-      "default": false,
       "description": "As enable_unreal_physics.",
       "type": "boolean"
      },
@@ -2381,15 +2411,25 @@
   {
    "name": "get_unreal_physics_state",
    "title": "Get Unreal Physics State",
-   "description": "Read bodies' live physics state: location, rotation, linear and angular velocity, awake or asleep, mass and center of mass. While a simulation runs each actor is read through its copy there (the editor world's actors stay where they were placed), otherwise in the editor world; world picks one. Editor and simulation paths are both accepted, and each body lists both. A multi-part actor (several primitive components, none the root) has a body per component, listed in components. Paged: total counts every body, next_offset starts the next page.",
+   "description": "Read bodies' live physics state: location, rotation, linear and angular velocity, awake or asleep, mass and center of mass. While a simulation runs each actor is read through its copy there (the editor world's actors stay where they were placed), otherwise in the editor world; world picks one. Editor and simulation paths are both accepted, and each body lists both. A multi-part actor (several primitive components, none the root) lists each part in components; a part welded into a simulating part's body reads physics_mode welded, with welded_to naming it. Paged: total counts every body, next_offset starts the next page.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_paths": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       }
+      ],
       "default": "",
-      "description": "Comma-separated actor paths (editor or simulation paths); empty when tag_filter is given.",
-      "type": "string"
+      "description": "Comma-separated (or a JSON array of) actor paths (editor or simulation paths); empty when tag_filter is given."
      },
      "tag_filter": {
       "default": "",
@@ -2550,14 +2590,24 @@
   {
    "name": "export_unreal_usd",
    "title": "Export Unreal Usd",
-   "description": "Export actors of the level being edited with the optional USDImporter plugin's LevelExporterUSD; actors_exported counts the actors the written stage has a prim for. Mesh and material files go to <output name>_assets beside the output. DynamicMeshActors export as empty Xforms, reported in warnings.",
+   "description": "Export actors of the level being edited with the optional USDImporter plugin's LevelExporterUSD; actors_exported counts the actors the written stage has a prim for. Mesh and material files go to <output name>_assets beside the output. DynamicMeshActors export as empty Xforms, and parts not attached under their actor's root are left out (components_left_out), both reported in warnings.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_paths": {
-      "description": "Comma-separated actor object paths to export.",
-      "type": "string"
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       }
+      ],
+      "description": "Comma-separated (or a JSON array of) actor object paths to export."
      },
      "output_path": {
       "description": "Output USD file path; must be inside the sandbox.",
@@ -2750,9 +2800,19 @@
     "additionalProperties": false,
     "properties": {
      "analysis_types": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       }
+      ],
       "default": "",
-      "description": "Comma-separated analyses: traversability, graspability, collision_complexity. Empty runs all three.",
-      "type": "string"
+      "description": "Comma-separated (or a JSON array of) analyses: traversability, graspability, collision_complexity. Empty runs all three."
      },
      "actor_filter": {
       "anyOf": [
@@ -3497,9 +3557,19 @@
       "type": "string"
      },
      "checks": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       }
+      ],
       "default": "",
-      "description": "Comma-separated checks to run (closed, manifold, degenerate_triangles, orientation, compact, normals, uvs); empty runs all.",
-      "type": "string"
+      "description": "Comma-separated (or a JSON array of) checks to run (closed, manifold, degenerate_triangles, orientation, compact, normals, uvs); empty runs all."
      },
      "weld": {
       "default": false,

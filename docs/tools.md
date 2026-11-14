@@ -971,6 +971,14 @@ Behaviour worth knowing:
       template are `ValidationError`, with `details.code`
       `not_an_actor_or_component`, `class_default_object` or
       `component_template`.
+  - **Numbers.** A number that is not finite (`NaN`, `Infinity`,
+    `-Infinity`, or one too large for a double such as `1e400`, anywhere in
+    the value) is refused before anything is sent (`ValidationError`,
+    `details.code: non_finite_value`): Unreal holds no such value, and `NaN`
+    once broke the script that closes the write's undo transaction, leaving
+    it open for the next edit. Give the text as a JSON string (`"\"NaN\""`)
+    to write it. The write's arguments reach the editor as JSON text, so no
+    value can change the script that carries it.
   - **Containers.** An array, set or map is replaced whole, so `[]` empties
     it. That includes struct arrays and properties Remote Control writes
     through a setter, such as a MaterialBillboard's `Elements`. Remote
@@ -1089,6 +1097,16 @@ Behaviour worth knowing:
     `IncompatibleBody`. A multi-part actor needs `component_name`, as the
     physics edits below do: the part's name, or its component path in the
     editor or in the simulation.
+  - A part welded into another part's body (`physics_mode: "welded"`, see
+    below) is pushed too: Unreal's impulse on a welded part acts on the whole
+    welded body (an impulse on a welded Arm gave its Chassis and Wheel the
+    same velocity, UE 5.7.4), so the reply names that part in `welded_to`,
+    `mass_kg` is the welded body's (its parts' masses added up) and a
+    `warning` says so. A part that neither simulates nor is welded is
+    refused (`IncompatibleBody`, `details.code: NOT_SIMULATING`); when it is
+    attached under another primitive part the refusal names that part to
+    simulate, whose body would weld it in, and not the part itself, which
+    would leave its parent in the simulation.
   - In a World Partition level the simulation streams in only the cells
     around the level viewport's camera, so an actor far from it has no copy:
     a cube 1 km from the camera was `NotInSimulation` until
@@ -1122,11 +1140,14 @@ Behaviour worth knowing:
     `editor_path` and `simulation_path`, and a body given by both is read
     once; a path with no live actor, or no live copy in the world read, is in
     `not_found`, and `warning` then says why that can be. A multi-part actor
-    (several primitive components, none the root) has a body per component:
-    its top-level body fields are null, `components` holds each component's
+    (several primitive components, none the root) has no one body: its
+    top-level body fields are null, `components` holds each part's
     (`component_name`, its world location and rotation and the body fields,
-    the first 20), `components_total` counts them and `note` says so. Unreal
-    reports contacts only to hit-event handlers, so none are listed.
+    the first 20), `components_total` counts them and `note` says so. A part
+    welded into a simulating part's body reads `physics_mode: "welded"` with
+    `welded_to` naming that part, and in the simulation that body's velocity
+    and mass. Unreal reports contacts only to hit-event handlers, so none are
+    listed.
   - Every tool has its own rate limit, 60 calls a minute after a burst of 10
     (`SECURITY__REQUESTS_PER_MINUTE`, `SECURITY__BURST_SIZE`; see
     [configuration](configuration.md#rate-limiting)): sampling one body a call
@@ -1165,16 +1186,26 @@ Behaviour worth knowing:
   else the actor's root, else its only one) the way the Details panel does: in one undoable editor
   transaction that marks the map dirty, so Save All writes the edit and one
   Undo reverts that call alone. Each reply is the body read back:
-  `physics_mode` (`simulated`, `kinematic`, `static` for a body that is not
-  Movable, `none` without physics collision), mobility, collision mode and
-  preset, `blocked_object_types` (the object types its collision responses
-  block), `mass_kg` (the mass Unreal computes) and the mass override, gravity
-  and damping, the attach parent and a `warning`.
+  `physics_mode` (`simulated`, `welded`, `kinematic`, `static` for a body
+  that is not Movable, `none` without physics collision), mobility,
+  collision mode and preset, `blocked_object_types` (the object types its
+  collision responses block), `mass_kg` (the mass Unreal computes) and the
+  mass override, gravity and damping, the attach parent, `welded_to` and
+  `welded_parts`, and a `warning`.
   - A multi-part actor (a SceneComponent root with several primitive
-    components, as `add_unreal_component` builds) has a body per component;
+    components, as `add_unreal_component` builds) has no one body;
     editor-only components, such as the sprite an Actor spawned from the
-    class carries, never count. A part is attached to the root, so
-    simulating one needs `allow_detach`.
+    class carries, never count. Each part that simulates is a body, and when
+    a simulation starts Unreal welds every part attached under it (through
+    primitive parts) that does not simulate itself into its body, so they
+    move as one rigid body of their masses added up. Such a part reads
+    `physics_mode: "welded"` with `welded_to` naming the part: in the
+    simulation as Unreal welded it, in the editor world as it will be, and
+    the simulating part lists them in `welded_parts`. So the robot of
+    `add_unreal_component` (Chassis under the root, Arm and Wheel under
+    Chassis) simulates as one body when Chassis does:
+    `enable_unreal_physics {component_name: "Chassis"}`, then a force on any
+    of the three pushes it.
     Without `component_name` these tools and `apply_unreal_force` refuse it
     with a `ValidationError` (`details.code: AMBIGUOUS_COMPONENT`, the
     components in `details.components`), and an unknown name is
@@ -1183,7 +1214,10 @@ Behaviour worth knowing:
     ScriptError traceback. `setup_unreal_physics_bulk` sets up one body an
     actor, so it lists such an actor among the failed ones (problem
     `AMBIGUOUS_COMPONENT`) and names `enable_unreal_physics` with
-    `component_name` for each part.
+    `component_name` for the part the others are attached under, listing the
+    parts. Each actor it sets up keeps its attachment, as
+    `enable_unreal_physics` keeps it; `configured` names the parent an
+    attached body leaves in the simulation (`simulation_detaches_from`).
   - The collision mode alone does not make a body collide: Unreal makes two
     bodies collide only when each blocks the other's object type, and a
     preset keeps its responses when its mode is changed. OverlapAll,
@@ -1216,18 +1250,35 @@ Behaviour worth knowing:
     is set up with a `warning` that it passes through them. A Static or
     Stationary body is made Movable (`mobility_changed_from`) unless
     `make_movable` is false.
-  - Unreal detaches a body from its parent when it starts simulating, keeping
-    its world transform, and turning physics off does not reattach it. An
-    attached body is refused unless `allow_detach` is true; it is then
-    detached in the same transaction, so Undo reattaches it, and the reply
-    names the parent in `detached_from`.
+  - The editor actor keeps its hierarchy. In the editor world the simulate
+    flag is written as the Details panel writes it, the body instance's
+    property: Unreal's runtime setter detached a part from its parent at once
+    inside the editor actor itself, so moving the actor left the part behind,
+    `export_unreal_usd` wrote the actor as an empty Xform, and turning physics
+    off did not reattach it (UE 5.7.4; the `allow_detach` option that did this
+    is gone). When a simulation starts, Unreal detaches the play copy's body
+    from its parent, keeping its world transform, and welds the parts under
+    it into it; after Stop the editor actor is as it was. The reply names
+    that parent in `simulation_detaches_from`. Simulating a part that is
+    welded into another's body (Arm under a simulating Chassis) makes it a
+    body of its own in the simulation, which no longer moves with that part;
+    the `warning` says so. A simulation path edits the play copy with the
+    runtime setter, which detaches an attached body at once, in that copy
+    only (`detached_from`).
   - `set_unreal_physics_params` takes a mass from 0.001 kg (Unreal's least)
     to 1e9 kg and damping from 0 to 1e6 (else a `ValidationError` with
     `details.code: OUT_OF_RANGE`), and reads every value back (`applied`,
     `params_set`; `PhysicsParamsNotApplied` names one that reads back
     different, with `details.expected` and `details.actual`). A Static body keeps the values but has no mass
     (`mass_kg` 0) and never simulates until it is Movable; the `warning`
-    says so. With no parameter it only reads the body.
+    says so. With no parameter it only reads the body. Unreal's setters on a
+    part welded into another's body write that body's values (a 5 kg mass set
+    on a welded Arm became its Chassis's override, UE 5.7.4), so in a running
+    simulation such a part is refused with nothing written
+    (`IncompatibleBody`, `details.code: WELDED`, `details.welded_to`); in the
+    editor world its own values are written, and the `warning` says that once
+    welded its mass adds to the welded body's while its damping and gravity
+    are the other part's.
   - `set_unreal_collision` checks a preset before writing (an unknown one
     changes nothing) and, when it sets `collision_enabled` on a static mesh,
     clears the mesh's Use Default Collision flag as a preset does; with the
@@ -1381,7 +1432,12 @@ Behaviour worth knowing:
     layer or `MaterialOverrides`. The gate used to cover the output alone, and
     the mesh files beside it were replaced. `written_files` lists every file
     the export created or changed under the output's folder and
-    `overwritten_files` those that existed before. With `overwrite`, a file
+    `overwritten_files` those that existed before. Unreal's exporter writes an
+    actor's components from its root component down, so a part not attached
+    under its actor's root (one detached inside the editor actor, as
+    `enable_unreal_physics`'s former `allow_detach` did) is left out, and the
+    actor can come out as an empty Xform: `components_left_out` names such
+    parts per actor, and a warning says how to reattach them. With `overwrite`, a file
     whose content would not change is left as it is (Unreal skips identical
     files), so it is not in `written_files`. Unreal's exporter writes a
     DynamicMeshActor as an empty Xform, without its mesh; `warnings` names
@@ -1731,7 +1787,13 @@ Behaviour worth knowing:
   pane draws), `details.pending_dir` the directory it lands in and
   `details.deadline_s` the wait. A late shot stays a PNG even with
   `format: "jpeg"`: a poll the editor runs after the call's deadline (one
-  queued while it rendered) converts nothing. `view` picks what is captured, and the
+  queued while it rendered) converts nothing. During Play In Editor a PNG
+  imported as a texture cannot be exported in the request that imported it
+  ("Invalid texture supplied", UE 5.7.4; 6 of 10 game-view JPEG captures used
+  to fail with a false "drew no screenshot"), so a poll whose export fails
+  keeps the texture, and the next poll, after the editor has ticked, exports
+  it (10 of 10 in Play). When no poll manages it before the deadline, the PNG
+  is returned with `format: "png"` and a warning naming the export's error. `view` picks what is captured, and the
   reply says which (`view`, `pie_active`): `editor` is the level editor
   viewport, whose camera `set_unreal_camera_view` moves; `game` is the
   player's view during a Play In Editor session (HighResShot run in the game
@@ -2051,6 +2113,9 @@ Behaviour worth knowing:
   - **A traceback starts with two frames of simul's.** The command's
     (`File "<string>", line 1`) and the runner's (`File "<simul runner>"`)
     come before the script's own frames, which keep the script's line numbers.
+  - **What a script printed before it raised** comes back in the
+    `ScriptError`'s `output`; it used to be lost. (Lines Unreal logs as
+    warnings or errors are not returned on success.)
 
   On UE 5.7 avoid one engine hazard in that code: Unreal wraps
   each static-library function

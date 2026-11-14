@@ -2739,7 +2739,6 @@
       "enable": true,
       "kinematic": false,
       "make_movable": true,
-      "allow_detach": false,
       "component_name": ""
      }
     }
@@ -2765,7 +2764,6 @@
     "enable": false,
     "kinematic": true,
     "make_movable": false,
-    "allow_detach": true,
     "component_name": "Part1"
    },
    "envelope": [
@@ -2784,7 +2782,6 @@
       "enable": false,
       "kinematic": true,
       "make_movable": false,
-      "allow_detach": true,
       "component_name": "Part1"
      }
     }
@@ -3089,7 +3086,6 @@
       "enable": true,
       "kinematic": false,
       "make_movable": true,
-      "allow_detach": false,
       "collision_preset": null,
       "mass": null,
       "linear_damping": null,
@@ -3123,7 +3119,6 @@
     "enable": false,
     "kinematic": true,
     "make_movable": false,
-    "allow_detach": true,
     "collision_preset": "PhysicsActor",
     "mass": 3.5,
     "linear_damping": 0.3,
@@ -3153,7 +3148,6 @@
       "enable": false,
       "kinematic": true,
       "make_movable": false,
-      "allow_detach": true,
       "collision_preset": "PhysicsActor",
       "mass": 3.5,
       "linear_damping": 0.3,

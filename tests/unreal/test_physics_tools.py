@@ -219,29 +219,28 @@ def test_turning_physics_off_keeps_collision_and_mobility(
     assert editor.unrecorded_writes() == []
 
 
-def test_an_attached_body_is_refused_unless_allow_detach(
+def test_an_attached_body_keeps_its_parent_and_the_reply_says_the_simulation_detaches_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """U2-08: Unreal detaches a body as it starts simulating; the tool did it silently."""
+    """U2-08 then R3-B1: Unreal detaches a body from its parent as it starts
+    simulating. The tool did it silently (U2-08), then on allow_detach in the
+    editor actor itself (R3-B1). Written as the Details panel writes it, the
+    editor keeps the attachment and the reply says what the simulation does."""
     editor = Editor()
     parent = editor.cube("Table", mobility="MOVABLE")
     child = editor.cube("Cup", mobility="MOVABLE")
     child.root_component.parent = parent.root_component
     session = physics_session(monkeypatch, editor)
 
-    refused = run(session.enable_physics(child.get_path_name()))
-    assert codes(refused) == ["ATTACHED"]
-    assert "allow_detach" in refused["error"]
-    assert child.root_component.parent is parent.root_component
-
-    result = run(session.enable_physics(child.get_path_name(), allow_detach=True))
+    result = run(session.enable_physics(child.get_path_name()))
 
     assert result["physics_enabled"] is True
-    assert result["detached_from"] == parent.root_component.get_path_name()
-    assert result["attach_parent"] is None
-    assert "Undo reattaches" in result["warning"]
-    # The parent was modified in the same transaction, so Undo reattaches the body.
-    assert parent.root_component.get_path_name() in editor.transactions[0]["modified"]
+    assert child.root_component.parent is parent.root_component and editor.detached == []
+    assert result["attach_parent"] == parent.root_component.get_path_name()
+    assert result["detached_from"] is None
+    assert result["simulation_detaches_from"] == parent.root_component.get_path_name()
+    assert "In the simulation Unreal detaches StaticMeshComponent0" in result["warning"]
+    assert "the editor actor keeps its hierarchy" in result["warning"]
     assert editor.unrecorded_writes() == []
 
 

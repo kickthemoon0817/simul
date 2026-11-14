@@ -326,6 +326,37 @@ def actor_component(actor, component_class):
         raise ValueError("Actor must have a compatible root or exactly one "
                          + component_class.__name__ + ": " + actor.get_path_name())
     return components[0]
+
+def editor_only(component):
+    try:
+        return bool(component.get_editor_property("is_editor_only"))
+    except Exception:
+        return False
+
+def outside_root(actor):
+    # The actor's primitive components (editor-only ones left out) not attached under its root
+    # component, by name. Moving the actor moves its root's tree only, and Unreal's USD exporter
+    # writes that tree only, so such a part stayed where it was and was left out of the stage
+    # (UE 5.7.4): a part that set_simulate_physics detached in the editor, as simul's physics
+    # tools did before they wrote the flag the way the Details panel does.
+    root = actor.root_component
+    left = []
+    for component in actor.get_components_by_class(unreal.PrimitiveComponent):
+        if component == root or editor_only(component):
+            continue
+        node = component.get_attach_parent()
+        while node is not None and node != root:
+            node = node.get_attach_parent()
+        if node is None:
+            left.append(component.get_name())
+    return left
+
+def outside_root_repair(names):
+    return ("Reattach " + ("it" if len(names) == 1 else "them") + " under the actor's root: Undo the edit that "
+            "detached " + ("it" if len(names) == 1 else "them") + " if it is still in the undo history, else "
+            "execute_unreal_script with component.attach_to_component(actor.root_component, '', "
+            "unreal.AttachmentRule.KEEP_WORLD, unreal.AttachmentRule.KEEP_WORLD, unreal.AttachmentRule.KEEP_WORLD, "
+            "False) for each part attached to nothing.")
 """
 
 SIMULATION_STATUS = """
@@ -793,9 +824,20 @@ def export_usd(path, actor_paths, values, overwrite):
                 if hasattr(unreal, "DynamicMeshComponent")
                 and actor.get_components_by_class(unreal.DynamicMeshComponent)]
     if meshless:
-        result["warnings"] = ["Unreal's USD exporter writes DynamicMeshActors as empty Xforms, without their mesh: "
-                              + ", ".join(meshless) + ". convert_unreal_mesh_format with target_format static_mesh "
-                              "and replace_actor true makes them StaticMeshActors, which export with their geometry."]
+        result["warnings"].append("Unreal's USD exporter writes DynamicMeshActors as empty Xforms, without their "
+                                  "mesh: " + ", ".join(meshless) + ". convert_unreal_mesh_format with target_format "
+                                  "static_mesh and replace_actor true makes them StaticMeshActors, which export "
+                                  "with their geometry.")
+    left_out = [{"actor_path": actor.get_path_name(), "components": outside_root(actor)} for actor in actors]
+    result["components_left_out"] = [entry for entry in left_out if entry["components"]][:LISTED_FILES]
+    if result["components_left_out"]:
+        names = [name for entry in result["components_left_out"] for name in entry["components"]]
+        result["warnings"].append(
+            "Unreal's USD exporter writes an actor's components from its root component down, so it left out the "
+            "parts not attached under their actor's root (components_left_out): "
+            + "; ".join(entry["actor_path"] + ": " + ", ".join(entry["components"])
+                        for entry in result["components_left_out"]) + ". " + outside_root_repair(names)
+            + " Then export again.")
     if not exported:
         result.update(success=False, error_type="EngineError",
                       error="Unreal's USD exporter wrote no prim for any actor given (it leaves out editor "
@@ -1145,7 +1187,13 @@ if values:
             actor.set_actor_rotation(unreal.Rotator(pitch=pitch, yaw=yaw, roll=roll), True)
         if "scale" in values:
             actor.set_actor_scale3d(unreal.Vector(*values["scale"]))
-print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}))
+left = outside_root(actor) if values else []
+warning = None
+if left:
+    warning = (", ".join(left) + (" is" if len(left) == 1 else " are") + " not attached under the actor's root "
+               "component, so " + ("it" if len(left) == 1 else "they") + " did not move with it. "
+               + outside_root_repair(left))
+print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor), "warning": warning}))
 """
 
 # Expects ``args`` = {"actor_path"}. Makes the actor the whole editor
@@ -2547,7 +2595,18 @@ INCOMPATIBLE_BODY = "IncompatibleBody"
 # record an undo step nor dirty the map, so the edit was lost on exit (observed
 # on UE 5.7.4); after modify() they are recorded, Undo and Redo restore them,
 # the attachment a simulating body drops included, and they survive a save and
-# reload (UE 5.7.4). Cancelling a transaction only drops its record and keeps
+# reload (UE 5.7.4). The simulate flag is the exception: in the editor world
+# it is written as the Details panel writes it, as the body instance's
+# property (write_simulate). set_simulate_physics on a registered component
+# detaches it from its parent at once, inside the editor actor itself: a part
+# of a multi-part actor left its root's tree, so moving the actor left the
+# part behind, Unreal's USD exporter (which walks the root's tree) wrote the
+# actor as an empty Xform, and turning physics off did not reattach it (UE
+# 5.7.4). Written as a property, the editor actor keeps its hierarchy; when a
+# simulation starts Unreal detaches the play copy's body from its parent and
+# welds the parts attached under it that do not simulate into its body
+# (welded_to), and the editor actor is unchanged after Stop (UE 5.7.4).
+# Cancelling a transaction only drops its record and keeps
 # what was changed (UTransBuffer::Cancel), so a script that fails after
 # writing restores the values itself before it cancels. An actor in a running
 # simulation's world (UEDPIE_<n>_<map>) is the play copy: Unreal records no
@@ -2587,6 +2646,16 @@ INCOMPATIBLE_BODY = "IncompatibleBody"
 # with a ScriptError traceback. An actor with no primitive component at all is
 # an IncompatibleBody (NO_PRIMITIVE_COMPONENT). Scripts raise SimulRefusal
 # with the envelope and return it through refusable().
+#
+# Welding: in a simulation Unreal welds a part that does not simulate into the
+# body of the simulating part it is attached under (Unreal's GetRootWelded
+# walks primitive parents only), so the two move as one rigid body. The welded
+# part's own body is that body: is_simulating_physics, get_mass (the parts'
+# masses added up), the velocities, add_impulse and the mass, damping and
+# gravity setters all act on it (a mass of 5 kg set on a welded Arm became its
+# Chassis's override, UE 5.7.4). Such a part reads physics_mode "welded" with
+# welded_to naming that part: in a simulation's world as Unreal welded it, and
+# in the editor world as it will when a simulation starts.
 PHYSICS_HELPERS = ACTOR_HELPERS + SIMULATION_WORLD + f"_INCOMPATIBLE_BODY = {INCOMPATIBLE_BODY!r}\n" + """
 PHYSICS_COLLISION = ("QUERY_AND_PHYSICS", "PHYSICS_ONLY")
 # Unreal's object types, by the name its Details panel shows and its CollisionChannel.
@@ -2608,12 +2677,6 @@ def refusable(run):
 def listed_components(components):
     return [{"component_name": c.get_name(), "component_class": c.get_class().get_name(),
              "component_path": c.get_path_name()} for c in components[:COMPONENTS_LISTED]]
-
-def editor_only(component):
-    try:
-        return bool(component.get_editor_property("is_editor_only"))
-    except Exception:
-        return False
 
 def body_components(actor):
     # Its primitive components that can have a body: not editor-only ones such as the
@@ -2655,8 +2718,58 @@ def physics_component(actor, component_name=None):
                                  "and none is its root, so it has no one body; pass component_name, one of: " + names,
                         "details": {"code": "AMBIGUOUS_COMPONENT", "parameter": "component_name",
                                     "components": listed_components(components),
-                                    "hint": "Pass component_name to edit one component's body; each simulates on "
-                                            "its own."}})
+                                    "hint": "Pass component_name to act on one part's body. A part that simulates is "
+                                            "a body of its own, and the parts attached under it that do not "
+                                            "simulate are welded into its body in the simulation, moving with it "
+                                            "as one rigid body: to simulate the actor as one body, enable physics "
+                                            "on the part the others are attached under."}})
+
+def own_flag(component):
+    return bool(component.get_editor_property("body_instance").get_editor_property("simulate_physics"))
+
+def weld_root(component):
+    # The nearest primitive part above this one, through primitive parents only, that simulates
+    # itself: the part whose body Unreal welds this one into when it does not simulate.
+    parent = component.get_attach_parent()
+    while isinstance(parent, unreal.PrimitiveComponent):
+        if own_flag(parent):
+            return parent
+        parent = parent.get_attach_parent()
+    return None
+
+def welded_to(component):
+    # The part whose body this one is welded into: in a simulation's world when Unreal welded it
+    # (its body, which is_simulating_physics reads, is then that part's), in the editor world when
+    # it will be once a simulation starts. None for a part that simulates itself or is not welded.
+    if own_flag(component) or component.get_collision_enabled().name not in PHYSICS_COLLISION:
+        return None
+    root = weld_root(component)
+    if root is None or root.mobility.name != "MOVABLE" or component.mobility.name != "MOVABLE":
+        return None
+    owner = component.get_owner()
+    if owner is not None and in_simulation(owner):
+        return root if component.is_simulating_physics() else None
+    return root if root.get_collision_enabled().name in PHYSICS_COLLISION else None
+
+def welded_parts(component):
+    # The parts of its actor welded into this part's body, by name.
+    owner = component.get_owner()
+    if owner is None or not own_flag(component):
+        return []
+    return [part.get_name() for part in body_components(owner)
+            if part != component and welded_to(part) == component]
+
+def write_simulate(component, simulate, simulation):
+    # The play copy takes the runtime setter, which detaches an attached body from its parent as Unreal
+    # does when a body starts simulating (the copy is gone when the simulation stops). The editor world
+    # takes the flag the way the Details panel writes it, which keeps the editor actor's hierarchy
+    # (see the comment above PHYSICS_HELPERS).
+    if simulation:
+        component.set_simulate_physics(simulate)
+        return
+    body = component.get_editor_property("body_instance")
+    body.set_editor_property("simulate_physics", simulate)
+    component.set_editor_property("body_instance", body)
 
 def blocked_object_types(component):
     channels = unreal.CollisionChannel
@@ -2673,18 +2786,21 @@ def physics_mode(component):
         return "none"
     if component.mobility.name != "MOVABLE":
         return "static"
-    body = component.get_editor_property("body_instance")
-    if body.get_editor_property("simulate_physics") and component.is_simulating_physics():
-        return "simulated"
-    return "kinematic"
+    if own_flag(component):
+        return "simulated" if component.is_simulating_physics() else "kinematic"
+    return "welded" if welded_to(component) is not None else "kinematic"
 
-def physics_report(component):
+def physics_report(component, parts=True):
+    # parts: list welded_parts, which walks the whole actor; a read of many bodies leaves it out.
     body = component.get_editor_property("body_instance")
     parent = component.get_attach_parent()
     override = bool(body.get_editor_property("override_mass"))
+    weld = welded_to(component)
     return {
         "component_path": component.get_path_name(),
         "physics_mode": physics_mode(component),
+        "welded_to": weld.get_path_name() if weld is not None else None,
+        "welded_parts": welded_parts(component) if parts else [],
         "simulate_physics": bool(body.get_editor_property("simulate_physics")),
         "mobility": component.mobility.name.title(),
         "collision_mode": component.get_collision_enabled().name,
@@ -2733,9 +2849,9 @@ def dynamic_mesh_problems(component, body, simulate):
         "(Unreal does not start simulating it): give it simple collision with compute_unreal_convex_hull "
         "(output collision) or decompose_unreal_convex_hull")}]
 
-def physics_problems(component, simulate, make_movable, allow_detach, collision=None, blocked=None):
-    # collision and blocked: the mode and blocked object types a preset applied in the same call will
-    # set; None reads the component's.
+def physics_problems(component, simulate, make_movable, collision=None, blocked=None, preset=None):
+    # collision, blocked and preset: the mode, blocked object types and name of a preset applied in the
+    # same call; None reads the component's.
     problems = []
     body = "a simulated" if simulate else "a kinematic"
     mobility = component.mobility.name
@@ -2745,7 +2861,7 @@ def physics_problems(component, simulate, make_movable, allow_detach, collision=
             "bodies: pass make_movable true (the default) to make it Movable")})
     collision = collision or component.get_collision_enabled().name
     blocked = blocked_object_types(component) if blocked is None else blocked
-    preset = str(component.get_collision_profile_name())
+    preset = preset or str(component.get_collision_profile_name())
     if collision not in PHYSICS_COLLISION:
         fix = ("call set_unreal_collision with collision_enabled true (its responses block " + ", ".join(blocked)
                + "), or with collision_preset " + ("PhysicsActor" if simulate else "BlockAllDynamic")
@@ -2783,18 +2899,12 @@ def physics_problems(component, simulate, make_movable, allow_detach, collision=
                         "its mesh " + mesh.get_path_name() + " has no simple collision shape, so " + body
                         + " body would pass through everything: add simple collision to the mesh "
                         "(Static Mesh editor, Collision menu)")})
-    parent = component.get_attach_parent()
-    if simulate and parent is not None and not allow_detach:
-        problems.append({"code": "ATTACHED", "message": (
-            "it is attached to " + parent.get_path_name() + ", and Unreal detaches a body from its "
-            "parent when it starts simulating (keeping its world transform): pass allow_detach true to "
-            "detach it in the same undoable step")})
     return problems
 
-def apply(component, mode):
+def apply(component, mode, simulation):
     if mode != "off" and component.mobility.name != "MOVABLE":
         component.set_mobility(unreal.ComponentMobility.MOVABLE)
-    component.set_simulate_physics(mode == "simulate")
+    write_simulate(component, mode == "simulate", simulation)
 
 def unmet(component, mode):
     flag = bool(component.get_editor_property("body_instance").get_editor_property("simulate_physics"))
@@ -2815,8 +2925,8 @@ def body_before(component):
             "mobility": component.mobility, "parent": component.get_attach_parent(),
             "socket": component.get_attach_socket_name()}
 
-def restore(component, before):
-    component.set_simulate_physics(before["simulate"])
+def restore(component, before, simulation):
+    write_simulate(component, before["simulate"], simulation)
     if component.mobility != before["mobility"]:
         component.set_mobility(before["mobility"])
     parent = before["parent"]
@@ -2858,7 +2968,7 @@ def snapshot(component):
     return snap
 
 def put_back(component, snap):
-    restore(component, snap)
+    restore(component, snap, False)
     component.set_editor_property("body_instance", snap["body"])
     if snap["default_collision"] is not None:
         component.set_editor_property("use_default_collision", snap["default_collision"])
@@ -2894,46 +3004,70 @@ def edit_note(simulation):
 """
 
 # Expects ``args`` = {"actor_path", "component_name" (or None), "mode"
-# ("simulate", "kinematic" or "off"), "make_movable", "allow_detach",
-# "transaction"}. "simulate" makes the body
+# ("simulate", "kinematic" or "off"), "make_movable", "transaction"}.
+# "simulate" makes the body
 # simulate physics, "kinematic" keeps its physics collision without simulating
 # (simulated bodies hit it; it moves only when its transform is set) and "off"
 # stops it simulating, collision and mobility kept. A body that cannot take
 # the mode is refused with nothing written (IncompatibleBody). A Static or
-# Stationary body is made Movable when make_movable is true, and a simulated
-# body attached to a parent is detached, as Unreal does, only with
-# allow_detach. If the body still does not read back as asked, every value is
-# restored and the transaction cancelled.
+# Stationary body is made Movable when make_movable is true. In the editor
+# world the editor actor keeps its hierarchy (write_simulate); the reply says
+# what the simulation does with an attached body (simulation_detaches_from)
+# and which parts it welds into it (welded_parts). In the play copy Unreal
+# detaches an attached body as it starts simulating (detached_from). If the
+# body still does not read back as asked, every value is restored and the
+# transaction cancelled.
 ENABLE_PHYSICS = PHYSICS_HELPERS + """
+def simulation_notes(component, mode, before, weld):
+    # What the simulation does with this editor-world body: Unreal detaches an attached body from its
+    # parent in the play copy as it starts simulating, and welds into it the parts attached under it.
+    notes, parent = [], before["parent"]
+    if mode == "simulate" and parent is not None:
+        if weld is not None:
+            notes.append("In the simulation Unreal detaches " + component.get_name() + " from " + parent.get_name()
+                         + " as it starts simulating, so it becomes a body of its own and no longer moves with "
+                         + weld.get_name() + ", whose body it was welded into; with its physics off it stays "
+                         "welded into " + weld.get_name() + "'s body. The editor actor keeps its hierarchy.")
+        else:
+            notes.append("In the simulation Unreal detaches " + component.get_name() + " from "
+                         + parent.get_path_name() + " as it starts simulating, so the body moves while "
+                         + parent.get_name() + " stays where the simulation started; the editor actor keeps "
+                         "its hierarchy.")
+    parts = welded_parts(component)
+    if parts:
+        notes.append(", ".join(parts) + (" is" if len(parts) == 1 else " are") + " attached under it without "
+                     "simulating, so in the simulation Unreal welds " + ("it" if len(parts) == 1 else "them")
+                     + " into its body: they move as one rigid body, of their masses added up.")
+    return notes
+
 def enable():
     actor = actor_at(args["actor_path"], play_world=True)
     component = physics_component(actor, args["component_name"])
     mode = args["mode"]
     if mode != "off":
-        problems = physics_problems(component, mode == "simulate", args["make_movable"], args["allow_detach"])
+        problems = physics_problems(component, mode == "simulate", args["make_movable"])
         if problems:
             what = "simulate physics on" if mode == "simulate" else "make kinematic"
             return refusal(actor, what, problems, component)
     before = body_before(component)
+    weld = welded_to(component)
     simulation = in_simulation(actor)
     failure = None
     if simulation:
-        apply(component, mode)
+        apply(component, mode, True)
         failure = unmet(component, mode)
         if failure is not None:
-            restore(component, before)
+            restore(component, before, True)
     else:
         with unreal.ScopedEditorTransaction(args["transaction"]) as transaction:
             component.modify()
-            if before["parent"] is not None:
-                before["parent"].modify()
             try:
-                apply(component, mode)
+                apply(component, mode, False)
                 failure = unmet(component, mode)
             except Exception as exc:
                 failure = str(exc) or type(exc).__name__
             if failure is not None:
-                restore(component, before)
+                restore(component, before, False)
                 transaction.cancel()
     if failure is not None:
         report = physics_report(component)
@@ -2943,17 +3077,24 @@ def enable():
                                 actual={"physics_mode": report["physics_mode"],
                                         "simulate_physics": report["simulate_physics"]})}
     result = physics_report(component)
+    parent = before["parent"]
     result.update(actor_path=actor.get_path_name(), world="simulation" if simulation else "editor",
                   physics_enabled=result["physics_mode"] == "simulated",
                   mobility_changed_from=None if component.mobility == before["mobility"]
                   else before["mobility"].name.title(),
-                  detached_from=None)
+                  detached_from=None, simulation_detaches_from=None)
     warnings = []
-    if before["parent"] is not None and component.get_attach_parent() is None:
-        result["detached_from"] = before["parent"].get_path_name()
-        warnings.append("Detached from " + result["detached_from"] + ", as Unreal does when a body starts "
-                        "simulating; Undo reattaches it, turning physics off does not "
-                        "(set_unreal_actor_parent does).")
+    if simulation:
+        if parent is not None and component.get_attach_parent() is None:
+            result["detached_from"] = parent.get_path_name()
+            warnings.append("Unreal detached this play copy's " + component.get_name() + " from " + parent.get_name()
+                            + " as it started simulating" + (", so it no longer moves with " + weld.get_name()
+                                                             if weld is not None else "")
+                            + "; the editor actor is unchanged.")
+    else:
+        if mode == "simulate" and parent is not None:
+            result["simulation_detaches_from"] = parent.get_path_name()
+        warnings += simulation_notes(component, mode, before, weld)
     if mode != "off":
         warnings.append(blocking_note(result))
     warnings.append(edit_note(simulation))
@@ -2978,11 +3119,29 @@ import struct
 def stored(value):
     return struct.unpack("f", struct.pack("f", value))[0]
 
+def welded_refusal(actor, component, weld):
+    names = ", ".join(sorted(args["values"]))
+    problem = {"code": "WELDED", "message": (
+        component.get_name() + " is welded into " + weld.get_name() + "'s body in the running simulation, so "
+        "Unreal moves them as one body and writes " + names + " to that body, " + weld.get_name() + "'s own "
+        "values, not to " + component.get_name() + ": set them on " + weld.get_name() + " (component_name "
+        + weld.get_name() + "), or on the editor actor's " + component.get_name() + ", whose mass then adds to "
+        "the welded body the next time the simulation starts")}
+    return {"success": False, "error_type": _INCOMPATIBLE_BODY,
+            "error": "Cannot set " + names + " on " + actor.get_actor_label() + " (component "
+                     + component.get_name() + "): " + problem["message"] + "; nothing was changed",
+            "details": {"code": "WELDED", "problems": [problem], "component_path": component.get_path_name(),
+                        "welded_to": weld.get_path_name()}}
+
 def set_params():
     actor = actor_at(args["actor_path"], play_world=True)
     component = physics_component(actor, args["component_name"])
     values = args["values"]
     simulation = in_simulation(actor)
+    weld = welded_to(component)
+    if values and weld is not None and (simulation or component.is_simulating_physics()):
+        # Welded now: the setters would write the weld parent's body (see PHYSICS_HELPERS).
+        return welded_refusal(actor, component, weld)
     if values:
         if simulation:
             write_params(component, values)
@@ -3007,6 +3166,10 @@ def set_params():
     elif result["physics_mode"] == "none":
         warnings.append("The body has no physics collision (" + result["collision_mode"] + "), so Unreal "
                         "gives it no physics mass and it collides with nothing.")
+    elif weld is not None and values:
+        warnings.append("In the simulation " + component.get_name() + " is welded into " + weld.get_name()
+                        + "'s body: they move as one body, whose mass is the parts' masses added up and whose "
+                        "damping and gravity are " + weld.get_name() + "'s.")
     note = edit_note(simulation)
     if note and values:
         warnings.append(note)
@@ -3092,7 +3255,7 @@ print(json.dumps(refusable(set_collision)))
 """
 
 # Expects ``args`` = {"paths", "tag", "folder", "actor_filter" (each or None), "mode"
-# ("simulate", "kinematic" or "off"), "make_movable", "allow_detach", "preset"
+# ("simulate", "kinematic" or "off"), "make_movable", "preset"
 # (or None), "values" (set_physics_params' checked values), "skip_failures",
 # "limit", "listed", "transaction"}. Sets up physics on many actors in one
 # call and one undoable transaction: the actors at paths, plus every editor
@@ -3103,7 +3266,10 @@ print(json.dumps(refusable(set_collision)))
 # skip_failures, one that cannot be set up refuses the whole call. Each actor is
 # snapshot before it is written (snapshot: the body instance struct with its
 # preset, responses, mass, damping, gravity and simulate flag, plus mobility,
-# attachment and Use Default Collision). One that still does not read back as
+# attachment and Use Default Collision). The simulate flag is written as
+# enable_physics writes it in the editor world, so every actor keeps its
+# attachment; simulation_detaches_from names the parent an attached one leaves
+# in the simulation. One that still does not read back as
 # asked is put back whole; without skip_failures every actor already written is
 # put back too and the transaction cancelled, so the call changes nothing
 # (cancelling alone only drops the undo record). A call that sets up no actor
@@ -3169,10 +3335,11 @@ def setup():
             details = refused.payload.get("details") or {}
             error = refused.payload["error"]
             if details.get("code") == "AMBIGUOUS_COMPONENT":
-                error = (actor.get_actor_label() + " has several primitive components and none is its root, so it "
-                         "has a body per component, and bulk setup sets up one body an actor: set up each part with "
-                         "enable_unreal_physics and component_name (" + ", ".join(
-                             c["component_name"] for c in details.get("components", [])) + ")")
+                error = (actor.get_actor_label() + " has several primitive components and none is its root, and "
+                         "bulk setup sets up one body an actor: set up the part the others are attached under with "
+                         "enable_unreal_physics and component_name (the parts attached under it that do not "
+                         "simulate are welded into its body in the simulation); its parts: " + ", ".join(
+                             c["component_name"] for c in details.get("components", [])))
             failed.append({"actor_path": actor.get_path_name(), "error": error,
                            "problems": [p["code"] for p in details.get("problems", [])] or [details.get("code")]})
             continue
@@ -3180,7 +3347,7 @@ def setup():
             failed.append({"actor_path": actor.get_path_name(), "error": str(exc)})
             continue
         problems = [] if mode == "off" else physics_problems(
-            component, mode == "simulate", args["make_movable"], args["allow_detach"], preset_mode, preset_blocked)
+            component, mode == "simulate", args["make_movable"], preset_mode, preset_blocked, preset)
         if problems:
             failed.append({"actor_path": actor.get_path_name(), "problems": [p["code"] for p in problems],
                            "error": "; ".join(p["message"] for p in problems)})
@@ -3197,7 +3364,7 @@ def setup():
         return {"success": False, "error_type": "ValidationError",
                 "error": "No actor matched the paths, tag, folder and actor_filter given; nothing was changed",
                 "details": {"code": "NO_MATCH"}}
-    configured, detached, written, not_applied = [], 0, [], {}
+    configured, detaching, written, not_applied = [], 0, [], {}
     expected = {"physics_mode": expected_mode(mode)}
     if preset:
         expected["collision_preset"] = preset
@@ -3207,11 +3374,9 @@ def setup():
             for actor, component in plan:
                 before = snapshot(component)
                 component.modify()
-                if before["parent"] is not None:
-                    before["parent"].modify()
                 if preset:
                     component.set_collision_profile_name(preset)
-                apply(component, mode)
+                apply(component, mode, False)
                 write_params(component, args["values"])
                 problem = unmet(component, mode)
                 if problem is not None:
@@ -3236,17 +3401,18 @@ def setup():
                     continue
                 written.append((component, before))
                 report = physics_report(component)
-                detached_from = (before["parent"].get_path_name()
-                                 if before["parent"] is not None and component.get_attach_parent() is None else None)
-                detached += detached_from is not None
+                leaves = (before["parent"].get_path_name()
+                          if mode == "simulate" and before["parent"] is not None else None)
+                detaching += leaves is not None
                 configured.append({"actor_path": actor.get_path_name(), "physics_mode": report["physics_mode"],
                                    "mobility_changed_from": None if component.mobility == before["mobility"]
                                    else before["mobility"].name.title(),
-                                   "detached_from": detached_from, "mass_kg": report["mass_kg"]})
+                                   "simulation_detaches_from": leaves, "mass_kg": report["mass_kg"]})
     warnings = []
-    if detached:
-        warnings.append("Detached " + str(detached) + " actor(s) from their parents, as Unreal does when a body "
-                        "starts simulating; Undo reattaches them.")
+    if detaching:
+        warnings.append(str(detaching) + " of the bodies set up to simulate " + ("is" if detaching == 1 else "are")
+                        + " attached to a parent: in the simulation Unreal detaches each from it as it starts "
+                        "simulating (simulation_detaches_from); the editor actors keep their attachment.")
     if pie_active():
         warnings.append("Play In Editor is running: this changed the editor world, which the running simulation "
                         "does not see; it takes effect the next time the simulation starts.")
@@ -3361,7 +3527,14 @@ def start(job):
 # z] in Unreal units (kg cm/s^2 for a force, kg cm/s for an impulse),
 # "location" (world cm) or None, "impulse", "duration" (s of physics time; 0 is
 # one physics step)}. component_name picks the body of a multi-part actor; the
-# copy's component of that name is pushed. Acts on the
+# copy's component of that name is pushed. A part welded into another's body
+# (physics_mode "welded") is pushed too: Unreal's AddImpulse acts on the welded
+# body, which moved as one (an impulse on a welded Arm gave its Chassis and
+# Wheel the same velocity, UE 5.7.4), and the reply names it in welded_to. A
+# part that neither simulates nor is welded is refused; when it is attached
+# under another primitive part the refusal names that part, whose body would
+# weld it in, rather than the part itself, which would leave its parent in
+# the simulation. Acts on the
 # actor's copy in the running simulation (SIMULATION_WORLD), the only world
 # whose bodies step; with no simulation running it refuses (SimulationNotRunning).
 APPLY_FORCE = (
@@ -3414,12 +3587,26 @@ def apply():
                 name = next((c.get_name() for c in body_components(source) if c.get_path_name() == name), name)
     component = physics_component(copy, name)
     mode = physics_mode(component)
-    if mode != "simulated":
+    weld = welded_to(component) if mode == "welded" else None
+    if mode not in ("simulated", "welded"):
         part = "" if component == copy.root_component else " (component " + component.get_name() + ")"
+        carrier, parent = None, component.get_attach_parent()
+        while isinstance(parent, unreal.PrimitiveComponent):
+            carrier, parent = parent, parent.get_attach_parent()
+        if carrier is not None:
+            # A part attached under another: simulating it alone would detach it from that part in the
+            # simulation, so name the part that carries it, whose body welds it in.
+            fix = ("enable_unreal_physics with component_name " + carrier.get_name() + " on the editor actor and "
+                   "restart the simulation: " + carrier.get_name() + " then simulates with the parts attached "
+                   "under it, this one included, welded into its body, and a force on any of them moves that "
+                   "body (enabling physics on " + component.get_name() + " itself would detach it from "
+                   + component.get_attach_parent().get_name() + " in the simulation, so it would move on its own)")
+        else:
+            fix = ("enable_unreal_physics on the editor actor and restart the simulation, or on the simulation "
+                   "path for this run")
         return {"success": False, "error_type": _INCOMPATIBLE_BODY,
                 "error": copy.get_actor_label() + part + " does not simulate physics in the running simulation "
-                         "(physics_mode " + mode + "), so a force moves nothing: enable_unreal_physics on the "
-                         "editor actor and restart the simulation, or on the simulation path for this run",
+                         "(physics_mode " + mode + "), so a force moves nothing: " + fix,
                 "details": dict(physics_report(component), code="NOT_SIMULATING")}
     vector, location = args["vector"], args["location"]
     paused = bool(unreal.GameplayStatics.is_game_paused(world))
@@ -3446,6 +3633,10 @@ def apply():
     seconds = None if application == "one_frame" else (1.0 if application == "impulse" else args["duration"])
     expected = [value * seconds / mass for value in vector] if seconds is not None and mass > 0 else None
     warnings = []
+    if weld is not None:
+        warnings.append(component.get_name() + " is welded into " + weld.get_name() + "'s body, so the force acts on "
+                        "that whole body, every part welded into it moving as one: mass_kg is its mass, the parts' "
+                        "masses added up.")
     if application == "one_frame":
         frame = unreal.GameplayStatics.get_world_delta_seconds(world)
         step = frame if limit is None else min(frame, limit)
@@ -3456,7 +3647,9 @@ def apply():
     if paused:
         warnings.append("The simulation is paused: the force acts once it resumes.")
     return {"actor_path": args["actor_path"], "simulation_actor_path": copy.get_path_name(),
-            "component_path": component.get_path_name(), "world": "simulation", "force_applied": True,
+            "component_path": component.get_path_name(),
+            "welded_to": weld.get_path_name() if weld is not None else None,
+            "world": "simulation", "force_applied": True,
             "application": application, "mass_kg": mass, "expected_delta_v": expected,
             "physics_step_limit_s": limit, "sim_time": now,
             "ends_at_sim_time": now + args["duration"] if application == "continuous" else None,
@@ -3473,10 +3666,11 @@ print(json.dumps(refusable(apply)))
 # editor path and the simulation path of the same body are one body); one page
 # of them, from offset, is rendered (SCENE_READ_HELPERS.page). A body's state is
 # its actor's root primitive component, else its only one. A multi-part actor
-# (several primitive components, none the root) has a body per component, each
-# simulating on its own, so its entry's body fields are null and components
-# holds each one's state (the first COMPONENTS_LISTED, with components_total),
-# and note says why; an actor without a primitive component reports its
+# (several primitive components, none the root) has no one body: each part that
+# simulates is a body, and a part attached under it that does not simulate is
+# welded into that body (physics_mode "welded", welded_to), so its entry's body
+# fields are null and components holds each part's state (the first
+# COMPONENTS_LISTED, with components_total), and note says why; an actor without a primitive component reports its
 # transform alone, with a note. A path with no live actor, or no live copy in
 # the world read, is listed in not_found, and warning says why that can be.
 PHYSICS_STATE = PHYSICS_HELPERS + SCENE_READ_HELPERS + """
@@ -3494,14 +3688,15 @@ def body_of(actor):
 
 def body_state(component):
     linear = component.get_physics_linear_velocity()
-    report = physics_report(component)
+    report = physics_report(component, parts=False)
     return {"component_path": component.get_path_name(), "physics_mode": report["physics_mode"],
             "linear_velocity": vector(linear),
             "angular_velocity": vector(component.get_physics_angular_velocity_in_degrees()),
             "speed": math.sqrt(linear.x * linear.x + linear.y * linear.y + linear.z * linear.z),
             "awake": bool(component.is_any_rigid_body_awake()) if report["physics_mode"] == "simulated" else None,
             "mass_kg": report["mass_kg"], "center_of_mass": vector(component.get_center_of_mass()),
-            "gravity_enabled": report["gravity_enabled"], "simulate_physics": report["simulate_physics"]}
+            "gravity_enabled": report["gravity_enabled"], "simulate_physics": report["simulate_physics"],
+            "welded_to": report["welded_to"]}
 
 def part_state(component):
     rotation = component.get_world_rotation()
@@ -3526,9 +3721,11 @@ def state(actor, simulation):
         entry["note"] = "The actor has no primitive component, so it has no physics body; only its transform is read."
         return entry
     entry.update(components=[part_state(part) for part in parts[:COMPONENTS_LISTED]], components_total=len(parts),
-                 note="The actor has " + str(len(parts)) + " primitive components and none is its root, so it has a "
-                      "body per component, each moving on its own: their states are in components, and the "
-                      "physics tools take component_name to act on one.")
+                 note="The actor has " + str(len(parts)) + " primitive components and none is its root, so it has no "
+                      "one body: each part that simulates is a body, and the parts attached under it that do not "
+                      "simulate are welded into its body (physics_mode welded, welded_to names it) and move with it "
+                      "as one, sharing its velocity and mass. Each part's state is in components, and the physics "
+                      "tools take component_name to act on one.")
     return entry
 
 def read():
