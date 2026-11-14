@@ -149,6 +149,10 @@ def build_tool_wrapper(
     def call(session: Any, request: Any) -> Any:
         if spec.sessionless is not None:
             return spec.sessionless(server.settings, request)
+        # Names the call, and whether it only reads, if its request times out
+        # and the editor is held (unreal_runtime._http_request).
+        session.tool_name = spec.name
+        session.tool_read_only = spec.read_only
         return getattr(session, str(spec.method))(**session_arguments(spec, request))
 
     async def tool(*args: Any, **kwargs: Any) -> ToolResult:

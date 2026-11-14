@@ -205,13 +205,25 @@ open arbitrary menus, address asset-editor tabs, or dismiss modal dialogs. A bus
 editor can time out. Mutations are not automatically retried; a timeout after dispatch
 means the operation may have executed, so inspect before retrying.
 
-The editor runs Remote Control's Python on its game thread, one request at a time,
-and keeps running a request after simul stops waiting for it. A request sent
-meanwhile queues behind it, so it can time out too and then run after it was
-reported failed. Unlike Isaac Sim, where the server keeps the instance after a
-timeout until the engine has finished, simul does not hold the editor yet. After a
-`TimeoutError`, wait until `ping_unreal` answers without `busy: true` before
-sending more work.
+The editor serves Remote Control on its game thread, one request at a time and in
+arrival order, and keeps running a request after simul stops waiting for it. A
+request sent meanwhile would queue behind it, time out too and then run after it
+was reported failed. So after a `TimeoutError` simul holds the editor, in either
+mode: it sends it nothing more, and every Unreal call until the editor has
+finished gets `InstanceBusy` at once, with `details.reason:
+"finishing_timed_out_call"`, `timed_out_tool`, `changes_state` (whether that
+call may still change the editor) and `busy_for_seconds`. Nothing answers
+without the game thread, `GET /remote/info` included, so simul learns that the
+editor is done from one `GET /remote/info` sent when the hold starts: its answer
+means everything queued before it has run. `ping_unreal` and
+`unreal_health_check` are still sent during the hold: while the editor is busy
+they report it with `busy: true` and `held_after_timeout`, and an answer ends the
+hold. An editor that stops taking connections (it quit or crashed) ends it too.
+The hold lasts at most `UNREAL__HOLD_AFTER_TIMEOUT` seconds (default 300), after
+which the log warns and later calls queue behind the request again; `0` turns it
+off. A stopping server releases it at once. The hold lives in the simul server
+process that saw the timeout: another simul server, or another client of Remote
+Control, sending to the same editor meanwhile still queues behind the request.
 
 ```sh
 simul unreal detach

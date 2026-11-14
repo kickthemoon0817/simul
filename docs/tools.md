@@ -849,7 +849,9 @@ Behaviour worth knowing:
     before retrying. `ping_unreal` reports one with this type too.
   - `TimeoutError`: no answer within `UNREAL__TIMEOUT`. A script or a change
     may still be running in the editor, and Remote Control cannot cancel it,
-    so check the editor's state before retrying.
+    so check the editor's state before retrying. Until the editor has
+    finished it, other Unreal calls get `InstanceBusy` without being sent
+    ([unreal-attachment.md](unreal-attachment.md#identity-checks-and-limits)).
   - `EngineError`: Remote Control answered with HTTP 5xx.
   - `ValidationError`: Remote Control refused the request as made (HTTP 400),
     for example a read-only, `EditConst` or protected property, or a value of
@@ -857,7 +859,11 @@ Behaviour worth knowing:
   - `NotFoundError`: the object, property, function or console variable
     named does not exist, whether Remote Control (HTTP 404, or a 400 saying
     so) or a tool's editor script reports it.
-  - `InstanceBusy`: the editor was saving or collecting garbage.
+  - `InstanceBusy`: the editor was saving or collecting garbage, or simul
+    sent nothing because the editor is still running a call that timed out
+    (`details.reason: "finishing_timed_out_call"`, with `timed_out_tool`,
+    `changes_state` and `busy_for_seconds`). Retry shortly; `ping_unreal`
+    reports the hold as `held_after_timeout`.
   - `AuthenticationError`: Remote Control refused this client (HTTP 401).
 
   `error` carries Remote Control's own message, and `details` carries the
@@ -1075,7 +1081,9 @@ Behaviour worth knowing:
   with `UNREAL__PING_TIMEOUT` (3 s by default), so a busy editor is reported
   within that time; `unreal_health_check` retries only a refused connection,
   from an editor still starting up, and gives its metadata script the full
-  `UNREAL__TIMEOUT`.
+  `UNREAL__TIMEOUT`. Both are still sent while simul holds the editor after a
+  timed-out call; a busy answer then carries `held_after_timeout`, and an
+  editor that answers is released.
 - `call_unreal_actor_function` returns `return_value` as JSON (the function's
   `ReturnValue`) and `outputs`, everything Remote Control returned, out
   parameters included.
@@ -3253,7 +3261,7 @@ script the bridge stopped at its timeout (`TimeoutError`).
 | `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
 | `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
 | `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a non-domain exception, a reply that does not parse or does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
-| `InstanceBusy` | The Isaac instance is serving another call, or is still finishing one whose reply timed out (`details.reason: "finishing_timed_out_call"`); a Blender instance is busy (`attach_blender_window`) or its bridge holds as many waiting requests as it takes (`bridge_busy`) | Retry shortly |
+| `InstanceBusy` | The Isaac instance is serving another call, or the Isaac instance or Unreal editor is still finishing one whose reply timed out (`details.reason: "finishing_timed_out_call"`); a Blender instance is busy (`attach_blender_window`) or its bridge holds as many waiting requests as it takes (`bridge_busy`) | Retry shortly |
 | `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
 
 Domain types of the server:
