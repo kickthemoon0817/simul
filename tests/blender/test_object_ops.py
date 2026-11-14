@@ -610,6 +610,15 @@ def test_delete_object_removes_a_constraint_joining_it_first(world: World) -> No
     assert world.view_layer.objects.active is joint["other"]
 
 
+def _lose(world: World, joint: Dict[str, Any], gone: str) -> None:
+    """Base goes: deleted (Blender clears the constraint's object) or its rigid body removed."""
+    if gone == "deleted":
+        joint["carrier"].rigid_body_constraint.object1 = None
+        world.objects.pop("Base")
+    else:
+        joint["other"].rigid_body = None
+
+
 @pytest.mark.parametrize("gone", ["deleted", "rigid_body_removed"])
 def test_delete_object_leaves_a_constraint_whose_other_body_is_gone(
     world: World, gone: str
@@ -617,20 +626,47 @@ def test_delete_object_leaves_a_constraint_whose_other_body_is_gone(
     """Review of #360: removing such a constraint reads the freed body and crashed Blender
     (MallocScribble), where Blender's own Delete did not."""
     joint = _joint(world)
-    if gone == "deleted":
-        joint["carrier"].rigid_body_constraint.object1 = None
-    else:
-        joint["other"].rigid_body = None
+    blender_runtime._note_built_constraints(world.scene)  # the simulation stepped it
+    _lose(world, joint, gone)
 
     result = _session().delete_object("Link")
 
     assert joint["log"] == []
     assert result["removed_constraints"] == []
-    assert "already deleted or has no rigid body" in result["warnings"][0]
-    # Review of #360: it stays refused after reopening too, until the constraint is fixed.
-    assert "removed or given two rigid bodies" in result["warnings"][0]
-    assert "saved and opened again" not in result["warnings"][0]
+    assert "deleted or lost its rigid body after the simulation stepped" in result["warnings"][0]
+    assert "may crash Blender" in result["warnings"][0]
+    # Round-3 audit (R3-BL-03): a file load builds nothing, so reopening lifts the refusal.
+    assert "the reopened file steps normally" in result["warnings"][0]
     assert "Link" not in world.objects
+
+
+@pytest.mark.parametrize("gone", ["deleted", "rigid_body_removed"])
+def test_delete_object_removes_a_constraint_the_simulation_never_stepped(
+    world: World, gone: str
+) -> None:
+    """Round-3 audit (R3-BL-03): Bullet never built a constraint whose object was gone
+    whenever the simulation stepped, so removing it reads no body."""
+    joint = _joint(world)
+    _lose(world, joint, gone)
+    joint["log"].clear()
+    world.objects.setdefault("Base", joint["other"])  # constraint_remove's stand-in checks it
+
+    result = _session().delete_object("Link")
+
+    assert result["removed_constraints"] == ["RBC_Base_Link"] and result["warnings"] == []
+
+
+def test_deleting_the_empty_of_a_constraint_at_risk_is_refused(world: World) -> None:
+    """Blender's Delete of the empty removes the constraint from Bullet's world, which reads
+    the freed body."""
+    joint = _joint(world)
+    blender_runtime._note_built_constraints(world.scene)
+    _lose(world, joint, "deleted")
+
+    with pytest.raises(blender_runtime.RefusedOperation, match="^Deleting 'RBC_Base_Link' is refused"):
+        _session().delete_object("RBC_Base_Link")
+
+    assert "RBC_Base_Link" in world.objects
 
 
 def test_delete_object_removes_a_constraint_whose_empty_is_disabled_in_viewports(
@@ -698,11 +734,10 @@ def test_delete_object_goes_ahead_when_a_constraint_cannot_be_removed(world: Wor
 
     assert result["removed_constraints"] == []
     assert "constraint_remove.poll() failed" in result["warnings"][0]
-    # Review of #360: reopening the file does not lift the refusal by itself.
     assert (
-        "stays refused until that constraint is removed or given two rigid bodies"
-        in result["warnings"][0]
-    )
+        "Once the simulation has stepped such a constraint, stepping again may crash "
+        "Blender and stays refused until the file is saved and opened again"
+    ) in result["warnings"][0]
     assert "Link" not in world.objects
     assert joint["carrier"].rigid_body_constraint is not None
 

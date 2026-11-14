@@ -589,8 +589,9 @@ def test_physics_state_does_not_step_past_the_work_budget(
 
     assert scene.frames == []
     assert state["pose_source"] == "unknown"
+    # 10 piled boxes at 10 substeps: 0.29 ms a frame.
     assert (
-        "stepping 100 frames of 10 bodies is estimated at 0.1 s, over the 0.01 s of "
+        "stepping 100 frames of 10 bodies is estimated at 0.0 s, over the 0.01 s of "
         "simulation a call runs unasked" in state["warning"]
     )
 
@@ -600,11 +601,15 @@ def test_physics_state_does_not_step_while_a_constraint_has_lost_a_body(blender:
     with a constraint left pointing at a deleted body; reading the pose as it is stays safe."""
     scene = _world_scene()
     drop = _body(scene, "Drop")
+    gone = SimpleNamespace(name="Gone", rigid_body=SimpleNamespace())
     carrier = SimpleNamespace(
-        name="RBC_Drop_Gone", rigid_body_constraint=SimpleNamespace(object1=drop, object2=None)
+        name="RBC_Drop_Gone", rigid_body_constraint=SimpleNamespace(object1=drop, object2=gone)
     )
     scene.rigidbody_world.constraints = SimpleNamespace(all_objects=[carrier])
-    _, session = blender(scene)
+    fake, session = blender(scene)
+    fake.data.objects = {"Drop": drop}
+    blender_runtime._note_built_constraints(scene)  # the simulation stepped it
+    carrier.rigid_body_constraint.object2 = None  # then Gone was deleted
     scene.frame_set(40)
     scene.frames.clear()
 
@@ -617,7 +622,7 @@ def test_physics_state_does_not_step_while_a_constraint_has_lost_a_body(blender:
 
 
 def test_physics_state_counts_substeps_toward_the_budget(blender: Any) -> None:
-    """10 bodies over 99 frames fit unless each frame takes 32 767 substeps (172 s)."""
+    """10 bodies over 99 frames fit unless each frame takes 32 767 substeps (86 s)."""
     scene = _world_scene()
     for index in range(10):
         _body(scene, "Drop" if index == 0 else f"B{index}")
@@ -630,7 +635,7 @@ def test_physics_state_counts_substeps_toward_the_budget(blender: Any) -> None:
 
     assert scene.frames == []
     assert state["pose_source"] == "unknown"
-    assert "is estimated at 171.9 s" in state["warning"]
+    assert "is estimated at 86.0 s" in state["warning"]
 
 
 @pytest.mark.parametrize(
@@ -700,9 +705,15 @@ def test_all_scope_bakes_and_frees_every_cache(blender: Any) -> None:
 
     assert (cloth.is_baked, scene.rigidbody_world.point_cache.is_baked) == (True, True)
     assert (cloth.frame_start, cloth.frame_end) == (1, 20)
-    assert fake.calls.index("ptcache.free_bake_all") < fake.calls.index(
-        "ptcache.bake_all"
-    )
+    # Round-3 audit (R3-BL-01): stepped, then baked from what each cache holds, since
+    # ptcache.bake_all cannot be stopped.
+    assert fake.calls == [
+        "ptcache.free_bake_all",
+        "ptcache.bake_from_cache",
+        "ptcache.bake_from_cache",
+    ]
+    assert scene.frames == [*range(1, 21), 1]
+    assert baked["complete"] is True
     assert {entry["kind"]: entry["frame_end"] for entry in baked["caches"]} == {
         "RIGID_BODY": 20,
         "CLOTH": 20,
@@ -899,3 +910,159 @@ def test_physics_state_stepping_stops_at_its_deadline(
     assert (state["pose_source"], state["simulated_for_frame"]) == ("unknown", False)
     assert state["stepped_frames"] == 23
     assert "stopped at frame 23 after 22 s" in state["warning"]
+
+
+def test_physics_state_goes_on_where_the_deadline_stopped_it(
+    blender: Any, frozen_clock: List[float]
+) -> None:
+    """Round-3 audit (m-1): after the 22 s stop, calling again walked from the cache start
+    through every cached frame again; it goes on from the last frame the cache holds."""
+    scene = _world_scene()
+    scene.rigidbody_world.point_cache = _BlenderInfoCache()
+    _body(scene, "Drop")
+    _, session = blender(scene)
+    scene.frame_set(100)
+    stepping = scene.frame_set
+
+    def slow_frame(frame: int) -> None:
+        frozen_clock[0] += 1.0
+        stepping(frame)
+
+    scene.frame_set = slow_frame  # type: ignore[method-assign]
+    assert "calling again goes on" in session.get_physics_state("Drop")["warning"]
+    scene.frames.clear()
+    frozen_clock[0] = 0.0
+
+    state = session.get_physics_state("Drop")
+
+    # The cache holds 1-23: the walk reads 23 and simulates 24-45, then stops again.
+    assert scene.frames == [*range(23, 46), 100]
+    assert state["stepped_frames"] == 23
+    scene.frames.clear()
+    frozen_clock[0] = 0.0
+    state = session.get_physics_state("Drop")
+    assert scene.frames == [*range(45, 68), 100]
+    scene.frame_set = stepping  # type: ignore[method-assign]
+    state = session.get_physics_state("Drop")
+    assert (state["pose_source"], state["stepped_frames"]) == ("simulation", 34)
+    assert state["location"][2] == pytest.approx(_z(100))
+    # Once the cache holds the frame, only that frame is read.
+    scene.frames.clear()
+    assert session.get_physics_state("Drop")["stepped_frames"] == 1
+    assert scene.frames == [100]
+
+
+def test_an_all_scope_bake_stops_at_its_deadline_with_what_it_baked(
+    blender: Any, frozen_clock: List[float]
+) -> None:
+    """Round-3 audit (R3-BL-01): a cloth draping a dense collider took 31 s where the estimate
+    said 12, in one blocking ptcache.bake_all the attached client gave up on at 30 s. The
+    stepping stops after 22 s and each cache is baked up to there."""
+    scene = _world_scene()
+    _body(scene, "Drop")
+    cloth = _cloth(scene)
+    fake, session = blender(scene)
+    stepping = scene.frame_set
+
+    def slow_frame(frame: int) -> None:
+        frozen_clock[0] += 1.0
+        stepping(frame)
+
+    scene.frame_set = slow_frame  # type: ignore[method-assign]
+
+    result = session.bake_simulation(1, 100, scope="all")
+
+    assert result["complete"] is False
+    assert scene.frames[:-1] == list(range(1, 24))
+    world_cache = scene.rigidbody_world.point_cache
+    assert (cloth.frame_end, cloth.is_baked) == (23, True)
+    assert (world_cache.frame_end, world_cache.is_baked) == (23, True)
+    stopped = next(w for w in result["warnings"] if w.startswith("The bake stopped"))
+    assert "The bake stopped at frame 23 of 1-100 after 24 s" in stopped
+    assert "each cache holds the frames up to 23" in stopped
+    assert "BLENDER__CONNECTION_TIMEOUT" not in stopped
+    BlenderBakeSimulationResponse(success=True, **result)
+    frozen_clock[0] = 0.0
+    assert session.bake_simulation(1, 100, scope="all", allow_long_bake=True)["complete"]
+    assert (cloth.frame_end, world_cache.frame_end) == (100, 100)
+
+
+def test_an_all_scope_bake_skips_what_bake_all_skips(blender: Any) -> None:
+    """A fluid domain's own particle systems have no physics of their own, and hair without
+    dynamics none at all: Blender's Bake All leaves them, and so does the stepping bake.
+    An emitter bakes over its emission range, so the stepping covers it."""
+    scene = FakeScene()
+    flip = SimpleNamespace(
+        name="Liquid",
+        settings=SimpleNamespace(type="FLIP", physics_type="NO", count=0),
+        point_cache=FakeCache(),
+    )
+    sparks = SimpleNamespace(
+        name="Sparks",
+        settings=SimpleNamespace(
+            type="EMITTER", physics_type="NEWTON", count=100, frame_start=-5.0,
+            frame_end=30.0, lifetime=10.0,
+        ),
+        point_cache=FakeCache(),
+    )
+    systems = _Systems([flip, sparks])
+    scene.objects.append(
+        SimpleNamespace(name="Domain", type="MESH", modifiers=[], particle_systems=systems)
+    )
+    scene.objects = _Systems(scene.objects)
+    fake, session = blender(scene)
+
+    session.bake_simulation(10, 20, scope="all")
+
+    assert (flip.point_cache.is_baked, sparks.point_cache.is_baked) == (False, True)
+    # Emission from frame 1 (at least), ended plus the lifetime: 41.
+    assert scene.frames == [*range(1, 42), 1]
+
+
+class _BlenderInfoCache(FakeCache):
+    """A rigid-body cache whose info reads as Blender's does when it is up to date."""
+
+    @property
+    def info(self) -> str:
+        return f"{len(self.frames)} frames in memory (1 KiB)."
+
+
+class _Systems(list):
+    """A list with bpy_prop_collection's ``get``."""
+
+    def get(self, name: str) -> Any:
+        return next((item for item in self if item.name == name), None)
+
+
+def test_a_stopped_bake_reports_how_far_a_particle_cache_holds_frames(
+    blender: Any, frozen_clock: List[float]
+) -> None:
+    """Review of #371: a particle cache keeps the range Blender derives from its emission
+    (1-41 here), but after a deadline stop holds frames only up to it; caches says so."""
+    scene = FakeScene()
+    sparks = SimpleNamespace(
+        name="Sparks",
+        settings=SimpleNamespace(
+            type="EMITTER", physics_type="NEWTON", count=100, frame_start=1.0,
+            frame_end=30.0, lifetime=10.0,
+        ),
+        point_cache=FakeCache(1, 41),
+    )
+    scene.objects = _Systems(
+        [SimpleNamespace(name="Emitter", type="MESH", modifiers=[], particle_systems=_Systems([sparks]))]
+    )
+    fake, session = blender(scene)
+    stepping = scene.frame_set
+
+    def slow_frame(frame: int) -> None:
+        frozen_clock[0] += 1.0
+        stepping(frame)
+
+    scene.frame_set = slow_frame  # type: ignore[method-assign]
+
+    result = session.bake_simulation(1, 30, scope="all")
+
+    assert result["complete"] is False
+    assert [(c["kind"], c["frame_end"], c["is_baked"]) for c in result["caches"]] == [
+        ("PARTICLES", 23, True)
+    ]

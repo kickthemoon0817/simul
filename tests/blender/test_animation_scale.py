@@ -578,7 +578,7 @@ class TestRigidBodyWalk:
             "Sampling frame 990 steps the unbaked rigid-body simulation through 989 "
             "frames (frames 2-990) of 1000 bodies, estimated at 52.4 s" in message
         )
-        assert "over the 6 s of simulation a call steps through unasked (113 frames here)" in message
+        assert "over the 18 s of simulation a call steps through unasked (339 frames here)" in message
         assert "(999 for every sample of this page)" in message
         assert (
             "bake_blender_simulation" in message
@@ -591,19 +591,21 @@ class TestRigidBodyWalk:
     ) -> None:
         """A GUI Blender 5.0.1 took 24 s for 400 000 bodies x frames; a call waits 30 s.
 
-        1 000 bodies at 10 substeps and 10 solver iterations are estimated at 53 ms a
-        frame, so 6 s is 113 frames.
+        1 000 piled bodies at 10 substeps and 10 solver iterations are estimated at 53 ms
+        a frame. A page steps through 3 times the 6 s budget unasked, 339 frames, since
+        the 22 s deadline stops what the estimate underrates (round-3 audit, R3-BL-02).
         """
         world = _world(bodies=1000)
+        world.point_cache.frame_end = 1000
         session, _, frames = _session(
             monkeypatch, FakeTransformObject("Body"), world=world
         )
 
-        session.get_object_trajectory("Body", 114, 114)
-        assert frames[:-1] == list(range(1, 115))
+        session.get_object_trajectory("Body", 340, 340)
+        assert frames[:-1] == list(range(1, 341))
         with pytest.raises(ValueError, match="BLENDER__CONNECTION_TIMEOUT") as refused:
-            session.get_object_trajectory("Body", 115, 115)
-        assert "through 114 frames (frames 2-115) of 1000 bodies" in str(refused.value)
+            session.get_object_trajectory("Body", 341, 341)
+        assert "through 340 frames (frames 2-341) of 1000 bodies" in str(refused.value)
 
     @pytest.mark.parametrize("baked", [False, True], ids=["unbaked", "baked"])
     def test_a_walk_is_refused_while_a_constraint_has_lost_a_body(
@@ -613,15 +615,14 @@ class TestRigidBodyWalk:
         cache is outdated (deleting a body marks even a baked one), which crashed with a
         constraint left pointing at the deleted body."""
         world = _world(baked=baked)
+        ends = [SimpleNamespace(rigid_body=SimpleNamespace()) for _ in range(2)]
+        rbc = SimpleNamespace(object1=ends[0], object2=ends[1])
         world.constraints = SimpleNamespace(
-            all_objects=[
-                SimpleNamespace(
-                    name="RBC",
-                    rigid_body_constraint=SimpleNamespace(object1=None, object2=None),
-                )
-            ]
+            all_objects=[SimpleNamespace(name="RBC", rigid_body_constraint=rbc)]
         )
-        session, _, frames = _session(monkeypatch, FakeTransformObject("Body"), world=world)
+        session, scene, frames = _session(monkeypatch, FakeTransformObject("Body"), world=world)
+        blender_runtime._note_built_constraints(scene)  # the simulation stepped it
+        rbc.object1 = rbc.object2 = None  # then both bodies were deleted
 
         with pytest.raises(blender_runtime.RefusedOperation, match="^Sampling is refused"):
             session.get_object_trajectory("Body", 10, 20, 10)
@@ -655,17 +656,17 @@ class TestRigidBodyWalk:
     def test_substeps_shorten_the_unasked_walk(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
-        """At 100 substeps a frame costs ten times as much: 6 s is 11 frames of 1 000 bodies."""
+        """At 100 substeps a frame costs ten times as much: 18 s is 33 frames of 1 000 bodies."""
         world = _world(bodies=1000)
         world.substeps_per_frame = 100
         session, _, frames = _session(
             monkeypatch, FakeTransformObject("Body"), world=world
         )
 
-        page = session.get_object_trajectory("Body", 1, 30, fields=["location"])
+        page = session.get_object_trajectory("Body", 1, 60, fields=["location"])
 
-        assert [p["frame"] for p in page["points"]] == list(range(1, 13))
-        assert (page["simulated_frames"], page["next_offset"]) == (11, 12)
+        assert [p["frame"] for p in page["points"]] == list(range(1, 35))
+        assert (page["simulated_frames"], page["next_offset"]) == (33, 34)
 
     def test_max_simulated_frames_confirms_a_walk_or_bounds_it(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
@@ -705,10 +706,10 @@ class TestRigidBodyWalk:
 
         page = session.get_object_trajectory("Body", 1, 1000, 50, fields=["location"])
 
-        # 6 s is 113 frames of 1 000 bodies (53 ms a frame): up to frame 114.
-        assert [p["frame"] for p in page["points"]] == [1, 51, 101]
-        assert (page["simulated_frames"], page["next_offset"]) == (100, 3)
-        assert frames == [*range(1, 102), 1]
+        # 18 s is 339 frames of 1 000 bodies (53 ms a frame): up to frame 340.
+        assert [p["frame"] for p in page["points"]] == [1, 51, 101, 151, 201, 251, 301]
+        assert (page["simulated_frames"], page["next_offset"]) == (300, 7)
+        assert frames == [*range(1, 302), 1]
 
     @pytest.mark.parametrize("state", ["baked", "disabled"])
     def test_a_baked_or_disabled_world_is_read_not_walked(

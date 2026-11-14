@@ -30,9 +30,13 @@ use the new version; Simul does not restart the editor automatically. A server
 and an add-on that speak different bridge protocols refuse each other with the
 `install-bridge` fix instead of misreading a call (`error_type:
 "BridgeProtocolError"`); protocol 5 is the first that records agent edits as undo
-steps, protocol 13 the first whose requests start with their token, and protocol
+steps, protocol 13 the first whose requests start with their token, protocol
 14 the first whose bake limit counts substeps, solver iterations, collision
-shapes and cloth size, and stops a bake after 22 s.
+shapes and cloth size, and stops a bake after 22 s, and protocol 15 the first
+that costs rigid bodies by what they touch and their hulls' own vertices, stops
+a `scope: "all"` bake after 22 s too, exports a SimReady asset at the
+simulation's start pose (`pose_frame`) and refuses only constraints the
+simulation stepped with a body that is gone.
 
 ## Select and verify the target
 
@@ -425,8 +429,11 @@ arrives; only a connection that sends nothing for 10 seconds while Blender is
 free to read is dropped. A larger request is refused before it is sent, with an
 error that names the limit; send the data in several calls instead.
 
-`bake_blender_simulation` refuses a bake likely to outlast the timeout unless
-`allow_long_bake` is set; see [tools.md](tools.md).
+`bake_blender_simulation` stops a bake after 22 s with the frames it simulated
+(`complete: false`), whatever its scope, and refuses up front only a bake
+estimated far over what a call should take, unless `allow_long_bake` is set;
+`get_blender_physics_state` and the trajectory tools stop their stepping after
+22 s too. See [tools.md](tools.md).
 
 ## Configuration
 
