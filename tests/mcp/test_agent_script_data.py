@@ -330,10 +330,10 @@ def test_blender_script_reports_a_failure_with_success_false(
 @pytest.mark.parametrize(
     ("extra", "error_type"),
     [
-        ({"error": "RuntimeError: boom"}, "ScriptError"),
+        ({"error": "boom", "details": {"exception_type": "RuntimeError"}}, "ScriptError"),
         (
             {
-                "error": "TimeoutError: script did not finish within 5s.",
+                "error": "Script did not finish within 5s.",
                 "timed_out": True,
             },
             "TimeoutError",
@@ -354,6 +354,9 @@ def test_blender_raised_script_is_a_script_error_as_elsewhere(
     assert is_error is True
     assert payload["error_type"] == error_type
     assert payload["error"] == extra["error"]
+    # As execute_isaac_script reports it: the class in details, not in the message.
+    raised = extra.get("details", {}).get("exception_type")
+    assert (payload.get("details") or {}).get("exception_type") == raised
 
 
 def test_blender_success_false_inside_other_output_is_only_text(

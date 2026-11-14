@@ -332,7 +332,8 @@ def test_failed_operation_reply_keeps_the_class_and_the_noted_context(
     )
     assert reply["success"] is False
     assert reply["error_type"] == "TypeError"
-    assert reply["error"] == "TypeError: Failed to add rigid body to 'Cube': enum \"BOGUS\" not found"
+    # R2-BLA-03: the class is the error_type, not a prefix of the message.
+    assert reply["error"] == "Failed to add rigid body to 'Cube': enum \"BOGUS\" not found"
 
 
 # ---------------------------------------------------------------------------

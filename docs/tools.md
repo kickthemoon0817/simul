@@ -865,7 +865,9 @@ Behaviour worth knowing:
     before retrying. `ping_unreal` reports one with this type too.
   - `TimeoutError`: no answer within `UNREAL__TIMEOUT`. A script or a change
     may still be running in the editor, and Remote Control cannot cancel it,
-    so check the editor's state before retrying.
+    so check the editor's state before retrying. Until the editor has
+    finished it, other Unreal calls get `InstanceBusy` without being sent
+    ([unreal-attachment.md](unreal-attachment.md#identity-checks-and-limits)).
   - `EngineError`: Remote Control answered with HTTP 5xx.
   - `ValidationError`: Remote Control refused the request as made (HTTP 400),
     for example a read-only, `EditConst` or protected property, or a value of
@@ -873,7 +875,11 @@ Behaviour worth knowing:
   - `NotFoundError`: the object, property, function or console variable
     named does not exist, whether Remote Control (HTTP 404, or a 400 saying
     so) or a tool's editor script reports it.
-  - `InstanceBusy`: the editor was saving or collecting garbage.
+  - `InstanceBusy`: the editor was saving or collecting garbage, or simul
+    sent nothing because the editor is still running a call that timed out
+    (`details.reason: "finishing_timed_out_call"`, with `timed_out_tool`,
+    `changes_state` and `busy_for_seconds`). Retry shortly; `ping_unreal`
+    reports the hold as `held_after_timeout`.
   - `AuthenticationError`: Remote Control refused this client (HTTP 401).
 
   `error` carries Remote Control's own message, and `details` carries the
@@ -1091,7 +1097,9 @@ Behaviour worth knowing:
   with `UNREAL__PING_TIMEOUT` (3 s by default), so a busy editor is reported
   within that time; `unreal_health_check` retries only a refused connection,
   from an editor still starting up, and gives its metadata script the full
-  `UNREAL__TIMEOUT`.
+  `UNREAL__TIMEOUT`. Both are still sent while simul holds the editor after a
+  timed-out call; a busy answer then carries `held_after_timeout`, and an
+  editor that answers is released.
 - `call_unreal_actor_function` returns `return_value` as JSON (the function's
   `ReturnValue`) and `outputs`, everything Remote Control returned, out
   parameters included.
@@ -2258,8 +2266,9 @@ Behaviour worth knowing:
   parent's transform, and a child without a previous parent keeps its own
   values. `keep_transform: false` clears the parent inverse instead, so the
   child's values become relative to the parent and it moves. A parent that is
-  the child itself or one of its descendants is refused (Blender ignores such
-  a parent without an error).
+  the child itself or one of its descendants is refused with
+  `error_type: "ValidationError"` and `details.code` `self_parent` or
+  `parent_loop` (Blender ignores such a parent without an error).
 - `create_blender_object` puts the object in the active collection, as
   Blender's Add menu does. When that collection, or one holding it, is
   excluded from the view layer, hidden or disabled in viewports, the object
@@ -2289,7 +2298,10 @@ Behaviour worth knowing:
   object was already deleted or has no rigid body is left as it is, since
   removing it reads the freed body and crashed Blender where its own Delete did
   not; one Blender will not remove is left too. `warnings` names both, and
-  Blender's Delete runs as before.
+  Blender's Delete runs as before. Restarting the simulation then stays
+  refused until that constraint is removed or given two rigid bodies, also
+  after the file is saved and opened again; do either in the reopened file
+  (opening it may crash Blender once while it frees the broken constraint).
 - `list_blender_scene_objects` and `search_blender_objects` return a page:
   `count` objects from `offset`, `total` matching, and `next_offset` for the
   next page (`null` after the last; `truncated` says whether more follow). A
@@ -2782,9 +2794,10 @@ Behaviour worth knowing:
   used to overwrite `model.glb`). For GLTF the extension picks the layout: `.glb`
   is GLB, `.gltf` is `GLTF_SEPARATE` (a `.bin` and textures beside it);
   `gltf_format: "GLTF_EMBEDDED"` writes one `.gltf` with its data inline. The
-  reply's `files_written` lists every file the export created or changed in
-  that folder (and its `textures/` or newly created subfolders), `file_path`
-  first. An existing `.bin` or `.mtl` beside the file that the file being
+  reply's `files_written` lists the files the exporter wrote: `file_path`
+  first, then its `.bin` or `.mtl`, the images a `.gltf` names and the
+  textures in `textures/`. Another file that changed in the folder during the
+  export (a log being written) is not listed. An existing `.bin` or `.mtl` beside the file that the file being
   replaced does not refer to is not overwritten unless
   `overwrite_companion_files: true`; texture files a `GLTF_SEPARATE` export
   writes replace files of the same name. Missing folders are created for every
@@ -3190,8 +3203,9 @@ Behaviour worth knowing:
   cut at 300 000 bytes of JSON, which printable ASCII never reaches but heavily
   non-ASCII output can, with the same report. Write larger results to a file
   and return its path. Anything the script raises, `SystemExit` from
-  `sys.exit()` and `KeyboardInterrupt` included, comes back in `error`; it
-  never ends Blender.
+  `sys.exit()` and `KeyboardInterrupt` included, comes back in `error` (the
+  message; its class is `details.exception_type`, as on Isaac); it never ends
+  Blender.
 
 ## Server
 
@@ -3269,7 +3283,7 @@ script the bridge stopped at its timeout (`TimeoutError`).
 | `ConnectionError` | The engine could not be reached, or the connection broke before it answered; the operation may not have run | Check the engine is running; retry |
 | `TimeoutError` | The engine did not answer in time; the operation may still be running | Check state before retrying |
 | `EngineError` | The engine received the request and reported a failure the tool does not name more precisely (a non-domain exception, a reply that does not parse or does not match the tool's response schema, a partial failure under `*_error` keys) | Read `error` |
-| `InstanceBusy` | The Isaac instance is serving another call, or is still finishing one whose reply timed out (`details.reason: "finishing_timed_out_call"`); a Blender instance is busy (`attach_blender_window`) or its bridge holds as many waiting requests as it takes (`bridge_busy`) | Retry shortly |
+| `InstanceBusy` | The Isaac instance is serving another call, or the Isaac instance or Unreal editor is still finishing one whose reply timed out (`details.reason: "finishing_timed_out_call"`); a Blender instance is busy (`attach_blender_window`) or its bridge holds as many waiting requests as it takes (`bridge_busy`) | Retry shortly |
 | `SandboxError` | A path or URL is outside the file sandbox; `details` names the allowed roots | Use an allowed path |
 
 Domain types of the server:

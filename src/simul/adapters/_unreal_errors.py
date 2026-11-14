@@ -22,7 +22,9 @@ alone:
     HTTP 400 that says so, or a tool script's ``SimulNotFound``.
 ``InstanceBusy``
     The editor answered but cannot serve the request now (it is saving or
-    collecting garbage).
+    collecting garbage), or simul sent nothing because the editor is still
+    running a request that timed out (``details.reason``
+    ``finishing_timed_out_call``, ``_unreal_hold``).
 ``SandboxError``
     The path policy refused a path on this machine (``simul.utils.paths``).
 

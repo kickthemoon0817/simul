@@ -180,7 +180,7 @@ def _script_timed_out(
         "duration_seconds": round(float(timeout if running is None else running), 4),
         "timed_out": True,
         "error": (
-            f"TimeoutError: script did not finish within {timeout:g}s. {state} It cannot be "
+            f"Script did not finish within {timeout:g}s. {state} It cannot be "
             "stopped from Simul, and its output is discarded; inspect Blender before running "
             "it again."
         ),

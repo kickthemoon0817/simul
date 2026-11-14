@@ -76,6 +76,14 @@ class UnrealPingResponse(BaseModel):
             "running a script, loading or compiling (error_type InstanceBusy), not down"
         ),
     )
+    held_after_timeout: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Present while simul holds the editor after a request timed out, until the editor has "
+            "finished it (other calls get InstanceBusy meanwhile): timed_out_tool, timed_out_route, "
+            "changes_state, busy_for_seconds and hold_limit_seconds"
+        ),
+    )
     error: Optional[str] = Field(None, description="Error message when success is False")
 
 
@@ -208,6 +216,14 @@ class UnrealHealthCheckResponse(BaseModel):
         description=(
             "The editor accepted the connection but did not answer in time: it is running a "
             "script, loading or compiling (error_type InstanceBusy), not down"
+        ),
+    )
+    held_after_timeout: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Present while simul holds the editor after a request timed out, until the editor has "
+            "finished it (other calls get InstanceBusy meanwhile): timed_out_tool, timed_out_route, "
+            "changes_state, busy_for_seconds and hold_limit_seconds"
         ),
     )
     warnings: List[str] = Field(

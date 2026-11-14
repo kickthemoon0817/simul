@@ -627,6 +627,9 @@ def test_delete_object_leaves_a_constraint_whose_other_body_is_gone(
     assert joint["log"] == []
     assert result["removed_constraints"] == []
     assert "already deleted or has no rigid body" in result["warnings"][0]
+    # Review of #360: it stays refused after reopening too, until the constraint is fixed.
+    assert "removed or given two rigid bodies" in result["warnings"][0]
+    assert "saved and opened again" not in result["warnings"][0]
     assert "Link" not in world.objects
 
 
@@ -695,7 +698,11 @@ def test_delete_object_goes_ahead_when_a_constraint_cannot_be_removed(world: Wor
 
     assert result["removed_constraints"] == []
     assert "constraint_remove.poll() failed" in result["warnings"][0]
-    assert "restarting the simulation is refused" in result["warnings"][0]
+    # Review of #360: reopening the file does not lift the refusal by itself.
+    assert (
+        "stays refused until that constraint is removed or given two rigid bodies"
+        in result["warnings"][0]
+    )
     assert "Link" not in world.objects
     assert joint["carrier"].rigid_body_constraint is not None
 
