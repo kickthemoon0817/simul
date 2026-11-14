@@ -30,9 +30,13 @@ use the new version; Simul does not restart the editor automatically. A server
 and an add-on that speak different bridge protocols refuse each other with the
 `install-bridge` fix instead of misreading a call (`error_type:
 "BridgeProtocolError"`); protocol 5 is the first that records agent edits as undo
-steps, protocol 13 the first whose requests start with their token, and protocol
+steps, protocol 13 the first whose requests start with their token, protocol
 14 the first whose bake limit counts substeps, solver iterations, collision
-shapes and cloth size, and stops a bake after 22 s.
+shapes and cloth size, and stops a bake after 22 s, and protocol 15 the first
+that costs rigid bodies by what they touch and their hulls' own vertices, stops
+a `scope: "all"` bake after 22 s too, exports a SimReady asset at the
+simulation's start pose (`pose_frame`) and refuses only constraints the
+simulation stepped with a body that is gone.
 
 ## Select and verify the target
 

@@ -1032,3 +1032,37 @@ class _Systems(list):
 
     def get(self, name: str) -> Any:
         return next((item for item in self if item.name == name), None)
+
+
+def test_a_stopped_bake_reports_how_far_a_particle_cache_holds_frames(
+    blender: Any, frozen_clock: List[float]
+) -> None:
+    """Review of #371: a particle cache keeps the range Blender derives from its emission
+    (1-41 here), but after a deadline stop holds frames only up to it; caches says so."""
+    scene = FakeScene()
+    sparks = SimpleNamespace(
+        name="Sparks",
+        settings=SimpleNamespace(
+            type="EMITTER", physics_type="NEWTON", count=100, frame_start=1.0,
+            frame_end=30.0, lifetime=10.0,
+        ),
+        point_cache=FakeCache(1, 41),
+    )
+    scene.objects = _Systems(
+        [SimpleNamespace(name="Emitter", type="MESH", modifiers=[], particle_systems=_Systems([sparks]))]
+    )
+    fake, session = blender(scene)
+    stepping = scene.frame_set
+
+    def slow_frame(frame: int) -> None:
+        frozen_clock[0] += 1.0
+        stepping(frame)
+
+    scene.frame_set = slow_frame  # type: ignore[method-assign]
+
+    result = session.bake_simulation(1, 30, scope="all")
+
+    assert result["complete"] is False
+    assert [(c["kind"], c["frame_end"], c["is_baked"]) for c in result["caches"]] == [
+        ("PARTICLES", 23, True)
+    ]

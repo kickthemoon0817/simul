@@ -3151,6 +3151,10 @@ Behaviour worth knowing:
 
   The deadline bounds what the estimate does not see (geometry-node
   simulations, frame-change handlers, a scene slower than the measured ones).
+  The contact cost is read from the scene before the bake, so a cloth that
+  already wraps its collider (a tube shirt on a 21 634-face body: 23 s
+  estimated, 80.7 s for 120 frames) can take several times its estimate; the
+  deadline stops it, but with `allow_long_bake` it runs to the end.
   `allow_long_bake: true` bakes the whole range in one call, which cannot be
   stopped once it starts on Blender's main thread: past the attached-mode
   client timeout (`BLENDER__CONNECTION_TIMEOUT`, a server setting, 30 s by
@@ -3175,7 +3179,9 @@ Behaviour worth knowing:
   scene (every time under macOS `MallocScribble`). Freeing such a constraint
   reads it too: deleting its empty (with Blender's Delete, or
   `bpy.data.objects.remove`), opening another file or quitting crashed in
-  `RB_constraint_delete`. No change inside the session removes it safely, so
+  `RB_constraint_delete`, and an undo past it crashed in a file of several
+  simulated scenes (`BKE_rigidbody_free_world`). No change inside the session
+  removes it safely, so
   the refusal says Blender may crash and how to keep the work: save the file
   first (`save_blender_file`). A constraint is built only while its file is
   open, so the saved file, opened again (which may crash Blender this once,
@@ -3192,11 +3198,15 @@ Behaviour worth knowing:
   end still unset, or one in a file saved after its body was deleted (both
   stepped cleanly under `MallocScribble`). A rigid body removed and added
   again is a new Bullet body, so the constraint is refused until the file is
-  reopened. Undo moves the records to the bodies it restores; an undo that
-  re-reads a simulated jointed body can still leave a dangling constraint,
-  which no tool can see, so after undoing past rigid body constraints, save
-  the file and open it again before simulating. A constraint that had already
-  lost its body when the add-on started is taken as never built.
+  reopened. A memfile undo re-reads the data that changed since the step it
+  goes back to. A constraint it re-reads has nothing built, so its record goes
+  and it steps normally (an undo of a body's deletion restores the constraint
+  this way). One it does not re-read keeps its built Bullet constraint and its
+  record, so when undo re-reads one of its bodies (a jointed body moved after
+  the simulation stepped it, then undone) the body is a new one, its Bullet body
+  was freed, and the constraint is refused like a deleted body's. A constraint
+  that had already lost its body when the add-on started is taken as never
+  built.
 - `get_blender_physics_state` steps an unbaked simulation to the current
   frame before reading the pose (`step_simulation`, default true, unless the
   frames to simulate are estimated at more than 36 s, as for a bake, and for

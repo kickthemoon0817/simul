@@ -616,6 +616,7 @@ class TestConstraintWithoutBody:
             enabled=True, constraints=SimpleNamespace(all_objects=[carrier])
         )
         scene.objects["Link"] = link
+        scene.objects[carrier.name] = carrier
         if simulated:
             blender_runtime._note_built_constraints(scene)  # a frame change stepped it
         carrier.rigid_body_constraint.object1 = None  # Blender's Delete freed Base
@@ -704,12 +705,52 @@ class TestConstraintWithoutBody:
 
         base.rigid_body = SimpleNamespace()
         assert blender_runtime.constraints_at_risk(scene) == ["RBC_Base_Link"]
-        # Undo re-reads the bodies it restores: the record follows them.
-        blender_runtime._follow_undo()
-        assert blender_runtime.constraints_at_risk(scene) == []
         # A constraint removed and added again was never stepped.
-        base.rigid_body = SimpleNamespace()
         carrier.rigid_body_constraint = SimpleNamespace(object1=base, object2=None)
+        assert blender_runtime.constraints_at_risk(scene) == []
+
+    def test_an_undo_that_re_reads_a_body_but_not_its_constraint_is_at_risk(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review of #371: a stepped hinge, its body moved, then Ctrl+Z. Undo re-read the body
+        (a new rigid body, its Bullet body freed) but not the constraint, still built against
+        the freed body; the record followed the new body and the next bake was allowed."""
+        _, scene, _ = _blender(monkeypatch)
+        carrier = self._broken(scene, simulated=False)
+        base = SimpleNamespace(name="Base", rigid_body=SimpleNamespace())
+        carrier.rigid_body_constraint.object1 = base
+        scene.objects["Base"] = base
+        blender_runtime._note_built_constraints(scene)
+
+        base.rigid_body = SimpleNamespace()  # undo re-read Base
+        blender_runtime._follow_undo()
+
+        assert blender_runtime.constraints_at_risk(scene) == ["RBC_Base_Link"]
+
+    def test_an_undo_that_re_reads_the_constraint_forgets_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A re-read constraint has nothing built: undoing a script's delete of a stepped body
+        restores both, and undo then redo of the delete steps without a refusal."""
+        _, scene, _ = _blender(monkeypatch)
+        carrier = self._broken(scene, simulated=False)
+        base = SimpleNamespace(name="Base", rigid_body=SimpleNamespace())
+        carrier.rigid_body_constraint.object1 = base
+        scene.objects["Base"] = base
+        blender_runtime._note_built_constraints(scene)
+        del scene.objects["Base"]
+        carrier.rigid_body_constraint.object1 = None  # a script deleted Base
+        assert blender_runtime.constraints_at_risk(scene) == ["RBC_Base_Link"]
+
+        restored = SimpleNamespace(name="Base", rigid_body=SimpleNamespace())
+        scene.objects["Base"] = restored
+        carrier.rigid_body_constraint = SimpleNamespace(object1=restored, object2=None)
+        blender_runtime._follow_undo()  # Ctrl+Z re-read both
+
+        assert blender_runtime._built_constraints == {}
+        del scene.objects["Base"]
+        carrier.rigid_body_constraint = SimpleNamespace(object1=None, object2=None)
+        blender_runtime._follow_undo()  # Ctrl+Shift+Z deletes it again, nothing stepped
         assert blender_runtime.constraints_at_risk(scene) == []
 
     @pytest.mark.parametrize("action", ["play", "reverse"])

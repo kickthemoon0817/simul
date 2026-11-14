@@ -1183,11 +1183,10 @@ def stop_watching_playback() -> None:
 # gone, or has another rigid body (removed and added again), is one the built
 # constraint may still point at. A file load builds nothing and frees the
 # records; a record whose rigid_body_constraint was reallocated (removed and
-# added again) no longer describes a built constraint. Undo re-reads changed
-# data, so it moves the pointers of the bodies it restores without anything
-# being removed in Blender's terms; the records follow them, as Blender's own
-# stepping does (a memfile undo of a simulated jointed body can still leave a
-# dangling constraint, which nothing here can see).
+# added again) no longer describes a built constraint. A memfile undo re-reads
+# the data that changed: a constraint it re-read has nothing built and loses
+# its record, and one it did not re-read keeps it, so a body undo re-read under
+# a built constraint (its old Bullet body freed) makes the constraint at risk.
 #
 # The records start when the watch starts (the add-on's bridge, or the first
 # embedded session). A constraint that already lost a body by then is taken as
@@ -1274,19 +1273,25 @@ def _file_objects() -> List[Any]:
 
 
 def _follow_undo(*_args: Any) -> None:
-    """undo_post / redo_post: move the records to the bodies and constraints undo re-read."""
+    """undo_post / redo_post: forget the constraints undo re-read, keep the others.
+
+    A memfile undo re-reads the data that changed since the step it goes back
+    to. A re-read rigid_body_constraint (a new pointer) has nothing built in
+    Bullet, so its record goes; the next frame change records it afresh. One
+    that was not re-read keeps its built Bullet constraint and its record: when
+    undo re-read one of its bodies (a moved jointed body), that body's rigid
+    body is new and its Bullet body was freed, so the record's old pointer
+    makes the constraint at risk, as it is (round-3 review: a stepped hinge,
+    a body moved, Ctrl+Z, and the next bake would have read the freed body).
+    """
     if not _built_constraints or not BLENDER_AVAILABLE:
         return
     live = {_uid(obj): obj for obj in _file_objects()}
     for key, record in list(_built_constraints.items()):
         carrier = live.get(key)
         rbc = getattr(carrier, "rigid_body_constraint", None) if carrier is not None else None
-        if rbc is not None:
-            record["constraint"] = _pointer(rbc)
-        for uid in record["bodies"]:
-            body = getattr(live.get(uid), "rigid_body", None)
-            if body is not None:
-                record["bodies"][uid] = _pointer(body)
+        if rbc is None or _pointer(rbc) != record["constraint"]:
+            del _built_constraints[key]
 
 
 def constraints_at_risk(scene: Any) -> List[str]:
@@ -8984,7 +8989,14 @@ class BlenderRuntimeSession:
                 "client's timeout (30 s by default) reports a TimeoutError while Blender "
                 "keeps baking"
             )
-        return {**self._bake_report(scene, scope, warnings), "complete": not stopped}
+        report = self._bake_report(scene, scope, warnings)
+        if stopped:
+            # A particle cache keeps the range Blender derives from its emission,
+            # but holds frames only up to the stop.
+            for entry in report["caches"]:
+                if entry["is_baked"] and entry["frame_end"] > last:
+                    entry["frame_end"] = last
+        return {**report, "complete": not stopped}
 
     def free_bake(self, scope: str = "rigid_body") -> Dict[str, Any]:
         """
@@ -9188,6 +9200,11 @@ class BlenderRuntimeSession:
         members = list(collection.all_objects) if collection is not None else []
         if not members:
             return None
+        # A headless Blender evaluates only when asked: right after a script
+        # moved objects their matrix_world was stale, and 20 cubes 2 m apart
+        # counted as touching.
+        if getattr(getattr(bpy, "context", None), "view_layer", None) is not None:
+            _synced_view_layer()
         substeps = max(int(getattr(world, "substeps_per_frame", 10)), 1)
         iterations = max(int(getattr(world, "solver_iterations", 10)), 1)
         moving: List[Any] = []
@@ -9965,8 +9982,8 @@ class BlenderRuntimeSession:
             "object that has since been deleted or lost its rigid body, and Blender keeps "
             "the simulated constraint pointing at the freed body. Blender 5.0.1 may crash "
             "when the simulation steps again, and when the constraint is freed (deleting "
-            "its empty, opening another file, quitting), losing unsaved work; nothing "
-            "inside this session removes it safely. Save the file first "
+            "its empty, an undo past it, opening another file, quitting), losing unsaved "
+            "work; nothing inside this session removes it safely. Save the file first "
             "(save_blender_file): a constraint is simulated only while its file is open, "
             "so the saved file, once opened again (which may crash Blender this once, "
             "after the save), steps normally, and each such constraint can then be given "

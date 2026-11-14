@@ -760,3 +760,19 @@ def test_sph_particles_and_a_replaying_fluid_domain_count(session: Session) -> N
     assert fine - FRAME == pytest.approx(0.6e-6 * 32_768 * 4**0.6)
     assert "(131072 cells)" in fine_parts[0]
     assert liquid - FRAME == pytest.approx(16_384 * 1.5e-6)
+
+
+def test_the_estimate_reads_the_bodies_where_the_depsgraph_puts_them(
+    session: Session,
+) -> None:
+    """Review of #371: a headless Blender evaluates only when asked, so right after a script
+    moved 20 cubes 2 m apart their matrix_world still had them piled; the view layer is
+    updated first."""
+    updates: List[str] = []
+    blender_runtime.bpy.context = SimpleNamespace(
+        view_layer=SimpleNamespace(update=lambda: updates.append("update"))
+    )
+
+    session._simulation_cost(_scene(_world(3)), "rigid_body")
+
+    assert updates == ["update"]
