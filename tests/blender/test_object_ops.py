@@ -25,7 +25,7 @@ import json
 import math
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import pytest
 
@@ -557,9 +557,147 @@ def test_delete_object_leaves_the_object_in_other_scenes(world: World) -> None:
     assert result == {
         "deleted_name": "SharedProp",
         "use_global": False,
+        "removed_constraints": [],
+        "warnings": [],
         "removed_from_file": False,
         "remaining_scenes": ["VariantB"],
     }
+
+
+def _joint(world: World, scene: Any = None) -> Dict[str, Any]:
+    """Two rigid bodies Link and Base joined by a constraint on the empty RBC_Base_Link.
+
+    ``constraint_remove`` acts on the overridden active object, as Blender's
+    does, and records the scene it ran in and whether both bodies still existed.
+    """
+    scene = scene or world.scene
+    body, other = world.add("Link"), world.add("Base")
+    body.rigid_body, other.rigid_body = SimpleNamespace(), SimpleNamespace()
+    carrier = world.add("RBC_Base_Link", object_type="EMPTY")
+    carrier.hide_viewport = False
+    carrier.rigid_body_constraint = SimpleNamespace(object1=other, object2=body)
+    scene.rigidbody_world = SimpleNamespace(constraints=SimpleNamespace(all_objects=[carrier]))
+    log: List[Tuple[str, Any, bool]] = []
+
+    def constraint_remove() -> set:
+        members = world.overrides[-1]
+        target = members["active_object"]
+        log.append((target.name, members["scene"], carrier.hide_viewport))
+        assert "Link" in world.objects and "Base" in world.objects, "both bodies must exist"
+        target.rigid_body_constraint = None
+        return {"FINISHED"}
+
+    world.bpy.ops.rigidbody = SimpleNamespace(constraint_remove=constraint_remove)
+    return {"body": body, "other": other, "carrier": carrier, "log": log}
+
+
+def test_delete_object_removes_a_constraint_joining_it_first(world: World) -> None:
+    """Blender's Delete left the constraint pointing at the freed body: the next restart of
+    the simulation (a bake) crashed Blender 5.0.1 in btDiscreteDynamicsWorld::removeConstraint."""
+    joint = _joint(world)
+    unrelated = world.add("RBC_Base_Base2", object_type="EMPTY")
+    unrelated.rigid_body_constraint = SimpleNamespace(object1=joint["other"], object2=None)
+    world.scene.rigidbody_world.constraints.all_objects.append(unrelated)
+    world.view_layer.objects.active = joint["other"]
+
+    result = _session().delete_object("Link")
+
+    assert joint["log"] == [("RBC_Base_Link", world.scene, False)]
+    assert result["removed_constraints"] == ["RBC_Base_Link"] and result["warnings"] == []
+    assert "Link" not in world.objects and "RBC_Base_Link" in world.objects
+    assert unrelated.rigid_body_constraint is not None
+    # The user's active object is restored.
+    assert world.view_layer.objects.active is joint["other"]
+
+
+@pytest.mark.parametrize("gone", ["deleted", "rigid_body_removed"])
+def test_delete_object_leaves_a_constraint_whose_other_body_is_gone(
+    world: World, gone: str
+) -> None:
+    """Review of #360: removing such a constraint reads the freed body and crashed Blender
+    (MallocScribble), where Blender's own Delete did not."""
+    joint = _joint(world)
+    if gone == "deleted":
+        joint["carrier"].rigid_body_constraint.object1 = None
+    else:
+        joint["other"].rigid_body = None
+
+    result = _session().delete_object("Link")
+
+    assert joint["log"] == []
+    assert result["removed_constraints"] == []
+    assert "already deleted or has no rigid body" in result["warnings"][0]
+    assert "Link" not in world.objects
+
+
+def test_delete_object_removes_a_constraint_whose_empty_is_disabled_in_viewports(
+    world: World,
+) -> None:
+    """Blender's constraint_remove refuses an object disabled in viewports; it is shown for
+    the call and hidden again."""
+    joint = _joint(world)
+    joint["carrier"].hide_viewport = True
+
+    result = _session().delete_object("Link")
+
+    assert joint["log"] == [("RBC_Base_Link", world.scene, False)]
+    assert result["removed_constraints"] == ["RBC_Base_Link"]
+    assert joint["carrier"].hide_viewport is True
+
+
+def test_delete_object_links_an_excluded_empty_into_the_scene_for_the_removal(
+    world: World,
+) -> None:
+    """Outside the view layer (an excluded collection) the empty cannot be made active, and
+    Blender 5.0.1 ran constraint_remove on the layer's active object instead."""
+    _joint(world)
+    links: List[str] = []
+    world.view_layer.objects = SimpleNamespace(
+        active=None,
+        get=lambda name: next((o for o in world.objects.values() if o.name in links and o.name == name), None),
+    )
+    world.scene.collection.objects = SimpleNamespace(  # type: ignore[attr-defined]
+        link=lambda ob: links.append(ob.name),
+        unlink=lambda ob: links.append(f"unlink {ob.name}"),
+    )
+
+    result = _session().delete_object("Link")
+
+    assert links == ["RBC_Base_Link", "unlink RBC_Base_Link"]
+    assert result["removed_constraints"] == ["RBC_Base_Link"]
+    assert world.view_layer.objects.active is None
+
+
+def test_delete_object_globally_removes_a_joint_of_another_scene(world: World) -> None:
+    """With use_global the constraint is removed in the scene whose world holds it."""
+    other_scene = FakeScene(world, "VariantB")
+    other_scene.view_layers = [world.view_layer]  # type: ignore[attr-defined]
+    world.scenes.append(other_scene)
+    joint = _joint(world, scene=other_scene)
+    world.scene.rigidbody_world = None
+
+    result = _session().delete_object("Link", use_global=True)
+
+    assert joint["log"] == [("RBC_Base_Link", other_scene, False)]
+    assert result["removed_constraints"] == ["RBC_Base_Link"]
+
+
+def test_delete_object_goes_ahead_when_a_constraint_cannot_be_removed(world: World) -> None:
+    """Blender's Delete runs as before; the warning says the simulation stays refused."""
+    joint = _joint(world)
+
+    def refuse() -> set:
+        raise RuntimeError("Operator bpy.ops.rigidbody.constraint_remove.poll() failed")
+
+    world.bpy.ops.rigidbody = SimpleNamespace(constraint_remove=refuse)
+
+    result = _session().delete_object("Link")
+
+    assert result["removed_constraints"] == []
+    assert "constraint_remove.poll() failed" in result["warnings"][0]
+    assert "restarting the simulation is refused" in result["warnings"][0]
+    assert "Link" not in world.objects
+    assert joint["carrier"].rigid_body_constraint is not None
 
 
 def test_delete_object_globally_deletes_it_from_every_scene(world: World) -> None:

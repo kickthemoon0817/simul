@@ -969,3 +969,186 @@ def test_a_motor_refuses_the_export_and_a_forced_export_names_the_lost_joint(sce
     assert forced["physics"]["joint_count"] == 0
     assert any("MOTOR constraint RBC_base_link_arm_link" in w for w in forced["warnings"])
     assert not Usd.Stage.Open(str(path)).GetPrimAtPath("/robot/Joints")
+
+
+# ---------------------------------------------------------------------------
+# Round 2 of the audit
+# ---------------------------------------------------------------------------
+
+
+def _link_parts(scene: Any, count: int) -> List[FakeObject]:
+    """What a script's ``objects.link`` leaves in headless Blender: in the scene, not yet
+    in ``view_layer.objects``, which ``ViewLayer.update`` syncs."""
+    fake = scene.fake
+    parts = [
+        FakeObject(f"part_{i}", parent=scene.obj("base_link"), data_name=f"Part{i}")
+        for i in range(1, count + 1)
+    ]
+    fake.objects.extend(parts)
+    synced: List[bool] = []
+
+    def update() -> None:
+        synced.append(True)
+        fake.layer_objects.extend(o for o in fake.objects if fake.layer_objects.get(o.name) is None)
+
+    fake.view_layer.update = update
+    return parts
+
+
+def test_objects_a_script_just_linked_are_exported(scene: Any) -> None:
+    """M-2: embedded Blender had not synced its view layer, so the export skipped them as
+    "not in the active view layer" and reported success with part of the asset."""
+    _link_parts(scene, 3)
+    path = scene.out / "linked.usda"
+
+    result = scene.session.export_simready_usd(str(path), object_names=["robot"], force=True)
+
+    assert result["skipped_objects"] == []
+    assert result["object_count"] == 6
+    stage = Usd.Stage.Open(str(path))
+    for index in (1, 2, 3):
+        assert stage.GetPrimAtPath(f"/robot/base_link/part_{index}"), index
+
+
+def test_validation_counts_objects_a_script_just_linked(scene: Any) -> None:
+    """M-2: a 2 000-part asset built by a script validated as 2 objects, compliant."""
+    _link_parts(scene, 3)
+
+    result = scene.session.validate_simready_compliance(["robot"])
+
+    assert result["object_count"] == 6
+    assert not any("view layer" in str(s) for s in result.get("skipped_objects") or [])
+
+
+def test_files_written_lists_only_what_the_export_wrote(scene: Any) -> None:
+    """m-3: a log file written to the same folder during the export was listed as written."""
+    exporter = scene.fake.ops.wm.usd_export
+
+    def exporting(**kwargs: Any) -> set:
+        folder = Path(kwargs["filepath"]).parent
+        (folder / "textures").mkdir(exist_ok=True)
+        (folder / "textures" / "albedo.png").write_bytes(b"png")
+        (folder / "session.log").write_text("written meanwhile by someone else")
+        return exporter(**kwargs)
+
+    exporting.get_rna_type = exporter.get_rna_type  # type: ignore[attr-defined]
+    scene.fake.ops.wm.usd_export = exporting
+    path = scene.out / "asset.usda"
+
+    result = scene.session.export_simready_usd(str(path), object_names=["robot"])
+
+    assert result["files_written"] == [str(path), str(scene.out / "textures" / "albedo.png")]
+
+
+def test_a_kinematic_body_is_written_kinematic_and_needs_no_mass(scene: Any) -> None:
+    """m-4: SimReady metadata had no way to say a body is fixed, such as a robot's base."""
+    scene.session.apply_simready_metadata(
+        "base_link",
+        {
+            "semantic": {"semantic_class": "robot_base"},
+            "physics": {"is_rigid_body": True, "is_kinematic": True, "collider_type": "none"},
+        },
+    )
+    path = scene.out / "kinematic.usda"
+
+    result = scene.session.export_simready_usd(str(path), object_names=["robot"], force=True)
+
+    stage = Usd.Stage.Open(str(path))
+    base = stage.GetPrimAtPath("/robot/base_link")
+    assert UsdPhysics.RigidBodyAPI(base).GetKinematicEnabledAttr().Get() is True
+    assert result["physics"]["kinematic_bodies"] == ["/robot/base_link"]
+    messages = [i["message"] for i in result["issues"] if i["object_name"] == "base_link"]
+    assert not any("without mass_kg" in m for m in messages)
+    assert not any("triangle-mesh collider" in m for m in messages)
+    assert not any("triangle-mesh collider" in w for w in result["warnings"])
+
+
+def test_is_kinematic_without_a_rigid_body_is_a_warning(scene: Any) -> None:
+    scene.session.apply_simready_metadata("base_link", {"physics": {"is_kinematic": True}})
+    path = scene.out / "not_a_body.usda"
+
+    result = scene.session.export_simready_usd(str(path), object_names=["robot"], force=True)
+
+    assert any(
+        "base_link: is_kinematic is set but is_rigid_body is not" in w for w in result["warnings"]
+    )
+    assert any(
+        i["message"].startswith("is_kinematic is set but is_rigid_body is not")
+        for i in result["issues"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("blender_body", "physics", "expected"),
+    [
+        (
+            {"type": "PASSIVE"},
+            {"is_rigid_body": True, "mass_kg": 1.0},
+            "Blender's rigid body is PASSIVE, so Blender's simulation does not move it",
+        ),
+        (
+            {"type": "ACTIVE", "kinematic": True},
+            {"is_rigid_body": True, "mass_kg": 1.0},
+            "Blender's rigid body is animated (kinematic)",
+        ),
+        (
+            {"type": "ACTIVE"},
+            {"mass_kg": 1.0},
+            "Blender simulates it as an ACTIVE rigid body, but its SimReady metadata has no "
+            "is_rigid_body, so the export writes it static",
+        ),
+        (
+            {"type": "ACTIVE", "mass": 50.0},
+            {"is_rigid_body": True, "mass_kg": 7.5},
+            "Blender's rigid body mass is 50 kg but SimReady mass_kg is 7.5 kg",
+        ),
+        (
+            {"type": "ACTIVE"},
+            {"is_rigid_body": True, "is_kinematic": True},
+            "makes it kinematic (is_kinematic), but Blender simulates it as an ACTIVE",
+        ),
+    ],
+    ids=["passive", "animated", "active-unmarked", "mass", "kinematic-active"],
+)
+def test_a_blender_rigid_body_that_disagrees_with_the_metadata_is_a_warning(
+    scene: Any, blender_body: Dict[str, Any], physics: Dict[str, Any], expected: str
+) -> None:
+    """m-4: the export writes the metadata; Blender's rigid body settings were ignored silently."""
+    settings = {"kinematic": False, "mass": 1.0, **blender_body}
+    scene.obj("base_link").rigid_body = SimpleNamespace(**settings)
+    scene.session.apply_simready_metadata(
+        "base_link", {"physics": {**physics, "collider_type": "convexHull"}}
+    )
+
+    validated = scene.session.validate_simready_compliance(["robot"])
+    exported = scene.session.export_simready_usd(
+        str(scene.out / "conflict.usda"), object_names=["robot"], force=True
+    )
+
+    assert any(
+        i["check"] == "physics" and i["severity"] == "warning" and expected in i["message"]
+        for i in validated["issues"]
+    )
+    assert any(w.startswith("base_link: ") and expected in w for w in exported["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("blender_body", "physics"),
+    [
+        ({"type": "PASSIVE"}, {}),
+        ({"type": "PASSIVE"}, {"is_rigid_body": True, "is_kinematic": True}),
+        ({"type": "ACTIVE", "mass": 7.5}, {"is_rigid_body": True, "mass_kg": 7.5}),
+    ],
+    ids=["static-collider", "fixed-base", "same-mass"],
+)
+def test_an_agreeing_blender_rigid_body_is_not_reported(
+    scene: Any, blender_body: Dict[str, Any], physics: Dict[str, Any]
+) -> None:
+    settings = {"kinematic": False, "mass": 1.0, **blender_body}
+    scene.obj("base_link").rigid_body = SimpleNamespace(**settings)
+    if physics:
+        scene.session.apply_simready_metadata("base_link", {"physics": physics})
+
+    validated = scene.session.validate_simready_compliance(["robot"])
+
+    assert not any("Blender" in i["message"] for i in validated["issues"])
