@@ -243,25 +243,28 @@ def test_the_audit_bake_at_100_substeps_is_refused(session: Session) -> None:
     message = str(refused.value)
     assert "Baking frames 1-1000 (1000 frames) is estimated at 159.6 s" in message
     assert "301 rigid bodies at 100 substeps and 10 solver iterations" in message
-    assert "over this tool's limit of 16 s and 20000 frames" in message
+    assert "over this tool's limit of 12 s and 20000 frames" in message
     assert "BLENDER__CONNECTION_TIMEOUT" in message
     assert refused.value.details == {
         "code": "BakeOverBudget",
         "estimated_seconds": 159.6,
         "limit_seconds": SIMULATION_SECONDS_BUDGET,
         "frame_limit": 20_000,
-        "frames_that_fit": 100,
+        "frames_that_fit": 75,
     }
-    assert "(about 100 frames fit)" in message
+    assert "(about 75 frames fit)" in message
 
 
-def test_the_round_one_bake_at_default_settings_still_runs(session: Session) -> None:
-    """300 bodies x 1000 frames at 10 substeps took 7.6 s scattered; piled up 15 s."""
-    session._check_bake_work(_scene(_world(301)), "rigid_body", 1, 1000)
+def test_a_bake_at_default_settings_fits_twelve_seconds(session: Session) -> None:
+    """300 piled bodies x 1000 frames at 10 substeps took 16.2 s headless, so up to 1.7 times
+    that in a GUI Blender: 750 frames fit the 12 s left under the 30 s timeout."""
+    session._check_bake_work(_scene(_world(301)), "rigid_body", 1, 750)
+    with pytest.raises(ValidationError, match="about 751 frames fit"):
+        session._check_bake_work(_scene(_world(301)), "rigid_body", 1, 1000)
 
 
 def test_solver_iterations_alone_can_put_a_bake_over_the_limit(session: Session) -> None:
-    session._check_bake_work(_scene(_world(200)), "rigid_body", 1, 1000)
+    session._check_bake_work(_scene(_world(200)), "rigid_body", 1, 700)
 
     with pytest.raises(ValidationError, match="100 solver iterations"):
         session._check_bake_work(_scene(_world(200, iterations=100)), "rigid_body", 1, 1000)
@@ -276,7 +279,7 @@ def test_the_audit_cloth_is_refused_and_a_shorter_range_fits(session: Session) -
 
     assert "cloth 'Cloth' on 'Cloth' with 6561 vertices at quality 5" in str(refused.value)
     fitting = refused.value.details["frames_that_fit"]
-    assert fitting == 264
+    assert fitting == 198
     session._check_bake_work(scene, "all", 1, fitting)
 
 
@@ -289,7 +292,7 @@ def test_allow_long_bake_skips_the_estimate(session: Session, monkeypatch: pytes
     checked: List[Any] = []
     monkeypatch.setattr(Session, "_check_bake_work", lambda *args: checked.append(args))
     monkeypatch.setattr(Session, "_simulating_world", lambda self, scene, what: scene.rigidbody_world)
-    monkeypatch.setattr(Session, "_bake_rigid_body_cache", lambda *args: None)
+    monkeypatch.setattr(Session, "_bake_rigid_body_cache", lambda *args: args[4])
     monkeypatch.setattr(Session, "_bake_report", lambda self, scene, scope, warnings: {})
     scene = _scene(_world(301, substeps=100))
     scene.frame_current = 1
@@ -318,3 +321,123 @@ def test_stepping_counts_only_the_frames_the_cache_does_not_hold(session: Sessio
     # Past the cache end nothing more is simulated.
     world.point_cache.info = ""
     assert session._step_seconds(scene, world, 10_000) == pytest.approx(249 * per_frame)
+
+
+# -- review of #360: collision shapes and the other costs the estimate missed --------
+
+
+def _body(shape: str, vertices: int = 8, loops: int = 0, faces: int = 0, **extra: Any) -> Any:
+    data = SimpleNamespace(
+        vertices=[None] * vertices,
+        loops=[None] * loops,
+        polygons=[None] * faces,
+        as_pointer=lambda: id(data),
+    )
+    return SimpleNamespace(
+        name="Body",
+        rigid_body=SimpleNamespace(collision_shape=shape, mesh_source=extra.get("source", "BASE")),
+        data=data,
+        modifiers=extra.get("modifiers", []),
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "units"),
+    [
+        (_body("CONVEX_HULL", 8), 1.0),
+        (_body("CONVEX_HULL", 482), 482 / 14),
+        (_body("CONVEX_HULL", 162), 162 / 14),
+        (_body("SPHERE", 482), 1.0),
+        (_body("BOX", 100_000), 1.0),
+        # A 32x16 UV sphere: 448 quads and 64 triangles, 1 984 loops, so 960 triangles.
+        (_body("MESH", loops=1984, faces=512), (1984 - 1024) / 56),
+        (_body("MESH", loops=24, faces=6), 1.0),
+        # mesh_source FINAL counts the modifiers; BASE does not.
+        (
+            _body("CONVEX_HULL", 8, source="FINAL", modifiers=[_subsurf(3)]),
+            8 * 64 / 14,
+        ),
+        (_body("CONVEX_HULL", 8, modifiers=[_subsurf(3)]), 1.0),
+    ],
+    ids=["cube", "uv-sphere", "ico3", "sphere-shape", "box-shape", "mesh-sphere", "mesh-cube",
+         "final-subsurf", "base-subsurf"],
+)
+def test_a_collision_shape_costs_by_its_vertices_or_triangles(body: Any, units: float) -> None:
+    """Piled 482-vertex hulls ran 21.7 times the cube estimate, 162-vertex ones 9.6 times,
+    960-triangle MESH shapes 9.3-14 times; 300 such spheres estimated at 1.6 s froze Blender
+    for 50 s."""
+    assert Session._body_shape_units(body, {}) == pytest.approx(units)
+
+
+def test_bodies_sharing_a_mesh_are_costed_once(session: Session) -> None:
+    sphere = _body("CONVEX_HULL", 482)
+    world = _world(0)
+    world.collection.all_objects = [sphere] * 300
+    seconds, parts = session._simulation_cost(_scene(world), "rigid_body")
+
+    assert seconds - blender_runtime._FRAME_SECONDS == pytest.approx(
+        300 * (482 / 14) * BODY_FRAME
+    )
+    assert parts[0].startswith(
+        "300 rigid bodies (their collision shapes cost as 10329 boxes) at 10 substeps"
+    )
+
+
+def test_array_and_mirror_before_a_cloth_multiply_its_vertices(session: Session) -> None:
+    """An Array of 16 before a cloth ran 9 times the estimate."""
+    array = SimpleNamespace(type="ARRAY", count=16, show_viewport=True)
+    mirror = SimpleNamespace(type="MIRROR", use_axis=(True, True, False), show_viewport=True)
+
+    _, parts = session._simulation_cost(
+        _scene(None, [_mesh("Sheet", 441, array, mirror, _cloth())]), "all"
+    )
+
+    assert "with 28224 vertices" in parts[0]
+
+
+def test_collider_faces_raise_the_cloth_cost(session: Session) -> None:
+    """A cloth against a 32 768-face collider ran 3.5 times the estimate."""
+    collider = _mesh("Ball", 0, SimpleNamespace(type="COLLISION", name="Collision"))
+    collider.data.polygons = [None] * 32_768
+    plain, _ = session._simulation_cost(_scene(None, [_mesh("Sheet", 1681, _cloth())]), "all")
+    dense, parts = session._simulation_cost(
+        _scene(None, [_mesh("Sheet", 1681, _cloth()), collider]), "all"
+    )
+
+    frame = blender_runtime._FRAME_SECONDS
+    assert dense - frame == pytest.approx((plain - frame) * (1 + 32_768 / 10_000))
+    assert "against 32768 collider faces" in parts[0]
+
+
+def test_sph_particles_and_a_replaying_fluid_domain_count(session: Session) -> None:
+    """SPH particles ran 6.4 times the estimate; a smoke domain in Replay mode, not counted
+    at all, 28 times at resolution 32."""
+    sph = SimpleNamespace(
+        name="Water",
+        settings=SimpleNamespace(type="EMITTER", count=5000, physics_type="FLUID"),
+        point_cache=_cache(),
+    )
+
+    def domain(cache_type: str, domain_type: str = "GAS") -> Any:
+        fluid = SimpleNamespace(
+            type="FLUID",
+            name="Fluid",
+            fluid_type="DOMAIN",
+            domain_settings=SimpleNamespace(
+                cache_type=cache_type, resolution_max=32, domain_type=domain_type
+            ),
+        )
+        obj = _mesh("Domain", 8, fluid)
+        obj.dimensions = (4.0, 4.0, 2.0)
+        return obj
+
+    _, parts = session._simulation_cost(
+        _scene(None, [_mesh("Emitter", 4, particle_systems=[sph]), domain("REPLAY")]), "all"
+    )
+    modular, none = session._simulation_cost(_scene(None, [domain("MODULAR")]), "all")
+
+    assert parts == [
+        "SPH fluid particle system 'Water' with 5000 particles: 5 ms a frame",
+        "smoke domain 'Domain' replaying at resolution 32 (16384 cells): 16.4 ms a frame",
+    ]
+    assert (modular, none) == (blender_runtime._FRAME_SECONDS, [])

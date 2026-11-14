@@ -45,9 +45,11 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # parsing up to 32 MiB of it; older clients send the token last.
 # Version 14: apply_simready_metadata takes physics.is_kinematic and export_simready_usd writes
 # it; delete_keyframe takes a sub-frame; bake_simulation, get_physics_state and the trajectory
-# tools bound their work by an estimate in seconds that counts substeps, solver iterations and
-# cloth/soft-body vertices, where an older add-on counted frames x bodies and let a bake that
-# outlasts the client's timeout through.
+# tools bound their work by an estimate in seconds that counts substeps, solver iterations,
+# collision shapes and cloth/soft-body vertices, and by a 22 s deadline (a bake replies
+# complete: false), where an older add-on counted frames x bodies and let a bake that outlasts
+# the client's timeout through; delete_object removes the constraints joining the object
+# first, and the tools that step frames refuse while a constraint has lost a body.
 PROTOCOL_VERSION = 14
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 

@@ -1059,8 +1059,9 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Delete an object from the current Blender scene with Blender's own Delete, which "
             "also resets a rigid body's cache. Another scene linking it keeps it "
             "(remaining_scenes); use_global=true deletes it from every scene and the file. "
-            "A rigid body constraint joining it is removed first (removed_constraints), since "
-            "one left pointing at the deleted body crashes Blender when the simulation restarts."
+            "A rigid body constraint joining it to another rigid body is removed first "
+            "(removed_constraints), since one left pointing at the deleted body crashes "
+            "Blender when the simulation restarts; one that cannot be is named in warnings."
         ),
         hints=DESTRUCTIVE,
         operation="delete_object",
@@ -1500,7 +1501,8 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "unbaked simulation advances one frame at a time, so after a frame jump a "
             "body sits where it was last simulated: by default the scene first steps "
             "from the cache start to the current frame, as playback would (when that "
-            "is estimated at 16 s or less). pose_source and simulated_for_frame say "
+            "is estimated at 12 s or less, and for at most 22 s). pose_source and "
+            "simulated_for_frame say "
             "whether the "
             "pose is the simulation's for this frame; frames past the cache end hold "
             "the bodies at its last frame (past_cache_end). rigid_body_cache reports "
@@ -1520,8 +1522,9 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Sample the world pose of an object, or of an armature's bone, over a frame "
             "range, a page at a time (next_offset continues). Not read-only: it steps "
             "the scene through the frames (frame-change handlers run, an unbaked "
-            "rigid-body cache fills, more than an estimated 8 s of simulation only "
-            "with max_simulated_frames) and restores the current frame afterwards."
+            "rigid-body cache fills, more than an estimated 6 s of simulation, or "
+            "22 s of stepping, only with max_simulated_frames) and restores the current "
+            "frame afterwards."
         ),
         hints=IDEMPOTENT,
         operation="get_object_trajectory",
@@ -1561,14 +1564,16 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "disabled rigid body world. The reply gives the range the cache holds "
             "and warns about scene frames it leaves out, where bodies hold their "
             "pose. A bake runs on Blender's main thread and cannot be stopped, so one "
-            "over 20 000 frames or an estimated 16 s is refused unless "
-            "allow_long_bake=true; the estimate counts rigid bodies x substeps x solver "
-            "iterations, cloth and soft-body vertices x quality, and particles, and the "
-            "refusal says how many frames fit. Past the client timeout Blender keeps "
-            "baking and the next calls wait behind it. Refused (RefusedOperation) while a "
-            "rigid body constraint joins a deleted object or one without a rigid body, "
-            "since restarting that simulation crashes Blender 5.0.1; save and reopen the "
-            "file first."
+            "over 20 000 frames or an estimated 12 s is refused unless "
+            "allow_long_bake=true; the estimate counts rigid bodies (by collision-shape "
+            "vertices) x substeps x solver iterations, cloth and soft-body vertices x "
+            "quality, particles and replaying fluid domains, and the refusal says how "
+            "many frames fit. A rigid_body bake that still runs 22 s stops there and "
+            "bakes what it simulated (complete: false). Past the client timeout Blender "
+            "keeps baking and the next calls wait behind it. Refused (RefusedOperation) "
+            "while a rigid body constraint joins a deleted object or one without a rigid "
+            "body, since restarting that simulation crashes Blender 5.0.1; save the file "
+            "first (reopening it may crash Blender once)."
         ),
         hints=OVERWRITING,
         operation="bake_simulation",

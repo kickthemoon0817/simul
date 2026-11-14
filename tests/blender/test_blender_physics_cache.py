@@ -874,3 +874,28 @@ def test_set_world_refuses_invalid_settings_before_changing_anything(
 def test_world_request_bounds(arguments: Dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         BlenderSetRigidBodyWorldRequest(**arguments)
+
+
+def test_physics_state_stepping_stops_at_its_deadline(
+    blender: Any, frozen_clock: List[float]
+) -> None:
+    """Review of #360: whatever the estimate, stepping stops after 22 s and says so."""
+    scene = _world_scene()
+    _body(scene, "Drop")
+    _, session = blender(scene)
+    scene.frame_set(100)
+    scene.frames.clear()
+    stepping = scene.frame_set
+
+    def slow_frame(frame: int) -> None:
+        frozen_clock[0] += 1.0
+        stepping(frame)
+
+    scene.frame_set = slow_frame  # type: ignore[method-assign]
+
+    state = session.get_physics_state("Drop")
+
+    assert scene.frames == [*range(1, 24), 100]
+    assert (state["pose_source"], state["simulated_for_frame"]) == ("unknown", False)
+    assert state["stepped_frames"] == 23
+    assert "stopped at frame 23 after 22 s" in state["warning"]

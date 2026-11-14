@@ -758,7 +758,7 @@
     "delete_blender_object": {
       "name": "delete_blender_object",
       "title": "Delete Blender Object",
-      "description": "Delete an object from the current Blender scene with Blender's own Delete, which also resets a rigid body's cache. Another scene linking it keeps it (remaining_scenes); use_global=true deletes it from every scene and the file. A rigid body constraint joining it is removed first (removed_constraints), since one left pointing at the deleted body crashes Blender when the simulation restarts.",
+      "description": "Delete an object from the current Blender scene with Blender's own Delete, which also resets a rigid body's cache. Another scene linking it keeps it (remaining_scenes); use_global=true deletes it from every scene and the file. A rigid body constraint joining it to another rigid body is removed first (removed_constraints), since one left pointing at the deleted body crashes Blender when the simulation restarts; one that cannot be is named in warnings.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1930,7 +1930,7 @@
     "get_blender_physics_state": {
       "name": "get_blender_physics_state",
       "title": "Get Blender Physics State",
-      "description": "Get an object's world pose and rigid-body state at the current frame. An unbaked simulation advances one frame at a time, so after a frame jump a body sits where it was last simulated: by default the scene first steps from the cache start to the current frame, as playback would (when that is estimated at 16 s or less). pose_source and simulated_for_frame say whether the pose is the simulation's for this frame; frames past the cache end hold the bodies at its last frame (past_cache_end). rigid_body_cache reports the cache range and bake state. Not read-only by default: stepping runs frame-change handlers and fills the unbaked cache, as get_blender_object_trajectory does; step_simulation=false only reads.",
+      "description": "Get an object's world pose and rigid-body state at the current frame. An unbaked simulation advances one frame at a time, so after a frame jump a body sits where it was last simulated: by default the scene first steps from the cache start to the current frame, as playback would (when that is estimated at 12 s or less, and for at most 22 s). pose_source and simulated_for_frame say whether the pose is the simulation's for this frame; frames past the cache end hold the bodies at its last frame (past_cache_end). rigid_body_cache reports the cache range and bake state. Not read-only by default: stepping runs frame-change handlers and fills the unbaked cache, as get_blender_object_trajectory does; step_simulation=false only reads.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1938,7 +1938,7 @@
           "object_name": {"description": "Name of the object.", "type": "string"},
           "step_simulation": {
             "default": true,
-            "description": "Step an unbaked rigid-body simulation from its cache start to the current frame before reading the pose, when the frames to simulate are estimated at 16 s or less (from the bodies, substeps and solver iterations, and the other unbaked simulations that step along); false reads the pose as it is.",
+            "description": "Step an unbaked rigid-body simulation from its cache start to the current frame before reading the pose, when the frames to simulate are estimated at 12 s or less (from the bodies, substeps and solver iterations, and the other unbaked simulations that step along); false reads the pose as it is.",
             "type": "boolean"
           }
         },
@@ -1950,7 +1950,7 @@
     "get_blender_object_trajectory": {
       "name": "get_blender_object_trajectory",
       "title": "Get Blender Object Trajectory",
-      "description": "Sample the world pose of an object, or of an armature's bone, over a frame range, a page at a time (next_offset continues). Not read-only: it steps the scene through the frames (frame-change handlers run, an unbaked rigid-body cache fills, more than an estimated 8 s of simulation only with max_simulated_frames) and restores the current frame afterwards.",
+      "description": "Sample the world pose of an object, or of an armature's bone, over a frame range, a page at a time (next_offset continues). Not read-only: it steps the scene through the frames (frame-change handlers run, an unbaked rigid-body cache fills, more than an estimated 6 s of simulation, or 22 s of stepping, only with max_simulated_frames) and restores the current frame afterwards.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -2010,7 +2010,7 @@
           "max_simulated_frames": {
             "anyOf": [{"minimum": 0, "type": "integer"}, {"type": "null"}],
             "default": null,
-            "description": "Most frames of unbaked rigid-body simulation the call may step through; the page ends before a sample that needs more. None allows the frames estimated at 8 s of simulation (from the bodies, substeps and solver iterations, and the other unbaked simulations that step along), and a request whose first sample needs more is refused."
+            "description": "Most frames of unbaked rigid-body simulation the call may step through; the page ends before a sample that needs more. None allows the frames estimated at 6 s of simulation (from the bodies, substeps and solver iterations, and the other unbaked simulations that step along), and a request whose first sample needs more is refused."
           }
         },
         "required": ["object_name", "start_frame", "end_frame"]
@@ -2091,7 +2091,7 @@
           "max_simulated_frames": {
             "anyOf": [{"minimum": 0, "type": "integer"}, {"type": "null"}],
             "default": null,
-            "description": "Most frames of unbaked rigid-body simulation the call may step through, as for get_object_trajectory; None allows the frames estimated at 8 s of simulation."
+            "description": "Most frames of unbaked rigid-body simulation the call may step through, as for get_object_trajectory; None allows the frames estimated at 6 s of simulation."
           }
         },
         "required": ["targets", "start_frame", "end_frame"]
@@ -2102,7 +2102,7 @@
     "bake_blender_simulation": {
       "name": "bake_blender_simulation",
       "title": "Bake Blender Simulation",
-      "description": "Bake the physics simulation for frame_start-frame_end (start before end), replacing an earlier bake: the simulation restarts from frame_start with the bodies' current transforms. scope 'rigid_body' (default) bakes only the rigid-body world's cache; 'all' bakes every point cache (rigid bodies, cloth, soft bodies, dynamic paint, particles). Refused for a disabled rigid body world. The reply gives the range the cache holds and warns about scene frames it leaves out, where bodies hold their pose. A bake runs on Blender's main thread and cannot be stopped, so one over 20 000 frames or an estimated 16 s is refused unless allow_long_bake=true; the estimate counts rigid bodies x substeps x solver iterations, cloth and soft-body vertices x quality, and particles, and the refusal says how many frames fit. Past the client timeout Blender keeps baking and the next calls wait behind it. Refused (RefusedOperation) while a rigid body constraint joins a deleted object or one without a rigid body, since restarting that simulation crashes Blender 5.0.1; save and reopen the file first.",
+      "description": "Bake the physics simulation for frame_start-frame_end (start before end), replacing an earlier bake: the simulation restarts from frame_start with the bodies' current transforms. scope 'rigid_body' (default) bakes only the rigid-body world's cache; 'all' bakes every point cache (rigid bodies, cloth, soft bodies, dynamic paint, particles). Refused for a disabled rigid body world. The reply gives the range the cache holds and warns about scene frames it leaves out, where bodies hold their pose. A bake runs on Blender's main thread and cannot be stopped, so one over 20 000 frames or an estimated 12 s is refused unless allow_long_bake=true; the estimate counts rigid bodies (by collision-shape vertices) x substeps x solver iterations, cloth and soft-body vertices x quality, particles and replaying fluid domains, and the refusal says how many frames fit. A rigid_body bake that still runs 22 s stops there and bakes what it simulated (complete: false). Past the client timeout Blender keeps baking and the next calls wait behind it. Refused (RefusedOperation) while a rigid body constraint joins a deleted object or one without a rigid body, since restarting that simulation crashes Blender 5.0.1; save the file first (reopening it may crash Blender once).",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -2127,7 +2127,7 @@
           },
           "allow_long_bake": {
             "default": false,
-            "description": "Bake even above 20 000 frames or an estimated 16 s, which can outlast the client's timeout while Blender keeps baking. The estimate counts the frames times each simulation's cost a frame: rigid bodies by count, substeps and solver iterations; cloth, soft bodies and dynamic paint by vertices and quality; particles by count.",
+            "description": "Bake even above 20 000 frames or an estimated 12 s, and past SIMULATION_DEADLINE_SECONDS, which can outlast the client's timeout while Blender keeps baking. The estimate counts the frames times each simulation's cost a frame: rigid bodies by count, collision shape, substeps and solver iterations; cloth, soft bodies and dynamic paint by vertices, quality and collider faces; particles by count; fluid domains in Replay mode by resolution. Without it a rigid_body bake also stops after SIMULATION_DEADLINE_SECONDS and bakes the frames simulated so far (complete is false).",
             "type": "boolean"
           }
         },

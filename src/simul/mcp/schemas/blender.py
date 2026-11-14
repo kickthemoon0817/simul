@@ -1251,6 +1251,14 @@ class BlenderDeleteObjectResponse(BaseModel):
             "when the simulation restarted"
         ),
     )
+    warnings: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Constraints joining the object that were left in place: one whose other "
+            "object is already gone (removing it can crash Blender) or one Blender "
+            "would not remove"
+        ),
+    )
     removed_from_file: Optional[bool] = Field(
         None, description="Whether the object is gone from the file (no scene links it any more)"
     )
@@ -3147,7 +3155,8 @@ class BlenderGetPhysicsStateRequest(BaseModel):
         True,
         description=(
             "Step an unbaked rigid-body simulation from its cache start to the current "
-            "frame before reading the pose, when that is estimated at 16 s or less"
+            "frame before reading the pose, when that is estimated at 12 s or less, "
+            "and for at most 22 s"
         ),
     )
 
@@ -3432,9 +3441,10 @@ class BlenderBakeSimulationRequest(BaseModel):
     allow_long_bake: bool = Field(
         False,
         description=(
-            "Bake above 20 000 frames or an estimated 16 s (from the rigid bodies, "
-            "substeps, solver iterations, cloth and soft-body vertices and quality, and "
-            "particles), which can outlast the client timeout while Blender keeps baking"
+            "Bake above 20 000 frames or an estimated 12 s (from the rigid bodies and "
+            "their collision shapes, substeps, solver iterations, cloth and soft-body "
+            "vertices and quality, particles and replaying fluid domains), and past 22 s, "
+            "which can outlast the client timeout while Blender keeps baking"
         ),
     )
 
@@ -3472,6 +3482,13 @@ class BlenderBakeSimulationResponse(BaseModel):
         ),
     )
     frame_count: Optional[int] = Field(None, description="Frames in the rigid-body bake")
+    complete: Optional[bool] = Field(
+        None,
+        description=(
+            "False when a rigid_body bake stopped at its 22 s deadline before frame_end: "
+            "frame_end then says how far it got, and the frames up to it are baked"
+        ),
+    )
     rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
         None, description="The rigid-body cache after the bake"
     )

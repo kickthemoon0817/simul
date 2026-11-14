@@ -31,7 +31,8 @@ and an add-on that speak different bridge protocols refuse each other with the
 `install-bridge` fix instead of misreading a call (`error_type:
 "BridgeProtocolError"`); protocol 5 is the first that records agent edits as undo
 steps, protocol 13 the first whose requests start with their token, and protocol
-14 the first whose bake limit counts substeps, solver iterations and cloth size.
+14 the first whose bake limit counts substeps, solver iterations, collision
+shapes and cloth size, and stops a bake after 22 s.
 
 ## Select and verify the target
 

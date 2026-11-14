@@ -2178,10 +2178,15 @@ Behaviour worth knowing:
   operator also resets a deleted rigid body's cache: removing the object
   directly left the cache, so after a frame jump another body took the
   deleted one's cached positions. A rigid body constraint that joins the
-  object is removed first, while both its bodies exist (its empty stays;
+  object to another rigid body is removed first, while both bodies exist, in
+  the scene whose rigid body world holds it (its empty stays;
   `removed_constraints` names it): Blender's Delete left the constraint
   pointing at the freed body, and the next restart of the simulation crashed
-  Blender 5.0.1 (see `bake_blender_simulation` below).
+  Blender 5.0.1 (see `bake_blender_simulation` below). A constraint whose other
+  object was already deleted or has no rigid body is left as it is, since
+  removing it reads the freed body and crashed Blender where its own Delete did
+  not; one Blender will not remove is left too. `warnings` names both, and
+  Blender's Delete runs as before.
 - `list_blender_scene_objects` and `search_blender_objects` return a page:
   `count` objects from `offset`, `total` matching, and `next_offset` for the
   next page (`null` after the last; `truncated` says whether more follow). A
@@ -2646,12 +2651,15 @@ Behaviour worth knowing:
   on from there (`simulated_frames` counts the frames it stepped). What the
   cache holds is read from its English info text; anything else (outdated,
   frames skipped, a translated interface) walks from the cache start. A page
-  ends before a sample whose simulation is estimated at more than 8 s (or
+  ends before a sample whose simulation is estimated at more than 6 s (or
   needs more than `max_simulated_frames` when given), so each call does at most
   that much and the next page goes on. The estimate is the one
-  `bake_blender_simulation` uses (below): rigid bodies x substeps x solver
-  iterations, plus the cloth, soft bodies, dynamic paint and particles that
-  step along unbaked. A request whose first sample alone needs more is
+  `bake_blender_simulation` uses (below): rigid bodies (by collision shape) x
+  substeps x solver iterations, plus the cloth, soft bodies, dynamic paint,
+  particles and fluid domains that step along unbaked. Whatever the estimate,
+  an unconfirmed page also ends once it has stepped for 22 s, with a `warning`
+  naming the frame it reached; the frames it simulated stay cached, so the next
+  page goes on from there. A request whose first sample alone needs more is
   refused before any frame is set, with what it would cost: bake first
   (`bake_blender_simulation`), sample fewer frames, or pass
   `max_simulated_frames` to go ahead. A GUI Blender took up to 1.7 times as
@@ -2953,39 +2961,55 @@ Behaviour worth knowing:
   `get_blender_force_field_info` refuses an object whose field type is NONE,
   such as a collider, whose collision settings live in the same place.
 - `bake_blender_simulation` refuses more than 20 000 frames, or a bake
-  estimated at more than 16 s, unless `allow_long_bake: true`. The estimate is
+  estimated at more than 12 s, unless `allow_long_bake: true`. A GUI Blender
+  took up to 1.7 times as long as the headless one the estimate was measured
+  on, so that is about 20 s there, inside the 30 s an attached call waits by
+  default. The estimate is
   the frames times what each simulation costs a frame, at rates measured with
   this tool in headless Blender 5.0.1 on an M-series Mac (the slowest case of
   each kind):
 
   | Simulation | Cost a frame |
   |---|---|
-  | Rigid bodies | bodies x substeps x (4.2 + 0.11 x solver iterations) µs: 300 piled convex-hull cubes took 5.1 µs a body and substep at 10 iterations, 9.3 at 50, 12.7 at 100; scattered ones 1.8 |
+  | Rigid bodies | bodies x substeps x (4.2 + 0.11 x solver iterations) µs: 300 piled convex-hull cubes took 5.1 µs a body and substep at 10 iterations, 9.3 at 50, 12.7 at 100; scattered ones 1.8. A body costs more by its collision shape: a convex hull its vertices / 14 times (at least once), a MESH shape its triangles / 56 times, counting the modifiers when `mesh_source` is not BASE; primitive shapes once. 300 piled 482-vertex UV-sphere hulls took 0.70 of that estimate, 162-vertex hulls 0.92, 960-triangle meshes 0.65 |
   | Cloth | vertices x (1.2 + 1.6 x quality) µs, x 1.3 with self-collision: an 80x80 grid took 2.1, 8.0 and 11.6 µs a vertex over its first 100 frames at quality 1, 5 and 10, and 9.2 µs over 291 frames at quality 5 |
   | Soft body | vertices x 5 µs (x step_min / 10 above 10 steps), x 2.5 with self-collision |
   | Dynamic paint | vertices of a vertex surface x 0.5 µs (image surfaces have no point cache) |
-  | Particles | particles x 0.1 µs; hair dynamics as cloth over the hair points |
+  | Particles | particles x 0.1 µs, SPH fluid particles x 1 µs; hair dynamics as cloth over the hair points |
+  | Fluid domain in Replay mode | cells (resolution³, scaled to the domain's shape) x 1 µs for smoke, 3 µs for liquid; the Modular and All cache types simulate only through Blender's own fluid bake |
 
-  A Subdivision modifier before a cloth or soft body multiplies its vertices by
-  4 per level. With `scope: "rigid_body"` the other caches that are not baked
+  Modifiers before a cloth or soft body multiply its vertices: Subdivision by 4
+  per level, Array by its count, Mirror by 2 per axis, Solidify by 2. Cloth and
+  soft bodies cost (1 + collider faces / 10 000) times as much, for the faces
+  of the objects with a Collision modifier. With `scope: "rigid_body"` the other caches that are not baked
   count too, since stepping the frames simulates them along. The refusal
   (`error_type: "ValidationError"`, `details.code: "BakeOverBudget"`) names each
   part, the estimate (`details.estimated_seconds`) and how many frames fit
-  (`details.frames_that_fit`). Bakes the estimate puts just under 16 s took
+  (`details.frames_that_fit`). Bakes the estimate put just under 16 s took
   16.2 s (300 piled cubes over 1000 frames at the default 10 substeps), 14.8 s
   (100 substeps, 100 frames), 16.4 s (100 solver iterations, 349 frames) and
   15.1 s (the 80x80 cloth, 264 frames) headless. The audit's bakes that passed
   the old frames x bodies bound, 300 bodies over 1000 frames at 100 substeps
-  (62.7 s) and the cloth over 1000 frames (55.6 s), are refused. A GUI
-  Blender took up to 1.7 times as long as a headless one.
+  (62.7 s) and the cloth over 1000 frames (55.6 s), are refused, and so is a
+  review's 300 default UV spheres over 100 frames, which froze a GUI Blender
+  for 50 s when its shapes were not counted.
+
+  What the estimate does not see (geometry-node simulations, frame-change
+  handlers, a scene slower than the measured ones) is bounded by a deadline: a
+  `rigid_body` bake without `allow_long_bake` stops stepping after 22 s, bakes
+  the frames it simulated, and answers with `complete: false`, `frame_end` set
+  to the last frame baked and a warning. `scope: "all"` runs Blender's Bake All,
+  which cannot be stopped part way, so only the estimate bounds it.
   A bake runs on Blender's main thread and cannot be stopped once it starts.
   Past the attached-mode client timeout (`BLENDER__CONNECTION_TIMEOUT`, 30 s by
   default), the call reports a timeout while Blender keeps baking, and the next
   calls wait behind it and can time out too. Raise the timeout before allowing
   a long bake; `get_blender_rigid_body_world` shows when it has finished
   (`rigid_body_cache.is_baked`).
-- `bake_blender_simulation`, and `get_blender_physics_state` and the trajectory
-  tools when they step an unbaked simulation, refuse with `error_type:
+- `bake_blender_simulation`, `set_blender_frame`, `play_blender_animation`
+  (play and reverse), `capture_blender_viewport_sequence`, the trajectory tools,
+  `get_blender_physics_state` when it steps, and `export_blender_file` when it
+  exports animation (glTF, FBX, USD) refuse with `error_type:
   "RefusedOperation"` (`details.code: "ConstraintWithoutBody"`,
   `details.constraints`) while a rigid body constraint joins an object that was
   deleted or has no rigid body. Restarting a simulation from its first frame
@@ -2998,16 +3022,21 @@ Behaviour worth knowing:
   after a deleted body Blender's own frame stepping from the first frame
   crashed the same way. The
   rebuild is the only way Blender restarts a simulation, so the bake cannot
-  avoid it. Save the file and open it again (`save_blender_file`, then
-  `open_blender_file`), which builds the constraints afresh, then give each
-  constraint two rigid bodies or remove it. An undo (Ctrl+Z) that re-reads a
-  jointed body leaves the same dangling constraint with both objects set, which
-  no tool can see: after undoing past rigid body constraints, save and reopen
-  the file before simulating.
+  avoid it. Removing or editing the broken constraint reads the freed body too,
+  and freeing the scene (quitting, opening a file) crashed the same way. Save
+  the file first (`save_blender_file`), which keeps the work. Opening it again
+  (`open_blender_file`) or quitting may then crash Blender once; the saved file
+  opens with its constraints built afresh, where each one can be given two
+  rigid bodies or removed. An undo (Ctrl+Z) that re-reads a jointed body leaves
+  the same dangling constraint with both objects set, which no tool can see:
+  after undoing past rigid body constraints, save the file and open it again
+  before simulating.
 - `get_blender_physics_state` steps an unbaked simulation from the cache start
   to the current frame before reading the pose (`step_simulation`, default
-  true, when the frames to simulate are estimated at 16 s or less, as for a
-  bake), as playback would, so like `get_blender_object_trajectory` it is not
+  true, when the frames to simulate are estimated at 12 s or less, as for a
+  bake, and for at most 22 s: then `pose_source` is `unknown` and the warning
+  says where it stopped; the simulated frames stay cached, so calling again
+  goes on), as playback would, so like `get_blender_object_trajectory` it is not
   read-only: an unbaked
   simulation advances one frame at a time, so after `set_blender_frame` jumped
   from 1 to 48 a falling body still sat at its starting pose. Frames Blender has

@@ -1373,8 +1373,12 @@ MAX_TRAJECTORY_TARGETS = 32
 #   to 100: 1.8 us for 300 convex-hull cubes scattered on a ground plane and
 #   5.1 us for 300 piled up (10 solver iterations), less for box and mesh
 #   shapes. Solver iterations add to it: piles took 9.3 us at 50 iterations
-#   and 12.7 us at 100 (50 substeps). Only the bodies' count is known up front,
-#   so every body is costed as piled. A frame change itself took 7-35 us.
+#   and 12.7 us at 100 (50 substeps). Every body is costed as piled. The
+#   collision shape scales it (_body_shape_units): a convex hull by its
+#   vertices over 14, a MESH shape by its triangles over 56. Measured against
+#   that: piled 482-vertex UV-sphere hulls took 0.70 of the estimate, 162-vertex
+#   ones 0.92, 960-triangle meshes 0.65, cubes under mesh_source FINAL with a
+#   level-3 Subdivision 0.47. A frame change itself took 7-35 us.
 # - Cloth costs per vertex and quality step: an 80x80 grid falling on a sphere
 #   took 2.1, 8.0 and 11.6 us per vertex a frame over its first 100 frames at
 #   quality 1, 5 and 10, and 9.2 us over 291 frames at quality 5, once it lay
@@ -1384,18 +1388,28 @@ MAX_TRAJECTORY_TARGETS = 32
 #   11.4 with self-collision.
 # - Dynamic paint took 0.2 us per vertex of a vertex surface a frame; image
 #   surfaces have no point cache.
-# - Particles took 0.06 us per particle a frame, 0.07 colliding.
+# - Particles took 0.06 us per particle a frame, 0.07 colliding; SPH fluid
+#   particles 6.4 times as much (0.85 of the 1 us costed).
+# - An Array of 16 before a cloth took 0.58 of its estimate (vertices x 16), a
+#   cloth against a 32 768-face collider 0.82 (1 + faces / 10 000 times), and
+#   smoke domains in Replay mode 0.53 (resolution 32) and 0.22 (64) of 1 us a
+#   cell, a liquid one 0.27 of 3 us a cell.
 #
-# Checked by baking what the estimate puts just under SIMULATION_SECONDS_BUDGET
-# (16 s): 300 piled cubes over 1000 frames took 16.2 s, at 100 substeps over
+# Checked by baking what the estimate puts just under 16 s, the budget before
+# the shapes were counted: 300 piled cubes over 1000 frames took 16.2 s, at 100 substeps over
 # 100 frames 14.8 s (4.8 s scattered), at 100 solver iterations over 349 frames
 # 16.4 s, and the 80x80 cloth over 264 frames 15.1 s. The audit's runs that
 # passed the old bound, 300 bodies x 1000 frames at 100 substeps (62.7 s) and
 # the cloth over 1000 frames (55.6 s), are estimated at 160 s and 60 s. A GUI
 # Blender took up to 1.7 times as long as a headless one.
 _FRAME_SECONDS = 20e-6
+#: Per body (a convex hull of up to _HULL_VERTICES_PER_UNIT vertices) and substep.
 _RIGID_BODY_SUBSTEP_SECONDS = 4.2e-6
 _RIGID_BODY_ITERATION_SECONDS = 0.11e-6
+#: A convex hull costs one body per this many vertices, a MESH shape per this
+#: many triangles; see _body_shape_units.
+_HULL_VERTICES_PER_UNIT = 14
+_MESH_TRIANGLES_PER_UNIT = 56
 _CLOTH_VERTEX_SECONDS = 1.2e-6
 _CLOTH_STEP_SECONDS = 1.6e-6
 _CLOTH_SELF_COLLISION_FACTOR = 1.3
@@ -1403,15 +1417,26 @@ _CLOTH_SELF_COLLISION_FACTOR = 1.3
 _SOFT_BODY_VERTEX_SECONDS = 5.0e-6
 _SOFT_BODY_SELF_COLLISION_FACTOR = 2.5
 _DYNAMIC_PAINT_VERTEX_SECONDS = 0.5e-6
+#: Cloth and soft bodies cost (1 + collider faces / this) times as much.
+_COLLIDER_FACES_PER_DOUBLING = 10_000
 _PARTICLE_SECONDS = 0.1e-6
+_SPH_PARTICLE_SECONDS = 1.0e-6
+_FLUID_GAS_CELL_SECONDS = 1.0e-6
+_FLUID_LIQUID_CELL_SECONDS = 3.0e-6
 #: Estimated seconds of simulation a call runs without being asked:
 #: bake_simulation without allow_long_bake, and get_physics_state's stepping.
-#: Inside the 30 s an attached call waits by default, with room for a slower
-#: GUI Blender.
-SIMULATION_SECONDS_BUDGET = 16.0
+#: A GUI Blender took up to 1.7 times as long as the headless one these rates
+#: were measured on, so this is about 20 s there, inside the 30 s an attached
+#: call waits by default (BLENDER__CONNECTION_TIMEOUT).
+SIMULATION_SECONDS_BUDGET = 12.0
 #: Estimated seconds of unbaked simulation a trajectory steps through unasked
 #: (max_simulated_frames raises it); it also reads every sample.
-TRAJECTORY_SIMULATION_SECONDS = 8.0
+TRAJECTORY_SIMULATION_SECONDS = 6.0
+#: Wall-clock seconds the per-frame loops (an unconfirmed bake, physics-state
+#: stepping, an unconfirmed trajectory walk) run before they stop and report
+#: how far they got, for what the estimate misses or underrates. It leaves 8 s
+#: of the client's 30 s for the reply.
+SIMULATION_DEADLINE_SECONDS = 22.0
 # A rigid-body memory cache's info when it is up to date ("1,000 frames in
 # memory (1.2 MiB)."); an outdated one ends ", cache is outdated!".
 _CACHED_FRAMES = re.compile(r"\s*(\d[\d,]*) frames in memory \([^)]*\)\.")
@@ -3033,9 +3058,10 @@ class BlenderRuntimeSession:
         method = self._resolve_capture_method(method)
         if camera_name is not None:
             self._resolve_camera(camera_name)
-        folder = self._sequence_folder(output_dir)
         blender_module: Any = bpy
         scene = blender_module.context.scene
+        self._check_constraints_rebuildable(scene, "Capturing a frame sequence is refused")
+        folder = self._sequence_folder(output_dir)
         # frame_set(7) alone would turn frame 7.25 into 7.0.
         original_frame = scene.frame_current
         original_subframe = float(getattr(scene, "frame_subframe", 0.0))
@@ -3320,9 +3346,11 @@ class BlenderRuntimeSession:
         Globally). The operator also resets the rigid-body cache of a deleted
         rigid body: removing the object directly left that cache in place, so
         another body evaluated after a frame jump took the deleted one's cached
-        positions. A rigid body constraint that joins the object is removed
-        first (its empty stays): Blender's Delete left it pointing at the freed
-        body, and the next restart of the simulation crashed Blender 5.0.1.
+        positions. A rigid body constraint that joins the object to another
+        rigid body is removed first, in its own scene (its empty stays):
+        Blender's Delete left it pointing at the freed body, and the next
+        restart of the simulation crashed Blender 5.0.1. One whose other object
+        is already gone, or that cannot be removed, is left with a warning.
 
         Args:
             object_name: Name of the object to delete.
@@ -3331,7 +3359,8 @@ class BlenderRuntimeSession:
 
         Returns:
             Dictionary with deleted_name, use_global, removed_constraints (the
-            empties whose constraint joining the object was removed), whether
+            empties whose constraint joining the object was removed), warnings
+            (constraints left in place), whether
             the object left the file (removed_from_file) and the scenes that
             still link it.
 
@@ -3348,7 +3377,7 @@ class BlenderRuntimeSession:
                 f"Object '{object_name}' is not in scene '{scene.name}'; pass "
                 "use_global=true to delete it from every scene"
             )
-        removed_constraints = self._release_constraints(
+        removed_constraints, warnings = self._release_constraints(
             list(blender_module.data.scenes) if use_global else [scene], obj
         )
         operator = blender_module.ops.object.delete
@@ -3370,6 +3399,7 @@ class BlenderRuntimeSession:
             "deleted_name": object_name,
             "use_global": use_global,
             "removed_constraints": removed_constraints,
+            "warnings": warnings,
             "removed_from_file": blender_module.data.objects.get(object_name) is None,
             "remaining_scenes": [
                 other.name
@@ -3378,43 +3408,114 @@ class BlenderRuntimeSession:
             ],
         }
 
-    @staticmethod
-    def _release_constraints(scenes: Sequence[Any], obj: Any) -> List[str]:
+    @classmethod
+    def _release_constraints(
+        cls, scenes: Sequence[Any], obj: Any
+    ) -> Tuple[List[str], List[str]]:
         """Remove the rigid body constraints of ``scenes`` that join ``obj``, while it exists.
 
         Removing a constraint takes it out of the Bullet world, which reads its
-        two bodies, so it is safe only before either goes.
+        two bodies, so it is safe only while both exist: a constraint whose
+        other object was already deleted, or lost its rigid body, is left as
+        it is (removing it crashed Blender 5.0.1, where Blender's own Delete
+        did not). A constraint that cannot be removed is left too, with a
+        warning, and Blender's Delete goes ahead as before.
 
         Returns:
-            The names of the empties that carried them.
+            The names of the empties whose constraint was removed, and warnings.
         """
-        blender_module: Any = bpy
-        carriers: List[Any] = []
+        found: List[Tuple[Any, Any]] = []
         for scene in scenes:
             world = getattr(scene, "rigidbody_world", None)
             collection = getattr(world, "constraints", None) if world is not None else None
             for carrier in getattr(collection, "all_objects", None) or ():
                 rbc = getattr(carrier, "rigid_body_constraint", None)
-                if rbc is not None and obj in (rbc.object1, rbc.object2) and carrier not in carriers:
-                    carriers.append(carrier)
-        if not carriers:
-            return []
-        view_layer = blender_module.context.view_layer
-        previous = view_layer.objects.active
+                if rbc is None or obj not in (rbc.object1, rbc.object2):
+                    continue
+                if all(carrier is not other for _, other in found):
+                    found.append((scene, carrier))
         removed: List[str] = []
-        try:
-            for carrier in carriers:
-                # constraint_remove acts on the view layer's active object.
-                view_layer.objects.active = carrier
-                _bpy_op(
-                    f"Could not remove the rigid body constraint on '{carrier.name}' that joins "
-                    f"'{obj.name}', so '{obj.name}' was not deleted",
-                    blender_module.ops.rigidbody.constraint_remove,
+        warnings: List[str] = []
+        for scene, carrier in found:
+            rbc = carrier.rigid_body_constraint
+            ends = (rbc.object1, rbc.object2)
+            if any(end is None or getattr(end, "rigid_body", None) is None for end in ends):
+                warnings.append(
+                    f"The rigid body constraint on '{carrier.name}' joins '{obj.name}' to an "
+                    "object that was already deleted or has no rigid body, so it was left as "
+                    "it is: removing it can crash Blender, which reads the freed body. "
+                    "Restarting the simulation stays refused until the file is saved and "
+                    "opened again"
                 )
+                continue
+            problem = cls._remove_constraint(scene, carrier)
+            if problem is None:
                 removed.append(str(carrier.name))
+            else:
+                warnings.append(
+                    f"Could not remove the rigid body constraint on '{carrier.name}' that "
+                    f"joins '{obj.name}' ({problem}); Blender's Delete leaves it pointing at "
+                    "the deleted body, so restarting the simulation is refused until the "
+                    "file is saved and opened again"
+                )
+        return removed, warnings
+
+    @staticmethod
+    def _remove_constraint(scene: Any, carrier: Any) -> Optional[str]:
+        """Run Blender's constraint_remove on ``carrier`` in its own scene; what went wrong, or None.
+
+        The operator acts on the view layer's active object and refuses one
+        disabled in viewports, so the carrier is made active, and shown, for
+        the call. A carrier outside the view layer (in an excluded collection)
+        is linked into the scene's own collection for the call: Blender 5.0.1
+        otherwise ran the operator on the layer's active object.
+        """
+        blender_module: Any = bpy
+        context = blender_module.context
+        if scene == context.scene:
+            layer = context.view_layer
+        else:
+            layers = list(getattr(scene, "view_layers", ()) or ())
+            layer = layers[0] if layers else None
+        objects = getattr(layer, "objects", None)
+        previous = getattr(objects, "active", None)
+        hidden = bool(getattr(carrier, "hide_viewport", False))
+        made_active = False
+        linked = None
+        try:
+            if hidden:
+                carrier.hide_viewport = False
+            getter = getattr(objects, "get", None)
+            if callable(getter) and getter(carrier.name) is None:
+                linked = scene.collection
+                linked.objects.link(carrier)
+                update = getattr(layer, "update", None)
+                if update is not None:
+                    update()
+            if objects is not None:
+                objects.active = carrier
+                made_active = True
+            override: Dict[str, Any] = {
+                "scene": scene,
+                "object": carrier,
+                "active_object": carrier,
+            }
+            if layer is not None:
+                override["view_layer"] = layer
+            with context.temp_override(**override):
+                blender_module.ops.rigidbody.constraint_remove()
+        except Exception as exc:  # The delete goes ahead; the warning names it.
+            return str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
         finally:
-            view_layer.objects.active = previous
-        return removed
+            if hidden:
+                carrier.hide_viewport = True
+            if made_active:
+                objects.active = previous
+            if linked is not None:
+                linked.objects.unlink(carrier)
+        if getattr(carrier, "rigid_body_constraint", None) is not None:
+            return "Blender left it in place"
+        return None
 
     def set_object_mode(
         self, mode: str = "OBJECT", object_name: Optional[str] = None
@@ -5350,6 +5451,13 @@ class BlenderRuntimeSession:
             to_select = self._collection_export_objects(collection_name)
             object_count = len(to_select)
 
+        if export_animation and fmt in _EXPORT_ANIMATION_PROPERTIES:
+            # The exporter steps through the frames to sample the animation.
+            self._check_constraints_rebuildable(
+                bpy.context.scene,
+                "Exporting animation is refused",
+                " export_animation=false exports the current frame.",
+            )
         op_func = self._operator(self._export_op_path(fmt))
         kwargs = self._export_options(
             op_func,
@@ -6106,8 +6214,10 @@ class BlenderRuntimeSession:
         """
         _check_frame("frame", frame, -FRAME_LIMIT)
         blender_module: Any = bpy
-        blender_module.context.scene.frame_set(frame)
-        return {"frame": blender_module.context.scene.frame_current}
+        scene = blender_module.context.scene
+        self._check_constraints_rebuildable(scene, "Changing the frame is refused")
+        scene.frame_set(frame)
+        return {"frame": scene.frame_current}
 
     def get_frame(self) -> Dict[str, Any]:
         """
@@ -6227,6 +6337,7 @@ class BlenderRuntimeSession:
             }
 
         wanted = "reverse" if action == "reverse" else "forward"
+        self._check_constraints_rebuildable(scene, "Playback is refused")
         if blender_module.app.background:
             raise RuntimeError(
                 "Blender is running in background mode (blender -b or the bpy "
@@ -7608,7 +7719,7 @@ class BlenderRuntimeSession:
             object_name: Name of the object.
             step_simulation: Step an unbaked rigid-body simulation from its
                 cache start to the current frame before reading the pose, when
-                the frames to simulate are estimated at 16 s or less (from the
+                the frames to simulate are estimated at 12 s or less (from the
                 bodies, substeps and solver iterations, and the other unbaked
                 simulations that step along); false reads the pose as it is.
 
@@ -7703,9 +7814,23 @@ class BlenderRuntimeSession:
                 ),
                 0,
             )
-        stepped = 0
+        stepped, stopped_at = 0, None
         if not cache.is_baked and frame > start and step_simulation:
-            stepped = self._step_rigid_bodies(scene, world, frame)
+            stepped, stopped_at = self._step_rigid_bodies(scene, world, frame)
+        if stopped_at is not None:
+            return (
+                "unknown",
+                False,
+                (
+                    f"Stepping the unbaked simulation to frame {frame} stopped at frame "
+                    f"{stopped_at} after {SIMULATION_DEADLINE_SECONDS:g} s, so that the call "
+                    f"answers inside the client's timeout: the body shows its frame-"
+                    f"{stopped_at} pose. The simulated frames stay in the rigid-body memory "
+                    "cache, so calling again goes on from there; or bake with "
+                    "bake_blender_simulation"
+                ),
+                stepped,
+            )
         if frame > end:
             return (
                 "past_cache_end",
@@ -7787,7 +7912,7 @@ class BlenderRuntimeSession:
             limit: Most samples to return; None returns as many as fit.
             max_simulated_frames: Most frames of unbaked rigid-body simulation
                 the call may step through; the page ends before a sample that
-                needs more. None allows the frames estimated at 8 s of
+                needs more. None allows the frames estimated at 6 s of
                 simulation (from the bodies, substeps and solver iterations, and
                 the other unbaked simulations that step along), and a request
                 whose first sample needs more is refused.
@@ -7858,7 +7983,7 @@ class BlenderRuntimeSession:
             limit: Most samples per target to return; None returns as many as fit.
             max_simulated_frames: Most frames of unbaked rigid-body simulation
                 the call may step through, as for get_object_trajectory; None
-                allows the frames estimated at 8 s of simulation.
+                allows the frames estimated at 6 s of simulation.
 
         Returns:
             Dict with fps, time_origin_frame, total_points, offset, point_count
@@ -7964,8 +8089,18 @@ class BlenderRuntimeSession:
         points: List[List[Dict[str, Any]]] = [[] for _ in resolved]
         used = 0
         last_set: Optional[int] = None
+        # A walk max_simulated_frames confirmed runs to its end.
+        deadline = (
+            None
+            if max_simulated_frames is not None
+            else time.monotonic() + SIMULATION_DEADLINE_SECONDS
+        )
+        out_of_time: Optional[int] = None
         try:
             for frame in walk:
+                if deadline is not None and last_set is not None and time.monotonic() > deadline:
+                    out_of_time = last_set
+                    break
                 scene.frame_set(frame)
                 last_set = frame
                 if frame not in wanted_samples:
@@ -8008,6 +8143,14 @@ class BlenderRuntimeSession:
             reached = resume if last_set is None else min(last_set, resume + simulated)
             simulated = max(0, reached - resume)
         next_offset = offset + count if offset + count < total else None
+        if out_of_time is not None and next_offset is not None:
+            stopped = (
+                f"The page stopped at frame {out_of_time} after "
+                f"{SIMULATION_DEADLINE_SECONDS:g} s of stepping, so that the call answers "
+                "inside the client's timeout; the frames it simulated stay in the "
+                "rigid-body memory cache, so the next page (next_offset) goes on from there"
+            )
+            warning = stopped if warning is None else f"{warning}. {stopped}"
         return {
             "fps": fps,
             "time_origin_frame": time_origin,
@@ -8225,6 +8368,8 @@ class BlenderRuntimeSession:
         world = getattr(scene, "rigidbody_world", None)
         if world is None or not getattr(world, "enabled", True) or not samples:
             return list(samples), 0, None, len(samples), 0
+        # Sampling sets frames one after another, as playback does.
+        self._check_constraints_rebuildable(scene, "Sampling is refused")
         cache = world.point_cache
         start, end = int(cache.frame_start), int(cache.frame_end)
         resume = max(self._cached_through(cache), start)
@@ -8273,8 +8418,6 @@ class BlenderRuntimeSession:
             return served, 0, warning, usable, resume
         last = min(served[-1], end)
         simulated = max(0, last - resume)
-        if simulated:
-            self._check_constraints_rebuildable(scene, "sampled")
         stepped = range(resume, last + 1) if simulated else range(0)
         return sorted(set(served) | set(stepped)), simulated, warning, usable, resume
 
@@ -8413,16 +8556,21 @@ class BlenderRuntimeSession:
                 cloth, soft bodies and dynamic paint over frame_start-frame_end,
                 particle systems over the range their emission settings give.
             allow_long_bake: Bake even above 20 000 frames or an estimated
-                16 s, which can outlast the client's timeout while Blender keeps
-                baking. The estimate counts the frames times each simulation's
-                cost a frame: rigid bodies by count, substeps and solver
-                iterations; cloth, soft bodies and dynamic paint by vertices and
-                quality; particles by count.
+                12 s, and past SIMULATION_DEADLINE_SECONDS, which can outlast
+                the client's timeout while Blender keeps baking. The estimate
+                counts the frames times each simulation's cost a frame: rigid
+                bodies by count, collision shape, substeps and solver
+                iterations; cloth, soft bodies and dynamic paint by vertices,
+                quality and collider faces; particles by count; fluid domains
+                in Replay mode by resolution. Without it a rigid_body bake also
+                stops after SIMULATION_DEADLINE_SECONDS and bakes the frames
+                simulated so far (complete is false).
 
         Returns:
             Dict with scope, frame_start, frame_end and frame_count of the
             rigid-body cache (null without one), rigid_body_cache, caches (each
-            cache's owner, kind, range and bake state) and warnings.
+            cache's owner, kind, range and bake state), complete (false when
+            the bake stopped at its deadline before frame_end) and warnings.
 
         Raises:
             ValidationError: Over the work budget without allow_long_bake
@@ -8432,21 +8580,39 @@ class BlenderRuntimeSession:
                 one without a rigid body (ConstraintWithoutBody); restarting the
                 simulation would crash Blender.
         """
+        started = time.monotonic()
         blender_module: Any = bpy
         scope = self._bake_scope(scope)
         self._check_cache_range(int(frame_start), int(frame_end))
         scene = blender_module.context.scene
-        self._check_constraints_rebuildable(scene, "baked")
+        self._check_constraints_rebuildable(scene, "The bake is refused")
         if not allow_long_bake:
             self._check_bake_work(scene, scope, int(frame_start), int(frame_end))
         warnings: List[str] = []
+        complete = True
         original_frame = int(scene.frame_current)
         if scope == "rigid_body":
             world = self._simulating_world(scene, "bake")
+            deadline = None if allow_long_bake else started + SIMULATION_DEADLINE_SECONDS
             try:
-                self._bake_rigid_body_cache(scene, world, frame_start, frame_end)
+                last = self._bake_rigid_body_cache(
+                    scene, world, frame_start, frame_end, deadline
+                )
             finally:
                 scene.frame_set(original_frame)
+            if last < frame_end:
+                complete = False
+                estimate = (frame_end - frame_start + 1) * self._simulation_cost(
+                    scene, scope
+                )[0]
+                warnings.append(
+                    f"The bake stopped at frame {last} of {frame_start}-{frame_end} after "
+                    f"{time.monotonic() - started:.0f} s, so that the call answers inside "
+                    f"the client's timeout: frames {frame_start}-{last} are baked. The "
+                    f"estimate ({estimate:.1f} s) missed what this scene's frames cost. "
+                    "Bake a shorter range, or raise BLENDER__CONNECTION_TIMEOUT and pass "
+                    "allow_long_bake=true to bake the whole range"
+                )
         else:
             caches = self._point_caches(scene)
             if not caches:
@@ -8460,7 +8626,7 @@ class BlenderRuntimeSession:
                 )
             finally:
                 scene.frame_set(original_frame)
-        return self._bake_report(scene, scope, warnings)
+        return {**self._bake_report(scene, scope, warnings), "complete": complete}
 
     def free_bake(self, scope: str = "rigid_body") -> Dict[str, Any]:
         """
@@ -8551,9 +8717,13 @@ class BlenderRuntimeSession:
         """Estimated seconds one simulated frame takes on the main thread, and its parts.
 
         The rates are the module's _*_SECONDS, measured on Blender 5.0.1: rigid
-        bodies by count, substeps and solver iterations; cloth, soft bodies
-        and dynamic paint by vertex count and their own quality settings;
-        particles by count.
+        bodies by count, collision shape, substeps and solver iterations;
+        cloth, soft bodies and dynamic paint by vertex count (after the
+        Subdivision, Array and Mirror modifiers before them), their own
+        quality settings and the collider faces they meet; particles by count
+        and physics; fluid domains in Replay mode by resolution. Anything else
+        a frame runs (geometry-node simulations, frame-change handlers, ...)
+        is not counted; SIMULATION_DEADLINE_SECONDS stops the stepping then.
 
         Args:
             scene: The scene whose simulations step.
@@ -8575,17 +8745,26 @@ class BlenderRuntimeSession:
 
         world = getattr(scene, "rigidbody_world", None)
         if world is not None and getattr(world, "enabled", True):
-            bodies = self._rigid_body_count(world)
-            if bodies:
+            collection = getattr(world, "collection", None)
+            members = list(collection.all_objects) if collection is not None else []
+            if members:
+                shapes: Dict[Any, float] = {}
+                units = sum(self._body_shape_units(obj, shapes) for obj in members)
                 substeps = max(int(getattr(world, "substeps_per_frame", 10)), 1)
                 iterations = max(int(getattr(world, "solver_iterations", 10)), 1)
+                shape_note = (
+                    f" (their collision shapes cost as {units:.0f} boxes)"
+                    if units > len(members) * 1.05
+                    else ""
+                )
                 add(
-                    bodies
+                    units
                     * substeps
                     * (_RIGID_BODY_SUBSTEP_SECONDS + _RIGID_BODY_ITERATION_SECONDS * iterations),
-                    f"{bodies} rigid bodies at {substeps} substeps and {iterations} solver "
-                    "iterations",
+                    f"{len(members)} rigid bodies{shape_note} at {substeps} substeps and "
+                    f"{iterations} solver iterations",
                 )
+        colliders = self._collider_faces(scene)
         for obj in scene.objects:
             modifiers = list(getattr(obj, "modifiers", ()))
             for position, modifier in enumerate(modifiers):
@@ -8593,7 +8772,7 @@ class BlenderRuntimeSession:
                     if scope == "rigid_body" and getattr(modifier.point_cache, "is_baked", False):
                         continue
                     points = self._simulated_points(obj, modifiers[:position])
-                    add(*self._modifier_cost(obj, modifier, points))
+                    add(*self._modifier_cost(obj, modifier, points, colliders))
                 elif modifier.type == "DYNAMIC_PAINT":
                     canvas = getattr(modifier, "canvas_settings", None)
                     for surface in getattr(canvas, "canvas_surfaces", ()) or ():
@@ -8608,6 +8787,10 @@ class BlenderRuntimeSession:
                             f"dynamic paint surface '{surface.name}' on '{obj.name}' with "
                             f"{points} vertices",
                         )
+                elif modifier.type == "FLUID":
+                    cost = self._fluid_cost(obj, modifier)
+                    if cost is not None:
+                        add(*cost)
             for system in getattr(obj, "particle_systems", ()):
                 if scope == "rigid_body" and getattr(system.point_cache, "is_baked", False):
                     continue
@@ -8616,43 +8799,113 @@ class BlenderRuntimeSession:
                     add(*cost)
         return seconds, parts
 
-    @staticmethod
-    def _simulated_points(obj: Any, before: Sequence[Any]) -> int:
-        """The vertices a simulation modifier gets: the object's, times each Subdivision before it.
+    @classmethod
+    def _body_shape_units(cls, obj: Any, seen: Dict[Any, float]) -> float:
+        """What a rigid body's collision shape costs, in 8-vertex convex hulls (1 or more).
 
-        Other modifiers before it are not evaluated for this estimate.
+        Bullet's convex-hull tests grow with the hull's vertices and a MESH
+        shape's with its triangles: piled bodies took 9.6 times the cube's
+        time per body for 162-vertex hulls, 21.7 times for 482-vertex ones,
+        and 9.3-14 times for 960-triangle meshes. Primitive shapes (box,
+        sphere, capsule, cylinder, cone) cost as a cube or less. The mesh is
+        the object's own, with the modifiers its mesh_source includes.
         """
+        body = getattr(obj, "rigid_body", None)
+        shape = getattr(body, "collision_shape", "BOX")
+        data = getattr(obj, "data", None)
+        if shape not in ("CONVEX_HULL", "MESH") or data is None:
+            return 1.0
+        source = getattr(body, "mesh_source", "BASE")
+        # Bodies sharing a mesh share its cost, unless their own modifiers count.
+        owner = data if source == "BASE" else obj
+        pointer = getattr(owner, "as_pointer", None)
+        key = (shape, source, pointer() if callable(pointer) else id(owner))
+        if key not in seen:
+            modifiers = list(getattr(obj, "modifiers", ())) if source != "BASE" else []
+            factor = cls._modifier_multiplier(modifiers)
+            if shape == "CONVEX_HULL":
+                vertices = len(getattr(data, "vertices", ()) or ()) * factor
+                seen[key] = max(1.0, vertices / _HULL_VERTICES_PER_UNIT)
+            else:
+                loops = len(getattr(data, "loops", ()) or ())
+                faces = len(getattr(data, "polygons", ()) or ())
+                seen[key] = max(1.0, (loops - 2 * faces) * factor / _MESH_TRIANGLES_PER_UNIT)
+        return seen[key]
+
+    @staticmethod
+    def _modifier_multiplier(modifiers: Sequence[Any]) -> int:
+        """How many times the vertices Subdivision, Array, Mirror and Solidify modifiers make.
+
+        Other modifiers are not evaluated for this estimate.
+        """
+        factor = 1
+        for modifier in modifiers:
+            if not getattr(modifier, "show_viewport", True):
+                continue
+            kind = modifier.type
+            if kind == "SUBSURF":
+                factor *= 4 ** max(int(getattr(modifier, "levels", 0)), 0)
+            elif kind == "ARRAY":
+                factor *= max(int(getattr(modifier, "count", 1)), 1)
+            elif kind == "MIRROR":
+                axes = getattr(modifier, "use_axis", (True, False, False))
+                factor *= 2 ** max(sum(1 for axis in axes if axis), 1)
+            elif kind == "SOLIDIFY":
+                factor *= 2
+        return factor
+
+    @classmethod
+    def _simulated_points(cls, obj: Any, before: Sequence[Any]) -> int:
+        """The vertices a simulation modifier gets: the object's, times what the modifiers before it make."""
         data = getattr(obj, "data", None)
         points = len(getattr(data, "vertices", None) or getattr(data, "points", None) or ())
         if not points and hasattr(data, "splines"):
             points = sum(
                 len(spline.points) + len(spline.bezier_points) for spline in data.splines
             )
-        for modifier in before:
-            if modifier.type == "SUBSURF" and getattr(modifier, "show_viewport", True):
-                points *= 4 ** max(int(getattr(modifier, "levels", 0)), 0)
-        return points
+        return points * cls._modifier_multiplier(before)
 
     @staticmethod
-    def _modifier_cost(obj: Any, modifier: Any, points: int) -> Tuple[float, str]:
+    def _collider_faces(scene: Any) -> int:
+        """Faces of the objects with a Collision modifier, which cloth and soft bodies test against."""
+        faces = 0
+        for obj in scene.objects:
+            if any(m.type == "COLLISION" for m in getattr(obj, "modifiers", ())):
+                faces += len(getattr(getattr(obj, "data", None), "polygons", ()) or ())
+        return faces
+
+    @staticmethod
+    def _modifier_cost(
+        obj: Any, modifier: Any, points: int, collider_faces: int = 0
+    ) -> Tuple[float, str]:
         """A cloth or soft body's seconds a frame, and its description."""
         settings = getattr(modifier, "settings", None)
+        meeting = 1.0 + collider_faces / _COLLIDER_FACES_PER_DOUBLING
+        contact = (
+            f" against {collider_faces} collider faces" if collider_faces > 2_000 else ""
+        )
         if modifier.type == "CLOTH":
             quality = max(int(getattr(settings, "quality", 5)), 1)
-            cost = points * (_CLOTH_VERTEX_SECONDS + _CLOTH_STEP_SECONDS * quality)
+            cost = points * (_CLOTH_VERTEX_SECONDS + _CLOTH_STEP_SECONDS * quality) * meeting
             detail = f"quality {quality}"
             collision = getattr(modifier, "collision_settings", None)
             if getattr(collision, "use_self_collision", False):
                 cost *= _CLOTH_SELF_COLLISION_FACTOR
                 detail += " with self-collision"
-            return cost, f"cloth '{modifier.name}' on '{obj.name}' with {points} vertices at {detail}"
+            return cost, (
+                f"cloth '{modifier.name}' on '{obj.name}' with {points} vertices at "
+                f"{detail}{contact}"
+            )
         step_min = max(int(getattr(settings, "step_min", 10)), 1)
-        cost = points * _SOFT_BODY_VERTEX_SECONDS * max(step_min / 10, 1.0)
+        cost = points * _SOFT_BODY_VERTEX_SECONDS * max(step_min / 10, 1.0) * meeting
         detail = f"at least {step_min} steps a frame"
         if getattr(settings, "use_self_collision", False):
             cost *= _SOFT_BODY_SELF_COLLISION_FACTOR
             detail += " with self-collision"
-        return cost, f"soft body '{modifier.name}' on '{obj.name}' with {points} vertices, {detail}"
+        return cost, (
+            f"soft body '{modifier.name}' on '{obj.name}' with {points} vertices, "
+            f"{detail}{contact}"
+        )
 
     @staticmethod
     def _particle_cost(system: Any) -> Optional[Tuple[float, str]]:
@@ -8670,12 +8923,47 @@ class BlenderRuntimeSession:
                 points * (_CLOTH_VERTEX_SECONDS + _CLOTH_STEP_SECONDS * quality),
                 f"hair dynamics '{system.name}' with {points} points at quality {quality}",
             )
+        if getattr(settings, "physics_type", "NEWTON") == "FLUID":
+            return (
+                count * _SPH_PARTICLE_SECONDS,
+                f"SPH fluid particle system '{system.name}' with {count} particles",
+            )
         return count * _PARTICLE_SECONDS, f"particle system '{system.name}' with {count} particles"
 
+    @staticmethod
+    def _fluid_cost(obj: Any, modifier: Any) -> Optional[Tuple[float, str]]:
+        """A fluid domain's seconds a frame in Replay mode, which simulates on frame change.
+
+        The Modular and All cache types simulate only when baked through
+        Blender's fluid bake, so stepping frames reads their cache.
+        """
+        if getattr(modifier, "fluid_type", None) != "DOMAIN":
+            return None
+        domain = getattr(modifier, "domain_settings", None)
+        if getattr(domain, "cache_type", "REPLAY") != "REPLAY":
+            return None
+        resolution = max(int(getattr(domain, "resolution_max", 32)), 1)
+        size = [abs(float(v)) for v in getattr(obj, "dimensions", (1.0, 1.0, 1.0))]
+        longest = max(size) or 1.0
+        cells = resolution**3
+        for side in size:
+            cells *= max(side / longest, 1.0 / resolution)
+        liquid = getattr(domain, "domain_type", "GAS") == "LIQUID"
+        rate = _FLUID_LIQUID_CELL_SECONDS if liquid else _FLUID_GAS_CELL_SECONDS
+        return cells * rate, (
+            f"{'liquid' if liquid else 'smoke'} domain '{obj.name}' replaying at resolution "
+            f"{resolution} ({cells:.0f} cells)"
+        )
+
     def _bake_rigid_body_cache(
-        self, scene: Any, world: Any, frame_start: int, frame_end: int
-    ) -> None:
-        """Bake the rigid-body cache alone.
+        self,
+        scene: Any,
+        world: Any,
+        frame_start: int,
+        frame_end: int,
+        deadline: Optional[float] = None,
+    ) -> int:
+        """Bake the rigid-body cache alone; the last frame baked.
 
         ``ptcache.bake`` given the rigid-body cache bakes every cache in the
         scene on Blender 5.0.1 (a cloth came out baked over its own 250 frames)
@@ -8683,6 +8971,10 @@ class BlenderRuntimeSession:
         fills the rigid-body cache as playback does, and ``bake_from_cache``
         marks only that cache baked. Other simulations step along, as during
         playback, without being baked.
+
+        Past ``deadline`` (``time.monotonic()``), the stepping stops and the
+        frames simulated so far are baked: on Blender 5.0.1 moving the cache's
+        end frame back kept them, and the bake read back exactly.
         """
         blender_module: Any = bpy
         cache = world.point_cache
@@ -8691,15 +8983,25 @@ class BlenderRuntimeSession:
         cache.frame_start = frame_start
         cache.frame_end = frame_end
         self._invalidate_rigid_body_cache(world)
+        last = frame_end
         for frame in range(frame_start, frame_end + 1):
             scene.frame_set(frame)
+            if (
+                deadline is not None
+                and frame_start < frame < frame_end
+                and time.monotonic() > deadline
+            ):
+                last = frame
+                cache.frame_end = frame
+                break
         with blender_module.context.temp_override(scene=scene, point_cache=cache):
             blender_module.ops.ptcache.bake_from_cache()
         if not cache.is_baked:
             raise RuntimeError(
                 "Blender did not mark the rigid-body cache baked after stepping "
-                f"frames {frame_start}-{frame_end}"
+                f"frames {frame_start}-{last}"
             )
+        return last
 
     def _bake_all_caches(
         self,
@@ -8799,7 +9101,9 @@ class BlenderRuntimeSession:
         collection = world.collection
         return len(collection.all_objects) if collection is not None else 0
 
-    def _step_rigid_bodies(self, scene: Any, world: Any, frame: int) -> int:
+    def _step_rigid_bodies(
+        self, scene: Any, world: Any, frame: int
+    ) -> Tuple[int, Optional[int]]:
         """Step an unbaked rigid-body simulation from its cache start up to ``frame``.
 
         Blender advances an unbaked simulation only from one frame to the next,
@@ -8807,25 +9111,34 @@ class BlenderRuntimeSession:
         Frames already cached are read, not simulated again. Past the cache
         end nothing more is simulated; the walk stops there and ends on
         ``frame``. Nothing is stepped when the frames to simulate are estimated
-        at more than ``_STEP_SECONDS_BUDGET`` (``_step_seconds``).
+        at more than ``_STEP_SECONDS_BUDGET`` (``_step_seconds``), and the
+        stepping stops after SIMULATION_DEADLINE_SECONDS whatever the estimate.
 
         Returns:
-            The number of frames visited, 0 when the walk was over budget.
+            The number of frames visited (0 when the walk was over budget), and
+            the frame the stepping stopped at when it ran out of time, else None.
         """
         cache = world.point_cache
         start = int(cache.frame_start)
         last = min(frame, int(cache.frame_end))
         frames = last - start + 1
         if self._step_seconds(scene, world, frame) > self._STEP_SECONDS_BUDGET:
-            return 0
+            return 0, None
         self._check_constraints_rebuildable(
-            scene, "stepped (pass step_simulation=false to read the pose as it is)"
+            scene,
+            "Stepping the simulation is refused",
+            " step_simulation=false reads the pose as it is.",
         )
+        deadline = time.monotonic() + SIMULATION_DEADLINE_SECONDS
         for step in range(start, last + 1):
             scene.frame_set(step)
+            if step < last and time.monotonic() > deadline:
+                # A jump does not simulate: the bodies keep this frame's pose.
+                scene.frame_set(frame)
+                return step - start + 1, step
         if last != frame:
             scene.frame_set(frame)
-        return frames
+        return frames, None
 
     def _step_seconds(self, scene: Any, world: Any, frame: int) -> float:
         """Estimated seconds of simulation a walk from the cache start to ``frame`` takes.
@@ -8870,22 +9183,27 @@ class BlenderRuntimeSession:
                 broken.append(str(carrier.name))
         return sorted(broken)
 
-    def _check_constraints_rebuildable(self, scene: Any, action: str) -> None:
-        """Refuse to restart a simulation Blender would crash rebuilding.
+    def _check_constraints_rebuildable(self, scene: Any, refused: str, hint: str = "") -> None:
+        """Refuse to step a simulation Blender would crash rebuilding.
 
-        Restarting a simulation from its first frame (a bake, or stepping an
-        outdated cache) makes Blender 5.0.1 rebuild its Bullet world, and the
-        rebuild first removes every constraint it built, which reads the
+        Stepping from a simulation's first frame to the next (a bake, a
+        frame change, playback, a trajectory, an animation export) makes
+        Blender 5.0.1 rebuild its Bullet world when the cache is outdated, and
+        the rebuild first removes every constraint it built, which reads the
         constraint's two bodies. Deleting one of them, or removing its rigid
         body, frees that body but leaves the built constraint pointing at it,
-        with the constraint's object cleared: the rebuild then crashed Blender in
-        btDiscreteDynamicsWorld::removeConstraint, losing unsaved work (every
+        with the constraint's object cleared: the rebuild then crashed Blender
+        in btDiscreteDynamicsWorld::removeConstraint, losing unsaved work (every
         time with macOS MallocScribble; after a deleted body Blender's own
-        frame stepping crashed the same way). Blender builds constraints afresh
-        when it reads the file, so
-        saving and reopening it makes the restart safe. A memfile undo that
-        re-reads a jointed body leaves the same dangling constraint with both
-        objects set, which nothing here can see.
+        frame stepping crashed the same way). Freeing the scene (quitting,
+        opening another file) crashed too. A memfile undo that re-reads a
+        jointed body leaves the same dangling constraint with both objects set,
+        which nothing here can see.
+
+        Args:
+            scene: The scene about to step.
+            refused: What is refused, such as "The bake is refused".
+            hint: A sentence on how to do without the stepping, or "".
 
         Raises:
             RefusedOperation: ``details.code`` ConstraintWithoutBody, with the
@@ -8895,14 +9213,15 @@ class BlenderRuntimeSession:
         if not broken:
             return
         raise RefusedOperation(
-            f"The simulation is not {action}: the rigid body constraint(s) "
-            f"{', '.join(broken)} join an object that was deleted or has no rigid body. "
-            "If such a constraint was simulated before its object went, Blender 5.0.1 "
-            "crashes when it restarts the simulation, as this would (it reads the freed "
-            "body), and the unsaved scene is lost; Blender's own playback from the first "
-            "frame can crash the same way. Save the file and open it again "
-            "(save_blender_file, then open_blender_file), which builds the constraints "
-            "afresh, then give each of them two rigid bodies or remove it",
+            f"{refused}: the rigid body constraint(s) {', '.join(broken)} join an object "
+            "that was deleted or has no rigid body. When such a constraint was simulated "
+            "before its object went, Blender 5.0.1 crashes as soon as the simulation "
+            "steps from its first frame to the next (it reads the freed body), and the "
+            "unsaved scene is lost. Save the file first (save_blender_file) so the work "
+            "is kept. Opening it again (open_blender_file) or quitting may still crash "
+            "Blender once, while it frees the broken constraint; the saved file then "
+            "opens with its constraints built afresh, and each one can be given two "
+            f"rigid bodies or removed.{hint}",
             "ConstraintWithoutBody",
             constraints=broken,
         )
