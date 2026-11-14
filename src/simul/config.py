@@ -579,6 +579,18 @@ class UnrealConfig(BaseModel):
         gt=0.0,
         le=30.0,
     )
+    hold_after_timeout: float = Field(
+        default=300.0,
+        description=(
+            "After an Unreal request times out while the editor may still be running it, simul "
+            "sends that editor nothing more for up to this many seconds, until it answers again, "
+            "and answers other calls with InstanceBusy meanwhile; otherwise they would queue "
+            "behind the request on the editor's game thread, time out too and run after being "
+            "reported failed. 0 turns the hold off. Env: UNREAL__HOLD_AFTER_TIMEOUT."
+        ),
+        ge=0.0,
+        le=86400.0,
+    )
 
     # Auth (matches simul unreal setup --passphrase). When set, the
     # Remote Control client sends a `Passphrase: <md5>` HTTP header on every
