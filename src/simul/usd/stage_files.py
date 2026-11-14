@@ -18,6 +18,10 @@ stage that uses the layer.
 
 Changes on disk are told by each file's :func:`stamp` (modification time,
 size and inode), so a write in the same clock tick as the read still shows.
+A file is stamped just before pxr reads it (:func:`open_layer` records the
+stamps of the layers a load opens), never after: a write that lands while
+pxr reads the file then leaves an older stamp, and the file shows as changed
+instead of being vouched for with the content it had before.
 An export is written to a temporary file beside the destination and then
 moved into place in one step (:func:`export_stage`): a reader never sees a
 partial file, and without ``overwrite`` the destination is claimed
@@ -31,13 +35,14 @@ import re
 import secrets
 import shutil
 import tempfile
+import time
 import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from pxr import Ar, UsdUtils
 
-from ._pxr import Sdf, Usd
+from ._pxr import Sdf, Tf, Usd
 
 # The file format argument that makes a load's root layer its own instance.
 STAGE_ARG = "simul_stage"
@@ -54,6 +59,10 @@ _OWN_ARG = rf"(?:{STAGE_ARG}|{CHECK_ARG})=[^&:@'\"\s]*"
 _OWN_ARG_LATER = re.compile(rf"&{_OWN_ARG}")
 _OWN_ARG_FIRST = re.compile(rf"(?<=:SDF_FORMAT_ARGS:){_OWN_ARG}&")
 _OWN_ARG_ONLY = re.compile(rf":SDF_FORMAT_ARGS:{_OWN_ARG}")
+# Listing pxr's layers fails while another thread releases one (see
+# layers_in_memory); the list is asked for this many times, a little later each time.
+_LIST_ATTEMPTS = 4
+_LIST_BACKOFF_SECONDS = 0.01
 
 
 def public_identifier(text: str) -> str:
@@ -72,20 +81,80 @@ def public_identifier(text: str) -> str:
     return _OWN_ARG_ONLY.sub("", text)
 
 
+class LoadedLayersUnavailable(RuntimeError):
+    """pxr could not list the layers it holds, each time :func:`layers_in_memory` asked."""
+
+
 def layers_in_memory() -> Set[str]:
     """Identifiers of the file layers pxr holds in this process now.
 
     pxr hands a stage that opens one of these files the copy in memory,
     which may be older than the file, instead of reading the file.
+
+    ``Sdf.Layer.GetLoadedLayers`` raises ``Tf.ErrorException`` ("Multiple
+    Python objects for C++ object ...") when another thread is releasing a
+    layer it lists: the layer's Python object is gone while its C++ object is
+    still being destroyed. The MCP server unloads an ended session's stages
+    on a worker thread beside reads such as ``validate_usd_file``, so this
+    happens. The list is a snapshot, so it is asked for again, a little
+    later each time.
+
+    Raises:
+        LoadedLayersUnavailable: Every attempt failed; nothing says which
+            layers pxr holds.
     """
-    identifiers: Set[str] = set()
-    for layer in Sdf.Layer.GetLoadedLayers():
+    failure: Optional[BaseException] = None
+    for attempt in range(_LIST_ATTEMPTS):
+        if attempt:
+            time.sleep(_LIST_BACKOFF_SECONDS * attempt)
         try:
-            if layer and not layer.anonymous:
-                identifiers.add(layer.identifier)
-        except Exception:
-            continue  # released while the list was read
-    return identifiers
+            loaded = Sdf.Layer.GetLoadedLayers()
+        except Tf.ErrorException as exc:
+            failure = exc
+            continue
+        identifiers: Set[str] = set()
+        for layer in loaded:
+            try:
+                if layer and not layer.anonymous:
+                    identifiers.add(layer.identifier)
+            except Exception:
+                continue  # released while the list was read
+        return identifiers
+    raise LoadedLayersUnavailable(
+        f"pxr could not list the layers it holds ({_LIST_ATTEMPTS} attempts): {failure}"
+    ) from failure
+
+
+def open_layer(identifier: str, reads: Optional[Dict[str, Stamp]] = None) -> Optional[Sdf.Layer]:
+    """Open ``identifier`` as ``Sdf.Layer.FindOrOpen`` does, stamping the file first when pxr reads it.
+
+    pxr reads the file only for a layer it does not hold yet. With ``reads``,
+    the file's :func:`stamp` is taken just before that read and recorded
+    under the layer's real path, so a write that lands while pxr reads it
+    leaves the recorded stamp older than the file. A layer pxr already holds
+    is returned as it is and not recorded: this call read nothing.
+
+    Args:
+        identifier: An anchored layer identifier, as composition opens it.
+        reads: Where to record the stamps; None records nothing.
+
+    Returns:
+        The layer, or None when pxr cannot open it (composition reports why).
+    """
+    try:
+        if reads is None or Sdf.Layer.Find(identifier):
+            return Sdf.Layer.FindOrOpen(identifier)
+        path = Sdf.Layer.SplitIdentifier(identifier)[0]
+        resolved = str(Ar.GetResolver().Resolve(path)) if path else ""
+        before = stamp(resolved) if resolved else None
+        layer = Sdf.Layer.FindOrOpen(identifier)
+    except Exception:
+        return None
+    if layer is not None and layer.realPath:
+        # A stamp of another file than the one read (an unexpected resolve)
+        # only makes the layer look changed, so it is reread.
+        reads.setdefault(layer.realPath, before)
+    return layer
 
 
 def open_private_root(identifier: str) -> Sdf.Layer:
@@ -388,6 +457,7 @@ __all__ = [
     "EXPORT_FORMATS",
     "STAGE_ARG",
     "DestinationExists",
+    "LoadedLayersUnavailable",
     "Stamp",
     "changed_files",
     "compose_stage",
@@ -396,7 +466,9 @@ __all__ = [
     "file_identity",
     "file_layers",
     "file_stamps",
+    "layers_in_memory",
     "open_candidate",
+    "open_layer",
     "open_private_root",
     "open_private_stage",
     "same_file",
