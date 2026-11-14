@@ -240,7 +240,6 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "enable": False,
         "kinematic": True,
         "make_movable": False,
-        "allow_detach": True,
         "component_name": "Part1",
     },
     "set_unreal_collision": {
@@ -278,7 +277,6 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "enable": False,
         "kinematic": True,
         "make_movable": False,
-        "allow_detach": True,
         "collision_preset": "PhysicsActor",
         "mass": 3.5,
         "linear_damping": 0.3,

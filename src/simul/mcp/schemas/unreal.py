@@ -937,6 +937,13 @@ class UnrealSetActorTransformResponse(BaseModel):
     scale: Tuple[float, float, float] = Field(
         ..., description="Scale [x, y, z], read back after the write"
     )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Names the actor's primitive components not attached under its root component, which did not "
+            "move with it, and how to reattach them; null when every part is under the root"
+        ),
+    )
 
 
 class UnrealSetActorPropertyResponse(BaseModel):
@@ -1332,10 +1339,22 @@ class UnrealPhysicsBody(BaseModel):
     physics_mode: Optional[str] = Field(
         None,
         description=(
-            "simulated (Movable, physics collision, simulates), kinematic (Movable, physics "
-            "collision, moved only by its transform), static (not Movable: no mass, never moves) "
-            "or none (no physics collision)"
+            "simulated (Movable, physics collision, simulates), welded (does not simulate itself but is "
+            "attached under a part that does, so in the simulation Unreal welds it into that part's body and "
+            "they move as one: welded_to), kinematic (Movable, physics collision, moved only by its "
+            "transform), static (not Movable: no mass, never moves) or none (no physics collision)"
         ),
+    )
+    welded_to: Optional[str] = Field(
+        None,
+        description=(
+            "Component whose body this part is welded into: in a simulation as Unreal welded it, in the "
+            "editor world as it will once a simulation starts. Its velocity, mass and forces are that body's"
+        ),
+    )
+    welded_parts: List[str] = Field(
+        default_factory=list,
+        description="Parts of the actor welded into this body (by component name), empty when none",
     )
     simulate_physics: Optional[bool] = Field(None, description="The body's Simulate Physics flag")
     mobility: Optional[str] = Field(None, description="Static, Stationary or Movable")
@@ -1367,7 +1386,11 @@ class UnrealPhysicsBody(BaseModel):
         None, description="Component the body is attached to, null when it is not attached"
     )
     warning: Optional[str] = Field(
-        None, description="What to know about the result: a detach, a Static body, an edit during PIE"
+        None,
+        description=(
+            "What to know about the result: what the simulation detaches or welds, a Static body, an edit "
+            "during PIE"
+        ),
     )
 
 
@@ -1381,8 +1404,16 @@ class UnrealEnablePhysicsResponse(UnrealPhysicsBody):
     detached_from: Optional[str] = Field(
         None,
         description=(
-            "Parent component the body was detached from as it started simulating (allow_detach); "
-            "Undo reattaches it"
+            "Parent the play copy's body was detached from as it started simulating (a simulation path); "
+            "null in the editor world, where the actor keeps its hierarchy"
+        ),
+    )
+    simulation_detaches_from: Optional[str] = Field(
+        None,
+        description=(
+            "Editor world: the parent Unreal detaches this body from in the simulation as it starts "
+            "simulating (the editor actor stays attached); null when the body is not attached or does not "
+            "simulate"
         ),
     )
 
@@ -1414,6 +1445,13 @@ class UnrealApplyForceResponse(BaseModel):
         None, description="The actor's copy in the running simulation, which the force acted on"
     )
     component_path: Optional[str] = Field(None, description="Body the force acted on")
+    welded_to: Optional[str] = Field(
+        None,
+        description=(
+            "When the component is welded into another part's body, that part: the force acted on the whole "
+            "welded body"
+        ),
+    )
     world: str = Field("simulation", description="World acted on: always the running simulation")
     force_applied: bool = Field(True, description="Whether force was applied")
     force_vector: List[float] = Field(..., description="Force or impulse [x, y, z] as given, in units")
@@ -1431,7 +1469,9 @@ class UnrealApplyForceResponse(BaseModel):
         ),
     )
     duration_s: float = Field(0.0, description="Seconds of physics time a continuous force acts")
-    mass_kg: Optional[float] = Field(None, description="Mass of the body in the simulation")
+    mass_kg: Optional[float] = Field(
+        None, description="Mass of the body in the simulation (a welded body's: its parts' masses added up)"
+    )
     expected_delta_v: Optional[List[float]] = Field(
         None,
         description=(
@@ -1481,15 +1521,18 @@ class UnrealSetupPhysicsBulkResponse(BaseModel):
     configured: List[Dict[str, Any]] = Field(
         default_factory=list,
         description=(
-            "The first 50 actors set up: actor_path, physics_mode, mobility_changed_from, detached_from, "
-            "mass_kg"
+            "The first 50 actors set up: actor_path, physics_mode, mobility_changed_from, "
+            "simulation_detaches_from (the parent an attached body leaves in the simulation; the editor actor "
+            "keeps it), mass_kg"
         ),
     )
     failed: List[Dict[str, Any]] = Field(
         default_factory=list,
         description="The first 50 actors not set up: actor_path, error and, for a body, its problem codes",
     )
-    warning: Optional[str] = Field(None, description="What to know about the result: detaches, an edit during PIE")
+    warning: Optional[str] = Field(
+        None, description="What to know about the result: what the simulation detaches, an edit during PIE"
+    )
 
 
 class UnrealBodyState(BaseModel):
@@ -1508,7 +1551,10 @@ class UnrealBodyState(BaseModel):
     component_path: Optional[str] = Field(
         None, description="Root (or only) primitive component read; null when the actor has none"
     )
-    physics_mode: Optional[str] = Field(None, description="simulated, kinematic, static or none")
+    physics_mode: Optional[str] = Field(None, description="simulated, welded, kinematic, static or none")
+    welded_to: Optional[str] = Field(
+        None, description="Component whose body this one is welded into (physics_mode welded), else null"
+    )
     linear_velocity: Optional[List[float]] = Field(None, description="Linear velocity [x, y, z], cm/s")
     angular_velocity: Optional[List[float]] = Field(None, description="Angular velocity [x, y, z], degrees/s")
     speed: Optional[float] = Field(None, description="Linear speed, cm/s")
@@ -1524,7 +1570,8 @@ class UnrealBodyState(BaseModel):
         description=(
             "For a multi-part actor (several primitive components, none the root), each component's body, "
             "the first 20: component_name, component_path, location and rotation (the component's, in the "
-            "world) and the body fields above; null otherwise"
+            "world) and the body fields above; a part welded into another's body reads that body's velocity "
+            "and mass, with welded_to naming it; null otherwise"
         ),
     )
     components_total: Optional[int] = Field(
@@ -1660,11 +1707,18 @@ class UnrealExportUsdResponse(BaseModel):
     overwritten_files: List[str] = Field(
         default_factory=list, description="Those of written_files that existed before"
     )
+    components_left_out: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Actors with primitive components not attached under their root component, which the exporter "
+            "left out: actor_path and components (names); empty when there are none"
+        ),
+    )
     warnings: List[str] = Field(
         default_factory=list,
         description=(
             "What the export wrote differently from the level, such as DynamicMeshActors written as "
-            "empty Xforms without their mesh"
+            "empty Xforms without their mesh, or parts left out because they are not under their actor's root"
         ),
     )
 
