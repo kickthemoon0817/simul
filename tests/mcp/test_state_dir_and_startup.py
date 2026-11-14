@@ -288,9 +288,41 @@ def _wait_for(predicate, timeout: float = 60.0) -> None:  # type: ignore[no-unty
         time.sleep(0.05)
 
 
+_INITIALIZE = json.dumps(
+    {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "signal-test", "version": "0"},
+        },
+    }
+)
+
+
+def _read_line(stream, timeout: float = 60.0) -> bytes:  # type: ignore[no-untyped-def]
+    import select
+
+    ready, _, _ = select.select([stream], [], [], timeout)
+    assert ready, "no answer on stdout"
+    return stream.readline()
+
+
 @posix_only
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])
 @pytest.mark.parametrize("transport", ["stdio", "http"])
-def test_sigterm_runs_shutdown_and_exits_0(tmp_path: Path, transport: str) -> None:
+def test_a_signal_runs_shutdown_and_exits_0_with_stdin_held_open(
+    tmp_path: Path, transport: str, signum: int
+) -> None:
+    """Round-2 audit M-5: over stdio the server ignored SIGTERM and SIGINT while stdin stayed open.
+
+    FastMCP reads stdin in a thread that returns only when stdin closes, and
+    ``asyncio.run`` waited for it. This test never closes stdin before the
+    process exits (the earlier version passed only because ``communicate()``
+    closed it), and the stdio server has answered ``initialize`` first.
+    """
     log = tmp_path / "simul.log"
     port = _free_port()
     env = _subprocess_env(
@@ -304,26 +336,74 @@ def test_sigterm_runs_shutdown_and_exits_0(tmp_path: Path, transport: str) -> No
         [sys.executable, "-m", "simul.cli.main", "server", "--transport", transport, "--backends", "usd"],
         env=env, cwd=str(tmp_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
+    assert proc.stdin is not None and proc.stdout is not None
     try:
-        # The CLI logs this line once before it installs its SIGTERM handler and
-        # SimulMCPServer.run logs it again afterwards; only the second one means
-        # the handler is in place, so a signal sent after the first can still
-        # kill the process with -15.
         started = f"with {transport} transport"
         _wait_for(lambda: log.exists() and log.read_text().count(started) >= 2 or proc.poll() is not None)
         if transport == "http":
             _wait_for(lambda: _connects(port) or proc.poll() is not None)
+        else:
+            proc.stdin.write(_INITIALIZE.encode() + b"\n")
+            proc.stdin.flush()
+            assert json.loads(_read_line(proc.stdout))["id"] == 1
         assert proc.poll() is None, proc.stderr.read().decode() if proc.stderr else ""
 
-        proc.send_signal(signal.SIGTERM)
-        _, err = proc.communicate(timeout=30)
+        sent = time.monotonic()
+        proc.send_signal(signum)
+        returncode = proc.wait(timeout=15)
+        took = time.monotonic() - sent
+        assert not proc.stdin.closed, "stdin stayed open throughout"
     finally:
         if proc.poll() is None:
             proc.kill()
-            proc.communicate()
+        proc.wait()
+    err = proc.stderr.read().decode() if proc.stderr else ""
 
-    assert proc.returncode == 0, err.decode()
-    assert "Simul 3D MCP Server shut down" in log.read_text()
+    assert returncode == 0, err
+    assert took < 3.0, took
+    name = signal.Signals(signum).name
+    text = log.read_text()
+    assert "Simul 3D MCP Server shut down" in text
+    assert f"Stopped on {name}" in text
+    assert f"Server stopped ({name})" in err
+    assert "Traceback" not in err
+
+
+@posix_only
+def test_a_sigterm_during_startup_exits_0(tmp_path: Path) -> None:
+    """A SIGTERM 0.3-0.6 s after spawn, before the loop's handlers, used to exit -15 without shutdown."""
+    marker = tmp_path / "startup-reached"
+    env = _subprocess_env(tmp_path, SIMUL_HOME=str(tmp_path / "state"), LOGGING__FILE_PATH=str(tmp_path / "simul.log"))
+    # Hold the command at the last step before asyncio.run, so the signal
+    # lands where the handlers used to be missing.
+    script = (
+        "import pathlib, sys, time\n"
+        "import simul.cli.main as m\n"
+        "real = m._keep_fastmcp_home_in_state_dir\n"
+        "def slow():\n"
+        f"    pathlib.Path({str(marker)!r}).write_text('x')\n"
+        "    time.sleep(1.0)\n"
+        "    real()\n"
+        "m._keep_fastmcp_home_in_state_dir = slow\n"
+        "sys.argv = ['simul', 'server', '--backends', 'usd']\n"
+        "m.app()\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env=env, cwd=str(tmp_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for(lambda: marker.exists() or proc.poll() is not None)
+        proc.send_signal(signal.SIGTERM)
+        returncode = proc.wait(timeout=15)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+    err = proc.stderr.read().decode() if proc.stderr else ""
+
+    assert returncode == 0, err
+    assert "Server stopped (SIGTERM)" in err
 
 
 def test_a_busy_http_port_exits_1_with_the_json_envelope(tmp_path: Path) -> None:

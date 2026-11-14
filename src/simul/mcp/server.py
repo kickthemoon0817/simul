@@ -51,6 +51,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from .. import __version__ as _source_version
 from ..adapters import IsaacRuntimeAdapter, IsaacSocketClient
+from ..adapters.isaac_socket_client import UnfinishedRequest
 from ..adapters.base import BackendAdapter
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, current_request_id, get_logger, note_call_outcome
@@ -213,6 +214,23 @@ class CancelledOutcome:
 
 # How long a cancelled Isaac call waits for the bridge to accept its interrupt.
 _INTERRUPT_TIMEOUT_SECONDS: float = 5.0
+
+
+@dataclass
+class IsaacHold:
+    """An Isaac instance kept after a call timed out, until the engine has finished it.
+
+    Attributes:
+        tool_name: The call that timed out.
+        since: ``time.monotonic()`` when the client gave up on its reply.
+        task: The background task that waits for the engine and then
+            releases the instance lock.
+    """
+
+    tool_name: str
+    since: float
+    task: "Optional[asyncio.Task[None]]" = None
+
 
 # Rate-limit buckets kept before idle ones are swept. A bucket that has
 # refilled to its burst is indistinguishable from a new one, so dropping it
@@ -715,6 +733,17 @@ class SimulMCPServer(LoggerMixin):
         # surface; a call to one answers ScriptExecutionDisabled.
         self._hidden_script_tools: Set[str] = set()
         self._isaac_instance_locks: Dict[str, asyncio.Lock] = {}
+        # Instances kept after a call timed out, until Isaac Sim has finished
+        # it (see _hold_if_engine_busy), keyed by instance name.
+        self._isaac_holds: Dict[str, IsaacHold] = {}
+        # Request tasks waiting for the engine to finish a call their client
+        # cancelled; a stopping server waits for them, bounded.
+        self._draining_calls: Set["asyncio.Task[Any]"] = set()
+        # Set when the server starts stopping (begin_shutdown): from then on
+        # every wait on Isaac Sim gives up after server.shutdown_timeout.
+        self._stopping = asyncio.Event()
+        self._stopping_since: Optional[float] = None
+        self._shut_down = False
         # Token buckets keyed by (agent, tool); the per-agent ceiling across
         # every tool uses _GLOBAL_RATE_BUCKET as the tool key.
         self._rate_limiters: Dict[Tuple[str, str], RateLimiter] = {}
@@ -2028,21 +2057,137 @@ class SimulMCPServer(LoggerMixin):
                 return
         lock = self._get_instance_lock(instance_name)
         if not await self._acquire_instance_lock(lock):
-            yield Refusal(
-                ErrorResponse(
-                    error=(
-                        f"Isaac instance {instance_name!r} is busy with another "
-                        "call. It is running, not unreachable — retry shortly."
-                    ),
-                    error_type=error_types.INSTANCE_BUSY,
-                ).model_dump(),
-                "instance_busy",
-            )
+            yield Refusal(self._instance_busy_error(instance_name), "instance_busy")
             return
         try:
             yield None
             self._heartbeat_active_binding(tool_name)
         finally:
+            if not self._hold_if_engine_busy(instance_name, lock, tool_name):
+                lock.release()
+
+    def _instance_busy_error(self, instance_name: str) -> Dict[str, Any]:
+        """The InstanceBusy envelope for a call that could not get the instance in time."""
+        hold = self._isaac_holds.get(instance_name)
+        if hold is None:
+            return ErrorResponse(
+                error=(
+                    f"Isaac instance {instance_name!r} is busy with another "
+                    "call. It is running, not unreachable — retry shortly."
+                ),
+                error_type=error_types.INSTANCE_BUSY,
+            ).model_dump()
+        info = self.isaac_hold_info(instance_name) or {}
+        return ErrorResponse(
+            error=(
+                f"Isaac instance {instance_name!r} is still running {hold.tool_name}, whose "
+                f"reply timed out {info.get('busy_for_seconds', 0):.0f}s ago. Isaac Sim keeps "
+                "running a call after its reply times out and runs the next one only after "
+                "it, so the server keeps the instance until the engine has finished rather "
+                "than queue this call behind it. Retry shortly; ping_isaac does not wait for "
+                "it, and interrupt_isaac_script stops a bridge script."
+            ),
+            error_type=error_types.INSTANCE_BUSY,
+            details={"instance": instance_name, "reason": "finishing_timed_out_call", **info},
+        ).model_dump()
+
+    def isaac_hold_info(self, instance_name: str) -> Optional[Dict[str, Any]]:
+        """Describe the hold on an instance after a timed-out call, or None when it is not held.
+
+        Returns:
+            ``timed_out_tool``, ``busy_for_seconds`` (since the reply timed
+            out) and ``hold_limit_seconds``.
+        """
+        hold = self._isaac_holds.get(instance_name)
+        if hold is None:
+            return None
+        return {
+            "timed_out_tool": hold.tool_name,
+            "busy_for_seconds": round(time.monotonic() - hold.since, 1),
+            "hold_limit_seconds": self.settings.isaac_sim.hold_after_timeout,
+        }
+
+    def _hold_if_engine_busy(self, instance_name: str, lock: asyncio.Lock, tool_name: str) -> bool:
+        """Keep ``lock`` past the call when Isaac Sim may still be running a request it timed out on.
+
+        Isaac Sim goes on running a script (or a bridge action) after its reply
+        times out, and runs the next request only once it has finished. Letting
+        the next call in then sends it to wait behind the old one, so it times
+        out too and runs after being reported failed. Instead the lock passes
+        to a background task that waits, up to ``isaac_sim.hold_after_timeout``,
+        for the engine to finish (``IsaacSocketClient.wait_until_idle``) and
+        then releases it; calls meanwhile get InstanceBusy saying why.
+
+        Returns:
+            True when the lock was handed to such a task, False when the
+            caller should release it.
+        """
+        client = self._isaac_clients.get(instance_name, self.client)
+        unfinished = getattr(client, "unfinished_request", None)
+        if not isinstance(unfinished, UnfinishedRequest):
+            return False
+        limit = self.settings.isaac_sim.hold_after_timeout
+        if limit <= 0 or self._stopping.is_set():
+            client.forget_unfinished_request()
+            return False
+        hold = IsaacHold(tool_name=tool_name, since=unfinished.since)
+        try:
+            hold.task = asyncio.get_running_loop().create_task(
+                self._hold_until_engine_idle(instance_name, client, hold, limit)
+            )
+        except RuntimeError:  # pragma: no cover - always called on the loop
+            return False
+        # Ends the hold however the task ends, cancelled before it ran included.
+        hold.task.add_done_callback(lambda _task: self._end_hold(instance_name, lock, hold))
+        self._isaac_holds[instance_name] = hold
+        self.logger.warning(
+            "%s timed out while Isaac Sim may still be running it; holding instance %r "
+            "until the engine has finished (at most %gs, isaac_sim.hold_after_timeout)",
+            tool_name,
+            instance_name,
+            limit,
+        )
+        return True
+
+    async def _hold_until_engine_idle(
+        self, instance_name: str, client: Any, hold: IsaacHold, limit: float
+    ) -> None:
+        """Wait for Isaac Sim to finish the request that timed out; ``_end_hold`` then releases it."""
+        try:
+            idle = await client.wait_until_idle(max(0.0, limit - (time.monotonic() - hold.since)))
+        except Exception as exc:
+            client.forget_unfinished_request()
+            self.logger.warning(
+                "Could not tell whether Isaac instance %r finished %s (%s); releasing it",
+                instance_name,
+                hold.tool_name,
+                exc,
+            )
+            return
+        waited = time.monotonic() - hold.since
+        if idle:
+            self.logger.info(
+                "Isaac instance %r finished %s %.1fs after its reply timed out; released",
+                instance_name,
+                hold.tool_name,
+                waited,
+            )
+            return
+        client.forget_unfinished_request()
+        self.logger.warning(
+            "Isaac instance %r still had not finished %s %.0fs after its reply timed out "
+            "(isaac_sim.hold_after_timeout); releasing it, so new calls may queue behind it "
+            "inside Isaac Sim",
+            instance_name,
+            hold.tool_name,
+            waited,
+        )
+
+    def _end_hold(self, instance_name: str, lock: asyncio.Lock, hold: IsaacHold) -> None:
+        """Forget ``hold`` and release the instance lock it kept."""
+        if self._isaac_holds.get(instance_name) is hold:
+            del self._isaac_holds[instance_name]
+        if lock.locked():
             lock.release()
 
     async def _acquire_instance_lock(self, lock: asyncio.Lock) -> bool:
@@ -2132,7 +2277,12 @@ class SimulMCPServer(LoggerMixin):
                 return await asyncio.shield(task)
             except asyncio.CancelledError as cancelled:
                 # The same exception goes on; it carries what the engine did
-                # to the usage and audit records (_run_envelope).
+                # to the usage and audit records (_run_envelope). A stopping
+                # server waits for this task (wait_for_draining_calls).
+                current = asyncio.current_task()
+                if current is not None:
+                    self._draining_calls.add(current)
+                    current.add_done_callback(self._draining_calls.discard)
                 setattr(
                     cancelled,
                     _DRAINED_OUTCOME,
@@ -2189,7 +2339,12 @@ class SimulMCPServer(LoggerMixin):
     async def _wait_for_cancelled_isaac_call(
         self, tool_name: str, task: "asyncio.Future[Dict[str, Any]]", client: Any
     ) -> None:
-        """Interrupt the cancelled call's script and wait for it, shielded."""
+        """Interrupt the cancelled call's script and wait for it, shielded.
+
+        A stopping server stops waiting ``server.shutdown_timeout`` after it
+        began to stop; the call is then abandoned (its socket closed) and
+        recorded with ``executed: "unknown"``.
+        """
         self.logger.info(
             "%s was cancelled by the client; holding the Isaac instance until it ends", tool_name
         )
@@ -2201,13 +2356,85 @@ class SimulMCPServer(LoggerMixin):
                     )
                 except Exception as exc:
                     self.logger.debug("Could not interrupt the cancelled %s: %s", tool_name, exc)
-            while not task.done():
+            if not await self._wait_for_engine(task, tool_name):
+                task.cancel()
                 try:
-                    await asyncio.wait({task})
+                    await asyncio.wait({task}, timeout=1.0)
                 except asyncio.CancelledError:
-                    # A cancellation anyio's shield does not cover (a bare
-                    # task.cancel()); the engine is still busy, keep waiting.
+                    pass
+
+    async def _wait_for_engine(self, task: "asyncio.Future[Any]", what: str) -> bool:
+        """Wait for ``task`` regardless of cancellation, until it ends or shutdown gives up.
+
+        A cancellation the caller's anyio shield does not cover (a bare
+        ``task.cancel()``) is swallowed: the engine is still busy. Once the
+        server is stopping (``begin_shutdown``) the wait ends
+        ``server.shutdown_timeout`` after that, with a warning naming ``what``.
+
+        Returns:
+            True when ``task`` ended, False when a stopping server gave up on it.
+        """
+        stopping = asyncio.ensure_future(self._stopping.wait())
+        try:
+            while not task.done():
+                if self._stopping_since is None:
+                    waiting: Set["asyncio.Future[Any]"] = {task, stopping}
+                    timeout: Optional[float] = None
+                else:
+                    timeout = self._shutdown_deadline() - time.monotonic()
+                    if timeout <= 0:
+                        self.logger.warning(
+                            "Shutdown: stopped waiting for Isaac Sim to finish %s after %gs "
+                            "(server.shutdown_timeout); it may still be running inside Isaac Sim",
+                            what,
+                            self.settings.server.shutdown_timeout,
+                        )
+                        return False
+                    waiting = {task}
+                try:
+                    await asyncio.wait(waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+                except asyncio.CancelledError:
                     continue
+            return True
+        finally:
+            stopping.cancel()
+
+    def _shutdown_deadline(self) -> float:
+        """``time.monotonic()`` at which a stopping server stops waiting on Isaac Sim."""
+        since = self._stopping_since if self._stopping_since is not None else time.monotonic()
+        return since + self.settings.server.shutdown_timeout
+
+    def begin_shutdown(self) -> None:
+        """Start stopping: from now on waits on Isaac Sim end ``server.shutdown_timeout`` later.
+
+        Called when SIGTERM or SIGINT arrives (``simul server``), and by
+        ``shutdown``. Idempotent.
+        """
+        if self._stopping_since is not None:
+            return
+        self._stopping_since = time.monotonic()
+        self._stopping.set()
+        if self._draining_calls or self._isaac_holds:
+            self.logger.info(
+                "Stopping; waiting up to %gs (server.shutdown_timeout) for Isaac Sim to "
+                "finish %d cancelled call(s); %d instance(s) held after a timeout are released",
+                self.settings.server.shutdown_timeout,
+                len(self._draining_calls),
+                len(self._isaac_holds),
+            )
+
+    async def wait_for_draining_calls(self) -> None:
+        """Wait, up to the shutdown deadline, for cancelled Isaac calls still waiting on the engine.
+
+        Each one records its usage and audit rows as it ends; ``simul
+        server`` waits for them before it exits over stdio with stdin open.
+        """
+        pending = {task for task in self._draining_calls if not task.done()}
+        if not pending:
+            return
+        remaining = self._shutdown_deadline() - time.monotonic()
+        # A margin past the deadline for the calls to record themselves.
+        await asyncio.wait(pending, timeout=max(0.0, remaining) + 1.0)
 
     async def _exec_payload(
         self,
@@ -3026,7 +3253,33 @@ class SimulMCPServer(LoggerMixin):
         self.logger.info(f"Registered {len(self._registered_tool_names())} MCP tools")
 
     async def shutdown(self) -> None:
-        """Release server resources on shutdown."""
+        """Release server resources on shutdown. Idempotent.
+
+        Instances held after a timed-out call are released: their wait for
+        the engine is cancelled, with a warning naming the call.
+        """
+        if self._shut_down:
+            return
+        self._shut_down = True
+        self.begin_shutdown()
+        holds = []
+        for instance_name, hold in list(self._isaac_holds.items()):
+            self.logger.warning(
+                "Released Isaac instance %r on shutdown while it may still be running %s, "
+                "which timed out %.0fs ago",
+                instance_name,
+                hold.tool_name,
+                time.monotonic() - hold.since,
+            )
+            client = self._isaac_clients.get(instance_name, self.client)
+            forget = getattr(client, "forget_unfinished_request", None)
+            if callable(forget):
+                forget()
+            if hold.task is not None:
+                hold.task.cancel()
+                holds.append(hold.task)
+        if holds:
+            await asyncio.wait(holds, timeout=1.0)
         for adapter in self._adapters.values():
             if adapter is not None:
                 adapter.close()
@@ -3145,6 +3398,7 @@ async def start_mcp_server(
     settings: Optional[Settings] = None,
     transport: str = "stdio",
     backends: Optional[Set[str]] = None,
+    on_server: Optional[Callable[[SimulMCPServer], None]] = None,
 ) -> None:
     """
     Start the Simul 3D MCP Server.
@@ -3153,6 +3407,10 @@ async def start_mcp_server(
         settings: Configuration settings
         transport: Transport type
         backends: Backend names to enable (None = all available)
+        on_server: Called with the server once it is built, before it runs;
+            ``simul server`` uses it to stop the server on a signal.
     """
     server = create_server_instance(settings, backends=backends)
+    if on_server is not None:
+        on_server(server)
     await server.run(transport)

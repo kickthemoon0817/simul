@@ -11,6 +11,10 @@ server:
   host: "localhost"
   port: 8765
   timeout: 30
+  # Longest a stopping server (SIGTERM, SIGINT) waits for Isaac Sim to finish
+  # calls it is still running (cancelled or timed out) before it exits anyway.
+  # Keep it under the supervisor's grace period (Docker: 10 s).
+  shutdown_timeout: 5.0
   # A host that is not loopback (0.0.0.0, a LAN address) needs this opt-in,
   # or `simul server --allow-public`; the server refuses to start otherwise.
   allow_public: false
@@ -59,6 +63,12 @@ isaac_sim:
     # timeout on every call.
     failure_threshold: 3
     cooldown_seconds: 30.0
+
+  # After a call times out while Isaac Sim may still be running it, keep the
+  # instance (other calls get InstanceBusy) until the engine has finished, for
+  # at most this many seconds. 0 releases it at once, and later calls then
+  # queue behind the running script inside Kit.
+  hold_after_timeout: 300.0
 
   # Discovery directory for bridge extension port files
   discovery_dir: "/tmp/simul"
