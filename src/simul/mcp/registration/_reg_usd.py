@@ -15,7 +15,8 @@ at a time (see ``simul.mcp.usd_scheduler``).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
+import asyncio
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from fastmcp.tools import ToolResult
 
@@ -157,6 +158,55 @@ def _loaded_stage(session: "HeadlessUSDSession", stage_id: str) -> Any:
     return stage
 
 
+def _scheduled_release(
+    scheduler: USDCallScheduler,
+    release: Callable[[str], Any],
+    holds_stages: Optional[Callable[[str], bool]] = None,
+) -> Callable[[str], None]:
+    """The session-end hook: unload an ended MCP session's stages through ``scheduler``.
+
+    The hook runs on the event loop while other calls' pxr work runs on
+    worker threads. Unloading there raced it: a session that ended during
+    another session's load dropped the stamp of a shared layer that load
+    was composing (it held the layer, but its stage was not registered
+    yet), so the load took its stale copy for a file just read, and every
+    later load, validation and export trusted that copy. Reading a stage's
+    unsaved state there also overlapped edits. The release now runs
+    between writes (``USDCallScheduler.run_between_writes``): beside reads,
+    as it did before, but never during a load, reload or edit, and it holds
+    up no other session's reads. ``holds_stages`` (read from the registry
+    alone, on the event loop) skips a session that loaded nothing.
+    """
+    pending: Set["asyncio.Task[Any]"] = set()
+
+    def hook(session_id: str) -> None:
+        if holds_stages is not None and not holds_stages(session_id):
+            return
+
+        def work() -> None:
+            release(session_id)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            work()  # no event loop, so no scheduled call is running
+            return
+
+        async def run() -> None:
+            try:
+                await scheduler.run_between_writes(
+                    f"Releasing the USD stages of ended MCP session {session_id}", work
+                )
+            except Exception as exc:
+                logger.warning("Could not release the USD stages of ended MCP session %s: %s", session_id, exc)
+
+        task = loop.create_task(run())
+        pending.add(task)  # held until done, so the loop's weak reference is not the only one
+        task.add_done_callback(pending.discard)
+
+    return hook
+
+
 def register_usd_tools(server: "SimulMCPServer") -> None:
     """Register USD-related tools."""
     scheduler = USDCallScheduler(server.settings.server.timeout)
@@ -255,7 +305,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     # are held to the composition sandbox.
     adapter = server.headless_adapter
     if adapter is not None and hasattr(adapter, "release_session"):
-        server.add_session_end_hook(adapter.release_session)
+        server.add_session_end_hook(
+            _scheduled_release(scheduler, adapter.release_session, getattr(adapter, "holds_stages", None))
+        )
         adapter.set_sandbox_factory(lambda: CompositionSandbox(server._path_policy))
 
     @server.mcp.tool(
@@ -1158,7 +1210,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "collision shapes) is left out unless asked for. Nothing boundable is "
             "a successful result with has_geometry false and bbox null, never a "
             "guessed box; excluded_purposes_with_geometry then says whether "
-            "widening include_purposes would find some."
+            "widening include_purposes would find some. A PointInstancer whose "
+            "prototypes pxr cannot read is left out and named in warnings."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -1267,8 +1320,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "time range, with its duration in seconds; time_sample_range is in stage "
             "time codes, through layer offsets and value clips. warnings groups the layers "
             "whose upAxis or metersPerUnit differs from the stage's (USD does not "
-            "rescale them), with a count and example layers per group. format "
-            "text adds a short digest."
+            "rescale them), with a count and example layers per group, and names "
+            "any PointInstancer the bounds leave out because pxr cannot read its "
+            "prototypes. format text adds a short digest."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False

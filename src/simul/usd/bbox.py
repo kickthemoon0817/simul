@@ -11,13 +11,21 @@ collision shapes authored as guides) is left out unless asked for.
 
 A prim with nothing boundable at or below it under those purposes has no
 bound: the functions here return ``None`` for it, never a guessed box.
+
+A PointInstancer whose ``prototypes`` a layer authors as an attribute (a
+malformed export) makes pxr's bound raise for every prim above it. The bound
+then leaves that instancer out: it is the union of the bounds of the largest
+subtrees that do not hold one, and the cache's ``problems`` gets an
+``UnreadableProperty`` warning per instancer left out.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from ._pxr import Usd, UsdGeom
+from ._pxr import Gf, Sdf, Tf, Usd, UsdGeom
+from .pxr_errors import read_failure
+from .validation import ValidationIssue
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import monitor_performance
@@ -60,12 +68,12 @@ def normalize_purposes(purposes: Optional[Iterable[str]] = None) -> Tuple[str, .
 
 
 def _aligned_range_to_bbox(usd_bbox: Any) -> Optional[BBox]:
-    """Convert a ``Gf.BBox3d`` to a ``(min, max)`` pair, or None when empty.
+    """Convert a ``Gf.BBox3d`` (or an aligned ``Gf.Range3d``) to a ``(min, max)`` pair, or None when empty.
 
     ``Gf.BBox3d`` has no ``IsEmpty``/``GetMin``/``GetMax``; the axis-aligned
     range (with the box's matrix applied) carries them.
     """
-    aligned = usd_bbox.ComputeAlignedRange()
+    aligned = usd_bbox if isinstance(usd_bbox, Gf.Range3d) else usd_bbox.ComputeAlignedRange()
     if aligned.IsEmpty():
         return None
     min_point = aligned.GetMin()
@@ -103,6 +111,9 @@ class BBoxCache(LoggerMixin):
         self.stage = stage
         self.time_code = resolve_time_code(time_code)
         self.purposes = normalize_purposes(purposes)
+        # UnreadableProperty warnings (USDIssue fields) for the instancers a
+        # bound left out, each reported once.
+        self.problems: List[Dict[str, Any]] = []
         self._usd_bbox_cache = self._new_usd_cache()
         self.logger.debug(
             f"BBox cache initialized at time {self.time_code} for purposes {list(self.purposes)}"
@@ -137,7 +148,8 @@ class BBoxCache(LoggerMixin):
             ``(min, max)`` in world coordinates, or None when nothing with an
             included purpose is boundable at or below the prim
         """
-        return _aligned_range_to_bbox(self._cache_for(use_cache).ComputeWorldBound(prim))
+        cache = self._cache_for(use_cache)
+        return self._bound(cache, prim, lambda part: cache.ComputeWorldBound(part).ComputeAlignedRange())
 
     @monitor_performance("bbox_cache.compute_local_bbox")
     def compute_local_bbox(self, prim: Usd.Prim, use_cache: bool = True) -> Optional[BBox]:
@@ -155,7 +167,67 @@ class BBoxCache(LoggerMixin):
             ``(min, max)`` in the prim's object space, or None when nothing
             with an included purpose is boundable at or below the prim
         """
-        return _aligned_range_to_bbox(self._cache_for(use_cache).ComputeUntransformedBound(prim))
+        cache = self._cache_for(use_cache)
+        if prim.IsPseudoRoot():
+            # Nothing above it transforms, so its own space is world space.
+            return self._bound(cache, prim, lambda part: cache.ComputeWorldBound(part).ComputeAlignedRange())
+        return self._bound(
+            cache,
+            prim,
+            lambda part: (
+                cache.ComputeUntransformedBound(part)
+                if part == prim
+                else cache.ComputeRelativeBound(part, prim)
+            ).ComputeAlignedRange(),
+        )
+
+    def _bound(self, cache: UsdGeom.BBoxCache, prim: Usd.Prim, measure: Callable[[Usd.Prim], Any]) -> Optional[BBox]:
+        """``measure(prim)``, or the bound around the instancers pxr cannot read when it raises.
+
+        ``measure`` gives the aligned range of one prim's subtree in the
+        wanted space. pxr may leave partial entries in its cache after
+        raising, so the cache is cleared before the subtrees are measured.
+        """
+        try:
+            return _aligned_range_to_bbox(measure(prim))
+        except Tf.ErrorException:
+            unreadable = _unreadable_instancers(prim)
+            if not unreadable:
+                raise
+        cache.Clear()
+        self._report(unreadable)
+        skipped = [path for path, _reason, _layer in unreadable]
+        total = Gf.Range3d()
+        walk = iter(Usd.PrimRange(prim, Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)))
+        for part in walk:
+            path = part.GetPath()
+            if any(path.HasPrefix(skip) for skip in skipped):
+                walk.PruneChildren()  # the instancer and what lies under it
+                continue
+            if any(skip.HasPrefix(path) for skip in skipped):
+                continue  # holds one: bound its other children instead
+            total.UnionWith(measure(part))
+            walk.PruneChildren()
+        return _aligned_range_to_bbox(total)
+
+    def _report(self, unreadable: List[Tuple[Sdf.Path, str, Optional[str]]]) -> None:
+        reported = {problem["location"].get("property_path") for problem in self.problems}
+        for path, reason, layer in unreadable:
+            property_path = path.AppendProperty("prototypes").pathString
+            if property_path in reported:
+                continue
+            self.problems.append(
+                ValidationIssue(
+                    "warning",
+                    "UnreadableProperty",
+                    f"Cannot read the prototypes of PointInstancer {path}: {reason}. A layer authors it as an "
+                    "attribute, which USD cannot read as a relationship, so the instancer and everything under "
+                    "it are left out of the bound.",
+                    layer=layer,
+                    prim_path=path.pathString,
+                    property_path=property_path,
+                ).to_dict()
+            )
 
     def get_stage_bbox(self) -> Optional[BBox]:
         """
@@ -166,6 +238,23 @@ class BBoxCache(LoggerMixin):
             with an included purpose
         """
         return self.compute_world_bbox(self.stage.GetPseudoRoot())
+
+
+def _unreadable_instancers(prim: Usd.Prim) -> List[Tuple[Sdf.Path, str, Optional[str]]]:
+    """The PointInstancers at or under ``prim`` whose ``prototypes`` pxr cannot read.
+
+    Each with pxr's reason and the file holding the spec pxr refused.
+    """
+    found: List[Tuple[Sdf.Path, str, Optional[str]]] = []
+    for part in Usd.PrimRange(prim, Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)):
+        if not part.IsA(UsdGeom.PointInstancer):
+            continue
+        try:
+            UsdGeom.PointInstancer(part).GetPrototypesRel().GetTargets()
+        except Tf.ErrorException as exc:
+            reason, layer = read_failure(exc)
+            found.append((part.GetPath(), reason, layer))
+    return found
 
 
 def bbox_to_dict(bbox: BBox) -> Dict[str, List[float]]:
@@ -231,6 +320,7 @@ def describe_bounds(
         "has_geometry": bbox is not None,
         "included_purposes": list(cache.purposes),
         "time_code": time_code_value(cache.time_code),
+        "warnings": cache.problems,
     }
     if bbox is not None:
         result["bbox"] = {

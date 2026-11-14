@@ -26,7 +26,11 @@ kinds of lock before a call starts:
   run one after the other and the second sees the first's write.
 
 A call waits at most ``server.timeout`` seconds for its locks and otherwise
-fails with ``StageBusy``, so nothing queues forever behind a slow call.
+fails with ``StageBusy``, so nothing queues forever behind a slow call. The
+one exception is housekeeping (``run_between_writes``, which unloads an
+ended MCP session's stages): it runs beside reads, never beside a write,
+and waits as long as it takes, since it must not race a load, reload or
+edit and must not be dropped.
 Python cannot stop a thread inside pxr. A call whose request is cancelled or
 times out on the client keeps running until it finishes, and it holds its
 locks until then, so its stage is never touched mid-call. Later calls on
@@ -90,8 +94,8 @@ class _AccessLock:
             if exclusive:
                 return
 
-    async def acquire(self, exclusive: bool, timeout: float) -> bool:
-        """Wait up to ``timeout`` seconds for the lock.
+    async def acquire(self, exclusive: bool, timeout: Optional[float]) -> bool:
+        """Wait up to ``timeout`` seconds for the lock; None waits as long as it takes.
 
         Returns:
             True once held, False when the wait timed out.
@@ -272,6 +276,45 @@ class USDCallScheduler:
                 )
                 or "the USD backend",
             )
+            raise
+        finally:
+            if future.done():
+                release()
+            else:
+                future.add_done_callback(_release_after(release))
+
+    async def run_between_writes(self, name: str, work: Callable[[], Any]) -> Any:
+        """Run ``work`` on a worker thread beside reads but never beside a write, however long that takes.
+
+        For housekeeping that must not race a load, reload or edit (which
+        hold the backend exclusively) and must not be refused, such as
+        unloading an ended session's stages. It holds the backend shared, as
+        a read does: it waits for a write running or queued before it, but
+        not for slow reads, so it holds up no other session's reads. It
+        never gives up with ``StageBusy``.
+
+        Args:
+            name: What runs, for the log.
+            work: The synchronous pxr work.
+
+        Returns:
+            What ``work`` returned.
+        """
+        await self._access.acquire(False, None)
+        loop = asyncio.get_running_loop()
+
+        def release() -> None:
+            self._access.release(False)
+
+        try:
+            future = loop.run_in_executor(None, work)
+        except BaseException:
+            release()
+            raise
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            _LOGGER.warning("%s was cancelled; it finishes in the background", name)
             raise
         finally:
             if future.done():

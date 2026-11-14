@@ -54,6 +54,10 @@ class PagedList:
         count_maps: Result fields mapping each paged list's name to its
             length (``returned: {"traversable_surfaces": 40, ...}``); restated
             to the lengths kept.
+        keep_keys: Entry fields an entry compacted to fit the budget keeps
+            even when they are over the small-value size: short lists that
+            say what the entry is (a prim's applied API schemas), not its
+            bulk.
     """
 
     fields: Tuple[str, ...]
@@ -62,6 +66,7 @@ class PagedList:
     count_fields: Tuple[str, ...] = ("count", "returned")
     reset_fields: Tuple[str, ...] = ()
     count_maps: Tuple[str, ...] = ()
+    keep_keys: Tuple[str, ...] = ()
 
 
 #: Every paged tool's declaration, by registered tool name.
@@ -82,7 +87,8 @@ PAGED_RESULTS: Dict[str, PagedList] = {
     "list_isaac_physics_objects": PagedList(("rigid_bodies", "colliders", "joints")),
     # Headless USD
     "search_prims": PagedList(("results",), limit_param="limit"),
-    "get_prim_subtree": PagedList(("prims",)),
+    # A prim too large for the page keeps its applied schemas, as get_prim_info does.
+    "get_prim_subtree": PagedList(("prims",), keep_keys=("api_schemas",)),
     # Blender
     "list_blender_scene_objects": PagedList(("objects",), limit_param="max_items"),
     "search_blender_objects": PagedList(("objects",)),

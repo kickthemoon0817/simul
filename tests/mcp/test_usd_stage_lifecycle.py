@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -46,6 +47,15 @@ def _payload(result: Any) -> Dict[str, Any]:
 
 async def _call(client: Client, name: str, **arguments: Any) -> Dict[str, Any]:
     return _payload(await client.call_tool(name, arguments, raise_on_error=False))
+
+
+async def _until(condition, timeout: float = 10.0) -> None:
+    """Wait for ``condition()`` to hold, polling the event loop."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        assert loop.time() < deadline, "timed out waiting"
+        await asyncio.sleep(0.01)
 
 
 def _run(server: SimulMCPServer, steps) -> List[Dict[str, Any]]:
@@ -182,6 +192,8 @@ def test_an_ended_session_releases_its_stages(
                     await _call(
                         client, "create_prim", stage_id=stage_id, prim_path="/Robot/Extra", prim_type="Xform"
                     )
+        # The release runs through the USD scheduler once the session's end is seen.
+        await _until(lambda: not server.headless_adapter._session._stage_records)
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(_main())
@@ -431,6 +443,189 @@ def test_a_session_that_ends_during_a_load_leaves_no_stage(
 
     session = server.headless_adapter._session
     assert session._stage_records == {} and session._active_stages == {}
+
+
+_SUB_OLD = '#usda 1.0\ndef Xform "World"\n{\n    def Cube "FromSub"\n    {\n        double size = 1\n    }\n}\n'
+_SUB_NEW = (
+    '#usda 1.0\ndef Xform "World"\n{\n    def Cube "FromSub" (\n'
+    '        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]\n    )\n'
+    "    {\n        double size = 2\n        float physics:mass = -1\n    }\n}\n"
+)
+
+
+def test_a_session_ending_during_another_sessions_load_waits_for_it(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """USD round-3 B2 and m6: the session-end release ran on the event loop, beside pxr work.
+
+    Session A's stage composes sub.usda, which then changes on disk. Session
+    B's load of another file composing sub.usda is held inside composition
+    while A ends. A's release used to run at once, on the event loop, and
+    dropped sub.usda's stamp while B's unregistered stage held the old copy:
+    B's load took that copy for the file it had just read, and so did every
+    later load, validation and export. The release now waits for B's load.
+    """
+    import threading
+
+    from simul.adapters.headless_usd import HeadlessUSDSession
+    from simul.usd import stage_files
+
+    sub = sandbox / "sub.usda"
+    sub.write_text(_SUB_OLD)
+    for name in ("a", "b"):
+        (sandbox / f"{name}.usda").write_text("#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\n")
+    server = _server(sandbox)
+    session = server.headless_adapter._session
+    entered, proceed = threading.Event(), threading.Event()
+    compose = stage_files.compose_stage
+    release_owner = HeadlessUSDSession.release_owner
+    releases: List[Any] = []
+
+    def gated_compose(root: Any) -> Any:
+        stage = compose(root)
+        if root.realPath.endswith("b.usda"):
+            entered.set()
+            proceed.wait(10)
+        return stage
+
+    def tracked_release(self: HeadlessUSDSession, owner: Any) -> List[str]:
+        on_loop = threading.current_thread() is threading.main_thread()
+        releases.append({"owner": owner, "on_event_loop": on_loop, "registered": len(self._stage_records)})
+        return release_owner(self, owner)
+
+    monkeypatch.setattr(stage_files, "compose_stage", gated_compose)
+    monkeypatch.setattr(HeadlessUSDSession, "release_owner", tracked_release)
+
+    async def _main() -> Dict[str, Any]:
+        first = Client(server.mcp, mode="legacy")
+        await first.__aenter__()
+        second = Client(server.mcp, mode="legacy")
+        await second.__aenter__()
+        theirs = await _call(first, "load_usd_file", file_path=str(sandbox / "a.usda"))
+        sub.write_text(_SUB_NEW)
+        later = sub.stat().st_mtime_ns + 2_000_000_000
+        os.utime(sub, ns=(later, later))
+        loading = asyncio.create_task(_call(second, "load_usd_file", file_path=str(sandbox / "b.usda")))
+        await _until(entered.is_set)
+        await first.__aexit__(None, None, None)
+        await _until(lambda: len(server._watched_sessions) == 1)
+        await asyncio.sleep(0.2)
+        held_during_load = theirs["stage_id"] in session._stage_records
+        proceed.set()
+        mine = await loading
+        await _until(lambda: theirs["stage_id"] not in session._stage_records)
+        info = await _call(
+            second, "get_prim_info", stage_id=mine["stage_id"], prim_path="/World/FromSub", attribute_filter=["size"]
+        )
+        listed = await _call(second, "list_usd_stages")
+        validated = await _call(second, "validate_usd_file", file_path=str(sandbox / "a.usda"))
+        await second.__aexit__(None, None, None)
+        return {
+            "held_during_load": held_during_load,
+            "size": info["attributes"]["size"]["value"],
+            "changed": [stage["changed_on_disk"] for stage in listed["stages"]],
+            "validated": validated,
+        }
+
+    outcome = asyncio.run(_main())
+
+    assert outcome["held_during_load"] is True
+    assert releases[0]["on_event_loop"] is False
+    assert releases[0]["registered"] == 2  # B's load registered its stage before A's release ran
+    assert outcome["size"] == 2.0
+    assert outcome["changed"] == [[]]
+    assert outcome["validated"]["is_valid"] is False
+    assert "MassInvalidValues" in [issue["code"] for issue in outcome["validated"]["issues"]]
+
+
+def test_a_session_end_does_not_hold_other_sessions_behind_a_slow_read(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #363: the release took the backend exclusively, so every later call waited for the slowest read.
+
+    A runs a slow summary, B (which holds a stage) disconnects, and C's quick
+    read must answer while A's summary is still running, with server.timeout
+    at 1 s; it used to get StageBusy. B's stage is still released.
+    """
+    import threading
+
+    from simul.adapters.headless_usd import HeadlessUSDSession
+
+    base = Settings()
+    settings = base.model_copy(
+        update={
+            "security": base.security.model_copy(
+                update={"allowed_paths": [str(sandbox)], "rate_limiting_enabled": False}
+            ),
+            "server": base.server.model_copy(update={"timeout": 1}),
+        }
+    )
+    server = SimulMCPServer(settings, backends={"usd"})
+    session = server.headless_adapter._session
+    entered, proceed = threading.Event(), threading.Event()
+    summarize = HeadlessUSDSession.summarize_stage
+
+    def slow_summary(self: HeadlessUSDSession, *args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        proceed.wait(10)
+        return summarize(self, *args, **kwargs)
+
+    monkeypatch.setattr(HeadlessUSDSession, "summarize_stage", slow_summary)
+    robot = str(sandbox / "robot.usda")
+
+    async def _main() -> Dict[str, Any]:
+        clients = [Client(server.mcp, mode="legacy") for _ in range(3)]
+        for client in clients:
+            await client.__aenter__()
+        first, second, third = clients
+        mine = (await _call(first, "load_usd_file", file_path=robot))["stage_id"]
+        theirs = (await _call(second, "load_usd_file", file_path=robot))["stage_id"]
+        other = (await _call(third, "load_usd_file", file_path=robot))["stage_id"]
+        summary = asyncio.create_task(_call(first, "summarize_scene", stage_id=mine))
+        await _until(entered.is_set)
+        await second.__aexit__(None, None, None)
+        await _until(lambda: len(server._watched_sessions) == 2)
+        await _until(lambda: theirs not in session._stage_records)
+        quick = await _call(third, "get_prim_info", stage_id=other, prim_path="/Robot/link")
+        summary_running = not summary.done()
+        proceed.set()
+        summarized = await summary
+        for client in (first, third):
+            await client.__aexit__(None, None, None)
+        return {"quick": quick, "summary_running": summary_running, "summarized": summarized}
+
+    outcome = asyncio.run(_main())
+
+    assert outcome["quick"]["success"] is True, outcome["quick"]
+    assert outcome["summary_running"] is True
+    assert outcome["summarized"]["success"] is True
+
+
+def test_a_session_that_loaded_nothing_queues_no_release(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from simul.adapters.headless_usd import HeadlessUSDSession
+
+    server = _server(sandbox)
+    released: List[Any] = []
+    release_owner = HeadlessUSDSession.release_owner
+
+    def tracked(self: HeadlessUSDSession, owner: Any) -> List[str]:
+        released.append(owner)
+        return release_owner(self, owner)
+
+    monkeypatch.setattr(HeadlessUSDSession, "release_owner", tracked)
+
+    async def _main() -> None:
+        async with Client(server.mcp, mode="legacy") as idle:
+            await _call(idle, "list_usd_stages")
+        async with Client(server.mcp, mode="legacy") as busy:
+            await _call(busy, "load_usd_file", file_path=str(sandbox / "robot.usda"))
+        await _until(lambda: len(released) == 1)
+        await asyncio.sleep(0.1)
+
+    asyncio.run(_main())
+
+    assert len(released) == 1  # only the session that held a stage
+    assert server.headless_adapter._session._stage_records == {}
 
 
 def test_a_relative_export_path_resolves_against_relative_path_base(tmp_path: Path) -> None:

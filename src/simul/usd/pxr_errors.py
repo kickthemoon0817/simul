@@ -19,15 +19,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ._pxr import Tf, Usd, UsdShade
 from .stage_files import public_identifier
-from .validation import ValidationIssue
+from .validation import SPEC_REFERENCE, ValidationIssue
 
 _TF_ERROR = re.compile(
     r"Error in '[^']*' at line \d+ in file .*? : '(?P<message>.*?)'(?=\s*(?:Error in|$))",
     re.S,
 )
-
-# A spec pxr names in a message, ``@<layer identifier>@</Prim.property>``.
-_SPEC_REFERENCE = re.compile(r"@(?P<layer>[^@\s]*)@<(?P<path>[^>]*)>")
 
 # Warning code for a property a read could not resolve.
 UNREADABLE_PROPERTY = "UnreadableProperty"
@@ -73,7 +70,7 @@ def is_pxr_error(exc: BaseException) -> bool:
     return isinstance(exc, Tf.ErrorException)
 
 
-def _read_failure(exc: BaseException) -> Tuple[str, Optional[str]]:
+def read_failure(exc: BaseException) -> Tuple[str, Optional[str]]:
     """pxr's reason for a failed read, and the file of the first spec it names.
 
     pxr names a spec as ``@<layer identifier>@</Prim.property>``; the reason
@@ -83,9 +80,9 @@ def _read_failure(exc: BaseException) -> Tuple[str, Optional[str]]:
     identifier (see :func:`tf_error_reason`).
     """
     reason = tf_error_reason(exc)
-    match = _SPEC_REFERENCE.search(reason)
+    match = SPEC_REFERENCE.search(reason)
     layer = match.group("layer") if match else None
-    return _SPEC_REFERENCE.sub(lambda found: found.group("path"), reason), layer or None
+    return SPEC_REFERENCE.sub(lambda found: found.group("path"), reason), layer or None
 
 
 def unreadable_issue(
@@ -120,7 +117,7 @@ def relationship_targets(rel: Usd.Relationship, problems: List[Dict[str, Any]]) 
     try:
         return [target.pathString for target in rel.GetTargets()]
     except Tf.ErrorException as exc:
-        reason, layer = _read_failure(exc)
+        reason, layer = read_failure(exc)
         problems.append(
             unreadable_issue(
                 rel.GetPrim(),
@@ -189,7 +186,7 @@ def bound_material_path(
         fallback = _nearest_readable_binding(prim, purpose)
         if problems is not None:
             which = f"{purpose} material binding" if purpose else "material binding"
-            reason, layer = _read_failure(exc)
+            reason, layer = read_failure(exc)
             outcome = (
                 f"the nearest binding pxr can read, {fallback}, is reported"
                 if fallback

@@ -44,7 +44,7 @@ from pxr import Ar
 
 from ..utils.paths import PathPolicy, SandboxDenied
 from ._pxr import Sdf, Tf, Usd, UsdGeom
-from .stage_files import public_identifier
+from .stage_files import layers_in_memory, public_identifier
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import USDConfig
@@ -64,6 +64,8 @@ _PXR_NAMESPACE = re.compile(r"pxrInternal_v\d+(?:_\d+)*__pxrReserved__::")
 _TEXT_POSITION = re.compile(r"^(?P<file>.+?):(?P<line>\d+):(?P<column>\d+):\s*(?P<message>.*)$", re.S)
 _ASSET_IN_MESSAGE = re.compile(r"@([^@]+)@")
 _QUOTED = re.compile(r"'([^']+)'")
+# A spec pxr names in a message, ``@<layer identifier>@</Prim.property>``.
+SPEC_REFERENCE = re.compile(r"@(?P<layer>[^@\s]*)@<(?P<path>[^>]*)>")
 
 
 @dataclass(frozen=True)
@@ -740,6 +742,75 @@ def _site_location(site: Any) -> Dict[str, Optional[str]]:
     return location
 
 
+def _validator_name(validator: Any) -> str:
+    try:
+        return str(validator.GetMetadata().name)
+    except Exception:  # pragma: no cover - every loaded validator has metadata
+        return "an unnamed pxr validator"
+
+
+def _validator_failure(name: str, exc: BaseException) -> ValidationIssue:
+    """The error for a pxr validator that raised instead of reporting.
+
+    Its checks did not run, so the file cannot be vouched for; pxr's reason
+    usually names a spec it could not read (``@layer@</Prim.property>``), which
+    becomes the issue's location.
+    """
+    reasons = list(dict.fromkeys(public_identifier(message) for message in tf_error_messages(exc)))
+    reason = "; ".join(reasons) or type(exc).__name__
+    location: Dict[str, Optional[str]] = {}
+    spec = SPEC_REFERENCE.search(reason)
+    if spec is not None:
+        location["layer"] = spec.group("layer") or None
+        try:
+            path = Sdf.Path(spec.group("path"))
+        except Exception:  # pragma: no cover - pxr quotes valid paths
+            path = Sdf.Path()
+        if path.IsPropertyPath():
+            location["prim_path"] = path.GetPrimPath().pathString
+            location["property_path"] = path.pathString
+        elif path.IsPrimPath():
+            location["prim_path"] = path.pathString
+        reason = SPEC_REFERENCE.sub(lambda found: found.group("path"), reason)
+    return ValidationIssue(
+        ERROR,
+        "ValidatorFailed",
+        f"pxr's validator {name} stopped with an error, so its checks did not run on this file: "
+        f"{reason}. The file cannot be vouched for until what pxr cannot read is fixed.",
+        source=name,
+        **location,
+    )
+
+
+def _run_validators(
+    UsdValidation: Any, validators: Any, stage: "Usd.Stage"
+) -> Tuple[List[Any], List[ValidationIssue]]:
+    """Run pxr's validators over ``stage``; return their findings and an error per validator that raised.
+
+    One ``ValidationContext`` runs them all in one pass over the stage, but it
+    raises when any one validator raises, and every finding is lost with
+    it: one property a validator cannot read (``physics:body0`` authored as
+    an attribute) used to hide a negative mass and a dangling joint. So when
+    the shared pass raises, each validator runs again in a context of its own:
+    every finding of the others is kept, and each validator that raises is an
+    error naming it. The shared pass is the common case and costs one walk
+    of the stage; one context per validator costs about twice as much, and
+    is paid only for a file that makes a validator raise.
+    """
+    try:
+        return list(UsdValidation.ValidationContext(validators).Validate(stage)), []
+    except Exception:
+        pass
+    errors: List[Any] = []
+    failures: List[ValidationIssue] = []
+    for validator in validators:
+        try:
+            errors.extend(UsdValidation.ValidationContext([validator]).Validate(stage))
+        except Exception as exc:
+            failures.append(_validator_failure(_validator_name(validator), exc))
+    return errors, failures
+
+
 def compliance_issues(
     stage: "Usd.Stage",
     *,
@@ -786,15 +857,8 @@ def compliance_issues(
     # Overlapping validators (the root-package and every-package usdz rules)
     # report the same finding; keep one.
     seen: Set[Tuple[str, str, Optional[str]]] = set()
-    issues: List[ValidationIssue] = []
-    try:
-        errors = UsdValidation.ValidationContext(validators).Validate(stage)
-    except Exception as exc:
-        message = "; ".join(tf_error_messages(exc)) or str(exc)
-        return (
-            [ValidationIssue(WARNING, "ComplianceCheckFailed", f"pxr's validators raised: {message}")],
-            list(names),
-        )
+    errors, failures = _run_validators(UsdValidation, validators, stage)
+    issues: List[ValidationIssue] = list(failures)
     for error in errors:
         if error.HasNoError():
             continue
@@ -926,18 +990,6 @@ def _file_size(file_path: str) -> int:
     return info.st_size if stat.S_ISREG(info.st_mode) else 0
 
 
-def _layers_in_memory() -> Set[str]:
-    """Identifiers of the file layers pxr holds in this process now (for loaded stages)."""
-    identifiers: Set[str] = set()
-    for layer in Sdf.Layer.GetLoadedLayers():
-        try:
-            if layer and not layer.anonymous:
-                identifiers.add(layer.identifier)
-        except Exception:
-            continue  # released while the list was read
-    return identifiers
-
-
 class _ReadFromDisk(Exception):
     """The check used an in-memory layer that may be older than its file."""
 
@@ -987,7 +1039,7 @@ def validate_usd_file(
         TimeoutError: The fresh process took longer than
             ``usd.validation_timeout_seconds``.
     """
-    in_memory = _layers_in_memory()
+    in_memory = layers_in_memory()
 
     def stale(layers: Iterable[Any]) -> List[str]:
         return [
