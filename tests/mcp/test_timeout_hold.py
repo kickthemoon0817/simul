@@ -38,6 +38,7 @@ from simul.mcp import backends as backends_module
 from simul.mcp import server as server_module
 from simul.mcp.usage_tracker import ToolUsageTracker
 from tests.fakes import FakeFastMCP
+from tests.tcp_fakes import FakeTcpServer
 
 
 class _SerialKit:
@@ -51,16 +52,13 @@ class _SerialKit:
         self.ran: List[Tuple[str, float, float]] = []
         self.port = 0
         self._main_thread = asyncio.Lock()
-        self._server: Optional[asyncio.AbstractServer] = None
+        self._server = FakeTcpServer(self._handle)
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
-        self.port = self._server.sockets[0].getsockname()[1]
+        self.port = await self._server.start()
 
     async def stop(self) -> None:
-        assert self._server is not None
-        self._server.close()
-        await self._server.wait_closed()
+        await self._server.stop()
 
     def scripts(self) -> List[str]:
         return [code for code, _start, _end in self.ran]
@@ -176,16 +174,15 @@ def test_python_server_s_timeout_reply_is_tracked() -> None:
         writer.close()
 
     async def scenario() -> Tuple[Any, Optional[UnfinishedRequest], bool]:
-        server = await asyncio.start_server(handle, "127.0.0.1", 0)
-        port = server.sockets[0].getsockname()[1]
+        server = FakeTcpServer(handle)
+        port = await server.start()
         client = IsaacSocketClient(port=port, timeout_seconds=2.0, socket_protocol="python_server")
         try:
             result = await client.execute("busy()")
             tracked = client.unfinished_request
             return result, tracked, await client.wait_until_idle(2.0)
         finally:
-            server.close()
-            await server.wait_closed()
+            await server.stop()
 
     result, tracked, idle = asyncio.run(scenario())
 
@@ -202,16 +199,13 @@ class _Bridge:
         self.request_timeout_reply = request_timeout_reply
         self.actions: List[str] = []
         self.port = 0
-        self._server: Optional[asyncio.AbstractServer] = None
+        self._server = FakeTcpServer(self._handle)
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
-        self.port = self._server.sockets[0].getsockname()[1]
+        self.port = await self._server.start()
 
     async def stop(self) -> None:
-        assert self._server is not None
-        self._server.close()
-        await self._server.wait_closed()
+        await self._server.stop()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         (size,) = struct.unpack(">I", await reader.readexactly(4))
