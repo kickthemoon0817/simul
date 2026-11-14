@@ -47,7 +47,19 @@ refuses one.
 The source travels base64-encoded: UE treats an ``ExecuteFile`` command whose
 first ``.py`` is followed by whitespace as the path of a file to run, and the
 encoding (and the runner, which never spells it) keeps that from ever
-matching.
+matching. A command sent past the runner carries its source as it is, so a
+value it embeds that names a ``.py`` file (a tag "see setup.py first") made
+Unreal look for a file of that name and run nothing. ``isolate_request``
+therefore rewrites every request that runs Python, a call of the Python
+library on its own or inside a ``/remote/batch``, and ``unisolated_commands``
+names any ``PythonCommand`` a request would still send outside the runner,
+whatever its route or object, so that the session refuses to send it.
+
+While the call runs, Unreal's ``sys.stdout`` and ``sys.stderr`` are swapped
+for streams that make the same log entries without writing the log to disk
+after every line, which cost about 11 ms a line; the log is written once, when
+the call ends. A last line the script leaves unfinished is logged then too,
+in this call's output rather than the next one's.
 """
 
 from __future__ import annotations
@@ -55,7 +67,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 #: The module ``run`` lives in, in the editor's ``sys.modules``.
 RUNNER_MODULE = "_simul_unreal_runner_v1"
@@ -68,7 +80,83 @@ RUNNER_MODULE = "_simul_unreal_runner_v1"
 #: run itself: this is the execution path, not a new one, and the same
 #: script-execution policy gates what reaches it.
 RUNNER_SOURCE = '''
-import base64, builtins, itertools, sys, types
+import base64, builtins, io, itertools, sys, types
+
+class _Log(io.BufferedIOBase):
+    # What Unreal's sys.stdout and sys.stderr write to (unreal_core._Logger):
+    # each write is one log entry. Unreal's flush, log_flush, writes the whole
+    # log to disk (GLog->Flush), and its streams' line buffering ran it after
+    # every line, about 11 ms a line on UE 5.7.4, so a script printing
+    # thousands of lines held the editor for minutes. Here flush does nothing
+    # while the call runs, and run flushes the log once, when it ends; past
+    # the call (a stream the script wrapped around this one stays) it is
+    # Unreal's flush again.
+    def __init__(self, log_func, flush_func=None):
+        self.log_func = log_func
+        self.flush_func = flush_func
+        self.wrote = False
+        self.active = True
+    def writable(self):
+        return True
+    def write(self, data):
+        self.log_func(bytes(data).decode("utf-8"))
+        self.wrote = True
+        return len(data)
+    def flush(self):
+        if not self.active and callable(self.flush_func):
+            self.flush_func()
+
+def _swap_streams(swapped):
+    # Unreal's own streams only, each for one that makes the same entries in
+    # the same order (line-buffered text over the same log function); a
+    # stream anything else installed stays as it is. Never raises: the
+    # script's own failure, or none, is what the call reports.
+    for name in ("stdout", "stderr"):
+        try:
+            stream = getattr(sys, name, None)
+            buffer = getattr(stream, "buffer", None)
+            log_func = getattr(buffer, "log_func", None)
+            if isinstance(stream, io.TextIOWrapper) and callable(log_func):
+                log = _Log(log_func, getattr(buffer, "flush_func", None))
+                unflushed = io.TextIOWrapper(log, encoding="utf-8", line_buffering=True,
+                                             write_through=stream.write_through)
+                swapped.append((name, stream, unflushed, log))
+                setattr(sys, name, unflushed)
+        except Exception:
+            pass
+
+def _restore_streams(swapped):
+    # Never raises, whatever the script did to the streams: a script that
+    # detached sys.stdout (sys.stdout = io.TextIOWrapper(sys.stdout.detach()))
+    # leaves the swapped stream without a buffer, and writes through a stream
+    # of its own to the same _Log, which records what was written.
+    wrote = None
+    for name, stream, unflushed, log in swapped:
+        try:
+            current = getattr(sys, name, None)
+            for own in (unflushed, current):
+                try:
+                    # A last line the script left unfinished, in this
+                    # stream or the one it wrapped around the log, is this
+                    # call's output.
+                    if own is unflushed or getattr(own, "buffer", None) is log:
+                        own.flush()
+                except Exception:
+                    pass
+            if current is not unflushed and getattr(current, "buffer", None) is log:
+                log.active = False  # the script's stream over it outlives the call
+            if log.wrote:
+                wrote = stream
+            # A stream the script installed itself stays.
+            if current is unflushed:
+                setattr(sys, name, stream)
+        except Exception:
+            pass
+    if wrote is not None:
+        try:
+            wrote.flush()  # Unreal's log to disk, once
+        except Exception:
+            pass
 
 def _source(encoded):
     # utf-8-sig: a file saved as "UTF-8 with BOM" starts with U+FEFF, which
@@ -144,7 +232,9 @@ def _keep_unsafe(namespace, budget=10000):
 def run(mode, code, guard=""):
     _release_kept()
     namespace = _namespace()
+    streams = []
     try:
+        _swap_streams(streams)
         if guard:
             exec(compile(_source(guard), "<string>", "exec"), namespace)
         if mode == "eval":
@@ -159,6 +249,7 @@ def run(mode, code, guard=""):
             if sys.displayhook is _display:
                 sys.displayhook = displayhook
     finally:
+        _restore_streams(streams)
         try:
             _keep_unsafe(namespace)
         except Exception:
@@ -222,6 +313,35 @@ def _refuse_python_console(body: Dict[str, Any], function_key: str) -> None:
         )
 
 
+#: The route that calls a function on an object, the Python library's included.
+OBJECT_CALL_ROUTE = "/remote/object/call"
+#: The route that runs a list of Remote Control requests in one.
+BATCH_ROUTE = "/remote/batch"
+#: A Remote Control preset's exposed function: its body's ``Parameters`` are
+#: the function's, so a preset exposing ``ExecutePythonCommandEx`` takes a
+#: ``PythonCommand`` there, and the route does not say which function it is.
+_PRESET_FUNCTION = re.compile(r"(/remote/preset/[^/]+/function/[^/]+)(?:/.*)?")
+
+
+def remote_route(url: Any) -> str:
+    """The Remote Control route a request URL reaches, as every check here compares routes.
+
+    No query, no trailing slash, lower case (Unreal's router may match routes
+    ignoring case); and a path below a route is that route: Unreal's HTTP
+    router hands a request to the longest route its path starts with, and the
+    object call and batch handlers never look at what follows, so
+    ``/remote/object/call/x`` runs as an object call and ``/remote/batch/x``
+    as a batch (FHttpRouter, UE 5.7). A preset function's path is folded the
+    same way.
+    """
+    route = str(url).split("?", 1)[0].rstrip("/").lower()
+    for prefix in (OBJECT_CALL_ROUTE, BATCH_ROUTE):
+        if route.startswith(prefix + "/"):
+            return prefix
+    preset = _PRESET_FUNCTION.fullmatch(route)
+    return preset[1] if preset is not None else route
+
+
 def python_command(path: str, body: Optional[Dict[str, Any]]) -> Optional[Tuple[str, str, str]]:
     """What a request runs, when it runs Python source in the editor.
 
@@ -239,7 +359,7 @@ def python_command(path: str, body: Optional[Dict[str, Any]]) -> Optional[Tuple[
             is an ``ExecuteConsoleCommand`` of a ``py`` command, which no
             runner can isolate.
     """
-    if path.rstrip("/").lower() != "/remote/object/call" or not isinstance(body, dict):
+    if remote_route(path) != OBJECT_CALL_ROUTE or not isinstance(body, dict):
         return None
     object_key, function_key = _key(body, "objectPath"), _key(body, "functionName")
     if object_key is None or function_key is None:
@@ -376,3 +496,101 @@ def isolate(body: Dict[str, Any], guard: str = "") -> Dict[str, Any]:
     if mode_key is not None or mode == "eval":
         parameters[mode_key or "ExecutionMode"] = "EvaluateStatement" if mode == "eval" else "ExecuteFile"
     return {**body, parameters_key: parameters}
+
+
+def _batch_parts(body: Any) -> List[Dict[str, Any]]:
+    """The requests of a ``/remote/batch`` body, each a dict; anything else is left out."""
+    requests_key = _key(body, "Requests") if isinstance(body, dict) else None
+    parts = body.get(requests_key) if requests_key is not None else None
+    return [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
+
+
+def isolate_request(path: str, body: Optional[Dict[str, Any]], guard: str = "") -> Optional[Dict[str, Any]]:
+    """A request rewritten so that every Python command it carries runs in the runner.
+
+    A ``/remote/object/call`` of the Python library is ``isolate``'d with
+    ``guard``. In a ``/remote/batch`` each part that is one is ``isolate``'d
+    without it (the session checks the attachment before the batch). Any
+    other request comes back as it is.
+
+    Args:
+        path: The request's route.
+        body: The request's body.
+        guard: Source to run before a call's code, in the same namespace.
+
+    Raises:
+        ValueError: The request, or a part of the batch, is one
+            ``python_command`` refuses.
+    """
+    if python_command(path, body) is not None:
+        return isolate(body or {}, guard)
+    if remote_route(path) != BATCH_ROUTE or not isinstance(body, dict):
+        return body
+    requests_key = _key(body, "Requests")
+    if requests_key is None or not isinstance(body[requests_key], list):
+        return body
+    parts: List[Any] = []
+    for index, part in enumerate(body[requests_key]):
+        if isinstance(part, dict):
+            url_key, body_key = _key(part, "URL"), _key(part, "Body")
+            url = part.get(url_key) if url_key is not None else None
+            inner = part.get(body_key) if body_key is not None else None
+            try:
+                runs_python = python_command(remote_route(url or ""), inner) is not None
+            except ValueError as exc:
+                raise ValueError(f"operation {index}: {exc}") from exc
+            if runs_python and body_key is not None and isinstance(inner, dict):
+                part = {**part, body_key: isolate(inner)}
+        parts.append(part)
+    return {**body, requests_key: parts}
+
+
+def _call_commands(body: Any) -> List[str]:
+    """Every string a function call's body (an object call's or a preset's) passes as ``PythonCommand``."""
+    parameters_key = _key(body, "parameters") if isinstance(body, dict) else None
+    parameters = body.get(parameters_key) if parameters_key is not None else None
+    if not isinstance(parameters, dict):
+        return []
+    command_key = _key(parameters, "PythonCommand")
+    command = parameters.get(command_key) if command_key is not None else None
+    return [command] if isinstance(command, str) else []
+
+
+def _calls_python_by_name(route: str) -> bool:
+    """Whether a route calls a function with the parameters its body names: an object call or a preset function."""
+    return route == OBJECT_CALL_ROUTE or _PRESET_FUNCTION.fullmatch(route) is not None
+
+
+def unisolated_commands(path: str, body: Optional[Dict[str, Any]], _depth: int = 0) -> List[str]:
+    """The ``PythonCommand`` values a request would send outside the runner.
+
+    Every ``/remote/object/call`` and every Remote Control preset function
+    call (``/remote/preset/<preset>/function/<function>``), on its own or in
+    a ``/remote/batch`` (a batch inside a batch too, which Unreal runs),
+    whose parameters pass a ``PythonCommand`` that is not a
+    ``runner_command``, whatever object and function it names: a command
+    ``python_command`` does not recognise is still one Remote Control could
+    hand to Python. Routes are compared as ``remote_route`` folds them, so a
+    path below one of these is that route. Other routes pass no function
+    parameters.
+
+    Args:
+        path: The request's route.
+        body: The request's body, as it is about to be sent.
+
+    Returns:
+        The offending commands, and a note standing for one in a batch nested
+        deeper than this looks; empty when every one runs in the runner.
+    """
+    route = remote_route(path)
+    if _calls_python_by_name(route):
+        return [command for command in _call_commands(body) if unwrap_command(command) is None]
+    if route != BATCH_ROUTE or _depth > 8:
+        return [] if route != BATCH_ROUTE else ["a batch nested more than 8 deep"]
+    return [
+        command
+        for part in _batch_parts(body)
+        for command in unisolated_commands(
+            str(part.get(_key(part, "URL") or "URL") or ""), part.get(_key(part, "Body") or "Body"), _depth + 1
+        )
+    ]

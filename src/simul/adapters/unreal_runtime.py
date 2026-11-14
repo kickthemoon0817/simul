@@ -33,10 +33,7 @@ from ..utils.asset_references import (
     interchange_outside_references,
 )
 from ..utils.paths import PathPolicy, SandboxDenied
-from ..utils.regex_guard import UNREAL_TAG_LENGTH, RegexRefused
-from ..utils.regex_guard import (
-    exponential_regex_construct as _exponential_regex_construct,
-)
+from ..utils.regex_guard import UNREAL_TAG_LENGTH, name_searcher
 from ..utils.script_result import apply_script_success
 from ._unreal_errors import (
     CAMERA_NOT_APPLIED,
@@ -97,7 +94,15 @@ from ._unreal_mesh_scripts import edge_selection as parse_edge_selection
 from ._unreal_mesh_scripts import face_selection as parse_face_selection
 from ._unreal_mesh_scripts import game_asset_path, invalid_choice, mesh_script, primitive_dimensions, refusal
 from ._unreal_procedural import new_generation, plan_scene
-from ._unreal_python import isolate, python_command
+from ._unreal_python import (
+    BATCH_ROUTE,
+    PYTHON_LIBRARY,
+    isolate,
+    isolate_request,
+    python_command,
+    remote_route,
+    unisolated_commands,
+)
 from ._unreal_scripts import (
     ACTOR_COMPONENTS,
     ACTOR_EXISTS,
@@ -119,6 +124,7 @@ from ._unreal_scripts import (
     ENGINE_METADATA,
     FIND_ACTORS_BY_TAG,
     FOCUS_ACTOR,
+    GRAPH_COMPONENTS,
     INCOMPATIBLE_BODY,
     INFO_CHILDREN,
     INTERCHANGE_INFO,
@@ -154,6 +160,7 @@ from ._unreal_scripts import (
     MEASURED_SHOT,
     in_function,
     pie_refusal,
+    regex_searcher_helpers,
 )
 
 #: ``ExecutionMode`` values UE's ``PythonScriptLibrary.ExecutePythonCommandEx``
@@ -498,6 +505,15 @@ PAGE_BUDGET_BYTES = 30_000
 _SCREENSHOT_SUBDIRS = ("MacEditor", "WindowsEditor", "LinuxEditor", "Mac", "Windows", "Linux")
 # Interval between screenshot polls; each poll is one cheap Remote Control call.
 _CAPTURE_POLL_SECONDS = 0.1
+#: Seconds a viewport capture waits for its file: this, plus
+#: ``_CAPTURE_SECONDS_PER_MEGAPIXEL`` for each million pixels. Rendering a
+#: HighResShot holds the editor's game thread, and a JPEG is converted inside a
+#: poll. A headless UE 5.7.4 editor on an Apple silicon Mac took 5.6 s for an
+#: 8192x8192 PNG (9.6 s as JPEG) and 24 s for a 16384x16384 one (30 s as
+#: JPEG); with a fixed 15 s the largest went past the deadline and Unreal wrote
+#: the file minutes after the call failed.
+_CAPTURE_BASE_SECONDS = 15.0
+_CAPTURE_SECONDS_PER_MEGAPIXEL = 0.25
 # Bytes per capture_to_file transfer call. Measured on UE 5.7: Remote Control
 # returned 16 MiB script output intact; 1-2 MiB chunks had the best
 # throughput (~115 ms per MiB vs ~255 ms per MiB at 128 KiB).
@@ -650,6 +666,35 @@ def _world_partition_warning(result: Dict[str, Any]) -> Optional[str]:
         "loaded in the editor, so this reply leaves them out. Load a region, or every actor, with "
         "load_unreal_world_partition_actors (CLI: simul unreal wp-load)."
     )
+
+
+def capture_deadline(resolution: Optional[Tuple[int, int]]) -> float:
+    """Seconds a viewport capture of ``resolution`` waits for its file (None: the viewport's own size)."""
+    pixels = resolution[0] * resolution[1] if resolution is not None else 0
+    return _CAPTURE_BASE_SECONDS + _CAPTURE_SECONDS_PER_MEGAPIXEL * pixels / 1_000_000
+
+
+def capture_late_error(resolution: Optional[Tuple[int, int]], seconds: float, jpeg: bool) -> str:
+    """``capture_viewport``'s error when Unreal wrote no complete shot within ``seconds``."""
+    size = f"{resolution[0]}x{resolution[1]} " if resolution is not None else ""
+    return (
+        f"Unreal did not produce a nonempty {size}screenshot within the capture deadline of {seconds:.0f} s "
+        f"({_CAPTURE_BASE_SECONDS:g} s plus {_CAPTURE_SECONDS_PER_MEGAPIXEL:g} s per megapixel). Unreal cannot "
+        "cancel the shot, so it may still write it: to details.pending_path when it has begun to, otherwise as the "
+        "next HighresScreenshotNNNNN.png (or this call's SimulShot_ file) in details.pending_dir"
+        + (", as a PNG: once the call has given up, no poll of it converts the shot to JPEG" if jpeg else "")
+        + ". Capture at a lower resolution, or check the editor before capturing again."
+    )
+
+
+def _capped_component_nodes(node: Any) -> List[Dict[str, Any]]:
+    """The nodes of a scene graph tree whose component list was cut (``components_truncated``), in tree order."""
+    if not isinstance(node, dict):
+        return []
+    found = [node] if node.get("components_truncated") else []
+    for child in node.get("children") or []:
+        found.extend(_capped_component_nodes(child))
+    return found
 
 
 #: Prints whether Play In Editor runs, as ``{"pie_active": bool}``.
@@ -1252,7 +1297,8 @@ def decide(args):
     registry = sys.modules.get({PROPERTY_TRANSACTIONS!r})
     entry = registry.open.pop(args["token"], None) if registry is not None else None
     if entry is None:
-        return {{"applied": None, "restored": False, "closed": None, "error": "the write was not prepared"}}
+        return {{"applied": None, "restored": False, "closed": None, "prepared": False,
+                "error": "the write was not prepared"}}
     obj = unreal.find_object(None, entry["path"])
     result = {{"applied": None, "restored": False, "closed": None}}
     try:
@@ -1321,20 +1367,19 @@ def _read_back(answer: Dict[str, Any], name: str) -> Dict[str, Any]:
 
 
 def _python_call(script: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """A ``/remote/object/call`` body that runs ``script`` in a dict of its own.
+    """A ``/remote/object/call`` body that runs ``script``, after ``args = {...}``, on the Python library.
 
-    For the operations ``set_actor_property`` batches: the dict holds the
-    script's names, and nothing is left in the editor's shared console dict.
+    For the operations ``set_actor_property`` batches. Like every Python call
+    the session sends, on its own or in a ``/remote/batch``, it runs in the
+    runner (``_unreal_python.isolate_request``): in a namespace of its own,
+    with its source base64-encoded, so a value it embeds that names a ``.py``
+    file is never read by Unreal as the path of a file to run.
     """
     source = (f"args = {args!r}\n" if args is not None else "") + script
     return {
-        "objectPath": "/Script/PythonScriptPlugin.Default__PythonScriptLibrary",
+        "objectPath": PYTHON_LIBRARY,
         "functionName": "ExecutePythonCommandEx",
-        "parameters": {
-            "PythonCommand": f"exec({source!r}, {{'__name__': '__main__'}})",
-            "ExecutionMode": "ExecuteFile",
-            "FileExecutionScope": "Public",
-        },
+        "parameters": {"PythonCommand": source, "ExecutionMode": "ExecuteFile", "FileExecutionScope": "Public"},
     }
 
 
@@ -1514,8 +1559,9 @@ def _batch_requests(operations: Any) -> Tuple[List[Dict[str, Any]], Optional[str
         url = fields.get("URL")
         if not isinstance(url, str) or not url.startswith("/remote/"):
             return [], f"operation {index} needs URL, a Remote Control route such as /remote/object/call"
-        # Unreal's router may match routes ignoring case, so compare that way.
-        if url.split("?", 1)[0].rstrip("/").lower() == "/remote/batch":
+        # Compared as Unreal routes it: ignoring case, and a path below the
+        # batch route (/remote/batch/x) is the batch route.
+        if remote_route(url) == BATCH_ROUTE:
             return [], f"operation {index} is a batch: a batch cannot contain another"
         verb = fields.get("Verb")
         if not isinstance(verb, str) or verb.upper() not in BATCH_VERBS:
@@ -1523,13 +1569,19 @@ def _batch_requests(operations: Any) -> Tuple[List[Dict[str, Any]], Optional[str
         fields["Verb"] = verb.upper()
         if "Body" in fields and not isinstance(fields["Body"], dict):
             return [], f"operation {index}'s Body must be a JSON object"
+        # The session runs every Python call in the batch in a namespace of
+        # its own when it sends it (_http_request); refuse here what it
+        # would refuse then, per operation.
         try:
-            runs_python = python_command(url.split("?", 1)[0], fields.get("Body")) is not None
+            sent = isolate_request(url.split("?", 1)[0], fields.get("Body"))
         except ValueError as exc:
             return [], f"operation {index}: {exc}"
-        if runs_python:
-            # In a namespace of its own, as every other Python call.
-            fields["Body"] = isolate(fields["Body"])
+        if unisolated_commands(url, sent):
+            return [], (
+                f"operation {index} passes a PythonCommand to something other than {PYTHON_LIBRARY}'s "
+                "ExecutePythonCommandEx or ExecutePythonCommand, where simul runs Python in a namespace of its own; "
+                "call that instead"
+            )
         shaped.append(fields)
     given = [fields["RequestId"] for fields in shaped if fields.get("RequestId") is not None]
     if len(set(given)) != len(given):
@@ -2049,6 +2101,9 @@ class UnrealRuntimeSession(LoggerMixin):
         attached = self.settings.unreal.mode == "attached" and not _skip_attachment
         try:
             runs_python = python_command(path, body) is not None
+            if not runs_python:
+                # A batch's Python calls, in a namespace of their own each.
+                body = isolate_request(path, body)
         except ValueError as exc:
             raise UnrealError(str(exc), VALIDATION_ERROR) from exc
         if runs_python:
@@ -2058,6 +2113,18 @@ class UnrealRuntimeSession(LoggerMixin):
             body = isolate(body or {}, self._attachment_guard() if attached else "")
         elif attached:
             body = await self._guard_attachment(method, path, body)
+        stray = unisolated_commands(path, body)
+        if stray:
+            # Nothing reaches Python past the runner, whatever builds the
+            # request: a command sent as it is runs in the editor's shared
+            # console dict, and one that names a .py file runs nothing.
+            raise UnrealError(
+                f"Refusing to send {path}: it passes a PythonCommand to something other than "
+                f"{PYTHON_LIBRARY}'s ExecutePythonCommandEx or ExecutePythonCommand, the only calls simul runs "
+                "in a namespace of its own",
+                VALIDATION_ERROR,
+                details={"route": path, "code": "python_outside_runner"},
+            )
         # Remote Control uses PUT even for arbitrary Python and actor mutations.
         # Once sent, a timeout cannot establish that the operation did not run.
         retry_safe = (
@@ -2202,7 +2269,7 @@ class UnrealRuntimeSession(LoggerMixin):
             passphrase (the session's default headers carry a configured one),
             otherwise nothing.
         """
-        if path == "/remote/batch" and not self._passphrase_md5:
+        if remote_route(path) == BATCH_ROUTE and not self._passphrase_md5:
             return {"Passphrase": BATCH_PASSPHRASE_PLACEHOLDER}
         return {}
 
@@ -2476,8 +2543,11 @@ class UnrealRuntimeSession(LoggerMixin):
             "position": position,
             "activity": activity,
         }
+        # A target that names no actor, or several, is refused as the actor
+        # tools refuse one: NotFoundError, ValidationError.
         return await self._execute_json_script(
-            EDITOR_STATE + f"args = {args!r}\n" + CONTROL_UI
+            EDITOR_STATE + f"args = {args!r}\n" + CONTROL_UI,
+            expected_errors=(NOT_FOUND_ERROR, VALIDATION_ERROR),
         )
 
     async def _http_get(
@@ -3706,6 +3776,7 @@ if lock.owner not in (None, {token!r}) and now < lock.expires:
     print({marker!r} + json.dumps({{'busy': True}}))
     return
 lock.owner, lock.expires = {token!r}, now + {_CAPTURE_LOCK_SECONDS!r}
+lock.taken_at = now  # the editor's clock, before the trigger: when this call's waits start at the earliest
 level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
 pie = bool(level.is_in_play_in_editor())
 game = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world() if pie else None
@@ -3713,9 +3784,9 @@ player = game is not None and unreal.GameplayStatics.get_player_controller(game,
 view = {view!r}
 if view == 'auto':
     view = 'game' if player else 'editor'
+shot_dir = unreal.Paths.convert_relative_path_to_full(unreal.Paths.screen_shot_dir())
 payload = {{'existing': numbered_shots(), 'pie_active': pie, 'player': player, 'view': view,
-            'pending_path': os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.screen_shot_dir()),
-                                         {tagged + '.png'!r})}}
+            'pending_path': os.path.join(shot_dir, {tagged + '.png'!r}), 'pending_dir': shot_dir}}
 if view == 'game' and player:
     unreal.SystemLibrary.execute_console_command(game, {game_command!r})
 print({marker!r} + json.dumps(payload))
@@ -3773,11 +3844,16 @@ print({marker!r} + json.dumps(payload))
             if failed is not None:
                 return failed
 
-        def read_code(game_shot: bool) -> str:
+        def read_code(game_shot: bool, give_up_after: float) -> str:
+            # give_up_after: seconds from the lock's taken_at by which the
+            # call has stopped waiting. A poll the editor runs later (queued
+            # while it rendered) converts nothing, so a shot that lands after
+            # the call gave up stays the PNG its error names.
             return prelude + EDITOR_WORLD + in_function(f"""
 lock = capture_lock()
 if lock.owner == {token!r}:
     lock.expires = time.time() + {_CAPTURE_LOCK_SECONDS!r}
+late = lock.owner != {token!r} or time.time() > getattr(lock, 'taken_at', 0.0) + {give_up_after!r}
 size_wanted = {list(resolution) if resolution is not None else None!r}
 quality = {jpeg_quality!r}
 inline_limit = {inline_limit!r}
@@ -3800,20 +3876,25 @@ def complete(path):
 
 if {game_shot!r}:
     candidates = [os.path.join(shot_root(), subdir, {tagged + '.png'!r}) for subdir in SUBDIRS]
-    written = [path for path in candidates if os.path.isfile(path)]
+    started = [path for path in candidates if os.path.isfile(path)]
 else:
     existing = set({existing!r})
-    written = [path for path in numbered_shots() if path not in existing]
-written = [path for path in written if complete(path)
+    started = [path for path in numbered_shots() if path not in existing]
+written = [path for path in started if complete(path)
            and (size_wanted is None or png_size(path) == size_wanted)]
-payload = {{'path': '', 'size_bytes': 0}}
-if written:
+# What Unreal has begun to write, for a capture that runs out of time.
+payload = {{'path': '', 'size_bytes': 0, 'pending': max(started, key=os.path.getmtime) if started else None}}
+if written and not (late and quality is not None):
     target = max(written, key=os.path.getmtime)
     path, size = target, os.path.getsize(target)
     if quality is not None:
         world = editor_world() or unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
         texture = unreal.RenderingLibrary.import_file_as_texture2d(world, target)
-        path = os.path.splitext(target)[0] + '.jpg'
+        # A numbered PNG removed below frees its number, which Unreal gives
+        # the next shot (FFileHelper::GenerateNextBitmapFilename), so its
+        # JPEG carries this call's token: a later capture's JPEG of the same
+        # number used to overwrite this one's.
+        path = os.path.splitext(target)[0] + ('' if {game_shot!r} else '_' + {token!r}) + '.jpg'
         options = unreal.ImageWriteOptions()
         options.format = unreal.DesiredImageFormat.JPG
         options.compression_quality = quality
@@ -3836,26 +3917,36 @@ if written:
 print({marker!r} + json.dumps(payload))
 """)
 
-        async def written(seconds: float, game_shot: bool) -> Dict[str, Any]:
+        # A large shot holds the editor while it renders, and a JPEG is
+        # converted inside a poll: one poll may take as long as the capture.
+        seconds = capture_deadline(resolution)
+        poll_timeout = max(self.timeout, seconds)
+
+        async def written(seconds: float, game_shot: bool, waited: float = 0.0) -> Dict[str, Any]:
+            # waited: what earlier waits of this call took at most, so that
+            # the editor's give-up time, counted from before the trigger,
+            # never comes after this wait's deadline.
             payload: Dict[str, Any] = {}
-            code = read_code(game_shot)
+            pending = None
+            code = read_code(game_shot, waited + seconds)
             # Short first wait so UE's frame loop runs HighResShot, then poll.
             await asyncio.sleep(_CAPTURE_POLL_SECONDS)
             deadline = asyncio.get_event_loop().time() + seconds
             while True:
                 try:
                     payload = self._parse_marker_json(
-                        await self._execute_python(code, mode="ExecuteFile"),
+                        await self._execute_python(code, mode="ExecuteFile", timeout=poll_timeout),
                         marker,
                     )
                 except Exception:
                     payload = {}
+                pending = payload.get("pending") or pending
                 if payload.get("path") or asyncio.get_event_loop().time() >= deadline:
-                    return payload
+                    return {**payload, "pending": pending}
                 await asyncio.sleep(_CAPTURE_POLL_SECONDS)
 
         fell_back = False
-        capture_payload = await written(_GAME_VIEW_WAIT_SECONDS if taken == "game" else 15.0, taken == "game")
+        capture_payload = await written(_GAME_VIEW_WAIT_SECONDS if taken == "game" else seconds, taken == "game")
         if taken == "game" and not capture_payload.get("path"):
             # The game viewport drew nothing in time, as can happen during
             # Simulate In Editor. Unreal cannot cancel the shot, so it may
@@ -3872,12 +3963,22 @@ print({marker!r} + json.dumps(payload))
             if failed is not None:
                 return failed
             taken, fell_back = "editor", True
-            capture_payload = await written(15.0, False)
+            capture_payload = await written(seconds, False, waited=_GAME_VIEW_WAIT_SECONDS)
+        pending = capture_payload.pop("pending", None)
         if not capture_payload.get("path") or not capture_payload.get("size_bytes"):
+            # Unreal cannot cancel the shot: say where it lands, as the game
+            # view's refusal does. An editor shot's number is chosen when its
+            # pane draws, so until a file appears only the directory is known.
             return {
                 "success": False,
                 "error_type": "CaptureError",
-                "error": "Unreal did not produce a nonempty screenshot before the capture deadline.",
+                "error": capture_late_error(resolution, seconds, jpeg_quality is not None),
+                "pie_active": bool(snapshot["pie_active"]),
+                "details": {
+                    "pending_path": pending,
+                    "pending_dir": snapshot.get("pending_dir"),
+                    "deadline_s": round(seconds, 1),
+                },
             }
         return {
             **capture_payload,
@@ -3913,7 +4014,11 @@ print({marker!r} + json.dumps(payload))
         first, about 2 s). Unreal sends an editor HighResShot to every
         level viewport pane that draws, while the camera tools move only the
         first perspective pane; when several panes wrote a file the reply warns
-        that the newest one, which is returned, may not be that pane.
+        that the newest one, which is returned, may not be that pane. The call
+        waits for the file up to ``capture_deadline``: 15 s plus 0.25 s per
+        megapixel (82 s for 16384x16384, which took 24 s, 30 s as JPEG, on
+        UE 5.7.4); past it a CaptureError's ``details`` say where Unreal,
+        which cannot cancel the shot, may still write it.
 
         Args:
             resolution_x: Capture width in pixels, 1 to 16384.
@@ -3934,7 +4039,9 @@ print({marker!r} + json.dumps(payload))
             ``format``, ``view`` ("editor" or "game"), ``pie_active`` and
             ``warnings``; with ``inline``, ``image_base64`` and
             ``inline_width`` / ``inline_height``, or ``inline_skipped``; or a
-            CaptureError, InvalidState or UnsupportedFormat envelope.
+            CaptureError (past the deadline with ``details.pending_path``, the
+            file Unreal has begun to write or null, ``details.pending_dir`` and
+            ``details.deadline_s``), InvalidState or UnsupportedFormat envelope.
         """
         if format not in CAPTURE_FORMATS:
             return {
@@ -4187,8 +4294,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "quality": jpeg_quality,
             "inline_limit": MAX_INLINE_CAPTURE_BYTES if inline and not inline_max_size else 0,
         }
+        # One script renders and writes the image: it waits as long as a
+        # viewport capture of the size would (8192x8192 took 6.5 s on UE 5.7.4).
         shot = await self._execute_json_script(
-            f"args = {args!r}\n" + CAMERA_CAPTURE, expected_errors=("ValidationError",)
+            f"args = {args!r}\n" + CAMERA_CAPTURE,
+            expected_errors=("ValidationError",),
+            timeout=max(self.timeout, capture_deadline((resolution_x, resolution_y))),
         )
         if shot.get("error"):
             return shot
@@ -4850,36 +4961,61 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         if "value" in previous:
             result["previous_value"] = previous["value"]
 
+        token = uuid.uuid4().hex
         try:
             parts = await self._property_write(
-                actor_path, property_name, parsed_value, container, generate_transaction
+                actor_path, property_name, parsed_value, container, generate_transaction, token
             )
         except UnrealError as exc:
             if _not_sent(exc) is not None:
                 raise  # it never left this machine: nothing ran
-            # The batch may have run, compared and rolled back in the editor;
-            # its answer is lost or unreadable. Say what Unreal holds now.
+            # The batch may have run, in part or whole; its answer is lost or
+            # unreadable. Close what it may have left open, then say what
+            # Unreal holds now.
+            decided = await self._decide_property_write(token, parsed_value, str(exc))
             now = await self._read_property(actor_path, property_name)
             failed: Dict[str, Any] = {**result, "success": False, "error": str(exc), "error_type": exc.error_type}
             if exc.details:
                 failed["details"] = exc.details
             if "value" in now:
                 failed["value"] = now["value"]
+            if decided.get("applied") is not None:
+                failed.update(applied=decided["applied"], restored=bool(decided.get("restored")))
+            failed["warning"] = decided.get("late") or (
+                f"The write's undo transaction may still be open: {decided.get('error')}"
+            )
             return failed
         return self._property_reply(result, property_name, parsed_value, parts)
 
     def _property_reply(
         self, result: Dict[str, Any], name: str, value: Any, parts: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """set_actor_property's reply from its batch's answers (``_property_write``)."""
+        """set_actor_property's reply from its batch's answers (``_property_write``).
+
+        A verdict reached in a request of its own (``_decide_property_write``)
+        says so in ``warning``, whatever the outcome.
+        """
+        reply = self._property_outcome(result, name, value, parts)
+        late = parts["decided"].get("late")
+        if late:
+            reply["warning"] = f"{reply.get('warning') or ''} {late}".strip()
+        return reply
+
+    def _property_outcome(
+        self, result: Dict[str, Any], name: str, value: Any, parts: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """The reply ``_property_reply`` gives, but for how late its verdict came."""
         decided, written, held, final = parts["decided"], parts["written"], parts["held"], parts["final"]
         if parts["failure"] is not None and decided.get("applied") is None:
             # The write failed and could not be compared: nothing was emptied
-            # or written that needs putting back.
+            # or written that needs putting back. Say what Unreal holds.
             failure = parts["failure"]
             failed = {**result, "success": False, "error": str(failure), "error_type": failure.error_type}
             if failure.details:
                 failed["details"] = failure.details
+            if "value" in final or "value" in held:
+                failed["value"] = final.get("value", held.get("value"))
+                failed["applied"] = _json_value_matches(value, failed["value"])
             return failed
         now = final.get("value", held.get("value"))
         applied = decided.get("applied")
@@ -4952,13 +5088,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         value: Any,
         container: Optional[str],
         transaction: bool,
+        token: str,
     ) -> Dict[str, Any]:
         """Write, finish, compare and keep or roll back one property, in one Remote Control batch.
 
         Remote Control runs a batch's parts one after another, with no editor
         tick and no other request between them, so the undo transaction opens
         and closes inside it: it never spans two requests, and a concurrent
-        call's write never lands in it.
+        call's write never lands in it. ``token`` names the write in the
+        editor; a caller whose batch raised decides it again by it
+        (``_decide_property_write``).
 
         Returns:
             ``failure`` (the UnrealError the write was answered with, or None),
@@ -4967,7 +5106,6 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             ``applied``, ``restored``, ``closed``) and ``final`` (the read-back
             after it).
         """
-        token = uuid.uuid4().hex
         begin = {"token": token, "path": path, "name": name, "transaction": transaction, "empty": container}
         read = {"objectPath": path, "propertyName": name, "access": "READ_ACCESS"}
         responses = await self._property_batch(
@@ -4985,18 +5123,80 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         began = self._parse_python_json(responses[0].get("ResponseBody") or {})
         written = _batch_failure(responses[1], "/remote/object/property")
         decided = self._parse_python_json(responses[4].get("ResponseBody") or {})
+        final = _read_back(responses[5], name)
+        if "applied" not in decided:
+            # PROPERTY_DECIDE did not run to its verdict, so the transaction
+            # PROPERTY_BEGIN opened may still be open, and every later edit
+            # of the session would land in it. Decide again on its own.
+            decided = await self._decide_property_write(token, value, decided.get("error") or "no verdict")
+            final = await self._read_property(path, name)
         failure = written
         if began.get("error"):
             failure = UnrealError(f"Could not prepare {name} for the write: {began['error']}", ENGINE_ERROR)
-        if decided.get("error") and "applied" not in decided:
-            # The verdict script itself failed: the transaction may be open.
-            failure = UnrealError(f"Could not finish the write of {name}: {decided['error']}", ENGINE_ERROR)
+        if "applied" not in decided:
+            failure = UnrealError(
+                f"Could not finish the write of {name}: {decided.get('error')}. The undo transaction it opened may "
+                "still be open: check the editor's undo history",
+                ENGINE_ERROR,
+            )
         return {
             "failure": failure,
             "written": written,
             "held": _read_back(responses[3], name),
             "decided": decided,
-            "final": _read_back(responses[5], name),
+            "final": final,
+        }
+
+    async def _decide_property_write(self, token: str, value: Any, why: str) -> Dict[str, Any]:
+        """Run PROPERTY_DECIDE for ``token`` in a request of its own, after its batch did not.
+
+        It finds the entry PROPERTY_BEGIN filed, compares, keeps or puts back
+        the value and closes the transaction, as it would have in the batch;
+        an entry already gone (the batch's own verdict ran, its answer lost)
+        leaves nothing to close. Between the batch and this request the editor
+        may run other requests, whose edits then share the undo step.
+
+        Args:
+            token: The write's token.
+            value: The value written.
+            why: Why the batch's verdict is missing, for the reply.
+
+        Returns:
+            PROPERTY_DECIDE's verdict with ``late``, the reply's warning,
+            saying what happened to the write's transaction; ``applied`` None
+            and no ``error`` when there was nothing left to decide; or
+            ``{"error": ...}`` when it failed again.
+        """
+        try:
+            raw = await self._execute_python(
+                f"args = {{'token': {token!r}, 'expected': {value!r}}}\n" + PROPERTY_DECIDE
+            )
+        except UnrealError as exc:
+            return {"error": f"{why}; deciding it again failed too: {exc}"}
+        decided = self._parse_python_json(raw)
+        if "applied" not in decided:
+            return {"error": f"{why}; deciding it again failed too: {decided.get('error')}"}
+        if decided.get("prepared") is False:
+            return {
+                "applied": None,
+                "restored": False,
+                "late": (
+                    f"The write's verdict did not come back from its batch ({why}), and it had nothing left to "
+                    "close: the batch closed its own undo transaction, or never opened one"
+                ),
+            }
+        closed = {"ended": "ended", "cancelled": "cancelled"}.get(str(decided.get("closed")))
+        return {
+            **decided,
+            "late": (
+                f"The write's verdict did not run in its batch ({why}), so it ran in a request of its own"
+                + (
+                    f", which {closed} the write's undo transaction: an edit another client made in between "
+                    "may share that undo step"
+                    if closed
+                    else ""
+                )
+            ),
         }
 
     async def _property_batch(self, operations: List[Tuple[str, Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -7076,6 +7276,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "root_path": root_path or None,
             "max_depth": max_depth,
             "include_components": bool(include_components),
+            "listed_components": GRAPH_COMPONENTS,
             "class_filter": class_filter or None,
             "include_subclasses": bool(include_subclasses),
             "offset": offset,
@@ -7087,6 +7288,15 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             result["truncated"] = True
             result.setdefault("warnings", []).append(
                 f"Too large for one page, so drawn shallower: {cut}. Query each with root_path set to it."
+            )
+        capped = _capped_component_nodes(result.get("root"))
+        if capped:
+            named = ", ".join(f"{node['path']} ({node['component_count']})" for node in capped[:3])
+            more = f" and {len(capped) - 3} more" if len(capped) > 3 else ""
+            result.setdefault("warnings", []).append(
+                f"{len(capped)} actor(s) list only their first {GRAPH_COMPONENTS} components (component_count "
+                f"counts them all): {named}{more}. list_unreal_actor_components pages through an actor's "
+                "components: call it with that actor_path."
             )
         return result
 
@@ -7313,12 +7523,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Args:
             label: Semantic label (actor tag) to search for.
             match_mode: exact (a tag equals label), contains (a tag contains
-                label) or regex (label is a Python regular expression searched
-                for in each tag, ignoring case; a pattern whose failing search can
-                run for long on a 1023-character tag is refused, such as a repeated
-                group that holds a quantifier or alternatives, as in (\\w+)+, or two
-                quantifiers that can divide the same characters between them, as in
-                .*.*x or A*a*x); every mode ignores case.
+                label) or regex (label is a Python regular expression, at most
+                512 characters, searched for in each tag, ignoring case, as
+                Blender's add-on searches object names: with re when its
+                failing search on a 1023-character tag is bounded, otherwise,
+                as for (\\w+)+ or .*left.*front.*x, in time linear in the tag;
+                a pattern that needs both is refused); every mode ignores case.
             max_results: Most actors in the page, 1 to 5000.
             offset: Matching actors to skip before the page starts.
 
@@ -7335,9 +7545,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             ValueError: match_mode is not exact, contains or regex; in regex
                 mode, label is not a valid regular expression; or max_results
                 or offset is out of range.
-            RegexRefused: In regex mode, the label's search can backtrack for
-                long (``error_type`` ValidationError; see
-                ``simul.utils.regex_guard``).
+            RegexRefused: In regex mode, the label is over 512 characters, or
+                re can backtrack on it for long and it uses what the
+                linear-time search lacks: a back-reference, an atomic group, a
+                possessive quantifier, a conditional or a lookaround that
+                backtracks itself (``error_type`` ValidationError; see
+                ``simul.utils.regex_guard.name_searcher``).
         """
         modes = ("exact", "contains", "regex")
         if match_mode not in modes:
@@ -7345,32 +7558,27 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 f"match_mode must be one of {', '.join(modes)}, got {match_mode!r}"
             )
         self._check_page(offset, max_results)
+        script = FIND_ACTORS_BY_TAG
         if match_mode == "regex":
+            # The editor searches every tag on its game thread, where nothing
+            # can stop a search, with the same name_searcher: refused here is
+            # what it could search neither way.
             try:
-                re.compile(label)
+                name_searcher(label, re.IGNORECASE, UNREAL_TAG_LENGTH, subject="label")
             except re.error as exc:
                 raise ValueError(
                     f"label is not a valid regular expression: {exc}"
                 ) from exc
-            # The editor script compiles the label with re.IGNORECASE and
-            # searches every tag on the game thread, where nothing can stop it.
-            construct = _exponential_regex_construct(label, re.IGNORECASE, UNREAL_TAG_LENGTH)
-            if construct is not None:
-                raise RegexRefused(
-                    f"label has {construct}. The editor searches each tag with Python's "
-                    "re on its game thread, where nothing can stop a search. Use one "
-                    "plain quantifier per stretch of the tag (\\w+ rather than (\\w+)+, "
-                    ".* rather than .*.*), anchor the pattern with ^, or use contains mode",
-                    construct,
-                )
+            script = regex_searcher_helpers() + FIND_ACTORS_BY_TAG
         args = {
             "label": label,
             "match_mode": match_mode,
+            "tag_length": UNREAL_TAG_LENGTH,
             "offset": offset,
             "max_results": max_results,
             "listed_children": LISTED_CHILDREN,
         }
-        return await self._paged_read(FIND_ACTORS_BY_TAG, args, "matching actors", "total_matches")
+        return await self._paged_read(script, args, "matching actors", "total_matches")
 
     # ------------------------------------------------------------------
     # Phase 8: Geometry & Modeling (GeometryScript)

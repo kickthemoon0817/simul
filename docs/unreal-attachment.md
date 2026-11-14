@@ -95,8 +95,13 @@ with `SECURITY__ALLOW_SCRIPT_EXECUTION=false`, using a bounded list of actions:
 | `move_cursor` | `agent_id`, normalized `position: [x,y]` from bottom-left, optional `activity` label |
 | `clear_cursor` | Remove only this `agent_id`'s marker in the attached viewport |
 
-For actor actions, omit `target` to use the sole selected actor. Ambiguous labels,
-missing actors and stale attachments fail explicitly. Location uses centimeters;
+For actor actions, omit `target` to use the sole selected actor. They fail
+explicitly, as the actor tools do, and change nothing: a `target` no actor has
+is `NotFoundError`; a label several actors share is `ValidationError` with
+`details.code: "ambiguous_target"` and their paths in `details.candidates`;
+no `target` with other than one actor selected is `ValidationError` with
+`details.code: "not_one_selected"`; a stale attachment is `InvalidState`.
+Location uses centimeters;
 rotation uses Pitch/Yaw/Roll in degrees and returns Unreal's normalized angles.
 Transform editing participates in an editor undo transaction. While Play In
 Editor runs, `inspect` and `clear_cursor` work (`selected_actors` is empty, as
