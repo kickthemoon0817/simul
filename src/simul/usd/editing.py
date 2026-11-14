@@ -614,7 +614,7 @@ class _Planner:
             # attribute it is, so it stays editable.
         requested = self.requested.get(name)
         if attribute:
-            return self._plan_existing(name, value, attribute, requested)
+            return self._plan_existing(name, value, attribute, requested, declared)
         attr_def = definition.GetAttributeDefinition(name) if definition is not None else None
         if attr_def:
             type_name = attr_def.GetTypeName()
@@ -657,6 +657,7 @@ class _Planner:
         value: Any,
         attribute: Usd.Attribute,
         requested: Optional[Sdf.ValueTypeName],
+        declared: Optional[schema_properties.SchemaProperty] = None,
     ) -> PlannedWrite:
         type_name = attribute.GetTypeName()
         self._check_requested(name, type_name, requested)
@@ -684,7 +685,7 @@ class _Planner:
                     "that whole animation"
                 )
         write = self._plan_value(
-            name, value, type_name, attribute.GetMetadata("allowedTokens"), attribute.GetVariability()
+            name, value, type_name, self._allowed_tokens(name, attribute, declared), attribute.GetVariability()
         )
         try:
             op = coerce.parse_xform_op_name(name) if self.xformable else None
@@ -701,6 +702,28 @@ class _Planner:
             if not self.explicit_op_order and name not in self.op_order:
                 write.append_to_op_order = True
         return write
+
+    def _allowed_tokens(
+        self, name: str, attribute: Usd.Attribute, declared: Optional[schema_properties.SchemaProperty]
+    ) -> Optional[Sequence[str]]:
+        """The tokens a write to an existing attribute may set; None or empty when any value goes.
+
+        The attribute's own ``allowedTokens``, which the prim's schemas
+        provide. An attribute of a schema the prim lacks (written earlier,
+        with an ``UnappliedSchemaAttribute`` warning) carries none, so the
+        declaring schema's list applies, as it did when the attribute was
+        created: the value must still be one the schema accepts once it is
+        applied.
+        """
+        tokens = attribute.GetMetadata("allowedTokens")
+        if tokens or declared is None or declared.relationship:
+            return tokens
+        if self.definition is not None and self.definition.GetAttributeDefinition(name):
+            return tokens  # the prim's own schema declares it, without a list
+        type_name = attribute.GetTypeName()
+        if type_name not in declared.type_names:
+            return tokens
+        return declared.declaration_for(type_name).allowed_tokens
 
     def _plan_schema_attribute(
         self,

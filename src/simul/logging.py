@@ -29,7 +29,7 @@ import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import yaml
 
@@ -248,11 +248,21 @@ class SharedRotatingFileHandler(logging.Handler):
     unlocked and unrotated instead, with one warning on stderr, when the lock
     cannot be had (``ENOLCK`` on an NFS home whose lock daemon is gone, a log
     directory where the lock file cannot be created) or another process holds
-    it for longer than ``_LOCK_TIMEOUT_SECONDS`` (a stopped or debugged
-    process; the handlers of simul.log run on the server's event loop, so a
-    long wait would stall it). After either, locking is skipped for
-    ``_LOCK_BACKOFF_SECONDS``. A rotation that fails (a copy another program
-    holds open on Windows) is skipped the same way.
+    it for longer than ``_LOCK_TIMEOUT_SECONDS`` (the handlers of simul.log
+    run on the server's event loop, so a long wait would stall it). An
+    unlocked record is still appended whole to the file at its path, so the
+    worst it does is let that file grow past ``maxBytes`` until the next
+    locked write rotates it.
+
+    How long locking is then skipped depends on why. A lock that is not
+    available at all is skipped for ``_LOCK_BACKOFF_SECONDS``. A lock another
+    process holds is usually just busy (several servers writing at once), so
+    it is skipped for ``_CONTENTION_BACKOFF_SECONDS`` and tried again, without
+    a warning; a holder that keeps it through consecutive tries doubles that
+    pause each time, up to ``_LOCK_BACKOFF_SECONDS``, and from
+    ``_STUCK_LOCK_TRIES`` tries on (a stopped or debugged process) the
+    warning is printed. One lock taken resets the pause. A rotation that fails
+    (a copy another program holds open on Windows) is skipped the same way.
 
     Args:
         filename: The log file.
@@ -265,6 +275,8 @@ class SharedRotatingFileHandler(logging.Handler):
 
     _LOCK_TIMEOUT_SECONDS = 0.05
     _LOCK_BACKOFF_SECONDS = 30.0
+    _CONTENTION_BACKOFF_SECONDS = 0.5
+    _STUCK_LOCK_TRIES = 3
 
     def __init__(
         self,
@@ -286,6 +298,8 @@ class SharedRotatingFileHandler(logging.Handler):
         self.encoding = encoding or "utf-8"
         self.errors = errors
         self._unlocked_until = 0.0
+        # Lock waits that timed out in a row; each doubles the next pause.
+        self._contended = 0
         self._warned = False
         self._rotated_name = re.compile(
             re.escape(os.path.basename(self.baseFilename))
@@ -323,14 +337,31 @@ class SharedRotatingFileHandler(logging.Handler):
                     Path(self.baseFilename + ".lock"), timeout=self._LOCK_TIMEOUT_SECONDS
                 )
             )
-            return True
         except TimeoutError:
-            reason = "another process holds its lock"
+            # Busy, or held by a stopped process: retry soon, then less often.
+            self._contended += 1
+            pause = min(
+                self._LOCK_BACKOFF_SECONDS,
+                self._CONTENTION_BACKOFF_SECONDS * 2 ** (self._contended - 1),
+            )
+            self._unlocked_until = time.monotonic() + pause
+            if self._contended >= self._STUCK_LOCK_TRIES:
+                # A busy lock frees up between tries; this one did not.
+                self._warn_once(
+                    f"another process has held its lock through {self._contended} tries; "
+                    "appending to it without the lock or rotation and trying again less "
+                    f"often (at most every {self._LOCK_BACKOFF_SECONDS:g} s)"
+                )
+            return False
         except OSError as exc:
-            reason = f"its lock is not available ({exc})"
-        self._unlocked_until = time.monotonic() + self._LOCK_BACKOFF_SECONDS
-        self._warn_once(f"{reason}; appending to it without the lock or rotation")
-        return False
+            self._unlocked_until = time.monotonic() + self._LOCK_BACKOFF_SECONDS
+            self._warn_once(
+                f"its lock is not available ({exc}); appending to it without the lock or "
+                f"rotation, trying again every {self._LOCK_BACKOFF_SECONDS:g} s"
+            )
+            return False
+        self._contended = 0
+        return True
 
     def _warn_once(self, message: str) -> None:
         """Say once on stderr that the file is written without its lock or rotation."""
@@ -365,13 +396,21 @@ class SharedRotatingFileHandler(logging.Handler):
         self._prune(today)
 
     def _move(self, day: date) -> None:
-        target = f"{self.baseFilename}.{day:%Y-%m-%d}"
-        index = 0
-        while os.path.exists(target if index == 0 else f"{target}.{index}"):
-            index += 1
-        os.replace(self.baseFilename, target if index == 0 else f"{target}.{index}")
+        """Rename the file to the next copy of ``day``, numbered after every copy of it.
 
-    def _prune(self, today: date) -> None:
+        The number always grows within a day, so sorting the copies by
+        (day, number) is their age order. Reusing the lowest free number, as
+        this did, put the newest records into ``<file>.<day>`` again once
+        pruning had deleted it, where the next pruning deleted them first.
+        """
+        target = f"{self.baseFilename}.{day:%Y-%m-%d}"
+        taken = [index for copy_day, index, _path in self._copies() if copy_day == day]
+        if taken:
+            target = f"{target}.{max(taken) + 1}"
+        os.replace(self.baseFilename, target)
+
+    def _copies(self) -> List[Tuple[date, int, str]]:
+        """The rotated copies as (day, number, path), oldest first."""
         directory = os.path.dirname(self.baseFilename)
         copies = []
         for name in os.listdir(directory):
@@ -384,6 +423,10 @@ class SharedRotatingFileHandler(logging.Handler):
                 continue
             copies.append((day, int(match.group(2) or 0), os.path.join(directory, name)))
         copies.sort()
+        return copies
+
+    def _prune(self, today: date) -> None:
+        copies = self._copies()
         if self.backupCount:
             oldest = today - timedelta(days=self.backupCount)
             for day, _index, path in [copy for copy in copies if copy[0] < oldest]:
@@ -593,6 +636,17 @@ def _stop_audit_listener() -> None:
     except Exception:  # pragma: no cover - defensive
         pass
     _audit_listener = None
+
+
+def flush_logs() -> None:
+    """Write out every queued audit row, then flush and close every log handler.
+
+    For a process about to end with ``os._exit``, which skips the ``atexit``
+    hooks that do this otherwise (``simul server`` stopped by a signal while
+    its client keeps stdin open).
+    """
+    _stop_audit_listener()
+    logging.shutdown()
 
 
 def _setup_audit_handler(config: Dict[str, Any], settings: Settings) -> None:

@@ -90,10 +90,14 @@ async def _ping(server: "SimulMCPServer") -> Dict[str, Any]:
     """Probe the instance the request targets and describe its transports.
 
     ``busy`` says another call holds the instance: a probe that then fails may
-    only mean the engine is inside a synchronous script.
+    only mean the engine is inside a synchronous script. ``held_after_timeout``
+    says the server keeps the instance until the engine finishes a call whose
+    reply timed out.
     """
     client = server._get_request_isaac_client()
-    busy = server._get_instance_lock(server._get_effective_instance_name()).locked()
+    instance_name = server._get_effective_instance_name()
+    busy = server._get_instance_lock(instance_name).locked()
+    held = server.isaac_hold_info(instance_name)
     reachable = await client.ping()
     payload: Dict[str, Any] = {
         "success": reachable,
@@ -105,6 +109,8 @@ async def _ping(server: "SimulMCPServer") -> Dict[str, Any]:
         "vscode_address": client.vscode_address,
         "timeout_seconds": client.timeout_seconds,
     }
+    if held is not None:
+        payload["held_after_timeout"] = held
     if not reachable:
         payload["error"] = f"Isaac Sim is not reachable at {client.address}" + (
             "; another call holds the instance, and a synchronous script blocks the "

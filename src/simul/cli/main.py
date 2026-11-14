@@ -28,6 +28,7 @@ import json
 import os
 import signal
 import socket
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, NoReturn, Optional, Set, Tuple
@@ -44,7 +45,7 @@ from typer.core import TyperGroup
 from simul.cli.output import emit, emit_error, fail, is_json_mode, set_json_mode
 from simul.config import ConfigError, Settings, get_settings, inspect_config_file, load_settings
 from simul.tool_surfaces import THIN_BLENDER_TOOLS, THIN_UNREAL_TOOLS, TOOL_SURFACES
-from simul.logging import setup_logging, get_logger
+from simul.logging import flush_logs, get_logger, setup_logging
 from simul.utils.paths import state_dir
 
 from simul.cli.isaac import app as isaac_app
@@ -485,59 +486,236 @@ def _keep_fastmcp_home_in_state_dir() -> None:
     fastmcp.settings.home = state_dir() / "fastmcp"
 
 
-async def _serve(settings: Settings, transport: str, backends: Optional[Set[str]]) -> bool:
-    """Run the MCP server until it stops; on SIGTERM, stop it the way Ctrl-C does.
+#: The signals that stop ``simul server`` cleanly.
+_STOP_SIGNALS: Tuple[int, ...] = (signal.SIGTERM, signal.SIGINT)
+#: How long a stopping stdio server waits for its task to end before it
+#: concludes that the thread reading stdin is what holds it: that thread
+#: returns only when the client closes stdin.
+_STDIN_RELEASE_SECONDS = 0.25
+#: Past ``server.shutdown_timeout``, how long a stopping HTTP/SSE server is
+#: given before it is cancelled: uvicorn's own graceful window (FastMCP's
+#: ``timeout_graceful_shutdown``, 2 s) and a margin.
+_NETWORK_STOP_MARGIN_SECONDS = 5.0
 
-    SIGTERM used to end the process at once (exit -15), so
-    ``SimulMCPServer.shutdown`` never ran and the adapters were never closed.
-    Over stdio the handler cancels the server task; the server's ``finally``
-    shuts it down and the command exits 0. Over HTTP/SSE uvicorn already
-    stops gracefully on SIGTERM, then re-raises the signal to the handler it
-    found, which used to be the default one that kills the process before
-    ``shutdown`` runs. A handler that only records the signal is installed
-    for it instead.
+
+class _StopSignals:
+    """Record SIGTERM/SIGINT from the start of ``simul server`` until its loop handles them.
+
+    Before this, a signal in the second or so between the command starting and
+    the server's loop installing its handlers ended the process the default
+    way (exit -15, or a KeyboardInterrupt traceback). Installed first thing in
+    ``server``; ``_serve`` then takes the signals over and stops at once when
+    one already came. A signal that arrives while Python is still importing
+    the CLI, before ``server`` runs, ends it the default way: nothing has been
+    opened by then.
+    """
+
+    def __init__(self) -> None:
+        self.received: List[int] = []
+        self.originals: Dict[int, Any] = {}
+
+    def _record(self, signum: int, _frame: Any) -> None:
+        self.received.append(signum)
+
+    def __enter__(self) -> "_StopSignals":
+        for signum in _STOP_SIGNALS:
+            try:
+                self.originals[signum] = signal.signal(signum, self._record)
+            except (ValueError, OSError):
+                pass  # not the main thread
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        for signum, original in self.originals.items():
+            try:
+                signal.signal(signum, original)
+            except (ValueError, OSError, TypeError):
+                pass
+
+
+async def _finished(task: "asyncio.Future[Any]", timeout: float) -> bool:
+    """Whether ``task`` ends within ``timeout`` seconds (it is not cancelled)."""
+    done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
+    return bool(done)
+
+
+def _signal_name(signum: int) -> str:
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f"signal {signum}"
+
+
+def _report_stopped(signum: int) -> None:
+    """Say on stderr and in the log which signal stopped the server."""
+    name = _signal_name(signum)
+    get_logger(__name__).info("Stopped on %s", name)
+    console.print(f"[yellow]Server stopped ({name})[/yellow]")
+
+
+def _exit_now(signum: int) -> NoReturn:
+    """End the process with exit 0 once a stopped server has shut down.
+
+    For a stdio server whose client keeps stdin open: the thread FastMCP reads
+    stdin with returns only when stdin closes, and ``asyncio.run`` would wait
+    for it. Everything else has finished by now (``SimulMCPServer.shutdown``
+    ran), so the logs are flushed and the process exits without that thread.
+    """
+    _report_stopped(signum)
+    flush_logs()
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # pragma: no cover - a closed stream
+            pass
+    os._exit(0)
+
+
+async def _stop_serving(
+    serving: "asyncio.Future[Any]", server: Any, transport: str, signum: int, handler: Any
+) -> None:
+    """Stop a running server after ``signum``; returns once it ended, or exits the process.
+
+    Every wait on Isaac Sim gives up ``server.shutdown_timeout`` after the
+    signal (``begin_shutdown``), so the whole stop stays bounded.
+
+    Args:
+        serving: The task running the server.
+        server: The ``SimulMCPServer``, or None when it is not built yet.
+        transport: The server's transport.
+        signum: The signal that stopped it.
+        handler: The Python-level handler the loop installed for ``signum``;
+            another one in its place means uvicorn took the signal over.
+    """
+    grace = 0.0
+    if server is not None:
+        server.begin_shutdown()
+        grace = float(server.settings.server.shutdown_timeout)
+    if transport == "stdio":
+        serving.cancel()
+        if await _finished(serving, _STDIN_RELEASE_SECONDS):
+            return
+        if server is not None:
+            # Cancelled Isaac calls wait for the engine, bounded by the grace,
+            # and record themselves as they end.
+            await server.wait_for_draining_calls()
+            if await _finished(serving, _STDIN_RELEASE_SECONDS):
+                return
+            await server.shutdown()
+        # Only the thread blocked reading stdin is left.
+        _exit_now(signum)
+    # HTTP/SSE: uvicorn got the same signal (its handler replaced the loop's
+    # while it serves) and stops gracefully. A signal that came before it
+    # took the signals over (still starting) reached only this loop.
+    if signal.getsignal(signum) is handler:
+        serving.cancel()
+    if await _finished(serving, grace + _NETWORK_STOP_MARGIN_SECONDS):
+        return
+    serving.cancel()
+    if await _finished(serving, 1.0):
+        return
+    if server is not None:
+        await server.shutdown()
+    _exit_now(signum)
+
+
+async def _serve(
+    settings: Settings,
+    transport: str,
+    backends: Optional[Set[str]],
+    stop_signals: Optional[_StopSignals] = None,
+) -> Optional[int]:
+    """Run the MCP server until it stops; SIGTERM and SIGINT stop it cleanly.
+
+    Either signal starts the server's shutdown (``begin_shutdown``: waits on
+    Isaac Sim end ``server.shutdown_timeout`` later), stops the transport,
+    runs ``SimulMCPServer.shutdown`` and exits 0. Over stdio the server task
+    is cancelled; when the client keeps stdin open, the thread reading it
+    would hold ``asyncio.run`` until stdin closes, so the process exits
+    without it (``_exit_now``) once the server has shut down. Over HTTP/SSE
+    uvicorn stops gracefully on the same signal; it is cancelled if it is
+    still running past the grace.
+
+    The loop's handlers also see a signal uvicorn handles while it serves
+    (asyncio's signal wakeup fd stays in place under uvicorn's Python-level
+    handler), and the one uvicorn re-raises when it is done.
+
+    Args:
+        settings: The server's settings.
+        transport: ``stdio``, ``http`` or ``sse``.
+        backends: The selected backends, None for every available one.
+        stop_signals: The signals ``server`` recorded before the loop ran.
 
     Returns:
-        True when SIGTERM stopped the server.
+        The signal that stopped the server, or None when it stopped on its own
+        (stdin closed).
     """
     loop = asyncio.get_running_loop()
-    task = asyncio.current_task()
     received: List[int] = []
+    signalled = asyncio.Event()
 
-    def _cancel_once() -> None:
-        if not received:
-            received.append(signal.SIGTERM)
-            if task is not None:
-                task.cancel()
-
-    def _record(signum: int, _frame: Any) -> None:
+    def _on_signal(signum: int) -> None:
         received.append(signum)
+        signalled.set()
 
-    previous: Any = None
-    if transport == "stdio":
+    handlers: Dict[int, Any] = {}
+    previous: Dict[int, Any] = {}
+    for signum in _STOP_SIGNALS:
+        before = signal.getsignal(signum)
         try:
-            loop.add_signal_handler(signal.SIGTERM, _cancel_once)
+            loop.add_signal_handler(signum, _on_signal, signum)
         except (NotImplementedError, RuntimeError, ValueError):
-            pass  # no loop signal handlers here (Windows, a non-main thread)
-    else:
-        try:
-            previous = signal.signal(signal.SIGTERM, _record)
-        except ValueError:
-            pass  # not the main thread
+            # No loop signal handlers here (Windows, a non-main thread). The
+            # recorder keeps SIGTERM from killing an HTTP server uvicorn
+            # re-raises it to; SIGINT goes back to KeyboardInterrupt.
+            if signum == signal.SIGINT and stop_signals is not None:
+                original = stop_signals.originals.get(signum)
+                if original is not None:
+                    try:
+                        signal.signal(signum, original)
+                    except (ValueError, OSError, TypeError):
+                        pass
+            continue
+        previous[signum] = before
+        handlers[signum] = signal.getsignal(signum)
+    # Read only now that the loop has the signals: one that came before is in
+    # the recorder, one after reaches _on_signal, and none falls between.
+    if stop_signals is not None and stop_signals.received:
+        received[:0] = stop_signals.received
+        signalled.set()
+    servers: List[Any] = []
     try:
-        await start_mcp_server(settings, transport, backends=backends)
-    except asyncio.CancelledError:
-        if not received:
-            raise
+        if received:
+            # Stopped before the server was built: nothing to shut down.
+            return received[0]
+        serving = asyncio.ensure_future(
+            start_mcp_server(settings, transport, backends=backends, on_server=servers.append)
+        )
+        stop = asyncio.ensure_future(signalled.wait())
+        try:
+            await asyncio.wait({serving, stop}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stop.cancel()
+        if not serving.done():
+            signum = received[0]
+            await _stop_serving(
+                serving, servers[0] if servers else None, transport, signum, handlers.get(signum)
+            )
+        if serving.cancelled():
+            if not received:
+                raise asyncio.CancelledError()
+        else:
+            serving.result()
     finally:
-        if transport == "stdio":
+        for signum, before in previous.items():
             try:
-                loop.remove_signal_handler(signal.SIGTERM)
-            except (NotImplementedError, RuntimeError, ValueError):
+                loop.remove_signal_handler(signum)
+                signal.signal(signum, before)
+            except (NotImplementedError, RuntimeError, ValueError, OSError, TypeError):
                 pass
-        elif previous is not None:
-            signal.signal(signal.SIGTERM, previous)
-    return bool(received)
+    if not received and stop_signals is not None and stop_signals.received:
+        received.extend(stop_signals.received)
+    return received[0] if received else None
 
 
 @app.command()
@@ -584,7 +762,13 @@ def server(
     --allow-public is passed, check every request's Host and Origin headers
     (the DNS-rebinding defense), and require a bearer token when
     SERVER__AUTH_TOKEN_FILE or SERVER__AUTH_TOKEN is set.
+
+    SIGTERM and SIGINT stop it cleanly over every transport, stdin open or
+    not: shutdown runs, the logs are flushed and the command exits 0.
     """
+    # First: a signal during startup is kept for _serve rather than killing
+    # the process before anything can shut down.
+    stop_signals = _StopSignals().__enter__()
     try:
         from simul.mcp.backends import backend_skip_reason
         from simul.mcp.server import NETWORK_TRANSPORTS, TRANSPORTS
@@ -682,7 +866,7 @@ def server(
         logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
         _keep_fastmcp_home_in_state_dir()
         try:
-            stopped = asyncio.run(_serve(settings, transport, backend_set))
+            stopped = asyncio.run(_serve(settings, transport, backend_set, stop_signals))
         except SystemExit as exc:
             # uvicorn exits 3 (its STARTUP_FAILURE) when it cannot listen,
             # having only logged why; report it as every command reports a
@@ -690,9 +874,8 @@ def server(
             if transport in NETWORK_TRANSPORTS and exc.code not in (0, None):
                 _fail_to_listen(settings.server.host, settings.server.port, transport)
             raise
-        if stopped:
-            logger.info("Stopped on SIGTERM")
-            console.print("[yellow]Server stopped (SIGTERM)[/yellow]")
+        if stopped is not None:
+            _report_stopped(stopped)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Server stopped by user[/yellow]")
@@ -703,6 +886,8 @@ def server(
         raise typer.Exit(2)
     except Exception as e:
         fail(f"Error starting server: {e}", "StartupError")
+    finally:
+        stop_signals.__exit__()
 
 
 def _address_in_use(host: str, port: int) -> bool:

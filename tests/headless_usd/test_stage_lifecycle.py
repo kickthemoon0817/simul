@@ -719,6 +719,100 @@ class TestLoadOwnership:
         assert session.reuse_stage(second, files["robot"]) is False
 
 
+_SUB_OLD = '#usda 1.0\ndef Xform "World"\n{\n    def Cube "FromSub"\n    {\n        double size = 1\n    }\n}\n'
+# The new content: size 2, and a negative mass validation must report.
+_SUB_NEW = (
+    '#usda 1.0\ndef Xform "World"\n{\n    def Cube "FromSub" (\n'
+    '        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]\n    )\n'
+    "    {\n        double size = 2\n        float physics:mass = -1\n    }\n}\n"
+)
+
+
+def _shared_sublayer(directory: Path) -> Dict[str, Path]:
+    """a.usda and b.usda, each sublayering sub.usda (a Cube of size 1)."""
+    (directory / "sub.usda").write_text(_SUB_OLD)
+    for name in ("a", "b"):
+        (directory / f"{name}.usda").write_text("#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\n")
+    return {name: directory / f"{name}.usda" for name in ("a", "b", "sub")}
+
+
+def _rewrite(path: Path, text: str) -> None:
+    path.write_text(text)
+    _touch_later(path)
+
+
+def _size(session: HeadlessUSDSession, stage_id: str) -> float:
+    return session.get_stage(stage_id).GetPrimAtPath("/World/FromSub").GetAttribute("size").Get()
+
+
+class TestLayersInMemoryWithoutAStamp:
+    """USD round-3 B2: a shared layer pxr already held when a load began is not taken for the file as it is now.
+
+    A session that ended during another session's load used to drop the
+    stamp of a layer that load was composing (its stage was not registered
+    yet). The load then took the stale in-memory copy for a file it had just
+    read, and every later load, validation and export trusted that copy.
+    """
+
+    def test_a_layer_held_elsewhere_is_reread_not_trusted(self, session, tmp_path) -> None:
+        paths = _shared_sublayer(tmp_path)
+        held = Sdf.Layer.FindOrOpen(str(paths["sub"]))  # in memory, stamped by nobody
+        _rewrite(paths["sub"], _SUB_NEW)
+
+        stage_id = session.load_stage_or_raise(paths["a"])
+
+        assert _size(session, stage_id) == 2.0
+        assert held.GetPrimAtPath("/World/FromSub").attributes["size"].default == 2.0
+        assert session.layer_is_current(str(paths["sub"].resolve())) is True
+        assert session.stage_status(stage_id)["changed_on_disk"] == []
+
+    def test_a_stamp_is_kept_while_pxr_still_holds_the_layer(self, session, tmp_path) -> None:
+        paths = _shared_sublayer(tmp_path)
+        sub = str(paths["sub"].resolve())
+        stage_id = session.load_stage_or_raise(paths["a"])
+        held = Sdf.Layer.FindOrOpen(sub)  # a strong reference; Find returns a weak handle
+
+        session.unload_stage(stage_id)
+        kept = sub in session._shared_stamps
+        del held
+        other = session.load_stage_or_raise(paths["b"])
+        session.unload_stage(other)
+
+        assert kept is True
+        assert sub not in session._shared_stamps
+
+    def test_a_session_released_mid_load_cannot_leave_a_stale_layer_current(
+        self, session, tmp_path, monkeypatch
+    ) -> None:
+        paths = _shared_sublayer(tmp_path)
+        with session.acting_for("session-a"):
+            session.load_stage_or_raise(paths["a"])  # holds sub.usda, size 1
+        _rewrite(paths["sub"], _SUB_NEW)
+        compose = stage_files.compose_stage
+
+        def compose_then_release(root: Any) -> Any:
+            # The old interleaving: A's session ends while B's load holds sub.usda.
+            stage = compose(root)
+            session.release_owner("session-a")
+            return stage
+
+        monkeypatch.setattr(stage_files, "compose_stage", compose_then_release)
+        with session.acting_for("session-b"):
+            loaded = session.load_stage_or_raise(paths["b"])
+        monkeypatch.setattr(stage_files, "compose_stage", compose)
+
+        with session.acting_for("session-b"):
+            assert _size(session, loaded) == 2.0
+            assert session.stage_status(loaded)["changed_on_disk"] == []
+            again = session.load_stage_or_raise(paths["a"])
+            assert _size(session, again) == 2.0
+        report = validation.validate_usd_file(
+            str(paths["a"].resolve()), Settings().usd, layer_is_current=session.layer_is_current
+        )
+        assert report.is_valid is False
+        assert "MassInvalidValues" in [issue.code for issue in report.issues]
+
+
 def _package(directory: Path) -> Path:
     """A .usdz whose root layer sublayers a file inside it and names a texture inside it."""
     source = directory / "pkg_src"

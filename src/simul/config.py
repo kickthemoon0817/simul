@@ -150,6 +150,18 @@ class ServerConfig(BaseModel):
     host: str = Field(default="localhost", description="Server host")
     port: int = Field(default=8765, description="Server port", ge=1024, le=65535)
     timeout: int = Field(default=30, description="Connection timeout in seconds", ge=1)
+    shutdown_timeout: float = Field(
+        default=5.0,
+        description=(
+            "Longest a stopping server (SIGTERM, SIGINT) waits for Isaac Sim to finish the "
+            "calls it was running when the stop began, or that a client had cancelled, "
+            "before it exits anyway; the log names each call it stopped waiting for. An "
+            "instance held after a timed-out call is released at once. Keep it under your "
+            "supervisor's grace period (Docker: 10 s). Env: SERVER__SHUTDOWN_TIMEOUT."
+        ),
+        ge=0.0,
+        le=3600.0,
+    )
     allow_public: bool = Field(
         default=False,
         description=(
@@ -337,6 +349,18 @@ class IsaacSimConfig(BaseModel):
             "it again; a successful probe closes the circuit"
         ),
         ge=0.0,
+    )
+    hold_after_timeout: float = Field(
+        default=300.0,
+        description=(
+            "After an Isaac call times out while Isaac Sim may still be running it, the "
+            "server keeps the instance for up to this many seconds, until the engine has "
+            "finished, and answers other calls with InstanceBusy meanwhile; otherwise they "
+            "would queue behind the running script inside Kit, time out too and run after "
+            "being reported failed. 0 releases the instance at once"
+        ),
+        ge=0.0,
+        le=86400.0,
     )
 
     # Multi-instance support

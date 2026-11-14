@@ -33,7 +33,7 @@ import shutil
 import tempfile
 import unicodedata
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from pxr import Ar, UsdUtils
 
@@ -70,6 +70,22 @@ def public_identifier(text: str) -> str:
     text = _OWN_ARG_LATER.sub("", text)
     text = _OWN_ARG_FIRST.sub("", text)
     return _OWN_ARG_ONLY.sub("", text)
+
+
+def layers_in_memory() -> Set[str]:
+    """Identifiers of the file layers pxr holds in this process now.
+
+    pxr hands a stage that opens one of these files the copy in memory,
+    which may be older than the file, instead of reading the file.
+    """
+    identifiers: Set[str] = set()
+    for layer in Sdf.Layer.GetLoadedLayers():
+        try:
+            if layer and not layer.anonymous:
+                identifiers.add(layer.identifier)
+        except Exception:
+            continue  # released while the list was read
+    return identifiers
 
 
 def open_private_root(identifier: str) -> Sdf.Layer:
