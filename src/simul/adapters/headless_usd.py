@@ -749,9 +749,10 @@ class HeadlessUSDSession(LoggerMixin):
         stages that had any.
 
         It reads and drops pxr objects and forgets the stamps of shared
-        files no stage composes any more, so it must not run beside other
-        pxr work: the MCP server runs it through its USD scheduler, alone
-        (``USDCallScheduler.run_alone``), never on the event loop.
+        files no stage composes any more, so it must not run beside a load,
+        reload or edit: the MCP server runs it through its USD scheduler
+        between writes (``USDCallScheduler.run_between_writes``), never on
+        the event loop.
 
         Args:
             owner: The ended session's id
@@ -776,6 +777,18 @@ class HeadlessUSDSession(LoggerMixin):
         if released:
             self.logger.info(f"Released {len(released)} USD stage(s) of ended MCP session {owner}")
         return released
+
+    def holds_stages(self, owner: Optional[str]) -> bool:
+        """
+        Whether MCP session ``owner`` has any stage loaded, from the registry alone.
+
+        Reads no pxr object, so it is safe on the server's event loop.
+
+        Args:
+            owner: An MCP session's id
+        """
+        with self._registry:
+            return any(record.owner == owner for record in self._stage_records.values())
 
     def get_stage(self, stage_id: str) -> Optional[Usd.Stage]:
         """
@@ -1566,6 +1579,10 @@ class HeadlessUSDAdapter(LoggerMixin):
     def release_session(self, session_id: str) -> None:
         """Unload the stages of an MCP session that has ended."""
         self._session.release_owner(session_id)
+
+    def holds_stages(self, session_id: str) -> bool:
+        """Whether an MCP session has any stage loaded (registry only; safe on the event loop)."""
+        return self._session.holds_stages(session_id)
 
     def set_sandbox_factory(self, factory: Optional[Callable[[], CompositionSandbox]]) -> None:
         """Hold the files a reload rereads to the composition sandbox ``factory`` builds."""

@@ -538,6 +538,96 @@ def test_a_session_ending_during_another_sessions_load_waits_for_it(
     assert "MassInvalidValues" in [issue["code"] for issue in outcome["validated"]["issues"]]
 
 
+def test_a_session_end_does_not_hold_other_sessions_behind_a_slow_read(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #363: the release took the backend exclusively, so every later call waited for the slowest read.
+
+    A runs a slow summary, B (which holds a stage) disconnects, and C's quick
+    read must answer while A's summary is still running, with server.timeout
+    at 1 s; it used to get StageBusy. B's stage is still released.
+    """
+    import threading
+
+    from simul.adapters.headless_usd import HeadlessUSDSession
+
+    base = Settings()
+    settings = base.model_copy(
+        update={
+            "security": base.security.model_copy(
+                update={"allowed_paths": [str(sandbox)], "rate_limiting_enabled": False}
+            ),
+            "server": base.server.model_copy(update={"timeout": 1}),
+        }
+    )
+    server = SimulMCPServer(settings, backends={"usd"})
+    session = server.headless_adapter._session
+    entered, proceed = threading.Event(), threading.Event()
+    summarize = HeadlessUSDSession.summarize_stage
+
+    def slow_summary(self: HeadlessUSDSession, *args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        proceed.wait(10)
+        return summarize(self, *args, **kwargs)
+
+    monkeypatch.setattr(HeadlessUSDSession, "summarize_stage", slow_summary)
+    robot = str(sandbox / "robot.usda")
+
+    async def _main() -> Dict[str, Any]:
+        clients = [Client(server.mcp, mode="legacy") for _ in range(3)]
+        for client in clients:
+            await client.__aenter__()
+        first, second, third = clients
+        mine = (await _call(first, "load_usd_file", file_path=robot))["stage_id"]
+        theirs = (await _call(second, "load_usd_file", file_path=robot))["stage_id"]
+        other = (await _call(third, "load_usd_file", file_path=robot))["stage_id"]
+        summary = asyncio.create_task(_call(first, "summarize_scene", stage_id=mine))
+        await _until(entered.is_set)
+        await second.__aexit__(None, None, None)
+        await _until(lambda: len(server._watched_sessions) == 2)
+        await _until(lambda: theirs not in session._stage_records)
+        quick = await _call(third, "get_prim_info", stage_id=other, prim_path="/Robot/link")
+        summary_running = not summary.done()
+        proceed.set()
+        summarized = await summary
+        for client in (first, third):
+            await client.__aexit__(None, None, None)
+        return {"quick": quick, "summary_running": summary_running, "summarized": summarized}
+
+    outcome = asyncio.run(_main())
+
+    assert outcome["quick"]["success"] is True, outcome["quick"]
+    assert outcome["summary_running"] is True
+    assert outcome["summarized"]["success"] is True
+
+
+def test_a_session_that_loaded_nothing_queues_no_release(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from simul.adapters.headless_usd import HeadlessUSDSession
+
+    server = _server(sandbox)
+    released: List[Any] = []
+    release_owner = HeadlessUSDSession.release_owner
+
+    def tracked(self: HeadlessUSDSession, owner: Any) -> List[str]:
+        released.append(owner)
+        return release_owner(self, owner)
+
+    monkeypatch.setattr(HeadlessUSDSession, "release_owner", tracked)
+
+    async def _main() -> None:
+        async with Client(server.mcp, mode="legacy") as idle:
+            await _call(idle, "list_usd_stages")
+        async with Client(server.mcp, mode="legacy") as busy:
+            await _call(busy, "load_usd_file", file_path=str(sandbox / "robot.usda"))
+        await _until(lambda: len(released) == 1)
+        await asyncio.sleep(0.1)
+
+    asyncio.run(_main())
+
+    assert len(released) == 1  # only the session that held a stage
+    assert server.headless_adapter._session._stage_records == {}
+
+
 def test_a_relative_export_path_resolves_against_relative_path_base(tmp_path: Path) -> None:
     """With the sandbox off as with it on, as load_usd_file resolves its path."""
     base = tmp_path / "base"

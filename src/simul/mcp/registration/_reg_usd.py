@@ -158,8 +158,12 @@ def _loaded_stage(session: "HeadlessUSDSession", stage_id: str) -> Any:
     return stage
 
 
-def _scheduled_release(scheduler: USDCallScheduler, release: Callable[[str], Any]) -> Callable[[str], None]:
-    """The session-end hook: unload an ended MCP session's stages through ``scheduler``, alone.
+def _scheduled_release(
+    scheduler: USDCallScheduler,
+    release: Callable[[str], Any],
+    holds_stages: Optional[Callable[[str], bool]] = None,
+) -> Callable[[str], None]:
+    """The session-end hook: unload an ended MCP session's stages through ``scheduler``.
 
     The hook runs on the event loop while other calls' pxr work runs on
     worker threads. Unloading there raced it: a session that ended during
@@ -167,13 +171,18 @@ def _scheduled_release(scheduler: USDCallScheduler, release: Callable[[str], Any
     was composing (it held the layer, but its stage was not registered
     yet), so the load took its stale copy for a file just read, and every
     later load, validation and export trusted that copy. Reading a stage's
-    unsaved state there also overlapped edits. The release now queues like
-    a write (``USDCallScheduler.run_alone``): it runs once the calls ahead
-    of it finish, with nothing else running.
+    unsaved state there also overlapped edits. The release now runs
+    between writes (``USDCallScheduler.run_between_writes``): beside reads,
+    as it did before, but never during a load, reload or edit, and it holds
+    up no other session's reads. ``holds_stages`` (read from the registry
+    alone, on the event loop) skips a session that loaded nothing.
     """
     pending: Set["asyncio.Task[Any]"] = set()
 
     def hook(session_id: str) -> None:
+        if holds_stages is not None and not holds_stages(session_id):
+            return
+
         def work() -> None:
             release(session_id)
 
@@ -185,7 +194,9 @@ def _scheduled_release(scheduler: USDCallScheduler, release: Callable[[str], Any
 
         async def run() -> None:
             try:
-                await scheduler.run_alone(f"Releasing the USD stages of ended MCP session {session_id}", work)
+                await scheduler.run_between_writes(
+                    f"Releasing the USD stages of ended MCP session {session_id}", work
+                )
             except Exception as exc:
                 logger.warning("Could not release the USD stages of ended MCP session %s: %s", session_id, exc)
 
@@ -294,7 +305,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     # are held to the composition sandbox.
     adapter = server.headless_adapter
     if adapter is not None and hasattr(adapter, "release_session"):
-        server.add_session_end_hook(_scheduled_release(scheduler, adapter.release_session))
+        server.add_session_end_hook(
+            _scheduled_release(scheduler, adapter.release_session, getattr(adapter, "holds_stages", None))
+        )
         adapter.set_sandbox_factory(lambda: CompositionSandbox(server._path_policy))
 
     @server.mcp.tool(

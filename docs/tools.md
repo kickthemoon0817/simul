@@ -417,9 +417,9 @@ and unsaved edits are lost when the server exits.
 - **When a session ends, its stages are unloaded.** An initialize-handshake
   connection that closes takes its stages with it, unsaved edits included
   (the server logs a warning naming the stages that had unsaved edits).
-  The unload runs alone, once the calls already running or queued finish,
-  so it never overlaps another session's load or edit. Save or export
-  before disconnecting. Stages of a session whose end the
+  The unload runs beside other sessions' reads, but waits for any load,
+  reload or edit running or queued before it, so it never overlaps one
+  and holds up no other session. Save or export before disconnecting. Stages of a session whose end the
   server cannot observe (stdio's single session, the anonymous scope) stay
   until they are unloaded or the server exits.
 - **`list_usd_stages`** shows the session's stages, whether each has
