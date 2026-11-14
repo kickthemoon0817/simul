@@ -82,9 +82,10 @@ SIGINT (Ctrl-C) stop the server cleanly over stdio and HTTP alike, whether
 or not the client has closed stdin: the adapters are closed (`Simul 3D MCP
 Server shut down` and `Stopped on SIGTERM` in the log), the logs are flushed
 and the process exits 0, within about half a second when no Isaac Sim call
-is in flight. Isaac calls still running inside Isaac Sim (cancelled or timed
-out) are waited for at most `SERVER__SHUTDOWN_TIMEOUT` seconds (default 5),
-and the log names any it stopped waiting for. A signal during startup is
+is in flight. Isaac calls running when the stop began, or that a client had
+cancelled, are waited for at most `SERVER__SHUTDOWN_TIMEOUT` seconds (default
+5), and the log names any it stopped waiting for; an instance held after a
+timed-out call is released at once. A signal during startup is
 kept until the server can stop; only one in the first ~0.1 s, while Python
 is still importing the CLI and nothing is open yet, ends it the default way.
 State (logs, usage log, sessions) goes under `$SIMUL_HOME` (default

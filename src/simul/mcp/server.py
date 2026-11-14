@@ -2061,12 +2061,15 @@ class SimulMCPServer(LoggerMixin):
         if not await self._acquire_instance_lock(lock):
             yield Refusal(self._instance_busy_error(instance_name), "instance_busy")
             return
+        entered = time.monotonic()
         try:
             yield None
             self._heartbeat_active_binding(tool_name)
         finally:
             try:
-                held = self._hold_if_engine_busy(instance_name, lock, tool_name)
+                held = self._hold_if_engine_busy(
+                    instance_name, lock, tool_name, entered, self._get_active_binding()
+                )
             except Exception as exc:  # a lock never released would wedge the instance
                 self.logger.warning("Could not hold Isaac instance %r after %s: %s", instance_name, tool_name, exc)
                 held = False
@@ -2091,8 +2094,10 @@ class SimulMCPServer(LoggerMixin):
                 f"reply timed out {info.get('busy_for_seconds', 0):.0f}s ago. Isaac Sim keeps "
                 "running a call after its reply times out and runs the next one only after "
                 "it, so the server keeps the instance until the engine has finished rather "
-                "than queue this call behind it. Retry shortly; ping_isaac does not wait for "
-                "it, and interrupt_isaac_script stops a bridge script."
+                "than queue this call behind it. Retry shortly. interrupt_isaac_script stops "
+                "a bridge script; ping_isaac reports the hold without waiting for the "
+                "instance, but on the stock socket its own probe answers only once the "
+                "script has ended."
             ),
             error_type=error_types.INSTANCE_BUSY,
             details={"instance": instance_name, "reason": "finishing_timed_out_call", **info},
@@ -2114,7 +2119,14 @@ class SimulMCPServer(LoggerMixin):
             "hold_limit_seconds": self.settings.isaac_sim.hold_after_timeout,
         }
 
-    def _hold_if_engine_busy(self, instance_name: str, lock: asyncio.Lock, tool_name: str) -> bool:
+    def _hold_if_engine_busy(
+        self,
+        instance_name: str,
+        lock: asyncio.Lock,
+        tool_name: str,
+        entered: float,
+        binding: Optional[IsaacSessionBinding] = None,
+    ) -> bool:
         """Keep ``lock`` past the call when Isaac Sim may still be running a request it timed out on.
 
         Isaac Sim goes on running a script (or a bridge action) after its reply
@@ -2123,7 +2135,20 @@ class SimulMCPServer(LoggerMixin):
         out too and runs after being reported failed. Instead the lock passes
         to a background task that waits, up to ``isaac_sim.hold_after_timeout``,
         for the engine to finish (``IsaacSocketClient.wait_until_idle``) and
-        then releases it; calls meanwhile get InstanceBusy saying why.
+        then releases it; calls meanwhile get InstanceBusy saying why. The
+        caller's claim, if it has one, is refreshed while the hold lasts, so it
+        does not lapse to another agent meanwhile.
+
+        Only a timeout of this call counts: one recorded before it started
+        came from outside the instance lock (a probe beside the call that held
+        it), and this call has since reached the engine, so it is dropped.
+
+        Args:
+            instance_name: The instance the call held.
+            lock: Its lock, held by the call.
+            tool_name: The call.
+            entered: ``time.monotonic()`` when the call got the lock.
+            binding: The caller's claim binding on the instance, if any.
 
         Returns:
             True when the lock was handed to such a task, False when the
@@ -2134,13 +2159,13 @@ class SimulMCPServer(LoggerMixin):
         if not isinstance(unfinished, UnfinishedRequest):
             return False
         limit = self.settings.isaac_sim.hold_after_timeout
-        if limit <= 0 or self._stopping_since is not None:
+        if unfinished.since < entered or limit <= 0 or self._stopping_since is not None:
             client.forget_unfinished_request()
             return False
         hold = IsaacHold(tool_name=tool_name, since=unfinished.since)
         try:
             hold.task = asyncio.get_running_loop().create_task(
-                self._hold_until_engine_idle(instance_name, client, hold, limit)
+                self._hold_until_engine_idle(instance_name, client, hold, limit, binding)
             )
         except RuntimeError:  # pragma: no cover - always called on the loop
             return False
@@ -2157,11 +2182,29 @@ class SimulMCPServer(LoggerMixin):
         return True
 
     async def _hold_until_engine_idle(
-        self, instance_name: str, client: Any, hold: IsaacHold, limit: float
+        self,
+        instance_name: str,
+        client: Any,
+        hold: IsaacHold,
+        limit: float,
+        binding: Optional[IsaacSessionBinding] = None,
     ) -> None:
-        """Wait for Isaac Sim to finish the request that timed out; ``_end_hold`` then releases it."""
+        """Wait for Isaac Sim to finish the request that timed out; ``_end_hold`` then releases it.
+
+        Refreshes ``binding``'s claim every quarter of the claim lifetime while it waits.
+        """
+        waiting = asyncio.ensure_future(
+            client.wait_until_idle(max(0.0, limit - (time.monotonic() - hold.since)))
+        )
         try:
-            idle = await client.wait_until_idle(max(0.0, limit - (time.monotonic() - hold.since)))
+            while not waiting.done():
+                await asyncio.wait({waiting}, timeout=CLAIM_TTL_SECONDS / 4)
+                if not waiting.done() and binding is not None:
+                    self._heartbeat_binding(binding, hold.tool_name)
+            idle = waiting.result()
+        except asyncio.CancelledError:
+            waiting.cancel()
+            raise
         except Exception as exc:
             client.forget_unfinished_request()
             self.logger.warning(
@@ -2219,8 +2262,11 @@ class SimulMCPServer(LoggerMixin):
         call's result with an unhandled error.
         """
         binding = self._get_active_binding()
-        if binding is None:
-            return
+        if binding is not None:
+            self._heartbeat_binding(binding, tool_name)
+
+    def _heartbeat_binding(self, binding: IsaacSessionBinding, tool_name: str) -> None:
+        """Refresh ``binding``'s claim; a failure is logged (see ``_heartbeat_active_binding``)."""
         try:
             self.session_manager.get_instance_session(binding.port).heartbeat(
                 binding.agent_id, tool_name
@@ -2357,12 +2403,15 @@ class SimulMCPServer(LoggerMixin):
         )
         with anyio.CancelScope(shield=True):
             if getattr(client, "bridge_enabled", False):
-                try:
-                    await asyncio.wait_for(
-                        client.interrupt_bridge_script(), timeout=_INTERRUPT_TIMEOUT_SECONDS
+                interrupt = asyncio.ensure_future(client.interrupt_bridge_script())
+                if not await self._wait_for_engine(
+                    interrupt, tool_name, limit=_INTERRUPT_TIMEOUT_SECONDS, quiet=True
+                ):
+                    interrupt.cancel()
+                elif not interrupt.cancelled() and interrupt.exception() is not None:
+                    self.logger.debug(
+                        "Could not interrupt the cancelled %s: %s", tool_name, interrupt.exception()
                     )
-                except Exception as exc:
-                    self.logger.debug("Could not interrupt the cancelled %s: %s", tool_name, exc)
             if not await self._wait_for_engine(task, tool_name):
                 task.cancel()
                 try:
@@ -2370,24 +2419,46 @@ class SimulMCPServer(LoggerMixin):
                 except asyncio.CancelledError:
                     pass
 
-    async def _wait_for_engine(self, task: "asyncio.Future[Any]", what: str) -> bool:
+    async def _wait_for_engine(
+        self,
+        task: "asyncio.Future[Any]",
+        what: str,
+        *,
+        limit: Optional[float] = None,
+        quiet: bool = False,
+    ) -> bool:
         """Wait for ``task`` regardless of cancellation, until it ends or shutdown gives up.
 
         A cancellation the caller's anyio shield does not cover (a bare
         ``task.cancel()``) is swallowed: the engine is still busy. Once the
         server is stopping (``begin_shutdown``) the wait ends
-        ``server.shutdown_timeout`` after that, with a warning naming ``what``.
+        ``server.shutdown_timeout`` after that, with a warning naming ``what``
+        unless ``quiet``.
+
+        Args:
+            task: What to wait for.
+            what: The call, for the warning.
+            limit: Longest wait in seconds, stopping or not; None for none.
+            quiet: Give up at the shutdown deadline without the warning.
 
         Returns:
-            True when ``task`` ended, False when a stopping server gave up on it.
+            True when ``task`` ended, False when the wait gave up on it.
         """
+        give_up_at = None if limit is None else time.monotonic() + limit
         while not task.done():
             # Polled rather than signalled, so a stop that begins mid-wait is
             # seen within _ENGINE_WAIT_POLL_SECONDS.
+            now = time.monotonic()
             timeout = _ENGINE_WAIT_POLL_SECONDS
+            if give_up_at is not None:
+                if now >= give_up_at:
+                    return False
+                timeout = min(timeout, give_up_at - now)
             if self._stopping_since is not None:
-                timeout = self._shutdown_deadline() - time.monotonic()
-                if timeout <= 0:
+                left = self._shutdown_deadline() - now
+                if left <= 0:
+                    if quiet:
+                        return False
                     self.logger.warning(
                         "Shutdown: stopped waiting for Isaac Sim to finish %s after %gs "
                         "(server.shutdown_timeout); it may still be running inside Isaac Sim",
@@ -2395,7 +2466,7 @@ class SimulMCPServer(LoggerMixin):
                         self.settings.server.shutdown_timeout,
                     )
                     return False
-                timeout = min(timeout, _ENGINE_WAIT_POLL_SECONDS)
+                timeout = min(timeout, left)
             try:
                 await asyncio.wait({task}, timeout=timeout)
             except asyncio.CancelledError:
@@ -3150,6 +3221,9 @@ class SimulMCPServer(LoggerMixin):
             "prim_count": None,
             "is_playing": None,
         }
+        # These probes run outside the instance's lock, beside whatever call
+        # holds it: a reply timeout here is not left for that call's hold
+        # (note_unfinished=False).
         try:
             if client.bridge_enabled:
                 # The listing reports a prim count only incidentally, and
@@ -3157,9 +3231,11 @@ class SimulMCPServer(LoggerMixin):
                 # every instance enumerated. Ask stage info to skip it; callers
                 # that want the number have get_isaac_stage_info.
                 stage_info = await client.bridge_request(
-                    "get_stage_info", {"include_prim_count": False}
+                    "get_stage_info", {"include_prim_count": False}, note_unfinished=False
                 )
-                sim_state = await client.bridge_request("get_simulation_state", {})
+                sim_state = await client.bridge_request(
+                    "get_simulation_state", {}, note_unfinished=False
+                )
                 if stage_info.get("status") == "ok":
                     payload = stage_info.get("payload", {})
                     info["reachable"] = True
@@ -3189,7 +3265,8 @@ class SimulMCPServer(LoggerMixin):
                 # stage traversal is far too expensive for a listing field.
                 "    'prim_count': None,\n"
                 "    'is_playing': tl.is_playing(),\n"
-                "}))\n"
+                "}))\n",
+                note_unfinished=False,
             )
             if result.success:
                 info["reachable"] = True

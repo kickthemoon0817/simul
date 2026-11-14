@@ -411,7 +411,13 @@ class IsaacSocketClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
-            if await self._engine_is_idle(unfinished, remaining):
+            try:
+                idle = await asyncio.wait_for(
+                    self._engine_is_idle(unfinished, remaining), timeout=remaining
+                )
+            except asyncio.TimeoutError:
+                return False
+            if idle:
                 if self._unfinished is unfinished:
                     self._unfinished = None
                 return True
@@ -627,12 +633,23 @@ class IsaacSocketClient:
             return await self._execute_bridge_script(code, script_timeout)
 
     async def execute_vscode_only(
-        self, code: str, *, timeout_seconds: Optional[float] = None
+        self,
+        code: str,
+        *,
+        timeout_seconds: Optional[float] = None,
+        note_unfinished: bool = True,
     ) -> ScriptResult:
-        """Execute raw Python only through the VS Code socket transport."""
+        """Execute raw Python only through the VS Code socket transport.
+
+        ``note_unfinished=False`` keeps a reply timeout out of
+        ``unfinished_request``, for probes that run outside an instance's
+        lock (``list_isaac_instances``).
+        """
         script_timeout = self._resolve_script_timeout(timeout_seconds)
         async with self._lock:
-            return await self._execute_vscode_unlocked(code, script_timeout)
+            return await self._execute_vscode_unlocked(
+                code, script_timeout, note_unfinished=note_unfinished
+            )
 
     async def _execute_vscode_unlocked(
         self,
@@ -963,6 +980,7 @@ class IsaacSocketClient:
         payload: Optional[Dict[str, Any]] = None,
         *,
         read_timeout: Optional[float] = None,
+        note_unfinished: bool = True,
     ) -> Dict[str, Any]:
         """Send a typed request to the bridge transport without fallback.
 
@@ -972,10 +990,15 @@ class IsaacSocketClient:
             read_timeout: How long to wait for the reply once the request is
                 sent, for actions whose duration scales with their input
                 (``simulation_control`` step); the bridge timeout when None.
+            note_unfinished: Record a reply timeout as ``unfinished_request``
+                (off for probes outside an instance's lock).
         """
         async with self._lock:
             return await self._bridge_request(
-                action, payload or {}, read_timeout=read_timeout
+                action,
+                payload or {},
+                read_timeout=read_timeout,
+                note_unfinished=note_unfinished,
             )
 
     async def interrupt_bridge_script(self) -> Dict[str, Any]:
@@ -998,6 +1021,7 @@ class IsaacSocketClient:
         *,
         ignore_circuit: bool = False,
         read_timeout: Optional[float] = None,
+        note_unfinished: bool = True,
     ) -> Dict[str, Any]:
         """Send a typed request to the custom bridge extension.
 
@@ -1007,6 +1031,8 @@ class IsaacSocketClient:
             ignore_circuit: Dial the bridge even while its circuit is open.
             read_timeout: How long to wait for the reply once the request is
                 sent; defaults to the bridge timeout.
+            note_unfinished: Record a reply timeout as ``unfinished_request``
+                (probe actions never are).
 
         Raises:
             BridgeCircuitOpenError: The circuit is open and ``ignore_circuit``
@@ -1032,7 +1058,7 @@ class IsaacSocketClient:
             # while the bridge still runs the old one. A connection the peer
             # drops without replying (a port proxy with nothing behind it)
             # still counts below.
-            if action not in _PROBE_ACTIONS:
+            if note_unfinished and action not in _PROBE_ACTIONS:
                 self._note_unfinished("bridge", action)
             raise
         except (ConnectionRefusedError, ConnectionError, TimeoutError, OSError):
@@ -1043,6 +1069,7 @@ class IsaacSocketClient:
         if (
             isinstance(error, dict)
             and error.get("name") == "RequestTimeout"
+            and note_unfinished
             and action not in _PROBE_ACTIONS
         ):
             # The bridge stopped waiting for its handler, which runs on.

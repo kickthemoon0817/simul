@@ -154,9 +154,10 @@ class ServerConfig(BaseModel):
         default=5.0,
         description=(
             "Longest a stopping server (SIGTERM, SIGINT) waits for Isaac Sim to finish the "
-            "calls it is still running, ones a client cancelled or that timed out, before "
-            "it exits anyway; the log names each call it stopped waiting for. Keep it under "
-            "your supervisor's grace period (Docker: 10 s). Env: SERVER__SHUTDOWN_TIMEOUT."
+            "calls it was running when the stop began, or that a client had cancelled, "
+            "before it exits anyway; the log names each call it stopped waiting for. An "
+            "instance held after a timed-out call is released at once. Keep it under your "
+            "supervisor's grace period (Docker: 10 s). Env: SERVER__SHUTDOWN_TIMEOUT."
         ),
         ge=0.0,
         le=3600.0,

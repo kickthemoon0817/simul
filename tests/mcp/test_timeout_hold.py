@@ -395,6 +395,10 @@ class _FakeClient:
     def forget_unfinished_request(self) -> None:
         self.unfinished_request = None
 
+    async def interrupt_bridge_script(self) -> Dict[str, Any]:
+        await asyncio.sleep(60)  # a bridge that accepts and never answers
+        return {"status": "ok"}
+
 
 def _with_fake_client(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **isaac_sim: Any
@@ -489,11 +493,17 @@ def test_shutdown_releases_a_held_instance(
     assert "Released Isaac instance 'default' on shutdown" in caplog.text
 
 
+@pytest.mark.parametrize("bridge", [False, True], ids=["socket", "bridge-interrupt-hangs"])
 def test_a_stopping_server_gives_up_on_a_cancelled_call_after_shutdown_timeout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, bridge: bool
 ) -> None:
-    """A cancelled call used to hold shutdown for as long as the transport's timeout (up to 110 s)."""
-    instance, _fake = _with_fake_client(monkeypatch, tmp_path)
+    """A cancelled call used to hold shutdown for as long as the transport's timeout (up to 110 s).
+
+    Over the bridge the interrupt request waited a fixed 5 s first, so with
+    a shorter shutdown_timeout the process exited before the call was recorded.
+    """
+    instance, fake = _with_fake_client(monkeypatch, tmp_path)
+    fake.bridge_enabled = bridge
 
     async def scenario() -> float:
         started = asyncio.Event()
@@ -522,3 +532,99 @@ def test_a_stopping_server_gives_up_on_a_cancelled_call_after_shutdown_timeout(
     assert "stopped waiting for Isaac Sim to finish isaac_long" in caplog.text
     (row,) = instance.usage_tracker.get_recent(tool_name="isaac_long")
     assert row["cancelled"] is True and row["executed"] == "unknown"
+
+
+def test_a_timeout_from_before_the_call_does_not_hold_the_instance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A list_isaac_instances probe outside the lock timed out; the next call was blamed and held."""
+    instance, fake = _with_fake_client(monkeypatch, tmp_path)
+    fake.unfinished_request = UnfinishedRequest("socket", "script", time.monotonic() - 1.0)
+
+    async def quick() -> Dict[str, Any]:
+        return {"success": True}
+
+    asyncio.run(instance._exec_isaac("isaac_quick", quick()))
+
+    assert instance._isaac_holds == {}
+    assert not instance._get_instance_lock("default").locked()
+    assert fake.unfinished_request is None
+
+
+def test_the_listing_probes_record_no_timeout() -> None:
+    async def scenario() -> Tuple[Optional[UnfinishedRequest], Optional[UnfinishedRequest]]:
+        kit = _SerialKit()
+        await kit.start()
+        bridge = _Bridge(busy_polls=0)
+        await bridge.start()
+        try:
+            blocker = asyncio.ensure_future(_client(kit.port, timeout=5).execute("sleep(2.4)"))
+            await asyncio.sleep(0.05)
+            client = _client(kit.port)
+            with pytest.raises(TimeoutError):
+                await client.execute_vscode_only("print('listing')", note_unfinished=False)
+            after_socket = client.unfinished_request
+            bridged = IsaacSocketClient(
+                port=1, timeout_seconds=0.2, bridge_host="127.0.0.1", bridge_port=bridge.port,
+                prefer_bridge=True, fallback_to_vscode=False,
+            )
+            with pytest.raises(TimeoutError):
+                await bridged.bridge_request("get_stage_info", {}, note_unfinished=False)
+            await blocker
+            return after_socket, bridged.unfinished_request
+        finally:
+            await bridge.stop()
+            await kit.stop()
+
+    assert asyncio.run(scenario()) == (None, None)
+
+
+def test_the_hold_keeps_the_timed_out_caller_s_claim_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Claims lapse after CLAIM_TTL_SECONDS; a hold can outlast that and let another agent in."""
+    instance, fake = _with_fake_client(monkeypatch, tmp_path)
+    monkeypatch.setattr(server_module, "CLAIM_TTL_SECONDS", 0.4)
+    binding = server_module.IsaacSessionBinding(
+        binding_id="b", session_id="s", instance_name="default", agent_id="A", port=8226
+    )
+    monkeypatch.setattr(instance, "_get_active_binding", lambda: binding)
+    beats: List[Tuple[str, str]] = []
+    monkeypatch.setattr(instance, "_heartbeat_binding", lambda b, tool: beats.append((b.agent_id, tool)))
+
+    async def scenario() -> None:
+        async def times_out() -> Dict[str, Any]:
+            return fake.time_out()
+
+        await instance._exec_isaac("isaac_slow", times_out())
+        await asyncio.sleep(0.45)
+        fake.idle.set()
+        await asyncio.wait_for(instance._isaac_holds["default"].task, 2.0)
+
+    asyncio.run(scenario())
+
+    assert len(beats) >= 3 and set(beats) == {("A", "isaac_slow")}
+
+
+def test_the_hold_s_probe_never_overruns_its_limit() -> None:
+    """Re-detecting the socket flavour took a whole socket timeout past the hold limit."""
+
+    async def scenario() -> Tuple[bool, float]:
+        kit = _SerialKit()
+        await kit.start()
+        try:
+            blocker = asyncio.ensure_future(_client(kit.port, timeout=10).execute("sleep(3)"))
+            await asyncio.sleep(0.05)
+            client = IsaacSocketClient(port=kit.port, timeout_seconds=5.0, socket_protocol="auto")
+            client._note_unfinished("socket", "script")
+            started = time.monotonic()
+            idle = await client.wait_until_idle(0.5)
+            took = time.monotonic() - started
+            await blocker
+            return idle, took
+        finally:
+            await kit.stop()
+
+    idle, took = asyncio.run(scenario())
+
+    assert idle is False and took < 1.0, took

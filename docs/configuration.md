@@ -129,7 +129,7 @@ variable, so Blender must see the same `SIMUL_HOME` as the server (or set
 | `ISAAC_SIM__SOCKET_AUTH_TOKEN` | unset | Token for a 6.0 python_server started with `--auth-token`; also sent to the bridge, which then requires it ([security model](isaac-sim.md#security-model)) |
 | `ISAAC_SIM__BRIDGE_FAILURE_THRESHOLD` / `ISAAC_SIM__BRIDGE_COOLDOWN_SECONDS` | `3` / `30` | Bridge circuit breaker; see [isaac-sim.md](isaac-sim.md#transports) |
 | `ISAAC_SIM__HOLD_AFTER_TIMEOUT` | `300` | After an Isaac call times out while Isaac Sim may still be running it, the server keeps the instance until the engine has finished, for at most this many seconds, and other calls get `InstanceBusy` meanwhile; `0` releases it at once ([isaac-sim.md](isaac-sim.md#transports)) |
-| `SERVER__SHUTDOWN_TIMEOUT` | `5` | Longest a stopping server (SIGTERM, SIGINT) waits for Isaac Sim to finish calls it is still running (cancelled or timed out) before it exits anyway; the log names each call it stopped waiting for. Keep it under the supervisor's grace period (Docker: 10 s) |
+| `SERVER__SHUTDOWN_TIMEOUT` | `5` | Longest a stopping server (SIGTERM, SIGINT) waits for Isaac Sim to finish the calls it was running when the stop began, or that a client had cancelled, before it exits anyway; the log names each call it stopped waiting for. An instance held after a timed-out call is released at once. Keep it under the supervisor's grace period (Docker: 10 s) |
 | `UNREAL__HOST` / `UNREAL__PORT` | `localhost` / `30010` | Remote Control endpoint |
 | `UNREAL__TOOL_SURFACE` | `thin` | `full` registers every granular Unreal tool (`--unreal-tools` overrides) |
 | `BLENDER__TOOL_SURFACE` | `full` | `thin` registers only the essentials in `THIN_BLENDER_TOOLS` (`--blender-tools` overrides) |

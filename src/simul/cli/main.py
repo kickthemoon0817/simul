@@ -651,7 +651,7 @@ async def _serve(
         (stdin closed).
     """
     loop = asyncio.get_running_loop()
-    received: List[int] = list(stop_signals.received) if stop_signals is not None else []
+    received: List[int] = []
     signalled = asyncio.Event()
 
     def _on_signal(signum: int) -> None:
@@ -678,6 +678,11 @@ async def _serve(
             continue
         previous[signum] = before
         handlers[signum] = signal.getsignal(signum)
+    # Read only now that the loop has the signals: one that came before is in
+    # the recorder, one after reaches _on_signal, and none falls between.
+    if stop_signals is not None and stop_signals.received:
+        received[:0] = stop_signals.received
+        signalled.set()
     servers: List[Any] = []
     try:
         if received:

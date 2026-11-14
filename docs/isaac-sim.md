@@ -186,8 +186,12 @@ A stopped timeline is not flagged: USD then holds the authored state, which
   `get_runtime_info`, polled until it is no longer busy) and its answer
   releases the instance. Other calls wait up to `server.timeout` and then
   get `InstanceBusy` with `details.reason: "finishing_timed_out_call"`,
-  `timed_out_tool` and `busy_for_seconds`; `ping_isaac` does not wait and
-  reports `held_after_timeout`. The hold ends after
+  `timed_out_tool` and `busy_for_seconds`. `ping_isaac` does not wait for
+  the instance and reports `held_after_timeout`, though on the stock socket
+  its own probe answers only once the script has ended. A claim the
+  timed-out call's agent holds is kept alive while the hold lasts. Only the
+  timed-out call's own timeout starts a hold: the `list_isaac_instances`
+  probes, which run beside the call holding the instance, never do. The hold ends after
   `ISAAC_SIM__HOLD_AFTER_TIMEOUT` seconds (default 300) at most, with a
   warning in the log; `0` turns it off. On the stock sockets a coroutine
   script that awaits frames leaves the main thread free between frames, so

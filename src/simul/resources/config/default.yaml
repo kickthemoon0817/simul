@@ -12,8 +12,9 @@ server:
   port: 8765
   timeout: 30
   # Longest a stopping server (SIGTERM, SIGINT) waits for Isaac Sim to finish
-  # calls it is still running (cancelled or timed out) before it exits anyway.
-  # Keep it under the supervisor's grace period (Docker: 10 s).
+  # the calls it was running when the stop began, or that a client had
+  # cancelled, before it exits anyway. An instance held after a timed-out call
+  # is released at once. Keep it under the supervisor's grace period (Docker: 10 s).
   shutdown_timeout: 5.0
   # A host that is not loopback (0.0.0.0, a LAN address) needs this opt-in,
   # or `simul server --allow-public`; the server refuses to start otherwise.
