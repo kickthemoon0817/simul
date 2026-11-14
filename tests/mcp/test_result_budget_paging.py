@@ -176,6 +176,28 @@ def test_an_entry_larger_than_the_budget_is_sent_compacted() -> None:
     assert page["truncation"]["compacted_entries"] == ["prims[0]"]
 
 
+def test_a_compacted_subtree_prim_keeps_its_api_schemas() -> None:
+    """USD round-3 m5: compaction dropped api_schemas with attributes; get_prim_info keeps them (M1)."""
+    schemas = [f"PhysicsDriveAPI:joint_{index:02d}" for index in range(19)]
+    huge = {
+        "path": "/Robot/base",
+        "type": "Xform",
+        "api_schemas": schemas,
+        "attributes": {f"attr_{i}": {"type": "float", "value": i} for i in range(3000)},
+    }
+    payload = _page([huge] + _entries(10), offset=0, limit=100)
+    assert len(json.dumps(schemas)) > 256  # over the small-value size compaction keeps by itself
+
+    page = apply_result_budget(payload, paging=PAGED_RESULTS["get_prim_subtree"])
+    plain = apply_result_budget(payload, paging=PRIMS)
+
+    first = page["prims"][0]
+    assert first["truncated_item"] is True
+    assert first["api_schemas"] == schemas
+    assert first["dropped_keys"] == ["attributes"]
+    assert plain["prims"][0]["dropped_keys"] == ["api_schemas", "attributes"]
+
+
 @pytest.mark.parametrize("seed", range(12))
 def test_random_pages_always_progress_and_deliver_everything(seed: int) -> None:
     rng = random.Random(seed)

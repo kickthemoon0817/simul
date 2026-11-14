@@ -191,13 +191,57 @@ def _clip_prim_paths(cache: Any, clipped: Iterable[Any]) -> List[Sdf.Path]:
     return list(found.values())
 
 
+def _clip_attributes(prim: Usd.Prim) -> Optional[List[Usd.Attribute]]:
+    """The attributes ``prim``'s clip sets can give values to, or None when a set's manifest cannot be had.
+
+    pxr takes a clip value only for an attribute its clip set's manifest
+    declares: the authored ``manifestAssetPath``, or else the manifest pxr
+    generates from the clip layers (``UsdClipsAPI.GenerateClipManifest``).
+    Each declared attribute is mapped from the set's ``primPath`` onto
+    ``prim``'s subtree. A clip set that is on a large prim (``/World`` over
+    200,000 prims) but animates a few attributes costs those few.
+    """
+    api = Usd.ClipsAPI(prim)
+    stage = prim.GetStage()
+    target = prim.GetPath()
+    found: Dict[str, Usd.Attribute] = {}
+    for name in api.GetClips().keys():
+        source = api.GetClipPrimPath(name)
+        if not source or not Sdf.Path.IsValidPathString(source):
+            continue  # pxr ignores a clip set without a valid primPath
+        source_path = Sdf.Path(source)
+        manifest = None
+        authored = api.GetClipManifestAssetPath(name)
+        try:
+            if authored is not None and authored.path and authored.resolvedPath:
+                manifest = Sdf.Layer.FindOrOpen(authored.resolvedPath)
+            if manifest is None:
+                manifest = api.GenerateClipManifest(name)
+        except Exception:
+            return None
+        if manifest is None:
+            return None
+        if not manifest.GetPrimAtPath(source_path):
+            continue
+
+        def visit(path: Sdf.Path) -> None:
+            if path.IsPropertyPath() and manifest.GetAttributeAtPath(path):
+                attribute = stage.GetAttributeAtPath(path.ReplacePrefix(source_path, target))
+                if attribute:
+                    found.setdefault(attribute.GetPath().pathString, attribute)
+
+        manifest.Traverse(source_path, visit)
+    return list(found.values())
+
+
 def _clip_sample_range(stage: Usd.Stage, prim_paths: Iterable[Sdf.Path]) -> Optional[List[float]]:
     """The stage times of the samples value clips supply, as pxr maps them.
 
     pxr maps each clip's own times through the clip set's ``times`` and
-    ``active`` and the layer offsets above it; the attributes under each
-    clipped prim are asked for their time samples, so whatever pxr composes
-    is what is reported.
+    ``active`` and the layer offsets above it; the attributes the clip sets
+    can animate (``_clip_attributes``) are asked for their time samples, so
+    whatever pxr composes is what is reported. When a set's manifest cannot
+    be had, every attribute under the clipped prim is asked instead.
     """
     first: Optional[float] = None
     last: Optional[float] = None
@@ -205,14 +249,16 @@ def _clip_sample_range(stage: Usd.Stage, prim_paths: Iterable[Sdf.Path]) -> Opti
         prim = stage.GetPrimAtPath(path)
         if not prim:
             continue
-        for descendant in Usd.PrimRange(prim):
-            for attribute in descendant.GetAttributes():
-                if not attribute.ValueMightBeTimeVarying():
-                    continue
-                times = attribute.GetTimeSamples()
-                if times:
-                    first = times[0] if first is None else min(first, times[0])
-                    last = times[-1] if last is None else max(last, times[-1])
+        attributes = _clip_attributes(prim)
+        if attributes is None:
+            attributes = [attribute for descendant in Usd.PrimRange(prim) for attribute in descendant.GetAttributes()]
+        for attribute in attributes:
+            if not attribute.ValueMightBeTimeVarying():
+                continue
+            times = attribute.GetTimeSamples()
+            if times:
+                first = times[0] if first is None else min(first, times[0])
+                last = times[-1] if last is None else max(last, times[-1])
     if first is None or last is None:
         return None
     return [float(first), float(last)]
@@ -447,7 +493,8 @@ def describe_prim(
     Returns:
         The fields of the ``PrimInfo`` response. ``warnings`` lists the
         properties pxr could not read (a relationship or material binding
-        authored as an attribute); the rest of the prim is still described.
+        authored as an attribute, a PointInstancer's ``prototypes`` the bound
+        leaves out); the rest of the prim is still described.
     """
     time = resolve_time_code(time_code)
     problems: List[Dict[str, Any]] = []
@@ -503,7 +550,25 @@ def describe_prim(
         info["prototype"] = prim.GetPrototype().GetPath().pathString
     if prim.IsInstanceProxy():
         info["prim_in_prototype"] = prim.GetPrimInPrototype().GetPath().pathString
+    _add_bound_warnings(problems, bounds["warnings"])
     return info
+
+
+def _add_bound_warnings(problems: List[Dict[str, Any]], bound_warnings: List[Dict[str, Any]]) -> None:
+    """Add the instancers the bound left out to ``problems``, one warning per property.
+
+    The prim's own unreadable ``prototypes`` is already named by the
+    relationships warning; that one also says the bound leaves it out.
+    """
+    for warning in bound_warnings:
+        named = warning.get("location", {}).get("property_path")
+        same = next(
+            (problem for problem in problems if problem.get("location", {}).get("property_path") == named), None
+        )
+        if same is None:
+            problems.append(warning)
+        else:
+            same["message"] += " The instancer and everything under it are also left out of bbox."
 
 
 class USDReader(LoggerMixin):

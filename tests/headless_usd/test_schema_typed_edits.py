@@ -13,6 +13,10 @@ Round-2 audit findings, pinned against real ``pxr`` stages:
   animation.
 - M10: non-finite floats as the reads spell them, and finite values a float
   cannot hold.
+
+Round 3: m2, a later write to such an attribute keeps the schema's tokens;
+m3, a PointInstancer whose prototypes pxr cannot read no longer fails every
+bound above it.
 """
 
 from __future__ import annotations
@@ -32,8 +36,10 @@ from simul.usd import coerce, editing, schema_properties  # noqa: E402
 from simul.usd.editing import USDEditError  # noqa: E402
 from simul.usd.mesh_ops import get_mesh_statistics  # noqa: E402
 from simul.usd.pxr_errors import bound_material_path  # noqa: E402
+from simul.usd.bbox import BBoxCache, describe_bounds  # noqa: E402
 from simul.usd.reader import describe_prim  # noqa: E402
 from simul.usd.search import list_subtree  # noqa: E402
+from simul.usd.summarize import summarize_stage  # noqa: E402
 
 
 def _build(directory: Path) -> Path:
@@ -314,6 +320,88 @@ class TestReadsSurviveMalformedProperties:
         assert page["total"] == 9
 
 
+def _build_unreadable_instancer(directory: Path) -> Path:
+    """A PointInstancer whose prototypes a layer authors as an attribute, beside a cube at x=10."""
+    path = directory / "instancer.usda"
+    path.write_text(
+        '#usda 1.0\n(\n    defaultPrim = "W"\n    upAxis = "Z"\n    metersPerUnit = 1\n)\n\n'
+        'def Xform "W"\n{\n'
+        '    def PointInstancer "PI"\n    {\n        custom string prototypes = "/W/PI/Protos/Box"\n'
+        "        int[] protoIndices = [0, 0]\n        point3f[] positions = [(0, 0, 0), (5, 0, 0)]\n"
+        '        def Scope "Protos"\n        {\n            def Cube "Box"\n            {\n            }\n'
+        "        }\n    }\n"
+        '    def Xform "Holder"\n    {\n        double3 xformOp:translate = (10, 0, 0)\n'
+        '        uniform token[] xformOpOrder = ["xformOp:translate"]\n'
+        '        def Cube "A"\n        {\n        }\n    }\n}\n'
+    )
+    return path
+
+
+class TestBoundsSurviveAnUnreadableInstancer:
+    """USD round-3 m3: pxr's bound raises for every prim above a PointInstancer whose prototypes it cannot read."""
+
+    @pytest.fixture
+    def stage(self, tmp_path: Path) -> Usd.Stage:
+        return Usd.Stage.Open(str(_build_unreadable_instancer(tmp_path)))
+
+    def test_get_prim_info_of_the_instancer_names_the_property_once(self, stage) -> None:
+        info = describe_prim(stage.GetPrimAtPath("/W/PI"))
+
+        assert info["bbox"] is None
+        (warning,) = info["warnings"]
+        assert warning["code"] == "UnreadableProperty"
+        assert warning["location"]["property_path"] == "/W/PI.prototypes"
+        assert "left out of relationships" in warning["message"] and "left out of bbox" in warning["message"]
+
+    def test_an_ancestor_is_bound_around_the_instancer(self, stage) -> None:
+        info = describe_prim(stage.GetPrimAtPath("/W"))
+
+        assert (info["bbox"]["min"], info["bbox"]["max"]) == ([9.0, -1.0, -1.0], [11.0, 1.0, 1.0])
+        (warning,) = info["warnings"]
+        assert warning["location"]["property_path"] == "/W/PI.prototypes"
+        assert "left out of the bound" in warning["message"] and "pxrInternal" not in warning["message"]
+
+    @pytest.mark.parametrize("world_space", [True, False])
+    def test_the_stage_and_a_prim_in_its_own_space(self, stage, world_space) -> None:
+        whole = describe_bounds(stage, None, world_space=world_space)
+        holder = describe_bounds(stage, stage.GetPrimAtPath("/W"), world_space=world_space)
+
+        assert (whole["bbox"]["min"], whole["bbox"]["max"]) == ([9.0, -1.0, -1.0], [11.0, 1.0, 1.0])
+        assert (holder["bbox"]["min"], holder["bbox"]["max"]) == ([9.0, -1.0, -1.0], [11.0, 1.0, 1.0])
+        assert [w["location"]["prim_path"] for w in whole["warnings"]] == ["/W/PI"]
+
+    def test_a_reused_cache_keeps_failing_over_instead_of_returning_a_partial_bound(self, stage) -> None:
+        cache = BBoxCache(stage)
+
+        assert cache.compute_world_bbox(stage.GetPrimAtPath("/W/PI")) is None
+        assert cache.compute_world_bbox(stage.GetPrimAtPath("/W")) == ([9.0, -1.0, -1.0], [11.0, 1.0, 1.0])
+        assert len(cache.problems) == 1
+
+    def test_a_clean_stage_reports_nothing(self, tmp_path) -> None:
+        stage = Usd.Stage.Open(str(_build(tmp_path)))
+
+        assert describe_bounds(stage)["warnings"] == []
+
+    def test_summarize_scene(self, stage) -> None:
+        summary = summarize_stage(stage, "instancer.usda")
+
+        assert summary.scene_bbox == {"min": [9.0, -1.0, -1.0], "max": [11.0, 1.0, 1.0]}
+        assert [w["location"]["property_path"] for w in summary.warnings] == ["/W/PI.prototypes"]
+
+    def test_the_tools_answer_with_the_warning(self, usd_tools, tmp_path) -> None:
+        stage_id = usd_tools.load(_build_unreadable_instancer(tmp_path))
+
+        info = usd_tools.call("get_prim_info", stage_id=stage_id, prim_path="/W/PI")
+        whole = usd_tools.call("get_bounding_box", stage_id=stage_id)
+        summary = usd_tools.call("summarize_scene", stage_id=stage_id)["summary"]
+
+        assert info["success"] is True and info["bbox"] is None
+        assert whole["success"] is True and whole["bbox"]["max"] == [11.0, 1.0, 1.0]
+        assert [w["code"] for w in whole["warnings"]] == ["UnreadableProperty"]
+        assert summary["scene_bbox"]["min"] == [9.0, -1.0, -1.0]
+        assert "/W/PI.prototypes" in [w["location"]["property_path"] for w in summary["warnings"]]
+
+
 class TestSchemaTypedAttributes:
     """M3: an attribute another schema declares takes that schema's type, with a warning."""
 
@@ -362,6 +450,33 @@ class TestSchemaTypedAttributes:
 
         assert "allowed: force, acceleration" in bad_token.details["problems"][0]["reason"]
         assert "uniform" in sampled.details["problems"][0]["reason"]
+
+    @pytest.mark.parametrize(
+        "prim_path, name, first, second",
+        [
+            ("/World/Box", "physics:approximation", "convexHull", "boundingCube"),
+            ("/World/Fixed", "drive:angular:physics:type", "force", "acceleration"),
+        ],
+    )
+    def test_later_writes_keep_the_schema_tokens(self, session, scene, prim_path, name, first, second) -> None:
+        """USD round-3 m2: the tokens were checked only when the attribute was created."""
+        created = session.update_prim_attributes(scene["id"], prim_path, {name: first})
+        session.update_prim_attributes(scene["id"], prim_path, {name: second})
+        bogus = _refusal(session.update_prim_attributes, scene["id"], prim_path, {name: "bogus"})
+
+        assert created["created_attributes"] == {name: "token"}
+        assert "'bogus' is not an allowed token" in bogus.details["problems"][0]["reason"]
+        assert first in bogus.details["problems"][0]["reason"]
+        attribute = scene["stage"].GetPrimAtPath(prim_path).GetAttribute(name)
+        assert attribute.Get() == second and not attribute.GetMetadata("allowedTokens")
+
+    def test_custom_tokens_without_a_schema_stay_free(self, session, scene) -> None:
+        session.update_prim_attributes(
+            scene["id"], "/World/Box", {"custom:mode": "a"}, attribute_types={"custom:mode": "token"}
+        )
+        session.update_prim_attributes(scene["id"], "/World/Box", {"custom:mode": "anything"})
+
+        assert scene["stage"].GetPrimAtPath("/World/Box").GetAttribute("custom:mode").Get() == "anything"
 
     def test_attribute_types_must_match_the_schema(self, session, scene) -> None:
         error = _refusal(

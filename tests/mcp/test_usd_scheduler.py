@@ -291,3 +291,30 @@ def test_a_call_waiting_on_a_file_being_written_fails_with_stage_busy() -> None:
     assert "save_usd_stage" in busy["error"]
     assert "never" not in [label for label, _, _ in recorder.intervals]
     assert scheduler._file_locks == {} and scheduler._stage_locks == {}
+
+
+def test_run_alone_waits_past_the_timeout_and_holds_the_backend() -> None:
+    """Releasing an ended session's stages (USD round-3 B2, m6) queues like a write but is never refused."""
+    recorder = Recorder()
+
+    async def scenario() -> Tuple[Any, Any]:
+        patient = USDCallScheduler(0.1)
+        slow = asyncio.create_task(patient.run("slow", recorder.work("slow", 0.4), stage_key="A"))
+        await asyncio.sleep(0.05)
+        released = await patient.run_alone("release", recorder.work("release", 0.05))
+        await slow
+        scheduler = USDCallScheduler(5)
+        alone = asyncio.create_task(scheduler.run_alone("release2", recorder.work("release2", 0.3)))
+        await asyncio.sleep(0.05)
+        later = await scheduler.run("later", recorder.work("later", 0), stage_key="B")
+        await alone
+        return released, later
+
+    released, later = _run(scenario())
+
+    assert released == {"success": True, "label": "release"}
+    assert later["success"] is True
+    assert not recorder.overlaps("slow", "release")
+    assert not recorder.overlaps("release2", "later")
+    order = [label for label, _start, _end in sorted(recorder.intervals, key=lambda item: item[1])]
+    assert order == ["slow", "release", "release2", "later"]

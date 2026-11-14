@@ -24,6 +24,7 @@ from simul.mcp.paged_results import PAGED_RESULTS, BULK_FIELDS  # noqa: E402
 from simul.mcp.result_budget import DEFAULT_RESULT_BUDGET_BYTES, apply_result_budget  # noqa: E402
 from simul.mcp.server import SimulMCPServer  # noqa: E402
 from simul.usd.mesh_ops import MeshArrays, geometry_statistics  # noqa: E402
+from simul.usd import reader  # noqa: E402
 from simul.usd.reader import animation_range  # noqa: E402
 from simul.usd.stage_files import public_identifier  # noqa: E402
 
@@ -249,6 +250,69 @@ def test_m2_clips_with_a_manifest_are_found_before_any_read(tmp_path: Path) -> N
 
     assert result["time_sample_range"] == [100.0, 120.0] == _pxr_range(stage)
     assert result["has_animation"] is True
+
+
+def _clipped_world(tmp_path: Path, prims: int = 300) -> Path:
+    """A clip set on /World above ``prims`` prims, animating one attribute of one of them (no manifest)."""
+    for index in range(2):
+        clip = Sdf.Layer.CreateNew(str(tmp_path / f"world_clip_{index}.usda"))
+        spec = Sdf.CreatePrimInLayer(clip, "/World/p0000")
+        attribute = Sdf.AttributeSpec(spec, "xformOp:translate", Sdf.ValueTypeNames.Double3)
+        for time in range(11):
+            clip.SetTimeSample(attribute.path, time, Gf.Vec3d(index * 100 + time, 0, 0))
+        clip.Save()
+    stage = Usd.Stage.CreateNew(str(tmp_path / "world.usda"))
+    world = UsdGeom.Xform.Define(stage, "/World").GetPrim()
+    stage.SetDefaultPrim(world)
+    for index in range(prims):
+        prim = UsdGeom.Xform.Define(stage, f"/World/p{index:04d}")
+        op = prim.AddTranslateOp()
+        if index:
+            op.Set(Gf.Vec3d(index, 0, 0))  # a default would hide p0000's clip values
+        prim.GetPrim().CreateAttribute("custom:weight", Sdf.ValueTypeNames.Float).Set(1.0)
+    clips = Usd.ClipsAPI(world)
+    clips.SetClipAssetPaths([Sdf.AssetPath("./world_clip_0.usda"), Sdf.AssetPath("./world_clip_1.usda")])
+    clips.SetClipPrimPath("/World")
+    clips.SetClipActive([(100.0, 0), (110.0, 1)])
+    clips.SetClipTimes([(100.0, 0.0), (110.0, 10.0), (110.0, 0.0), (120.0, 10.0)])
+    stage.GetRootLayer().Save()
+    return tmp_path / "world.usda"
+
+
+def test_r3_m4_clips_on_a_large_prim_ask_only_the_attributes_they_animate(tmp_path: Path) -> None:
+    """USD round-3 m4: every attribute under the clipped prim used to be asked for its samples."""
+    stage = Usd.Stage.Open(str(_clipped_world(tmp_path)))
+
+    asked = reader._clip_attributes(stage.GetPrimAtPath("/World"))
+
+    assert [attribute.GetPath().pathString for attribute in asked] == ["/World/p0000.xformOp:translate"]
+    assert animation_range(stage)["time_sample_range"] == [100.0, 120.0] == _pxr_range(stage)
+
+
+def test_r3_m4_an_authored_manifest_names_the_attributes(tmp_path: Path) -> None:
+    for index in range(2):
+        (tmp_path / f"clip_{index}.usda").write_text(
+            '#usda 1.0\nover "Model"\n{\n    double v.timeSamples = { 0: %d, 10: %d }\n}\n' % (index, index + 1)
+        )
+    (tmp_path / "manifest.usda").write_text('#usda 1.0\nover "Model"\n{\n    double v\n}\n')
+    (tmp_path / "clips.usda").write_text(CLIPS_TEXT)
+    stage = Usd.Stage.Open(str(tmp_path / "clips.usda"))
+
+    asked = reader._clip_attributes(stage.GetPrimAtPath("/Model"))
+
+    assert [attribute.GetPath().pathString for attribute in asked] == ["/Model.v"]
+
+
+def test_r3_m4_without_a_manifest_every_attribute_is_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stage = Usd.Stage.Open(str(_clipped_world(tmp_path, prims=20)))
+
+    def broken(*_args: Any) -> Any:
+        raise RuntimeError("no manifest")
+
+    monkeypatch.setattr(Usd.ClipsAPI, "GenerateClipManifest", broken)
+
+    assert reader._clip_attributes(stage.GetPrimAtPath("/World")) is None
+    assert animation_range(stage)["time_sample_range"] == [100.0, 120.0]
 
 
 def test_m2_falls_back_to_each_layers_own_times_without_the_pcp_mapping(

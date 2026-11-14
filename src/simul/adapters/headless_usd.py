@@ -90,6 +90,14 @@ class _StageRecord:
     unreal_content: List[OutsidePath] = field(default_factory=list)
 
 
+def _layer_in_memory(path: str) -> bool:
+    """Whether pxr holds a layer for the file at ``path`` (a real path) in this process."""
+    try:
+        return bool(Sdf.Layer.Find(path))
+    except Exception:
+        return False
+
+
 class HeadlessUSDSession(LoggerMixin):
     """
     A headless USD session for file operations without Isaac Sim runtime.
@@ -420,6 +428,9 @@ class HeadlessUSDSession(LoggerMixin):
                 loaded_stages=owned,
             )
 
+        # The layers pxr already holds: composing reuses each as it is, so one
+        # this session has no stamp for must be checked against its file.
+        preloaded = stage_files.layers_in_memory()
         try:
             root = stage_files.open_private_root(file_path)
         except Exception as exc:
@@ -443,7 +454,7 @@ class HeadlessUSDSession(LoggerMixin):
                 f"pxr parsed the {root.GetFileFormat().formatId} layer but could not compose a "
                 f"stage from it: {editing.tf_error_reason(exc)}",
             ) from exc
-        reloaded, unread = self._refresh_shared(stage)
+        reloaded, unread = self._refresh_shared(stage, preloaded=preloaded)
         if reloaded:
             self.logger.info(f"Reread changed files for {file_path}: {reloaded}")
         if sandbox is not None:
@@ -487,7 +498,11 @@ class HeadlessUSDSession(LoggerMixin):
         return stamps
 
     def _changed_shared(
-        self, stage: Usd.Stage, skip: Optional[Set[str]] = None, extra: Iterable[Any] = ()
+        self,
+        stage: Usd.Stage,
+        skip: Optional[Set[str]] = None,
+        extra: Iterable[Any] = (),
+        preloaded: Optional[Set[str]] = None,
     ) -> List[Any]:
         """The shared layers whose files changed since the session read them, but ``skip``.
 
@@ -495,6 +510,12 @@ class HeadlessUSDSession(LoggerMixin):
         its root file names (``reload_stage`` checks them before rereading).
         A layer with file format arguments (a private root, a throwaway
         copy) is nobody's shared layer and is left out.
+
+        A layer with no stamp was read by this load, unless it was already
+        in memory when the load began (``preloaded``, identifiers): then
+        nothing says which content of its file it holds (it outlived the
+        stages the session stamped it for), so it counts as changed and is
+        reread, rather than taken for the file as it is now.
         """
         root = stage.GetRootLayer()
         changed: List[Any] = []
@@ -511,8 +532,11 @@ class HeadlessUSDSession(LoggerMixin):
                     continue
                 current = stage_files.stamp(path)
                 if path not in self._shared_stamps:
-                    # First seen: this load just read it.
-                    self._shared_stamps[path] = current
+                    if preloaded is not None and layer.identifier in preloaded:
+                        changed.append(layer)
+                    else:
+                        # First seen: this load just read it.
+                        self._shared_stamps[path] = current
                 elif self._shared_stamps[path] != current:
                     changed.append(layer)
         return changed
@@ -606,7 +630,7 @@ class HeadlessUSDSession(LoggerMixin):
             return list(record.unreal_content) if record is not None else []
 
     def _refresh_shared(
-        self, stage: Usd.Stage, skip: Optional[Set[str]] = None
+        self, stage: Usd.Stage, skip: Optional[Set[str]] = None, preloaded: Optional[Set[str]] = None
     ) -> Tuple[List[str], Dict[str, str]]:
         """
         Reload the shared layers of ``stage`` whose files changed since the session read them.
@@ -619,6 +643,12 @@ class HeadlessUSDSession(LoggerMixin):
         and held to the composition sandbox; only when every one passes are
         the layers reloaded (``_check_rereads``, then ``_reread``).
 
+        Args:
+            stage: The stage whose shared layers to check
+            skip: Real paths not to check
+            preloaded: Identifiers of the layers in memory when the call
+                began (see ``_changed_shared``)
+
         Returns:
             The real paths of the layers reloaded, and for each changed file
             pxr cannot parse now (left with its old content) the reason.
@@ -627,7 +657,7 @@ class HeadlessUSDSession(LoggerMixin):
             SandboxDenied: A changed file now reaches outside the sandbox;
                 nothing was reloaded.
         """
-        refreshable, unread = self._check_rereads(self._changed_shared(stage, skip))
+        refreshable, unread = self._check_rereads(self._changed_shared(stage, skip, preloaded=preloaded))
         reloaded, failed = self._reread(refreshable, stage)
         unread.update(failed)
         return reloaded, unread
@@ -685,19 +715,27 @@ class HeadlessUSDSession(LoggerMixin):
                 stage_id=stage_id,
                 override="discard_unsaved",
             )
+        del stage  # so the stage, and the layers only it holds, go with the drop
         self._drop(stage_id)
         self.logger.info(f"Unloaded USD stage: {stage_id}")
         return True
 
     def _drop(self, stage_id: str) -> None:
         with self._registry:
-            self._active_stages.pop(stage_id, None)
+            stage = self._active_stages.pop(stage_id, None)
             self._bbox_caches.pop(stage_id, None)
             self._stage_records.pop(stage_id, None)
+            del stage  # released here unless a caller still holds it
             # Forget the shared files no remaining stage composes, so a later
-            # load that reads one fresh does not take it for changed.
+            # load that reads one fresh does not take it for changed. A file
+            # whose layer pxr still holds (for a stage being read or loaded, or
+            # one that read clip layers after its load) keeps its stamp: a load
+            # composing it gets that copy, and the stamp says which content of
+            # the file it holds.
             in_use = {path for record in self._stage_records.values() for path in record.stamps}
             for path in [path for path in self._shared_stamps if path not in in_use]:
+                if _layer_in_memory(path):
+                    continue
                 del self._shared_stamps[path]
                 self._shared_unread.pop(path, None)
 
@@ -709,6 +747,11 @@ class HeadlessUSDSession(LoggerMixin):
         their owner is gone), so they would otherwise stay in memory until the
         server exits. Unsaved edits are dropped with them; a warning names the
         stages that had any.
+
+        It reads and drops pxr objects and forgets the stamps of shared
+        files no stage composes any more, so it must not run beside other
+        pxr work: the MCP server runs it through its USD scheduler, alone
+        (``USDCallScheduler.run_alone``), never on the event loop.
 
         Args:
             owner: The ended session's id
@@ -1040,6 +1083,7 @@ class HeadlessUSDSession(LoggerMixin):
                 override="discard_unsaved",
             )
         changed = stage_files.changed_files(stage, record.stamps)
+        preloaded = stage_files.layers_in_memory()
         factory = self._sandbox_factory
         named: List[Any] = []
         if record.file_path in changed:
@@ -1056,14 +1100,14 @@ class HeadlessUSDSession(LoggerMixin):
         # The shared layers the stage uses and those the new root content
         # names: a newly named one another stage holds may be older than its
         # file, whose new content must pass before the root is reread.
-        refreshable, unread = self._check_rereads(self._changed_shared(stage, extra=named))
+        refreshable, unread = self._check_rereads(self._changed_shared(stage, extra=named, preloaded=preloaded))
         try:
             root.Reload(True)
             reloaded, failed = self._reread(refreshable, stage)
             unread.update(failed)
             # A file the reread root names that no stage composed before was
             # read fresh; one another stage already holds may be stale.
-            more, failed = self._refresh_shared(stage, skip=set(unread))
+            more, failed = self._refresh_shared(stage, skip=set(unread), preloaded=preloaded)
             reloaded += more
             unread.update(failed)
         except SandboxDenied:

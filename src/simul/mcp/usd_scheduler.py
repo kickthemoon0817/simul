@@ -26,7 +26,10 @@ kinds of lock before a call starts:
   run one after the other and the second sees the first's write.
 
 A call waits at most ``server.timeout`` seconds for its locks and otherwise
-fails with ``StageBusy``, so nothing queues forever behind a slow call.
+fails with ``StageBusy``, so nothing queues forever behind a slow call. The
+one exception is housekeeping (``run_alone``, which unloads an ended MCP
+session's stages): it queues like a write and waits as long as it takes,
+since it must not race another call's pxr work and must not be dropped.
 Python cannot stop a thread inside pxr. A call whose request is cancelled or
 times out on the client keeps running until it finishes, and it holds its
 locks until then, so its stage is never touched mid-call. Later calls on
@@ -90,8 +93,8 @@ class _AccessLock:
             if exclusive:
                 return
 
-    async def acquire(self, exclusive: bool, timeout: float) -> bool:
-        """Wait up to ``timeout`` seconds for the lock.
+    async def acquire(self, exclusive: bool, timeout: Optional[float]) -> bool:
+        """Wait up to ``timeout`` seconds for the lock; None waits as long as it takes.
 
         Returns:
             True once held, False when the wait timed out.
@@ -272,6 +275,43 @@ class USDCallScheduler:
                 )
                 or "the USD backend",
             )
+            raise
+        finally:
+            if future.done():
+                release()
+            else:
+                future.add_done_callback(_release_after(release))
+
+    async def run_alone(self, name: str, work: Callable[[], Any]) -> Any:
+        """Run ``work`` on a worker thread with the backend to itself, however long that takes to get.
+
+        For housekeeping that must neither race pxr work nor be refused,
+        such as unloading an ended session's stages: it queues like a write,
+        in arrival order, after every call already running or queued, but
+        never gives up with ``StageBusy``.
+
+        Args:
+            name: What runs, for the log.
+            work: The synchronous pxr work.
+
+        Returns:
+            What ``work`` returned.
+        """
+        await self._access.acquire(True, None)
+        loop = asyncio.get_running_loop()
+
+        def release() -> None:
+            self._access.release(True)
+
+        try:
+            future = loop.run_in_executor(None, work)
+        except BaseException:
+            release()
+            raise
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            _LOGGER.warning("%s was cancelled; it finishes in the background with the USD backend held", name)
             raise
         finally:
             if future.done():

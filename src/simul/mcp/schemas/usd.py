@@ -570,6 +570,13 @@ class BBoxResponse(BaseModel):
             "add them to include_purposes to bound it"
         ),
     )
+    warnings: List[USDIssue] = Field(
+        default_factory=list,
+        description=(
+            "PointInstancers left out of the bound because pxr cannot read their prototypes "
+            "(UnreadableProperty: authored as an attribute, not a relationship)"
+        ),
+    )
     message: Optional[str] = Field(None, description="What an empty result means")
     error: Optional[str] = Field(None, description="Error message if failed")
 
