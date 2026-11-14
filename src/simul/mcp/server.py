@@ -215,6 +215,9 @@ class CancelledOutcome:
 # How long a cancelled Isaac call waits for the bridge to accept its interrupt.
 _INTERRUPT_TIMEOUT_SECONDS: float = 5.0
 
+# How often a wait for the engine checks whether the server began stopping.
+_ENGINE_WAIT_POLL_SECONDS: float = 0.25
+
 
 @dataclass
 class IsaacHold:
@@ -739,9 +742,8 @@ class SimulMCPServer(LoggerMixin):
         # Request tasks waiting for the engine to finish a call their client
         # cancelled; a stopping server waits for them, bounded.
         self._draining_calls: Set["asyncio.Task[Any]"] = set()
-        # Set when the server starts stopping (begin_shutdown): from then on
+        # When the server started stopping (begin_shutdown): from then on
         # every wait on Isaac Sim gives up after server.shutdown_timeout.
-        self._stopping = asyncio.Event()
         self._stopping_since: Optional[float] = None
         self._shut_down = False
         # Token buckets keyed by (agent, tool); the per-agent ceiling across
@@ -2063,7 +2065,12 @@ class SimulMCPServer(LoggerMixin):
             yield None
             self._heartbeat_active_binding(tool_name)
         finally:
-            if not self._hold_if_engine_busy(instance_name, lock, tool_name):
+            try:
+                held = self._hold_if_engine_busy(instance_name, lock, tool_name)
+            except Exception as exc:  # a lock never released would wedge the instance
+                self.logger.warning("Could not hold Isaac instance %r after %s: %s", instance_name, tool_name, exc)
+                held = False
+            if not held:
                 lock.release()
 
     def _instance_busy_error(self, instance_name: str) -> Dict[str, Any]:
@@ -2127,7 +2134,7 @@ class SimulMCPServer(LoggerMixin):
         if not isinstance(unfinished, UnfinishedRequest):
             return False
         limit = self.settings.isaac_sim.hold_after_timeout
-        if limit <= 0 or self._stopping.is_set():
+        if limit <= 0 or self._stopping_since is not None:
             client.forget_unfinished_request()
             return False
         hold = IsaacHold(tool_name=tool_name, since=unfinished.since)
@@ -2374,30 +2381,26 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             True when ``task`` ended, False when a stopping server gave up on it.
         """
-        stopping = asyncio.ensure_future(self._stopping.wait())
-        try:
-            while not task.done():
-                if self._stopping_since is None:
-                    waiting: Set["asyncio.Future[Any]"] = {task, stopping}
-                    timeout: Optional[float] = None
-                else:
-                    timeout = self._shutdown_deadline() - time.monotonic()
-                    if timeout <= 0:
-                        self.logger.warning(
-                            "Shutdown: stopped waiting for Isaac Sim to finish %s after %gs "
-                            "(server.shutdown_timeout); it may still be running inside Isaac Sim",
-                            what,
-                            self.settings.server.shutdown_timeout,
-                        )
-                        return False
-                    waiting = {task}
-                try:
-                    await asyncio.wait(waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
-                except asyncio.CancelledError:
-                    continue
-            return True
-        finally:
-            stopping.cancel()
+        while not task.done():
+            # Polled rather than signalled, so a stop that begins mid-wait is
+            # seen within _ENGINE_WAIT_POLL_SECONDS.
+            timeout = _ENGINE_WAIT_POLL_SECONDS
+            if self._stopping_since is not None:
+                timeout = self._shutdown_deadline() - time.monotonic()
+                if timeout <= 0:
+                    self.logger.warning(
+                        "Shutdown: stopped waiting for Isaac Sim to finish %s after %gs "
+                        "(server.shutdown_timeout); it may still be running inside Isaac Sim",
+                        what,
+                        self.settings.server.shutdown_timeout,
+                    )
+                    return False
+                timeout = min(timeout, _ENGINE_WAIT_POLL_SECONDS)
+            try:
+                await asyncio.wait({task}, timeout=timeout)
+            except asyncio.CancelledError:
+                continue
+        return True
 
     def _shutdown_deadline(self) -> float:
         """``time.monotonic()`` at which a stopping server stops waiting on Isaac Sim."""
@@ -2413,7 +2416,6 @@ class SimulMCPServer(LoggerMixin):
         if self._stopping_since is not None:
             return
         self._stopping_since = time.monotonic()
-        self._stopping.set()
         if self._draining_calls or self._isaac_holds:
             self.logger.info(
                 "Stopping; waiting up to %gs (server.shutdown_timeout) for Isaac Sim to "
