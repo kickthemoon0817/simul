@@ -128,6 +128,8 @@ variable, so Blender must see the same `SIMUL_HOME` as the server (or set
 | `ISAAC_SIM__SOCKET_PROTOCOL` | `auto` | `python_server` (6.0+) or `vscode` (5.x) skips the one-time probe |
 | `ISAAC_SIM__SOCKET_AUTH_TOKEN` | unset | Token for a 6.0 python_server started with `--auth-token`; also sent to the bridge, which then requires it ([security model](isaac-sim.md#security-model)) |
 | `ISAAC_SIM__BRIDGE_FAILURE_THRESHOLD` / `ISAAC_SIM__BRIDGE_COOLDOWN_SECONDS` | `3` / `30` | Bridge circuit breaker; see [isaac-sim.md](isaac-sim.md#transports) |
+| `ISAAC_SIM__HOLD_AFTER_TIMEOUT` | `300` | After an Isaac call times out while Isaac Sim may still be running it, the server keeps the instance until the engine has finished, for at most this many seconds, and other calls get `InstanceBusy` meanwhile; `0` releases it at once ([isaac-sim.md](isaac-sim.md#transports)) |
+| `SERVER__SHUTDOWN_TIMEOUT` | `5` | Longest a stopping server (SIGTERM, SIGINT) waits for Isaac Sim to finish the calls it was running when the stop began, or that a client had cancelled, before it exits anyway; the log names each call it stopped waiting for. An instance held after a timed-out call is released at once. Keep it under the supervisor's grace period (Docker: 10 s) |
 | `UNREAL__HOST` / `UNREAL__PORT` | `localhost` / `30010` | Remote Control endpoint |
 | `UNREAL__TOOL_SURFACE` | `thin` | `full` registers every granular Unreal tool (`--unreal-tools` overrides) |
 | `BLENDER__TOOL_SURFACE` | `full` | `thin` registers only the essentials in `THIN_BLENDER_TOOLS` (`--blender-tools` overrides) |
@@ -638,12 +640,21 @@ process writes first that day. (Python's timed rotation, used before, kept
 each process writing into the file it had open, so after the first midnight
 the other servers' rows went into the previous day's file and retention
 deleted them.) Dated copies older than `LOGGING__RETENTION_DAYS` days are
-deleted. `audit.jsonl` is also rotated at 10 MB within a day, and at most 30
-copies are kept. The lock and the rotation never cost a record: when the lock
-cannot be had (an NFS home without a lock daemon, a log directory where the
-lock file cannot be created) or another process holds it for more than
-50 ms, or a rotation fails, the record is appended to the file as it is,
-locking is skipped for 30 s, and one warning goes to stderr.
+deleted. `audit.jsonl` is also rotated at 10 MB within a day, to
+`<file>.<YYYY-MM-DD>.<n>` with `n` one above every copy of that day, and the
+30 newest copies are kept. The lock and the rotation never cost a record:
+when the lock cannot be had or a rotation fails, the record is appended whole
+to the file at its path, unlocked and unrotated (that file can then pass
+10 MB until the next locked write rotates it):
+
+- a lock that is not available at all (an NFS home without a lock daemon, a
+  log directory where the lock file cannot be created) is skipped for 30 s,
+  with one warning on stderr;
+- a lock another process has held for 50 ms (several servers writing at
+  once) is tried again after 0.5 s, without a warning. A holder that keeps it
+  through consecutive tries (a stopped or debugged process) doubles that
+  pause each time, up to 30 s, and from the third try on one warning goes
+  to stderr. One lock taken resets the pause.
 
 Log files are private to the user: directories simul creates for them are
 0700 and every log, audit and usage file, rotated copies, lock files and

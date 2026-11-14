@@ -126,6 +126,40 @@ TIMEOUT_MAY_STILL_COMPLETE = (
 )
 
 
+#: Script the idle probe sends to the stock socket. Kit runs scripts one at a
+#: time on its main thread, so its reply arrives only once the main thread has
+#: finished whatever it was running.
+IDLE_PROBE_SCRIPT: str = "print('simul-idle')"
+#: Pause between two idle probes that found the bridge still busy.
+IDLE_POLL_SECONDS: float = 0.5
+#: Bridge actions that leave no work behind when their reply times out: the
+#: probes (``ping``, ``get_runtime_info``) and the interrupt itself.
+_PROBE_ACTIONS: frozenset = frozenset({"ping", "get_runtime_info", "interrupt"})
+
+
+class SocketReplyTimeoutError(TimeoutError):
+    """The stock socket received the script but did not reply in time.
+
+    Unlike a connect timeout, the script was delivered: Kit may be running it,
+    or may run it later, once its main thread is free.
+    """
+
+
+@dataclass(frozen=True)
+class UnfinishedRequest:
+    """A request this client stopped waiting for while Isaac Sim may still run it.
+
+    Attributes:
+        transport: ``"bridge"`` or ``"socket"``, the transport that has it.
+        action: The bridge action, or ``"script"`` for the stock socket.
+        since: ``time.monotonic()`` when the client gave up on its reply.
+    """
+
+    transport: str
+    action: str
+    since: float
+
+
 class BridgeCircuitOpenError(ConnectionRefusedError):
     """The bridge was skipped because recent failures opened its circuit.
 
@@ -310,6 +344,9 @@ class IsaacSocketClient:
             None if socket_protocol == "auto" else socket_protocol
         )
         self.__lock: Optional[asyncio.Lock] = None
+        # The oldest request whose reply this client gave up on while the
+        # engine may still be running it; wait_until_idle clears it.
+        self._unfinished: Optional[UnfinishedRequest] = None
         # Tracks "{bridge}->{vscode}" pairs that have already produced a
         # WARNING-level fallback log so subsequent failures stay at DEBUG.
         self._logged_bridge_failures: set[str] = set()
@@ -320,6 +357,104 @@ class IsaacSocketClient:
         if self.__lock is None:
             self.__lock = asyncio.Lock()
         return self.__lock
+
+    @property
+    def unfinished_request(self) -> Optional[UnfinishedRequest]:
+        """The request Isaac Sim may still be running after its reply timed out, if any.
+
+        Set when a script or bridge action was delivered and its reply did not
+        arrive in time: a stock-socket read timeout, python_server's
+        ``TimeoutError`` reply, a bridge reply timeout or ``RequestTimeout``.
+        Kit goes on running the request and runs a later one only after it,
+        so work sent meanwhile times out too and runs after it was reported
+        failed. ``wait_until_idle`` clears it once the engine has finished.
+        """
+        return self._unfinished
+
+    def _note_unfinished(self, transport: str, action: str) -> None:
+        """Remember a delivered request whose reply timed out (the oldest one wins)."""
+        if self._unfinished is None:
+            self._unfinished = UnfinishedRequest(transport, action, time.monotonic())
+
+    def forget_unfinished_request(self) -> None:
+        """Stop tracking the unfinished request, after giving up on waiting for it."""
+        self._unfinished = None
+
+    async def wait_until_idle(self, timeout: float) -> bool:
+        """Wait until Isaac Sim has finished the request whose reply timed out.
+
+        The probe queues behind that request. On the stock socket it is a
+        trivial script, which Kit runs only once its main thread is free. On
+        the bridge it is ``get_runtime_info``, which answers once the main
+        thread is free and reports whether a script or action is still
+        running (a coroutine script awaiting frames leaves the main thread
+        free); it is asked again every ``IDLE_POLL_SECONDS`` while busy.
+        Nothing listening any more (Isaac Sim exited or restarted) counts as
+        idle: nothing runs the request then.
+
+        On the stock sockets a coroutine script that awaits frames leaves the
+        main thread free between frames, so the probe can answer while that
+        script still runs; only the bridge reports it.
+
+        Args:
+            timeout: Longest wait, in seconds.
+
+        Returns:
+            True once the engine is idle (``unfinished_request`` is then
+            cleared), False when ``timeout`` passed first.
+        """
+        unfinished = self._unfinished
+        if unfinished is None:
+            return True
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                idle = await asyncio.wait_for(
+                    self._engine_is_idle(unfinished, remaining), timeout=remaining
+                )
+            except asyncio.TimeoutError:
+                return False
+            if idle:
+                if self._unfinished is unfinished:
+                    self._unfinished = None
+                return True
+            pause = min(IDLE_POLL_SECONDS, deadline - time.monotonic())
+            if pause > 0:
+                await asyncio.sleep(pause)
+
+    async def _engine_is_idle(self, unfinished: UnfinishedRequest, remaining: float) -> bool:
+        """Probe once, waiting up to ``remaining`` seconds; True when the engine is free."""
+        try:
+            if unfinished.transport == "bridge":
+                response = await self._dial_bridge(
+                    "get_runtime_info", {"include_prim_count": False}, read_timeout=remaining
+                )
+                payload = response.get("payload")
+                activity = payload.get("bridge") if isinstance(payload, dict) else None
+                # An answer means the main thread is free; a bridge without
+                # the activity report cannot say more than that.
+                return not (isinstance(activity, dict) and activity.get("busy"))
+            result = await self._execute_vscode_unlocked(
+                IDLE_PROBE_SCRIPT,
+                max(MIN_SCRIPT_TIMEOUT_SECONDS, remaining),
+                read_timeout=remaining,
+                note_unfinished=False,
+            )
+            # python_server's watchdog answers TimeoutError while the probe
+            # still waits behind the main thread; any other reply means Kit
+            # got to the probe.
+            return result.error_name != "TimeoutError"
+        except TimeoutError:
+            return False
+        except (ConnectionError, OSError):
+            # Refused or reset: Isaac Sim is gone, and the request with it.
+            return True
+        except ValueError:
+            # Something answered, if not in the protocol: the main thread is free.
+            return True
 
     @property
     def _bridge_configured(self) -> bool:
@@ -498,15 +633,31 @@ class IsaacSocketClient:
             return await self._execute_bridge_script(code, script_timeout)
 
     async def execute_vscode_only(
-        self, code: str, *, timeout_seconds: Optional[float] = None
+        self,
+        code: str,
+        *,
+        timeout_seconds: Optional[float] = None,
+        note_unfinished: bool = True,
     ) -> ScriptResult:
-        """Execute raw Python only through the VS Code socket transport."""
+        """Execute raw Python only through the VS Code socket transport.
+
+        ``note_unfinished=False`` keeps a reply timeout out of
+        ``unfinished_request``, for probes that run outside an instance's
+        lock (``list_isaac_instances``).
+        """
         script_timeout = self._resolve_script_timeout(timeout_seconds)
         async with self._lock:
-            return await self._execute_vscode_unlocked(code, script_timeout)
+            return await self._execute_vscode_unlocked(
+                code, script_timeout, note_unfinished=note_unfinished
+            )
 
     async def _execute_vscode_unlocked(
-        self, code: str, script_timeout: Optional[float] = None
+        self,
+        code: str,
+        script_timeout: Optional[float] = None,
+        *,
+        read_timeout: Optional[float] = None,
+        note_unfinished: bool = True,
     ) -> ScriptResult:
         """
         Execute Python code through the stock Isaac Sim Python socket.
@@ -514,6 +665,10 @@ class IsaacSocketClient:
         Args:
             code: Python source code to execute.
             script_timeout: Budget for this script; the default when None.
+            read_timeout: Deadline for the reply; by default the larger of the
+                client timeout and the budget plus a margin.
+            note_unfinished: Record a delivered script whose reply timed out
+                as ``unfinished_request`` (off for pings and idle probes).
 
         Returns:
             ScriptResult with execution output.
@@ -566,10 +721,17 @@ class IsaacSocketClient:
             raw_response = await self._socket_round_trip(
                 payload_bytes,
                 half_close=is_python_server,
-                read_timeout=max(
-                    self._timeout_seconds, budget + SOCKET_SCRIPT_REPLY_MARGIN_SECONDS
+                read_timeout=(
+                    read_timeout
+                    if read_timeout is not None
+                    else max(self._timeout_seconds, budget + SOCKET_SCRIPT_REPLY_MARGIN_SECONDS)
                 ),
             )
+        except SocketReplyTimeoutError:
+            if note_unfinished:
+                self._note_unfinished("socket", "script")
+            self._forget_detected_protocol()
+            raise
         except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
             self._forget_detected_protocol()
             raise
@@ -580,6 +742,8 @@ class IsaacSocketClient:
             self._forget_detected_protocol()
         elif is_python_server and result.error_name == "TimeoutError":
             # python_server's watchdog only sends this reply; the script runs on.
+            if note_unfinished:
+                self._note_unfinished("socket", "script")
             result = replace(
                 result,
                 error_value=(
@@ -686,7 +850,7 @@ class IsaacSocketClient:
             while True:
                 remaining: float = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError(
+                    raise SocketReplyTimeoutError(
                         f"Overall read from Isaac Sim at {self.vscode_address} timed out "
                         f"after {read_deadline_seconds}s. The stock socket cannot stop "
                         "a script, so it may still be running inside Isaac Sim. "
@@ -698,7 +862,7 @@ class IsaacSocketClient:
                         timeout=remaining,
                     )
                 except asyncio.TimeoutError:
-                    raise TimeoutError(
+                    raise SocketReplyTimeoutError(
                         f"Overall read from Isaac Sim at {self.vscode_address} timed out "
                         f"after {read_deadline_seconds}s. The stock socket cannot stop "
                         "a script, so it may still be running inside Isaac Sim. "
@@ -799,7 +963,7 @@ class IsaacSocketClient:
                 if not self._fallback_to_vscode:
                     return False
         try:
-            result = await self._execute_vscode_unlocked("print('pong')")
+            result = await self._execute_vscode_unlocked("print('pong')", note_unfinished=False)
             return result.success and "pong" in result.output
         except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
             # ValueError covers UnicodeDecodeError and an oversized reply.
@@ -816,6 +980,7 @@ class IsaacSocketClient:
         payload: Optional[Dict[str, Any]] = None,
         *,
         read_timeout: Optional[float] = None,
+        note_unfinished: bool = True,
     ) -> Dict[str, Any]:
         """Send a typed request to the bridge transport without fallback.
 
@@ -825,10 +990,15 @@ class IsaacSocketClient:
             read_timeout: How long to wait for the reply once the request is
                 sent, for actions whose duration scales with their input
                 (``simulation_control`` step); the bridge timeout when None.
+            note_unfinished: Record a reply timeout as ``unfinished_request``
+                (off for probes outside an instance's lock).
         """
         async with self._lock:
             return await self._bridge_request(
-                action, payload or {}, read_timeout=read_timeout
+                action,
+                payload or {},
+                read_timeout=read_timeout,
+                note_unfinished=note_unfinished,
             )
 
     async def interrupt_bridge_script(self) -> Dict[str, Any]:
@@ -851,6 +1021,7 @@ class IsaacSocketClient:
         *,
         ignore_circuit: bool = False,
         read_timeout: Optional[float] = None,
+        note_unfinished: bool = True,
     ) -> Dict[str, Any]:
         """Send a typed request to the custom bridge extension.
 
@@ -860,6 +1031,8 @@ class IsaacSocketClient:
             ignore_circuit: Dial the bridge even while its circuit is open.
             read_timeout: How long to wait for the reply once the request is
                 sent; defaults to the bridge timeout.
+            note_unfinished: Record a reply timeout as ``unfinished_request``
+                (probe actions never are).
 
         Raises:
             BridgeCircuitOpenError: The circuit is open and ``ignore_circuit``
@@ -885,11 +1058,22 @@ class IsaacSocketClient:
             # while the bridge still runs the old one. A connection the peer
             # drops without replying (a port proxy with nothing behind it)
             # still counts below.
+            if note_unfinished and action not in _PROBE_ACTIONS:
+                self._note_unfinished("bridge", action)
             raise
         except (ConnectionRefusedError, ConnectionError, TimeoutError, OSError):
             self._record_bridge_failure()
             raise
         self._record_bridge_success()
+        error = response.get("error") if response.get("status") != "ok" else None
+        if (
+            isinstance(error, dict)
+            and error.get("name") == "RequestTimeout"
+            and note_unfinished
+            and action not in _PROBE_ACTIONS
+        ):
+            # The bridge stopped waiting for its handler, which runs on.
+            self._note_unfinished("bridge", action)
         return response
 
     def _record_bridge_failure(self) -> None:

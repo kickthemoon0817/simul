@@ -30,6 +30,8 @@ jobs:
   unit-tests:
     name: Unit tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # A hung test fails the job instead of holding the runner for 6 hours.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -74,6 +76,7 @@ jobs:
     # created.
     name: Packaging regression tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -109,6 +112,7 @@ jobs:
     # (unit-tests + packaging-gate).
     name: Lint + type-check (informational)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     continue-on-error: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
