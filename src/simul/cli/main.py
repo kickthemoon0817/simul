@@ -24,6 +24,7 @@ commands.  When stdout is not a TTY the CLI auto-detects JSON mode.
 
 import asyncio
 import errno
+import faulthandler
 import json
 import os
 import signal
@@ -496,6 +497,9 @@ _STDIN_RELEASE_SECONDS = 0.25
 #: given before it is cancelled: uvicorn's own graceful window (FastMCP's
 #: ``timeout_graceful_shutdown``, 2 s) and a margin.
 _NETWORK_STOP_MARGIN_SECONDS = 5.0
+#: Past the shutdown deadline, how long a worker thread may keep the
+#: interpreter lock before the process is ended without it (exit 1).
+_WORKER_LOCK_GRACE_SECONDS = 1.0
 
 
 class _StopSignals:
@@ -508,13 +512,24 @@ class _StopSignals:
     one already came. A signal that arrives while Python is still importing
     the CLI, before ``server`` runs, ends it the default way: nothing has been
     opened by then.
+
+    Once ``_serve`` has stopped the server (``stopped``), the handler is
+    back in place until the command returns, and a signal then ends the
+    process at once instead of being recorded: exit 0 when it is the first
+    (shutdown has run), ``128 + signal`` when a stop signal came before it.
     """
 
     def __init__(self) -> None:
         self.received: List[int] = []
         self.originals: Dict[int, Any] = {}
+        self.stopped = False
+        self.signalled = False
 
     def _record(self, signum: int, _frame: Any) -> None:
+        if self.stopped:
+            if self.signalled or self.received:
+                _force_exit(signum)
+            _exit_now(signum)
         self.received.append(signum)
 
     def __enter__(self) -> "_StopSignals":
@@ -553,22 +568,110 @@ def _report_stopped(signum: int) -> None:
     console.print(f"[yellow]Server stopped ({name})[/yellow]")
 
 
-def _exit_now(signum: int) -> NoReturn:
-    """End the process with exit 0 once a stopped server has shut down.
-
-    For a stdio server whose client keeps stdin open: the thread FastMCP reads
-    stdin with returns only when stdin closes, and ``asyncio.run`` would wait
-    for it. Everything else has finished by now (``SimulMCPServer.shutdown``
-    ran), so the logs are flushed and the process exits without that thread.
-    """
-    _report_stopped(signum)
+def _flush_everything() -> None:
     flush_logs()
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
         except Exception:  # pragma: no cover - a closed stream
             pass
+
+
+def _exit_now(signum: Optional[int]) -> NoReturn:
+    """End the process with exit 0 once a stopped server has shut down.
+
+    For a stdio server whose client keeps stdin open: the thread FastMCP reads
+    stdin with returns only when stdin closes, and ``asyncio.run`` would wait
+    for it. For a call still running on a worker thread past the shutdown
+    deadline: ``asyncio.run`` would wait for that thread. Everything else has
+    finished by now (``SimulMCPServer.shutdown`` ran), so the logs are
+    flushed and the process exits without those threads.
+
+    Args:
+        signum: The signal that stopped the server, reported; None when it
+            stopped on its own (stdin closed).
+    """
+    if signum is not None:
+        _report_stopped(signum)
+    _flush_everything()
     os._exit(0)
+
+
+def _force_exit(signum: int) -> NoReturn:
+    """End the process at once on a second SIGTERM or SIGINT while the server stops.
+
+    Nothing more is waited for: not Isaac Sim, not a worker thread, not the
+    transport. The logs are flushed and the exit status is ``128 + signum``
+    (143 for SIGTERM, 130 for SIGINT), as for a process the signal ended.
+    """
+    name = _signal_name(signum)
+    get_logger(__name__).warning(
+        "%s again while stopping: exiting at once without waiting for the calls still running",
+        name,
+    )
+    console.print(f"[yellow]Server stopped at once ({name} again)[/yellow]")
+    _flush_everything()
+    os._exit(128 + signum)
+
+
+async def _let_worker_calls_finish(server: Any, signum: Optional[int]) -> None:
+    """Wait for calls still running on worker threads, until the shutdown deadline; then exit without them.
+
+    A USD or attached-Blender call runs on a worker thread
+    (``simul.mcp.worker_threads``), which nothing can stop, and
+    ``asyncio.run`` would wait for it before the process could exit, however
+    long it took. It is waited for until ``server.shutdown_timeout`` has
+    passed since the stop began; then the log names it and the process exits
+    0 without it (``_exit_now``). Its request was cancelled when the server
+    stopped, so it is recorded with ``executed: "unknown"``.
+
+    A worker thread inside one long C call (pxr opening a large stage) keeps
+    the interpreter lock, and nothing on this thread runs until the call
+    returns: the round-3 probe's 900k-prim validation overran the deadline
+    by 2 s that way. So a timer that needs no interpreter lock
+    (``faulthandler.dump_traceback_later``) ends the process
+    ``_WORKER_LOCK_GRACE_SECONDS`` after the deadline if it is still there,
+    with exit 1 and every thread's traceback on stderr.
+
+    Args:
+        server: The stopped ``SimulMCPServer``, or None when it was never built.
+        signum: The signal that stopped it, or None.
+    """
+    from simul.mcp import worker_threads
+
+    if not worker_threads.running():
+        return
+    timeout = float(server.settings.server.shutdown_timeout) if server is not None else 0.0
+    deadline = server._shutdown_deadline() if server is not None else time.monotonic()
+    remaining = max(0.0, deadline - time.monotonic())
+    get_logger(__name__).info(
+        "Shutdown: waiting up to %.1fs for %s, running on a worker thread",
+        remaining,
+        ", ".join(worker_threads.running()),
+    )
+    flush_logs()
+    try:
+        faulthandler.dump_traceback_later(remaining + _WORKER_LOCK_GRACE_SECONDS, exit=True)
+        armed = True
+    except (AttributeError, OSError, RuntimeError, ValueError):  # no usable stderr
+        armed = False
+    try:
+        while True:
+            names = worker_threads.running()
+            if not names:
+                return
+            if time.monotonic() >= deadline:
+                get_logger(__name__).warning(
+                    "Shutdown: stopped waiting for %s, still running on a worker thread, after %gs "
+                    "(server.shutdown_timeout); exiting without it",
+                    ", ".join(names),
+                    timeout,
+                )
+                _exit_now(signum)
+            await asyncio.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    finally:
+        if armed:
+            faulthandler.cancel_dump_traceback_later()
 
 
 async def _stop_serving(
@@ -653,8 +756,35 @@ async def _serve(
     loop = asyncio.get_running_loop()
     received: List[int] = []
     signalled = asyncio.Event()
+    # uvicorn records each signal its own handler takes while it serves and
+    # raises it again once it is done (Server.capture_signals). The loop sees
+    # both, and the second is not a new signal: ``taken`` counts the ones
+    # uvicorn took, ``repeats`` the ones it has raised again whose loop
+    # callback is still to come.
+    taken: Dict[int, int] = {}
+    repeats: Dict[int, int] = {}
+    # Set once the server has shut down and only worker-thread calls are left.
+    shut_down: List[bool] = []
+
+    def _python_handler(signum: int, _frame: Any) -> None:
+        # The Python-level handler under the loop's (in place of asyncio's
+        # no-op). uvicorn puts it back before it raises a signal again, so a
+        # repeat reaches it at once, before the loop's callback for it runs.
+        if taken.get(signum):
+            taken[signum] -= 1
+            repeats[signum] = repeats.get(signum, 0) + 1
 
     def _on_signal(signum: int) -> None:
+        if repeats.get(signum):
+            repeats[signum] -= 1
+            return
+        if signal.getsignal(signum) is not _python_handler:
+            taken[signum] = taken.get(signum, 0) + 1
+        if received:
+            # A second signal while stopping ends the process at once.
+            _force_exit(signum)
+        if shut_down:
+            _exit_now(signum)
         received.append(signum)
         signalled.set()
 
@@ -677,6 +807,12 @@ async def _serve(
                         pass
             continue
         previous[signum] = before
+        try:
+            signal.signal(signum, _python_handler)
+            # As asyncio leaves it: system calls resume after the signal.
+            signal.siginterrupt(signum, False)
+        except (ValueError, OSError, AttributeError):
+            pass
         handlers[signum] = signal.getsignal(signum)
     # Read only now that the loop has the signals: one that came before is in
     # the recorder, one after reaches _on_signal, and none falls between.
@@ -701,12 +837,21 @@ async def _serve(
             await _stop_serving(
                 serving, servers[0] if servers else None, transport, signum, handlers.get(signum)
             )
+        if serving.cancelled() or serving.exception() is None:
+            shut_down.append(True)
+            await _let_worker_calls_finish(
+                servers[0] if servers else None, received[0] if received else None
+            )
         if serving.cancelled():
             if not received:
                 raise asyncio.CancelledError()
         else:
             serving.result()
     finally:
+        if stop_signals is not None:
+            # A signal from here on ends the process at once (_StopSignals).
+            stop_signals.signalled = bool(received)
+            stop_signals.stopped = True
         for signum, before in previous.items():
             try:
                 loop.remove_signal_handler(signum)

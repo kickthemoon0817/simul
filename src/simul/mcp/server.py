@@ -8,7 +8,9 @@ connection management, and 3D simulation/DCC integration based on FastMCP.
 import asyncio
 import base64
 import binascii
+import contextvars
 import difflib
+import functools
 import hashlib
 import inspect
 import json
@@ -59,7 +61,7 @@ from ..resources import find_checkout_root, resource
 from ..utils.errors import exception_message, exception_type_name
 from ..utils.paths import PathPolicy, SandboxDenied, sandbox_error
 from ..utils.timing import RateLimiter
-from . import error_types
+from . import error_types, worker_threads
 from .backends import ALL_BACKEND_NAMES, BACKENDS, NOT_SELECTED, backend_skip_reason
 from .error_types import normalize_error_payload
 from .registration import register_stats_tools
@@ -75,6 +77,7 @@ from .session_manager import (
     claim_is_orphaned,
 )
 from ..utils.discovery import DiscoveryDir
+from ..utils.engine_holds import SharedHold, SharedHolds, endpoint_key
 from .tools.isaac_tools import IsaacTools
 from .usage_tracker import ToolUsageTracker
 
@@ -228,11 +231,51 @@ class IsaacHold:
         since: ``time.monotonic()`` when the client gave up on its reply.
         task: The background task that waits for the engine and then
             releases the instance lock.
+        record: The hold's record for the other simul servers on the machine
+            (``simul.utils.engine_holds``), or None when it has none.
+        client: The client of the call that timed out.
     """
 
     tool_name: str
     since: float
     task: "Optional[asyncio.Task[None]]" = None
+    record: Optional[Any] = None
+    client: Any = None
+
+
+@dataclass(frozen=True)
+class AdmittedInstance:
+    """The Isaac instance a call was admitted to, and the client that reaches it.
+
+    Resolved once, when the call is admitted, and used for the whole call:
+    its lock and claim check, every request its tool sends, and the timeout
+    hold. A ``set_active_isaac_instance`` while the call waits for the lock
+    then changes where the session's later calls go, not this one (round-3
+    audit M3-1: a queued call ran on the instance the session switched to,
+    past that instance's claims).
+    """
+
+    name: str
+    client: Any
+
+
+#: The instance the running Isaac call was admitted to; see ``AdmittedInstance``.
+_ADMITTED_INSTANCE: "contextvars.ContextVar[Optional[AdmittedInstance]]" = contextvars.ContextVar(
+    "simul_admitted_isaac_instance", default=None
+)
+
+
+def _isaac_endpoint(client: Any) -> Optional[str]:
+    """The endpoint an Isaac engine's holds are recorded under: its stock socket's ``host:port``.
+
+    Every server reaching the same Isaac Sim names the same socket, whichever
+    transport it prefers. None for a client without one (a test double).
+    """
+    host = getattr(client, "_host", None)
+    port = getattr(client, "_port", None)
+    if not isinstance(host, str) or not isinstance(port, int) or isinstance(port, bool):
+        return None
+    return endpoint_key(host, port)
 
 
 # Rate-limit buckets kept before idle ones are swept. A bucket that has
@@ -739,6 +782,9 @@ class SimulMCPServer(LoggerMixin):
         # Instances kept after a call timed out, until Isaac Sim has finished
         # it (see _hold_if_engine_busy), keyed by instance name.
         self._isaac_holds: Dict[str, IsaacHold] = {}
+        # Those holds as every simul server on the machine sees them, and the
+        # other servers' holds this one honours (simul.utils.engine_holds).
+        self._shared_holds = SharedHolds("isaac")
         # Request tasks waiting for the engine to finish a call their client
         # cancelled; a stopping server waits for them, bounded.
         self._draining_calls: Set["asyncio.Task[Any]"] = set()
@@ -1262,14 +1308,27 @@ class SimulMCPServer(LoggerMixin):
         return self._get_or_create_session_route(session_id)
 
     def _get_effective_instance_name(self) -> str:
-        """Resolve the Isaac instance targeted by the current request."""
+        """Resolve the Isaac instance targeted by the current request.
+
+        Inside an admitted Isaac call, the instance it was admitted to
+        (``AdmittedInstance``), whatever the session switched to since.
+        """
+        admitted = _ADMITTED_INSTANCE.get()
+        if admitted is not None:
+            return admitted.name
         route = self._get_request_route()
         if route is not None:
             return route.active_instance
         return self._active_instance
 
     def _get_request_isaac_client(self) -> IsaacSocketClient:
-        """Resolve the Isaac socket client for the current request."""
+        """Resolve the Isaac socket client for the current request.
+
+        Inside an admitted Isaac call, the client it was admitted with.
+        """
+        admitted = _ADMITTED_INSTANCE.get()
+        if admitted is not None:
+            return cast(IsaacSocketClient, admitted.client)
         instance_name = self._get_effective_instance_name()
         return self._isaac_clients.get(instance_name, self.client)
 
@@ -1366,11 +1425,15 @@ class SimulMCPServer(LoggerMixin):
         return binding
 
     def _get_active_binding(self) -> Optional[IsaacSessionBinding]:
-        """Return the binding for the request's active Isaac instance."""
+        """Return the binding for the request's active Isaac instance.
+
+        Inside an admitted Isaac call, the binding for the instance it was
+        admitted to, so its heartbeat refreshes the claim it ran under.
+        """
         route = self._get_request_route()
         if route is None:
             return None
-        return route.bindings.get(route.active_instance)
+        return route.bindings.get(self._get_effective_instance_name())
 
     def _release_request_binding(
         self,
@@ -2036,13 +2099,19 @@ class SimulMCPServer(LoggerMixin):
     async def _isaac_admission(self, tool_name: str) -> AsyncIterator[Optional[Refusal]]:
         """Admit an Isaac call to the instance the request targets.
 
+        The instance and its client are resolved once, here, and bound to the
+        call (``AdmittedInstance``): its tool reaches that instance even if
+        the session switches instances while the call waits.
+
         With ``isaac_sim.enforce_claims`` on, a mutating tool is refused while
-        another agent holds a live claim on the instance. Then the instance's
-        lock is taken, bounded by ``server.timeout`` so a caller queued behind
-        a long step learns the instance is busy instead of waiting until its
-        own client gives up, which would read as "unreachable". An admitted
-        call holds the lock until it has finished, and the caller's binding
-        heartbeat is refreshed before the lock is released.
+        another agent holds a live claim on the instance. A call to an engine
+        another simul server holds after a timeout (``engine_holds``) is
+        refused at once. Then the instance's lock is taken, bounded by
+        ``server.timeout`` so a caller queued behind a long step learns the
+        instance is busy instead of waiting until its own client gives up,
+        which would read as "unreachable". An admitted call holds the lock
+        until it has finished, and the caller's binding heartbeat is
+        refreshed before the lock is released.
 
         Args:
             tool_name: Registered tool name, for the read-only check and the
@@ -2052,29 +2121,93 @@ class SimulMCPServer(LoggerMixin):
             An InstanceClaimed or InstanceBusy refusal, or None once admitted.
         """
         instance_name = self._get_effective_instance_name()
-        if self.settings.isaac_sim.enforce_claims and not await self._tool_is_read_only(tool_name):
-            holder = self._foreign_claim(instance_name, self._request_agent_id())
-            if holder is not None:
-                yield Refusal(self._claimed_error(instance_name, holder), "instance_claimed")
-                return
-        lock = self._get_instance_lock(instance_name)
-        if not await self._acquire_instance_lock(lock):
-            yield Refusal(self._instance_busy_error(instance_name), "instance_busy")
-            return
-        entered = time.monotonic()
+        client = self._get_request_isaac_client()
+        bound = _ADMITTED_INSTANCE.set(AdmittedInstance(instance_name, client))
         try:
-            yield None
-            self._heartbeat_active_binding(tool_name)
-        finally:
-            try:
-                held = self._hold_if_engine_busy(
-                    instance_name, lock, tool_name, entered, self._get_active_binding()
-                )
-            except Exception as exc:  # a lock never released would wedge the instance
-                self.logger.warning("Could not hold Isaac instance %r after %s: %s", instance_name, tool_name, exc)
-                held = False
-            if not held:
+            if self.settings.isaac_sim.enforce_claims and not await self._tool_is_read_only(tool_name):
+                holder = self._foreign_claim(instance_name, self._request_agent_id())
+                if holder is not None:
+                    yield Refusal(self._claimed_error(instance_name, holder), "instance_claimed")
+                    return
+            elsewhere = self._foreign_isaac_hold(client)
+            if elsewhere is not None:
+                yield Refusal(self._held_elsewhere_error(instance_name, elsewhere), "instance_busy")
+                return
+            lock = self._get_instance_lock(instance_name)
+            if not await self._acquire_instance_lock(lock):
+                yield Refusal(self._instance_busy_error(instance_name), "instance_busy")
+                return
+            # Another server may have begun holding the engine while this call
+            # waited for the lock.
+            elsewhere = self._foreign_isaac_hold(client)
+            if elsewhere is not None:
                 lock.release()
+                yield Refusal(self._held_elsewhere_error(instance_name, elsewhere), "instance_busy")
+                return
+            entered = time.monotonic()
+            try:
+                yield None
+                self._heartbeat_active_binding(tool_name)
+            finally:
+                try:
+                    held = self._hold_if_engine_busy(
+                        instance_name, lock, tool_name, entered, self._get_active_binding(), client
+                    )
+                except Exception as exc:  # a lock never released would wedge the instance
+                    self.logger.warning(
+                        "Could not hold Isaac instance %r after %s: %s", instance_name, tool_name, exc
+                    )
+                    held = False
+                if not held:
+                    lock.release()
+        finally:
+            _ADMITTED_INSTANCE.reset(bound)
+
+    def _foreign_isaac_hold(self, client: Any) -> Optional[SharedHold]:
+        """The hold another simul server keeps on ``client``'s engine, or None."""
+        endpoint = _isaac_endpoint(client)
+        if endpoint is None:
+            return None
+        return self._shared_holds.foreign(endpoint)
+
+    def isaac_hold_report(self, instance_name: str, client: Any) -> Optional[Dict[str, Any]]:
+        """Describe a hold on an instance, this server's or another's; None when it is not held.
+
+        Read from the servers' own state, without sending the engine
+        anything, for the listing and status tools (round-3 audit m3-1: they
+        waited for their own probe and reported a held instance unreachable).
+
+        Args:
+            instance_name: The instance, for this server's holds.
+            client: Its client, whose endpoint other servers' holds name.
+
+        Returns:
+            ``isaac_hold_info``'s fields, plus ``held_by`` (the other
+            server's ``pid``) for another server's hold.
+        """
+        local = self.isaac_hold_info(instance_name)
+        if local is not None:
+            return local
+        elsewhere = self._foreign_isaac_hold(client)
+        return None if elsewhere is None else elsewhere.info()
+
+    def _held_elsewhere_error(self, instance_name: str, hold: SharedHold) -> Dict[str, Any]:
+        """The InstanceBusy envelope for an engine another simul server holds after a timeout."""
+        info = hold.info()
+        return ErrorResponse(
+            error=(
+                f"Isaac instance {instance_name!r} ({hold.endpoint}) is still running "
+                f"{hold.tool} for another simul server on this machine (pid {hold.pid}), whose "
+                f"reply timed out {info['busy_for_seconds']:.0f}s ago. Isaac Sim runs one "
+                "request at a time and keeps running a call after its reply times out, so this "
+                "call would wait behind it, time out too and run after being reported failed: "
+                "nothing was sent. Retry shortly; ping_isaac reports the hold. It ends once "
+                "that server sees the engine idle, or after "
+                f"{info['hold_limit_seconds']:g}s (isaac_sim.hold_after_timeout)."
+            ),
+            error_type=error_types.INSTANCE_BUSY,
+            details={"instance": instance_name, "reason": "finishing_timed_out_call", **info},
+        ).model_dump()
 
     def _instance_busy_error(self, instance_name: str) -> Dict[str, Any]:
         """The InstanceBusy envelope for a call that could not get the instance in time."""
@@ -2095,9 +2228,8 @@ class SimulMCPServer(LoggerMixin):
                 "running a call after its reply times out and runs the next one only after "
                 "it, so the server keeps the instance until the engine has finished rather "
                 "than queue this call behind it. Retry shortly. interrupt_isaac_script stops "
-                "a bridge script; ping_isaac reports the hold without waiting for the "
-                "instance, but on the stock socket its own probe answers only once the "
-                "script has ended."
+                "a bridge script; ping_isaac and get_isaac_runtime_info report the hold at "
+                "once, without sending the engine anything."
             ),
             error_type=error_types.INSTANCE_BUSY,
             details={"instance": instance_name, "reason": "finishing_timed_out_call", **info},
@@ -2126,6 +2258,7 @@ class SimulMCPServer(LoggerMixin):
         tool_name: str,
         entered: float,
         binding: Optional[IsaacSessionBinding] = None,
+        client: Any = None,
     ) -> bool:
         """Keep ``lock`` past the call when Isaac Sim may still be running a request it timed out on.
 
@@ -2137,7 +2270,9 @@ class SimulMCPServer(LoggerMixin):
         for the engine to finish (``IsaacSocketClient.wait_until_idle``) and
         then releases it; calls meanwhile get InstanceBusy saying why. The
         caller's claim, if it has one, is refreshed while the hold lasts, so it
-        does not lapse to another agent meanwhile.
+        does not lapse to another agent meanwhile. The hold is also recorded
+        for the other simul servers on the machine (``engine_holds``), which
+        answer InstanceBusy for the same engine until it ends.
 
         Only a timeout of this call counts: one recorded before it started
         came from outside the instance lock (a probe beside the call that held
@@ -2149,12 +2284,15 @@ class SimulMCPServer(LoggerMixin):
             tool_name: The call.
             entered: ``time.monotonic()`` when the call got the lock.
             binding: The caller's claim binding on the instance, if any.
+            client: The client the call was admitted with; the instance's
+                current client when None.
 
         Returns:
             True when the lock was handed to such a task, False when the
             caller should release it.
         """
-        client = self._isaac_clients.get(instance_name, self.client)
+        if client is None:
+            client = self._isaac_clients.get(instance_name, self.client)
         unfinished = getattr(client, "unfinished_request", None)
         if not isinstance(unfinished, UnfinishedRequest):
             return False
@@ -2162,7 +2300,7 @@ class SimulMCPServer(LoggerMixin):
         if unfinished.since < entered or limit <= 0 or self._stopping_since is not None:
             client.forget_unfinished_request()
             return False
-        hold = IsaacHold(tool_name=tool_name, since=unfinished.since)
+        hold = IsaacHold(tool_name=tool_name, since=unfinished.since, client=client)
         try:
             hold.task = asyncio.get_running_loop().create_task(
                 self._hold_until_engine_idle(instance_name, client, hold, limit, binding)
@@ -2172,6 +2310,16 @@ class SimulMCPServer(LoggerMixin):
         # Ends the hold however the task ends, cancelled before it ran included.
         hold.task.add_done_callback(lambda _task: self._end_hold(instance_name, lock, hold))
         self._isaac_holds[instance_name] = hold
+        endpoint = _isaac_endpoint(client)
+        if endpoint is not None:
+            task = hold.task
+            hold.record = self._shared_holds.publish(
+                endpoint,
+                tool_name,
+                time.time() - (time.monotonic() - unfinished.since),
+                limit,
+                live=lambda: not task.done() and not task.get_loop().is_closed(),
+            )
         self.logger.warning(
             "%s timed out while Isaac Sim may still be running it; holding instance %r "
             "until the engine has finished (at most %gs, isaac_sim.hold_after_timeout)",
@@ -2234,9 +2382,11 @@ class SimulMCPServer(LoggerMixin):
         )
 
     def _end_hold(self, instance_name: str, lock: asyncio.Lock, hold: IsaacHold) -> None:
-        """Forget ``hold`` and release the instance lock it kept."""
+        """Forget ``hold``, withdraw its record and release the instance lock it kept."""
         if self._isaac_holds.get(instance_name) is hold:
             del self._isaac_holds[instance_name]
+        record, hold.record = hold.record, None
+        self._shared_holds.withdraw(record)
         if lock.locked():
             lock.release()
 
@@ -2623,7 +2773,7 @@ class SimulMCPServer(LoggerMixin):
         """
 
         async def run(request: Optional[BaseModel]) -> Dict[str, Any]:
-            return await self._run_backend_call(adapter, adapter_label, call, request)
+            return await self._run_backend_call(adapter, adapter_label, call, request, tool_name=tool_name)
 
         return await self._run_envelope(
             tool_name,
@@ -2641,6 +2791,8 @@ class SimulMCPServer(LoggerMixin):
         adapter_label: str,
         call: BackendCall,
         request: Optional[BaseModel] = None,
+        *,
+        tool_name: str = "",
     ) -> Dict[str, Any]:
         """Open a session and run ``call`` in it.
 
@@ -2653,6 +2805,8 @@ class SimulMCPServer(LoggerMixin):
                 returns the payload.
             request: The validated request, passed to ``call`` after the
                 session.
+            tool_name: The tool, naming a call that runs on a worker thread
+                (``worker_threads``) to a stopping server.
 
         Returns:
             The payload, or the error envelope of an absent backend.
@@ -2669,8 +2823,12 @@ class SimulMCPServer(LoggerMixin):
             # both so one envelope serves every backend.
             if getattr(adapter, "session_blocks_io", False):
                 # The adapter declares its session only waits on I/O (never
-                # bpy), so keep other MCP requests responsive meanwhile.
-                payload = await asyncio.to_thread(call, session, *arguments)
+                # bpy), so keep other MCP requests responsive meanwhile. As
+                # asyncio.to_thread, listed for a stopping server.
+                work = functools.partial(contextvars.copy_context().run, call, session, *arguments)
+                payload = await worker_threads.submit(
+                    asyncio.get_running_loop(), tool_name or adapter_label, work
+                )
             else:
                 payload = call(session, *arguments)
             if inspect.isawaitable(payload):
@@ -3205,7 +3363,11 @@ class SimulMCPServer(LoggerMixin):
             client: Socket client for this instance.
 
         Returns:
-            Dict with instance info fields.
+            Dict with instance info fields. An instance held after a
+            timed-out call (by this server or another on the machine) is not
+            probed: a probe would wait behind that call. It is listed
+            reachable and ``busy``, with ``held_after_timeout`` and no stage
+            fields.
         """
         active_instance = self._get_effective_instance_name()
         info: Dict[str, Any] = {
@@ -3221,6 +3383,10 @@ class SimulMCPServer(LoggerMixin):
             "prim_count": None,
             "is_playing": None,
         }
+        held = self.isaac_hold_report(name, client)
+        if held is not None:
+            info.update(reachable=True, busy=True, held_after_timeout=held)
+            return info
         # These probes run outside the instance's lock, beside whatever call
         # holds it: a reply timeout here is not left for that call's hold
         # (note_unfinished=False).
@@ -3350,10 +3516,13 @@ class SimulMCPServer(LoggerMixin):
                 hold.tool_name,
                 time.monotonic() - hold.since,
             )
-            client = self._isaac_clients.get(instance_name, self.client)
+            client = hold.client if hold.client is not None else self._isaac_clients.get(instance_name, self.client)
             forget = getattr(client, "forget_unfinished_request", None)
             if callable(forget):
                 forget()
+            # The other servers stop waiting for it now, not once the task ends.
+            record, hold.record = hold.record, None
+            self._shared_holds.withdraw(record)
             if hold.task is not None:
                 hold.task.cancel()
                 holds.append(hold.task)

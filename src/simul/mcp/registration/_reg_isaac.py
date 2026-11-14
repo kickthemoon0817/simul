@@ -68,7 +68,9 @@ def _register_ping(server: "SimulMCPServer") -> None:
             "Pre-flight check: verify that a running Isaac Sim instance is "
             "reachable on the configured TCP socket. Call this before other Isaac "
             "tools to confirm connectivity and get the target address. It does not "
-            "wait for a call already running on the instance; busy says one is."
+            "wait for a call already running on the instance; busy says one is. While the "
+            "instance is held after a timed-out call it answers at once, without a probe, "
+            "with held_after_timeout."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -90,19 +92,21 @@ async def _ping(server: "SimulMCPServer") -> Dict[str, Any]:
     """Probe the instance the request targets and describe its transports.
 
     ``busy`` says another call holds the instance: a probe that then fails may
-    only mean the engine is inside a synchronous script. ``held_after_timeout``
-    says the server keeps the instance until the engine finishes a call whose
-    reply timed out.
+    only mean the engine is inside a synchronous script.
+
+    While the instance is held after a timed-out call (by this server or
+    another simul server on the machine), nothing is sent: a probe would only
+    wait behind that call, and on the stock socket time out and read as
+    unreachable. The answer then comes from the servers' own state:
+    ``held_after_timeout`` describes the hold, ``probed`` is false, and the
+    instance counts as reachable, since the hold ends as soon as the engine
+    stops answering.
     """
     client = server._get_request_isaac_client()
     instance_name = server._get_effective_instance_name()
     busy = server._get_instance_lock(instance_name).locked()
-    held = server.isaac_hold_info(instance_name)
-    reachable = await client.ping()
+    held = server.isaac_hold_report(instance_name, client)
     payload: Dict[str, Any] = {
-        "success": reachable,
-        "reachable": reachable,
-        "busy": busy,
         "address": client.address,
         "bridge_address": client.bridge_address,
         "bridge_circuit_open": client.bridge_circuit_open,
@@ -110,13 +114,61 @@ async def _ping(server: "SimulMCPServer") -> Dict[str, Any]:
         "timeout_seconds": client.timeout_seconds,
     }
     if held is not None:
-        payload["held_after_timeout"] = held
+        return {
+            "success": True,
+            "reachable": True,
+            "busy": True,
+            "probed": False,
+            **payload,
+            "held_after_timeout": held,
+            "note": _held_note(held),
+        }
+    reachable = await client.ping()
+    payload = {"success": reachable, "reachable": reachable, "busy": busy, **payload}
     if not reachable:
         payload["error"] = f"Isaac Sim is not reachable at {client.address}" + (
             "; another call holds the instance, and a synchronous script blocks the "
             "socket until it returns" if busy else ""
         )
     return payload
+
+
+def _held_note(held: Dict[str, Any]) -> str:
+    """Say why a status tool answered from the server's state during a hold."""
+    holder = held.get("held_by")
+    whose = (
+        f"another simul server on this machine (pid {holder.get('pid')})"
+        if isinstance(holder, dict)
+        else "this server"
+    )
+    return (
+        f"Isaac Sim is still running {held.get('timed_out_tool')}, whose reply timed out "
+        f"{float(held.get('busy_for_seconds') or 0):.0f}s ago, and {whose} sends it nothing else "
+        "until it has finished (isaac_sim.hold_after_timeout), so Isaac Sim was not asked: "
+        "calls to it get InstanceBusy meanwhile. interrupt_isaac_script stops a bridge script."
+    )
+
+
+def held_status(server: "SimulMCPServer") -> Optional[Dict[str, Any]]:
+    """A status tool's answer while the request's instance is held after a timeout, or None.
+
+    Built from the servers' own state, without sending the engine anything:
+    ``busy``, ``held_after_timeout``, the ``instance`` and the ``client``'s
+    transport state (``reports_hold`` tools).
+    """
+    client = server._get_request_isaac_client()
+    instance_name = server._get_effective_instance_name()
+    held = server.isaac_hold_report(instance_name, client)
+    if held is None:
+        return None
+    return {
+        "success": True,
+        "busy": True,
+        "instance": instance_name,
+        "held_after_timeout": held,
+        "client": server._isaac_tools._client_state(),
+        "note": _held_note(held),
+    }
 
 
 def _build_tool_wrapper(
@@ -176,6 +228,10 @@ def _build_tool_wrapper(
                 # Refused before Isaac is reached, but still rate limited and
                 # recorded like every other call.
                 return await server._exec_payload(meta.name, denial)
+        if meta.reports_hold:
+            status = held_status(server)
+            if status is not None:
+                return await server._exec_payload(meta.name, status)
         call = getattr(server._isaac_tools, method_name)(**arguments)
         if meta.bypasses_instance_lock:
             return await server._exec_isaac(meta.name, call, bypass_instance_lock=True)

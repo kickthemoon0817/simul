@@ -2208,6 +2208,8 @@
      "mass": {
       "anyOf": [
        {
+        "maximum": 1000000000.0,
+        "minimum": 0.001,
         "type": "number"
        },
        {
@@ -2220,6 +2222,8 @@
      "linear_damping": {
       "anyOf": [
        {
+        "maximum": 1000000.0,
+        "minimum": 0.0,
         "type": "number"
        },
        {
@@ -2232,6 +2236,8 @@
      "angular_damping": {
       "anyOf": [
        {
+        "maximum": 1000000.0,
+        "minimum": 0.0,
         "type": "number"
        },
        {
@@ -2340,6 +2346,8 @@
      "mass": {
       "anyOf": [
        {
+        "maximum": 1000000000.0,
+        "minimum": 0.001,
         "type": "number"
        },
        {
@@ -2352,6 +2360,8 @@
      "linear_damping": {
       "anyOf": [
        {
+        "maximum": 1000000.0,
+        "minimum": 0.0,
         "type": "number"
        },
        {
@@ -2364,6 +2374,8 @@
      "angular_damping": {
       "anyOf": [
        {
+        "maximum": 1000000.0,
+        "minimum": 0.0,
         "type": "number"
        },
        {

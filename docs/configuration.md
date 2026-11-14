@@ -97,6 +97,7 @@ unless you configure that path yourself:
 | Audit stream | `logs/audit.jsonl` | `LOGGING__AUDIT_PATH` |
 | Tool usage log (`simul stats`, `get_tool_usage_stats`) | `logs/tool_usage.jsonl` | none |
 | Isaac Sim session and claim records | `sessions/<port>.json` | none |
+| Holds after a timed-out Isaac or Unreal call, shared by every server ([isaac-sim.md](isaac-sim.md#transports)) | `holds/<backend>-<host>_<port>.<pid>.*.json` | none |
 | Blender discovery files and the attachment | `blender/`, `blender/attachment.json` | `BLENDER__DISCOVERY_DIR`, `BLENDER__ATTACHMENT_PATH` |
 | `simul blender install-bridge` ZIP | `blender/simul_blender_bridge.zip` | `--output` |
 | Unreal attachment | `unreal/attachment.json` | `UNREAL__ATTACHMENT_PATH` |
@@ -128,15 +129,15 @@ variable, so Blender must see the same `SIMUL_HOME` as the server (or set
 | `ISAAC_SIM__SOCKET_PROTOCOL` | `auto` | `python_server` (6.0+) or `vscode` (5.x) skips the one-time probe |
 | `ISAAC_SIM__SOCKET_AUTH_TOKEN` | unset | Token for a 6.0 python_server started with `--auth-token`; also sent to the bridge, which then requires it ([security model](isaac-sim.md#security-model)) |
 | `ISAAC_SIM__BRIDGE_FAILURE_THRESHOLD` / `ISAAC_SIM__BRIDGE_COOLDOWN_SECONDS` | `3` / `30` | Bridge circuit breaker; see [isaac-sim.md](isaac-sim.md#transports) |
-| `ISAAC_SIM__HOLD_AFTER_TIMEOUT` | `300` | After an Isaac call times out while Isaac Sim may still be running it, the server keeps the instance until the engine has finished, for at most this many seconds, and other calls get `InstanceBusy` meanwhile; `0` releases it at once ([isaac-sim.md](isaac-sim.md#transports)) |
-| `SERVER__SHUTDOWN_TIMEOUT` | `5` | Longest a stopping server (SIGTERM, SIGINT) waits for Isaac Sim to finish the calls it was running when the stop began, or that a client had cancelled, before it exits anyway; the log names each call it stopped waiting for. An Isaac instance or Unreal editor held after a timed-out call is released at once. Keep it under the supervisor's grace period (Docker: 10 s) |
+| `ISAAC_SIM__HOLD_AFTER_TIMEOUT` | `300` | After an Isaac call times out while Isaac Sim may still be running it, the server keeps the instance until the engine has finished, for at most this many seconds, and other calls get `InstanceBusy` meanwhile, from every simul server sharing `SIMUL_HOME` (the hold is recorded under `$SIMUL_HOME/holds/`); `0` releases it at once ([isaac-sim.md](isaac-sim.md#transports)) |
+| `SERVER__SHUTDOWN_TIMEOUT` | `5` | Longest a stopping server (SIGTERM, SIGINT, or stdin closed over stdio) waits for the calls still running when the stop began, counted from then: Isaac calls it was running or that a client had cancelled, and USD or attached-Blender calls on worker threads. Past it the server exits anyway (0) and the log names each call it stopped waiting for; those are recorded `executed: "unknown"`. A worker thread that keeps Python's interpreter lock (pxr in one long call) one second past it ends the process with exit 1 and every thread's traceback on stderr. An Isaac instance or Unreal editor held after a timed-out call is released at once, and a second SIGTERM or SIGINT exits at once (`128 +` the signal). Keep it under the supervisor's grace period (Docker: 10 s) |
 | `UNREAL__HOST` / `UNREAL__PORT` | `localhost` / `30010` | Remote Control endpoint |
 | `UNREAL__TOOL_SURFACE` | `thin` | `full` registers every granular Unreal tool (`--unreal-tools` overrides) |
 | `BLENDER__TOOL_SURFACE` | `full` | `thin` registers only the essentials in `THIN_BLENDER_TOOLS` (`--blender-tools` overrides) |
 | `UNREAL__MODE` | `endpoint` | `attached` uses the editor chosen by `simul unreal attach` |
 | `UNREAL__PASSPHRASE` | unset | Plaintext or MD5 hex for an editor set up with `--passphrase` |
 | `UNREAL__MAX_ACTORS` | `200` | Default `max_results` of `list_unreal_actors` and `simul unreal list-actors` |
-| `UNREAL__HOLD_AFTER_TIMEOUT` | `300` | After an Unreal request times out while the editor may still be running it, simul sends that editor nothing more until it answers again, for at most this many seconds, and other calls get `InstanceBusy` meanwhile; `0` turns the hold off ([unreal-attachment.md](unreal-attachment.md#identity-checks-and-limits)) |
+| `UNREAL__HOLD_AFTER_TIMEOUT` | `300` | After an Unreal request times out while the editor may still be running it, simul sends that editor nothing more until it answers again, for at most this many seconds, and other calls get `InstanceBusy` meanwhile, from every simul server sharing `SIMUL_HOME` (`$SIMUL_HOME/holds/`); `0` turns the hold off ([unreal-attachment.md](unreal-attachment.md#identity-checks-and-limits)) |
 | `BLENDER__MODE` | `embedded` | `attached` uses the window chosen by `simul blender attach` |
 | `VIEWPORT__MAX_SIZE` | `2048` | Largest capture dimension |
 | `USD__ALLOWED_EXTENSIONS` | `[".usd",".usda",".usdc",".usdz"]` | Extensions the headless USD tools and `simul usd` commands open; load and validate share the list |

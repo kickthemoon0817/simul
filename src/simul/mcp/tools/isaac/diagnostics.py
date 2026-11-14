@@ -27,10 +27,12 @@ class DiagnosticsMixin:
             "dynamics and solver, renderer settings, viewport state, stage summary, and "
             "extension counts. Use this for a quick health check or to understand the "
             "current state of the simulation environment. Pass include_prim_count=true to "
-            "also count every prim on the stage."
+            "also count every prim on the stage. While the instance is held after a timed-out "
+            "call it answers at once with busy and held_after_timeout instead."
         ),
         read_only=True,
         idempotent=True,
+        reports_hold=True,
     )
     async def get_runtime_info(
         self, include_prim_count: bool = False
@@ -55,7 +57,11 @@ class DiagnosticsMixin:
             plus ``client`` describing this side of the wire. Over the bridge
             the payload also carries ``bridge`` (``busy``, ``busy_since``,
             ``busy_for_seconds``, ``current_action``), which is how a caller
-            tells an instance that is working from one that is hung.
+            tells an instance that is working from one that is hung. While
+            the instance is held after a timed-out call (by this server or
+            another on the machine), the MCP tool answers at once from the
+            server's own state instead: ``busy``, ``held_after_timeout`` and
+            ``client``, with the engine sections left out.
         """
         bridge_result = await self._execute_bridge_action(
             "get_runtime_info", {"include_prim_count": include_prim_count}

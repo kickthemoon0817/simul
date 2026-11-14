@@ -186,17 +186,41 @@ A stopped timeline is not flagged: USD then holds the authored state, which
   `get_runtime_info`, polled until it is no longer busy) and its answer
   releases the instance. Other calls wait up to `server.timeout` and then
   get `InstanceBusy` with `details.reason: "finishing_timed_out_call"`,
-  `timed_out_tool` and `busy_for_seconds`. `ping_isaac` does not wait for
-  the instance and reports `held_after_timeout`, though on the stock socket
-  its own probe answers only once the script has ended. A claim the
-  timed-out call's agent holds is kept alive while the hold lasts. Only the
-  timed-out call's own timeout starts a hold: the `list_isaac_instances`
-  probes, which run beside the call holding the instance, never do. The hold ends after
+  `timed_out_tool` and `busy_for_seconds`. A claim the timed-out call's
+  agent holds is kept alive while the hold lasts. Only the timed-out call's
+  own timeout starts a hold: the `list_isaac_instances` probes, which run
+  beside the call holding the instance, never do. The hold ends after
   `ISAAC_SIM__HOLD_AFTER_TIMEOUT` seconds (default 300) at most, with a
   warning in the log; `0` turns it off. On the stock sockets a coroutine
   script that awaits frames leaves the main thread free between frames, so
   the probe can answer while that script still runs; only the bridge
   reports it.
+- **The hold covers every simul server on the machine.** Each agent's
+  client usually spawns its own stdio server, so the hold is also recorded
+  under `$SIMUL_HOME/holds/` (one file per hold: the engine's stock-socket
+  `host:port`, when the reply timed out, the timed-out tool, the holding
+  server's pid and an expiry at the hold limit). Every other simul server
+  reads those records before it sends anything to that Isaac Sim and answers
+  `InstanceBusy` at once, read-only tools included, with `details.held_by`
+  naming the holder's pid, until the holder sees the engine idle and removes
+  its record. A record whose server exited (a crash, SIGKILL) or that is
+  past its expiry is ignored and removed. The servers must share the state
+  directory (`SIMUL_HOME`, default `~/.simul`); a client of Isaac Sim that is
+  not a simul server is not covered.
+- **Status during a hold.** While an instance is held (by this server or
+  another), `ping_isaac`, `get_isaac_runtime_info` and `list_isaac_instances`
+  answer at once from the servers' own state instead of sending a probe that
+  would only wait behind the timed-out call: `ping_isaac` reports
+  `reachable: true, busy: true, probed: false` with `held_after_timeout`,
+  `get_isaac_runtime_info` reports `busy: true` with `held_after_timeout` and
+  the `client` state (no engine sections), and the listing shows the
+  instance with `instance_status: "busy"`, `held_after_timeout` and
+  compatibility `blocked`.
+- **A call runs on the instance it was issued for.** The instance (and its
+  client) is resolved once, when the call is admitted, and the call keeps
+  it: a `set_active_isaac_instance` while the call waits for the instance
+  changes where the session's later calls go, not where this one runs, and
+  the claims checked are that instance's.
 - **5.x stock socket size limit.** Isaac Sim 5.1's `isaacsim.code_editor.vscode`
   has no framing: it runs every chunk of bytes it receives as a separate
   script, replies to the first and closes the connection. A script that
