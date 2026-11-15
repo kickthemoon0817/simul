@@ -49,14 +49,14 @@ def test_an_exec_timeout_keeps_the_editor_held_for_the_next_command(
         try:
             first = UnrealRuntimeSession(settings)
             with pytest.raises(UnrealTimeoutError):
-                await first.execute_script("import time; time.sleep(1.2)")
+                await first.execute_script("import time; time.sleep(2.5)")
             await first.close()  # the command exits while the editor still runs the script
             left = sorted(path.name for path in records.glob("*.json"))
             second = UnrealRuntimeSession(settings)
             with pytest.raises(UnrealError) as refused:
                 await second.execute_script("marker_b = 1")
             await second.close()
-            await asyncio.sleep(1.3)  # the script ends
+            await asyncio.sleep(2.0)  # the script ends (the refused call waited ADOPTED_HOLD_PROBE_SECONDS)
             third = UnrealRuntimeSession(settings)
             after = await third.execute_script("after = 1")
             await third.close()
@@ -66,7 +66,7 @@ def test_an_exec_timeout_keeps_the_editor_held_for_the_next_command(
 
     editor, left, refused, after, finally_left = asyncio.run(scenario())
 
-    assert len(left) == 1, "the timed-out command left its record for the next one"
+    assert len(left) == 1, "the timed-out command left its record, released, for the next one"
     assert refused.error_type == "InstanceBusy" and refused.details["reason"] == "finishing_timed_out_call"
     assert "nothing was sent" in str(refused)
     assert not any("marker_b" in command for command in editor.commands()), "the refused call never ran"
