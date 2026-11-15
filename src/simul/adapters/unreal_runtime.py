@@ -119,6 +119,7 @@ from ._unreal_scripts import (
     CAPTURE_LOCK_HELPERS,
     CREATE_MATERIAL_INSTANCE,
     DELETE_ACTOR,
+    EDITOR_FRAME,
     EDITOR_RELATIVE_PATHS,
     EDITOR_WORLD,
     ENABLE_PHYSICS,
@@ -137,8 +138,10 @@ from ._unreal_scripts import (
     PHYSICS_STATE,
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
+    RESTORE_EDITOR_CAMERA,
     ROBOTICS_SCENE_ANALYSIS,
     SAVE_ASSETS,
+    SAVE_EDITOR_CAMERA,
     SCENE_GRAPH,
     SCENE_SUMMARY,
     SET_ACTOR_PARENT,
@@ -155,6 +158,7 @@ from ._unreal_scripts import (
     SPAWN_ACTOR,
     USD_EXPORT,
     USD_IMPORT,
+    USD_IMPORT_CLEAR,
     VIEWPORT_STATE,
     WORLD_PARTITION_LISTED,
     WORLD_PARTITION_LOAD,
@@ -3096,7 +3100,10 @@ class UnrealRuntimeSession(LoggerMixin):
         That object is the script's data: an ``error`` or ``*_error`` key in
         it (a ``position_error`` metric) does not fail the call. The script
         fails it by raising or by printing ``"success": false``
-        (``apply_script_success``).
+        (``apply_script_success``). Beside ``output``, ``stderr`` holds what
+        it wrote to ``sys.stderr`` or logged as a warning or an error
+        (``unreal.log_warning``), when there is any; a JSON object the script
+        printed comes back as it printed it, with nothing added.
 
         Args:
             code: Python source code.
@@ -3104,28 +3111,39 @@ class UnrealRuntimeSession(LoggerMixin):
 
         Returns:
             The script's JSON object with ``success`` set, ``result``/``output``
-            fields, or a ``ScriptError`` envelope when the Python raised, with
-            ``output`` holding what it printed before it raised.
+            (and ``stderr``) fields, or a ``ScriptError`` envelope when the
+            Python raised, with ``output`` holding what it printed before it
+            raised.
         """
         raw = await self._execute_python(code, mode=mode)
-        info = [
-            str(entry.get("Output", ""))
-            for entry in raw.get("LogOutput") or []
-            if isinstance(entry, dict) and entry.get("Type") == "Info"
-        ]
-        output = "".join(info)
+        entries = [entry for entry in raw.get("LogOutput") or [] if isinstance(entry, dict)]
+        output = "".join(str(entry.get("Output", "")) for entry in entries if entry.get("Type") == "Info")
         failure = self._python_failure(raw)
+        # Unreal logs sys.stderr's writes as Error entries and unreal.log_warning's as Warning entries;
+        # only the Info ones are output, so they were reported nowhere (round-4 m6). Each entry is a
+        # line (a warning's has no newline of its own); the traceback of a script that raised is its
+        # error already.
+        lines = [
+            str(entry.get("Output", "")) for entry in entries if entry.get("Type") in ("Warning", "Error")
+        ]
+        stderr = "".join(
+            text if text.endswith("\n") else text + "\n"
+            for text in lines
+            if text.strip() and not (failure and text.strip() in failure)
+        )
+        printed: Dict[str, Any] = {"stderr": stderr} if stderr else {}
         if failure is not None:
             refusal = self._attached_refusal({"error": failure})
             if refusal is not None:
                 return refusal
             # What the script printed before it raised: the error alone lost it.
-            return {**self._script_error(failure), **({"output": output} if output else {})}
+            return {**self._script_error(failure), **({"output": output} if output else {}), **printed}
         if mode == "EvaluateStatement":
-            return {"success": True, "result": raw.get("CommandResult"), "output": output}
+            return {"success": True, "result": raw.get("CommandResult"), "output": output, **printed}
         parsed = self._first_json_object(raw)
         if parsed is None:
-            return {"success": True, "output": output}
+            return {"success": True, "output": output, **printed}
+        # The JSON object is the script's data, returned as it printed it, so nothing is added to it.
         return apply_script_success(parsed)
 
     @staticmethod
@@ -6128,8 +6146,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         ``start`` begins Simulate In Editor by default: the level runs and its
         physics steps with no player, the level viewport keeps the editor
         camera. ``mode`` "play" begins a Play session instead, in the level
-        viewport: the game mode spawns and possesses the player's pawn, and
-        when it stops Unreal puts the game camera's last view in the viewport.
+        viewport: the game mode spawns and possesses the player's pawn. When
+        it stops Unreal leaves the game camera's last view in the viewport, so
+        ``stop`` puts back the editor camera ``start`` saved
+        (``editor_camera_restored``; round-4 audit m3).
         Starting a session that runs resumes it if paused and otherwise leaves
         it as it is, whichever mode it runs in; the other actions leave a
         session already in their state unchanged. While either mode runs the
@@ -6189,11 +6209,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "details": {"code": "SIMULATION_NOT_RUNNING", "hint": SIMULATION_START_HINT},
             }
         started = action == "start" and not status["is_playing"]
+        stopping = action == "stop" and status["is_playing"]
         if started:
-            command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)." + (
-                "editor_play_simulate()" if mode == "simulate" else "editor_request_begin_play()"
+            # The editor camera, put back when the session stops (SAVE_EDITOR_CAMERA).
+            command = (
+                f"args = {{'save': {mode == 'play'!r}}}\n"
+                + SAVE_EDITOR_CAMERA
+                + "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)."
+                + ("editor_play_simulate()" if mode == "simulate" else "editor_request_begin_play()")
             )
-        elif action == "stop" and status["is_playing"]:
+        elif stopping:
             command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_end_play()"
         elif action in {"start", "pause", "resume"} and status["is_paused"] != (
             action == "pause"
@@ -6233,6 +6258,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 result: Dict[str, Any] = {"action": action, "state": state}
                 if action == "start":
                     result["mode"] = mode if started else None
+                if stopping:
+                    result.update(await self._restore_editor_camera())
                 return result
             if asyncio.get_running_loop().time() >= deadline:
                 return {
@@ -6241,6 +6268,30 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                     "error": f"PIE did not reach {target}; current state: {state}",
                 }
             await asyncio.sleep(0.1)
+
+    async def _restore_editor_camera(self) -> Dict[str, Any]:
+        """Put the level viewport camera back where it was before the Play session that just stopped.
+
+        Returns:
+            ``editor_camera_restored`` (the camera put back, or None when no
+            Play session saved one: Simulate keeps it), and a ``warning`` when
+            putting it back failed.
+        """
+        try:
+            restored = await self._execute_json_script(RESTORE_EDITOR_CAMERA)
+        except Exception as exc:  # the session stopped either way
+            restored = {"error": str(exc) or type(exc).__name__}
+        if restored.get("error"):
+            return {
+                "editor_camera_restored": None,
+                "warning": (
+                    "Could not put the level viewport camera back where it was before Play ("
+                    + str(restored["error"])
+                    + "): Unreal leaves the player camera's last view there, so an editor-view capture may "
+                    "show the world origin; set_unreal_camera_view or focus_unreal_on_actor moves it"
+                ),
+            }
+        return {"editor_camera_restored": restored.get("restored")}
 
     async def get_simulation_status(self) -> Dict[str, Any]:
         """
@@ -7169,18 +7220,57 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         if problems:
             return {"success": False, "error_type": "ValidationError", "error": "; ".join(problems)}
         self._check_usd_composition(usd_path)
-        args = {
+        args: Dict[str, Any] = {
             "path": usd_path,
             "destination": destination,
             "name": _sanitized_object_name(Path(usd_path).stem),
             "options": options,
             "replace": replace_existing,
         }
+        if replace_existing:
+            # The earlier import's actors go first, in a request of their own (USD_IMPORT_CLEAR): the
+            # importer's own Replace cleanup of them crashed the editor (round-4 audit, UE 5.7.4).
+            place = {key: args[key] for key in ("path", "destination", "name")}
+            cleared = await self._execute_json_script(
+                f"args = {place!r}\n" + USD_IMPORT_CLEAR,
+                expected_errors=("NotFoundError", "PluginUnavailable", PIE_ACTIVE),
+            )
+            if cleared.get("error"):
+                return cleared
+            if cleared.get("kept"):
+                return {
+                    "success": False,
+                    "error_type": "InvalidState",
+                    "error": (
+                        "Could not remove the earlier import's actors "
+                        + ", ".join(cleared["kept"][:3])
+                        + " before replacing it, so nothing was imported"
+                    ),
+                    "details": {"kept": cleared["kept"], "removed_actor_paths": cleared.get("removed", [])},
+                }
+            await self._next_editor_frame(cleared.get("frame"))
+            args.update(removed=cleared.get("removed", []), untagged=cleared.get("untagged", []))
         return await self._run_import_export(
             f"args = {args!r}\n" + USD_IMPORT,
             f"the import of {usd_path}",
             expected_errors=("NotFoundError", "InvalidState", "PluginUnavailable"),
         )
+
+    async def _next_editor_frame(self, frame: Optional[int], within: float = 2.0) -> None:
+        """Wait, at most ``within`` seconds, until the editor has ticked past ``frame``.
+
+        Two requests can be served in one frame; the import that follows
+        USD_IMPORT_CLEAR runs after the world has processed the destroyed
+        actors' end of frame. Nothing is waited for without a frame count.
+        """
+        if frame is None:
+            return
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            now = await self._execute_json_script(EDITOR_FRAME, failure_log_level=logging.DEBUG)
+            if now.get("error") or not isinstance(now.get("frame"), int) or now["frame"] > frame:
+                return
+            await asyncio.sleep(0.02)
 
     async def export_usd(
         self,

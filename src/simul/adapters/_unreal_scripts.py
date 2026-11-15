@@ -333,6 +333,41 @@ def editor_only(component):
     except Exception:
         return False
 
+# A Blueprint actor in the editor world re-runs its construction script when a property of one of
+# its components is written the way the Details panel writes it (set_editor_property, which runs
+# PostEditChangeProperty). Unreal then replaces every component the Blueprint's construction script
+# makes (each one added in the Blueprint editor) with a new one of the same name that carries the
+# edit, and renames the one held before TRASH_<class>_<n>, left out of the actor: a script that went
+# on reading it reported the edit as not applied while the editor showed it applied (UE 5.7.4). So a
+# script holding a component across such a write finds it again by its actor and name, which survive
+# the rerun (part_ref, part_now); set_part_property does both around one write.
+def part_ref(component):
+    if component is None:
+        return None
+    return (component.get_owner(), component.get_name())
+
+def part_now(ref, fallback=None):
+    # The component ref names as the actor holds it now; fallback when the actor has none of that name.
+    if ref is None:
+        return fallback
+    owner, name = ref
+    if owner is not None:
+        for part in owner.get_components_by_class(unreal.ActorComponent):
+            if part.get_name() == name:
+                return part
+    return fallback
+
+def set_part_property(component, name, value):
+    # set_editor_property on a component, returning the component its actor holds afterwards. A
+    # replacement made by the construction script is recorded too (modify), so that the writes that
+    # follow are in the open transaction.
+    ref = part_ref(component)
+    component.set_editor_property(name, value)
+    current = part_now(ref, component)
+    if current != component:
+        current.modify()
+    return current
+
 def outside_root(actor):
     # The actor's primitive components (editor-only ones left out) not attached under its root
     # component, by name. Moving the actor moves its root's tree only, and Unreal's USD exporter
@@ -372,6 +407,53 @@ print(json.dumps({
     "frame_count": None,
     "sim_time": unreal.GameplayStatics.get_time_seconds(world) if world else 0.0,
 }))
+"""
+
+#: The editor-side module that keeps the level viewport camera from before a
+#: Play session, as plain numbers (never an unreal object, which the next map
+#: change would leave dangling).
+EDITOR_CAMERA_MODULE = "_simul_editor_camera_v1"
+
+# When a Play session ends Unreal puts the player camera's last view in the
+# level viewport (editor_request_end_play): after a session whose player stood
+# at the origin the camera read [0,0,0] / [0,0,0], and the next editor-view
+# capture rendered the world origin without a word (round-4 audit m3, UE
+# 5.7.4). Simulate In Editor keeps the camera. So control_simulation runs
+# SAVE_EDITOR_CAMERA just before it starts a session (args["save"]: True for
+# Play, False for Simulate, which forgets an older camera) and
+# RESTORE_EDITOR_CAMERA once the session it stops has ended. Saving never
+# keeps the session from starting.
+SAVE_EDITOR_CAMERA = f"""
+import sys, types
+_store = sys.modules.get({EDITOR_CAMERA_MODULE!r})
+if _store is None:
+    _store = types.ModuleType({EDITOR_CAMERA_MODULE!r})
+    sys.modules[{EDITOR_CAMERA_MODULE!r}] = _store
+_store.saved = None
+if args["save"]:
+    try:
+        _info = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_level_viewport_camera_info()
+        if _info:
+            _location, _rotation = _info
+            _store.saved = ([_location.x, _location.y, _location.z],
+                            [_rotation.pitch, _rotation.yaw, _rotation.roll])
+    except Exception:
+        _store.saved = None
+"""
+
+RESTORE_EDITOR_CAMERA = f"""
+import json, sys, unreal
+store = sys.modules.get({EDITOR_CAMERA_MODULE!r})
+saved = getattr(store, "saved", None)
+if store is not None:
+    store.saved = None
+restored = None
+if saved:
+    location, rotation = saved
+    unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).set_level_viewport_camera_info(
+        unreal.Vector(*location), unreal.Rotator(pitch=rotation[0], yaw=rotation[1], roll=rotation[2]))
+    restored = {{"location": location, "rotation": rotation}}
+print(json.dumps({{"restored": restored}}))
 """
 
 # Warnings and errors the editor logged while a script ran. Unreal's importers
@@ -484,7 +566,57 @@ print(json.dumps({"paths": {name: sorted({os.path.abspath(name), unreal.Paths.co
 # import's factory holds the scene actor it spawned the same way. Each task's
 # object references are also cleared before the function returns.
 
-# Expects ``args`` = {"path", "destination", "name", "options", "replace"}:
+#: The actor tag every actor a USD import adds carries, followed by the import's
+#: folder (``/Game/Imports/robot``): what a later ``replace_existing`` import of
+#: the same folder destroys first (USD_IMPORT_CLEAR).
+USD_IMPORT_TAG = "simul.usd_import:"
+
+# Expects ``args`` = {"path", "destination", "name"}. Before a replace_existing
+# import (see USD_IMPORT): refuses as the import would (no USDImporter, PIE, no
+# file), then destroys the level actors tagged with the folder's import tag in
+# one undoable transaction, and reports them (removed), any it could not
+# destroy (kept), the untagged actors labelled like the import's root
+# (untagged) and the editor's frame count, so that the session can wait for a
+# frame before it imports.
+USD_IMPORT_CLEAR = EDITOR_WORLD + f"USD_IMPORT_TAG = {USD_IMPORT_TAG!r}\n" + """
+import os
+
+def clear(path, destination, name):
+    if not hasattr(unreal, "UsdStageImportFactory"):
+        return {"success": False, "error_type": "PluginUnavailable",
+                "error": "USD import requires the USDImporter plugin enabled at editor startup."}
+    if pie_active():
+        return pie_refusal("import USD into the level")
+    if not os.path.isfile(path):
+        return {"success": False, "error_type": "NotFoundError",
+                "error": "USD file not found on the editor host: " + path}
+    tag = USD_IMPORT_TAG + destination + "/" + name
+    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    actors = {actor.get_path_name(): actor for actor in subsystem.get_all_level_actors()}
+    earlier = [actor for actor in actors.values() if actor.actor_has_tag(tag)]
+    untagged = [path for path, actor in actors.items() if actor.get_actor_label() == name and actor not in earlier]
+    removed = [actor.get_path_name() for actor in earlier]
+    if earlier:
+        with unreal.ScopedEditorTransaction("simul: remove the earlier USD import's actors"):
+            subsystem.destroy_actors(earlier)
+    kept = [path for path in removed
+            if unreal.SystemLibrary.is_valid(unreal.find_object(None, path))]
+    frame = unreal.SystemLibrary.get_frame_count() if hasattr(unreal.SystemLibrary, "get_frame_count") else None
+    return {"removed": [path for path in removed if path not in kept], "kept": kept, "untagged": untagged,
+            "frame": frame}
+
+print(json.dumps(clear(**args)))
+"""
+
+#: Prints the editor's frame count, which the session polls until a frame has
+#: passed since USD_IMPORT_CLEAR.
+EDITOR_FRAME = """
+import json, unreal
+print(json.dumps({"frame": unreal.SystemLibrary.get_frame_count()}))
+"""
+
+# Expects ``args`` = {"path", "destination", "name", "options", "replace",
+# "removed", "untagged"}:
 # the USD file on the editor host, the content folder, the folder name the
 # import is filed under (the file's name, sanitized as Unreal names assets),
 # the importer options (``properties`` by UsdStageImportOptions property
@@ -512,7 +644,19 @@ print(json.dumps({"paths": {name: sorted({os.path.abspath(name), unreal.Paths.co
 # Unreal's defaults, Replace for both, replaced an earlier import's assets
 # (a customized mesh lost its collision and lightmap resolution) and deleted
 # its actors even though AssetImportTask.replace_existing was False, which the
-# USD importer does not read. With replace, both policies are Replace.
+# USD importer does not read. With replace, the asset policy is Replace and
+# the actor policy Append: the importer's Replace actor policy destroys the
+# earlier import's actor tree itself, inside the call that spawns the new
+# actors (UUsdStageImporter::ImportFromFile, Cleanup, RecursiveDestroyActor),
+# and that crashed the editor on an assertion in the world's end-of-frame
+# component bookkeeping (ComponentsThatNeedEndOfFrameUpdate_OnGameThread,
+# LevelTick.cpp:956; round-4 audit, UE 5.7.4). So simul destroys those actors
+# first, in a request of its own (USD_IMPORT_CLEAR), and lets the editor tick
+# before the import. Every actor an import adds carries the tag
+# USD_IMPORT_TAG + its folder, which is how a later replace finds them: never
+# by label, which a user's own actor can share. args["removed"] carries the
+# paths USD_IMPORT_CLEAR destroyed, and args["untagged"] the actors labelled
+# like the import's root that carry no such tag, which are left and reported.
 #
 # fallback_collision_type is the collision the importer gives a mesh whose
 # prim has no UsdPhysics collision, and its default, none, gives none: an
@@ -520,7 +664,7 @@ print(json.dumps({"paths": {name: sorted({os.path.abspath(name), unreal.Paths.co
 # component, so bodies would fall through it (UE 5.7.4). The new actors are
 # checked (without_collision) and the reply lists those simulated bodies pass
 # through, with a warning naming the options that give collision.
-USD_IMPORT = EDITOR_WORLD + EDITOR_LOG + DIRTY_PACKAGES + """
+USD_IMPORT = EDITOR_WORLD + EDITOR_LOG + DIRTY_PACKAGES + f"USD_IMPORT_TAG = {USD_IMPORT_TAG!r}\n" + """
 import os
 
 # UsdStageImportOptions' constructor defaults (UE 5.7) for the options simul sets on every import,
@@ -562,7 +706,9 @@ def import_options(values, replace):
         stage_options.set_editor_property("up_axis", getattr(unreal.UsdUpAxis, stage["up_axis"]))
         options.set_editor_property("stage_options", stage_options, quiet)
     if replace:
-        actors, assets = unreal.ReplaceActorPolicy.REPLACE, unreal.ReplaceAssetPolicy.REPLACE
+        # The earlier import's actors were destroyed first, in a request of their own (USD_IMPORT_CLEAR):
+        # the importer's own Replace cleanup of them crashed the editor (round-4 audit, UE 5.7.4).
+        actors, assets = unreal.ReplaceActorPolicy.APPEND, unreal.ReplaceAssetPolicy.REPLACE
     else:
         actors, assets = unreal.ReplaceActorPolicy.APPEND, unreal.ReplaceAssetPolicy.IGNORE
     options.set_editor_property("existing_actor_policy", actors, quiet)
@@ -596,7 +742,39 @@ def without_collision(actor_paths):
                 break
     return components, bare
 
-def import_usd(path, destination, name, options, replace):
+def stage_geometry(path, prims):
+    # The stage's geometry prims (UsdGeom.Gprim) under prims_to_import, as the importer reads them,
+    # leaving out skeletal meshes and point instancers (which do not become one static mesh component
+    # a prim); None when the editor's USD Python (pxr) cannot open it.
+    try:
+        from pxr import Usd, UsdGeom
+        stage = Usd.Stage.Open(path, Usd.Stage.LoadAll)
+    except Exception:
+        return None
+    if stage is None:
+        return None
+    roots = [root.rstrip("/") + "/" for root in (prims or ["/"])]
+    count = 0
+    # Instance proxies too: an instanced asset's parts are prims of its prototype (UE imports each).
+    walk = iter(Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies()))
+    for prim in walk:
+        if prim.GetTypeName() in ("SkelRoot", "PointInstancer"):
+            walk.PruneChildren()
+            continue
+        where = str(prim.GetPath()) + "/"
+        if prim.IsA(UsdGeom.Gprim) and any(where.startswith(root) for root in roots):
+            count += 1
+    return count
+
+def tag_imported(actor_paths, tag):
+    # The import's tag on each actor it added, which a later replace_existing import destroys by.
+    for path in actor_paths:
+        actor = unreal.find_object(None, path)
+        if isinstance(actor, unreal.Actor) and not actor.actor_has_tag(tag):
+            tags = list(actor.get_editor_property("tags"))
+            actor.set_editor_property("tags", tags + [unreal.Name(tag)])
+
+def import_usd(path, destination, name, options, replace, removed=(), untagged=()):
     if not hasattr(unreal, "UsdStageImportFactory"):
         return {"success": False, "error_type": "PluginUnavailable",
                 "error": "USD import requires the USDImporter plugin enabled at editor startup."}
@@ -641,13 +819,21 @@ def import_usd(path, destination, name, options, replace):
     known = set(before)
     actors = [p for p in after if p not in known]
     current = set(after)
-    removed = [p for p in before if p not in current]
+    removed = list(dict.fromkeys(list(removed) + [p for p in before if p not in current]))
     if not assets and not actors:
         return {"success": False, "error_type": "EngineError",
                 "error": "The USD importer produced no assets or actors from " + path
-                         + (": " + "; ".join(logged) if logged else "; see the editor log"),
-                "details": {"log": logged}}
+                         + (": " + "; ".join(logged) if logged else "; see the editor log")
+                         + ("; the earlier import's actors were removed before it"
+                            if removed else ""),
+                "details": {"log": logged, "removed_actor_paths": removed}}
+    tag_imported(actors, USD_IMPORT_TAG + folder)
     warnings = list(logged)
+    if untagged:
+        warnings.append(
+            str(len(untagged)) + " actor(s) labelled " + name + " carry no simul import tag (an import by an earlier "
+            "simul version, or an actor of your own), so the replace left them in the level: "
+            + ", ".join(untagged[:3]) + ". Delete them if they are from the earlier import.")
     dirtied = dirty_engine_packages()
     if dirtied:
         warnings.append(dirty_engine_warning(dirtied))
@@ -675,9 +861,33 @@ def import_usd(path, destination, name, options, replace):
             "them; they are listed in actors_without_collision. Import again with replace_existing true and "
             "fallback_collision_type convex_decomposition (concave meshes, such as a floor with walls) or convex_hull "
             "(one hull per mesh), or give a mesh simple collision with compute_unreal_convex_hull (output collision).")
+    properties = options.get("properties", {})
+    collapsing = properties.get("use_prim_kinds_for_collapsing", DEFAULTS["use_prim_kinds_for_collapsing"])
+    # Counted only when collapsing can merge prims: it opens the stage a second time.
+    geometry = stage_geometry(path, options.get("prims_to_import")) if collapsing and actors else None
+    if geometry and meshes < geometry:
+        warnings.append(
+            "The stage has " + str(geometry) + " geometry prims and the import made " + str(meshes) + " static "
+            "mesh component" + ("" if meshes == 1 else "s") + " from them, with use_prim_kinds_for_collapsing true "
+            "(Unreal's default), so prims were merged: a stage exported from Unreal, with no kind authored, came "
+            "back as one mesh. To keep each prim a mesh of its own, import again with replace_existing true and "
+            "use_prim_kinds_for_collapsing false.")
+    # The earlier import's assets this one did not make again are left in the folder (Unreal's
+    # Replace policy replaces only the assets an import makes), which look like part of this one.
+    made = {asset.partition(".")[0] for asset in assets}
+    now = {str(asset.package_name) for asset in registry.get_assets_by_path(folder, recursive=True)}
+    left_over = [package for package in existing if package not in made and package in now]
+    if left_over:
+        warnings.append(
+            str(len(left_over)) + " asset(s) in " + folder + " from an earlier import were not made by this one and "
+            "were left as they are, so the folder holds more than this import (left_over_assets, first: "
+            + ", ".join(left_over[:3]) + "). Delete them in the Content Browser if nothing uses them, or import "
+            "into a new destination_path.")
     return {"imported_assets": assets, "actor_paths": actors, "removed_actor_paths": removed,
             "warnings": warnings, "dirty_engine_packages": dirtied, "mesh_components": meshes,
-            "actors_without_collision": bare[:LISTED], "actors_without_collision_count": len(bare)}
+            "stage_geometry_prims": geometry,
+            "actors_without_collision": bare[:LISTED], "actors_without_collision_count": len(bare),
+            "left_over_assets": left_over[:LISTED], "left_over_assets_count": len(left_over)}
 
 print(json.dumps(import_usd(**args)))
 """
@@ -2506,9 +2716,11 @@ def has(component, name):
     return True
 
 def write(component, name, value):
+    # Returns the component to go on with: on a Blueprint light the write re-runs the construction
+    # script, which replaces the light component (set_part_property).
     if name == "light_color":
         value = unreal.Color(r=value[0], g=value[1], b=value[2], a=value[3])
-    component.set_editor_property(name, value)
+    return set_part_property(component, name, value)
 
 def differs(name, wanted, value):
     if isinstance(wanted, float):
@@ -2547,20 +2759,23 @@ def set_light():
                          + "; nothing was changed",
                 "details": {"code": "PROPERTY_NOT_ON_LIGHT", "parameters": lacking,
                             "light_class": component.get_class().get_name()}}
-    rejected = {}
+    rejected, kept = {}, []
     if values:
         before = {name: read(component, name) for name in values}
         with unreal.ScopedEditorTransaction("simul: set light params") as transaction:
             for name, value in values.items():
-                write(component, name, value)
+                component = write(component, name, value)
             for name, wanted in values.items():
                 stored = read(component, name)
                 if differs(name, wanted, stored):
                     rejected[name] = stored
             if rejected:
                 for name in values:
-                    write(component, name, before[name])
-                transaction.cancel()
+                    component = write(component, name, before[name])
+                # Cancelling drops the undo record and keeps the change, so only a light put back whole.
+                kept = sorted(name for name in values if differs(name, before[name], read(component, name)))
+                if not kept:
+                    transaction.cancel()
     current = {name: read(component, name) for name in READ_BACK if has(component, name)}
     result = {"component_path": component.get_path_name(), "light_class": component.get_class().get_name(),
               "intensity_unit": unit_of(component),
@@ -2573,7 +2788,9 @@ def set_light():
         result.update(success=False, error_type="LightParamsNotApplied",
                       error="Unreal did not take " + ", ".join(
                           name + " (it stored " + repr(stored) + ")" for name, stored in sorted(rejected.items()))
-                      + "; every value was put back as it was, so nothing was changed",
+                      + ("; every value was put back as it was, so nothing was changed" if not kept
+                         else "; putting back " + ", ".join(kept) + " did not take, so the edit is kept as one "
+                              "undo step: Undo reverts it"),
                       details={"code": "NOT_APPLIED", "expected": {name: values[name] for name in rejected},
                                "actual": rejected})
     return result
@@ -2763,13 +2980,17 @@ def write_simulate(component, simulate, simulation):
     # The play copy takes the runtime setter, which detaches an attached body from its parent as Unreal
     # does when a body starts simulating (the copy is gone when the simulation stops). The editor world
     # takes the flag the way the Details panel writes it, which keeps the editor actor's hierarchy
-    # (see the comment above PHYSICS_HELPERS).
+    # (see the comment above PHYSICS_HELPERS), and on a Blueprint actor replaces the component
+    # (set_part_property). Returns the component to go on with. The flag is set on a copy of the body:
+    # the struct get_editor_property returns refers to the component's own, so writing a field of it
+    # notifies the component, which re-ran a Blueprint's construction script before the write below
+    # and left it to the replaced component (UE 5.7.4).
     if simulation:
         component.set_simulate_physics(simulate)
-        return
-    body = component.get_editor_property("body_instance")
+        return component
+    body = component.get_editor_property("body_instance").copy()
     body.set_editor_property("simulate_physics", simulate)
-    component.set_editor_property("body_instance", body)
+    return set_part_property(component, "body_instance", body)
 
 def blocked_object_types(component):
     channels = unreal.CollisionChannel
@@ -2902,9 +3123,10 @@ def physics_problems(component, simulate, make_movable, collision=None, blocked=
     return problems
 
 def apply(component, mode, simulation):
+    # Returns the component to go on with (write_simulate).
     if mode != "off" and component.mobility.name != "MOVABLE":
         component.set_mobility(unreal.ComponentMobility.MOVABLE)
-    write_simulate(component, mode == "simulate", simulation)
+    return write_simulate(component, mode == "simulate", simulation)
 
 def unmet(component, mode):
     flag = bool(component.get_editor_property("body_instance").get_editor_property("simulate_physics"))
@@ -2921,18 +3143,39 @@ def unmet(component, mode):
     return None
 
 def body_before(component):
-    return {"simulate": bool(component.get_editor_property("body_instance").get_editor_property("simulate_physics")),
-            "mobility": component.mobility, "parent": component.get_attach_parent(),
-            "socket": component.get_attach_socket_name()}
+    # The parent is kept by reference too: a construction-script rerun replaces it as well (part_ref).
+    parent = component.get_attach_parent()
+    return {"simulate": own_flag(component), "mobility": component.mobility, "parent": parent,
+            "parent_ref": part_ref(parent), "socket": component.get_attach_socket_name()}
+
+def parent_before(before):
+    # The parent the body had before, as its actor holds it now.
+    return part_now(before["parent_ref"], before["parent"])
 
 def restore(component, before, simulation):
-    write_simulate(component, before["simulate"], simulation)
+    # Returns the component to go on with (write_simulate).
+    component = write_simulate(component, before["simulate"], simulation)
     if component.mobility != before["mobility"]:
         component.set_mobility(before["mobility"])
-    parent = before["parent"]
+    parent = parent_before(before)
     if parent is not None and component.get_attach_parent() != parent:
         rule = unreal.AttachmentRule.KEEP_WORLD
         component.attach_to_component(parent, before["socket"], rule, rule, rule, False)
+    return component
+
+def left_changed(component, before):
+    # What a body put back still has different from before, or None. A transaction is cancelled only
+    # when nothing is: cancelling drops the undo record and keeps the change (see PHYSICS_HELPERS).
+    changed = []
+    if own_flag(component) != before["simulate"]:
+        changed.append("its simulate flag")
+    if component.mobility != before["mobility"]:
+        changed.append("its mobility")
+    return " and ".join(changed) or None
+
+def kept_note(changed):
+    return ("; putting it back left " + changed + " changed, so the edit is kept as one undo step: "
+            "Undo reverts it")
 
 def write_params(component, values):
     if "mass" in values:
@@ -2968,10 +3211,12 @@ def snapshot(component):
     return snap
 
 def put_back(component, snap):
-    restore(component, snap, False)
-    component.set_editor_property("body_instance", snap["body"])
+    # Returns the component to go on with (set_part_property).
+    component = restore(component, snap, False)
+    component = set_part_property(component, "body_instance", snap["body"])
     if snap["default_collision"] is not None:
-        component.set_editor_property("use_default_collision", snap["default_collision"])
+        component = set_part_property(component, "use_default_collision", snap["default_collision"])
+    return component
 
 def expected_mode(mode):
     return {"simulate": "simulated", "kinematic": "kinematic"}.get(mode, "not simulating")
@@ -3016,12 +3261,18 @@ def edit_note(simulation):
 # and which parts it welds into it (welded_parts). In the play copy Unreal
 # detaches an attached body as it starts simulating (detached_from). If the
 # body still does not read back as asked, every value is restored and the
-# transaction cancelled.
+# transaction cancelled; when restoring leaves something changed the
+# transaction is kept instead, so one Undo reverts it (details.undo_kept).
+# Every check and the reply read the component as the actor holds it after the
+# write: on a Blueprint actor the write replaces it (part_ref). The round-4
+# audit's Blueprint crate read the replaced TRASH_ component, reported
+# "nothing was changed" while the flag was set, and cancelled the undo record,
+# so the next Undo reverted the edit before it (UE 5.7.4).
 ENABLE_PHYSICS = PHYSICS_HELPERS + """
-def simulation_notes(component, mode, before, weld):
+def simulation_notes(component, mode, parent, weld):
     # What the simulation does with this editor-world body: Unreal detaches an attached body from its
     # parent in the play copy as it starts simulating, and welds into it the parts attached under it.
-    notes, parent = [], before["parent"]
+    notes = []
     if mode == "simulate" and parent is not None:
         if weld is not None:
             notes.append("In the simulation Unreal detaches " + component.get_name() + " from " + parent.get_name()
@@ -3050,34 +3301,45 @@ def enable():
             what = "simulate physics on" if mode == "simulate" else "make kinematic"
             return refusal(actor, what, problems, component)
     before = body_before(component)
-    weld = welded_to(component)
+    ref, weld_ref = part_ref(component), part_ref(welded_to(component))
     simulation = in_simulation(actor)
-    failure = None
+    failure = kept = None
     if simulation:
-        apply(component, mode, True)
+        component = apply(component, mode, True)
         failure = unmet(component, mode)
         if failure is not None:
-            restore(component, before, True)
+            component = restore(component, before, True)
     else:
         with unreal.ScopedEditorTransaction(args["transaction"]) as transaction:
             component.modify()
             try:
-                apply(component, mode, False)
+                component = apply(component, mode, False)
                 failure = unmet(component, mode)
             except Exception as exc:
                 failure = str(exc) or type(exc).__name__
             if failure is not None:
-                restore(component, before, False)
-                transaction.cancel()
+                # The write may have replaced the component before it raised (part_ref).
+                component = part_now(ref, component)
+                try:
+                    component = restore(component, before, False)
+                    kept = left_changed(component, before)
+                except Exception as exc:
+                    component = part_now(ref, component)
+                    kept = "what was written (" + (str(exc) or type(exc).__name__) + ")"
+                if kept is None:
+                    transaction.cancel()
+    # The parts as the actor holds them now: writing the editor world's flag re-runs a Blueprint
+    # actor's construction script, which replaces them (part_ref).
+    weld, parent = part_now(weld_ref), parent_before(before)
     if failure is not None:
         report = physics_report(component)
         return {"success": False, "error_type": "PhysicsNotApplied",
-                "error": failure + "; nothing was changed",
+                "error": failure + (kept_note(kept) if kept else "; nothing was changed"),
                 "details": dict(report, code="NOT_APPLIED", expected={"physics_mode": expected_mode(mode)},
                                 actual={"physics_mode": report["physics_mode"],
-                                        "simulate_physics": report["simulate_physics"]})}
+                                        "simulate_physics": report["simulate_physics"]},
+                                undo_kept=kept is not None)}
     result = physics_report(component)
-    parent = before["parent"]
     result.update(actor_path=actor.get_path_name(), world="simulation" if simulation else "editor",
                   physics_enabled=result["physics_mode"] == "simulated",
                   mobility_changed_from=None if component.mobility == before["mobility"]
@@ -3094,7 +3356,7 @@ def enable():
     else:
         if mode == "simulate" and parent is not None:
             result["simulation_detaches_from"] = parent.get_path_name()
-        warnings += simulation_notes(component, mode, before, weld)
+        warnings += simulation_notes(component, mode, parent, weld)
     if mode != "off":
         warnings.append(blocking_note(result))
     warnings.append(edit_note(simulation))
@@ -3198,14 +3460,17 @@ print(json.dumps(refusable(set_params)))
 # so and names the preset that blocks (see PHYSICS_HELPERS).
 SET_COLLISION = PHYSICS_HELPERS + """
 def write(component, preset, enabled):
+    # Returns the component to go on with: clearing Use Default Collision is a property write, which
+    # re-runs a Blueprint actor's construction script (set_part_property).
     if preset:
         component.set_collision_profile_name(preset)
     if enabled is not None:
         if (isinstance(component, unreal.StaticMeshComponent)
                 and component.get_editor_property("use_default_collision")):
-            component.set_editor_property("use_default_collision", False)
+            component = set_part_property(component, "use_default_collision", False)
         component.set_collision_enabled(unreal.CollisionEnabled.QUERY_AND_PHYSICS if enabled
                                         else unreal.CollisionEnabled.NO_COLLISION)
+    return component
 
 def set_collision():
     actor = actor_at(args["actor_path"], play_world=True)
@@ -3219,11 +3484,11 @@ def set_collision():
     simulation = in_simulation(actor)
     if preset or enabled is not None:
         if simulation:
-            write(component, preset, enabled)
+            component = write(component, preset, enabled)
         else:
             with unreal.ScopedEditorTransaction(args["transaction"]):
                 component.modify()
-                write(component, preset, enabled)
+                component = write(component, preset, enabled)
     result = physics_report(component)
     result.update(actor_path=actor.get_path_name(), world="simulation" if simulation else "editor",
                   collision_enabled=result["collision_mode"] != "NO_COLLISION",
@@ -3272,7 +3537,11 @@ print(json.dumps(refusable(set_collision)))
 # in the simulation. One that still does not read back as
 # asked is put back whole; without skip_failures every actor already written is
 # put back too and the transaction cancelled, so the call changes nothing
-# (cancelling alone only drops the undo record). A call that sets up no actor
+# (cancelling alone only drops the undo record); when putting one back leaves
+# it changed, the transaction is kept so that one Undo reverts the call
+# (details.undo_kept). Each actor's checks, values and report go to the
+# component as the actor holds it after the flag's write, which replaces a
+# Blueprint actor's components (part_ref). A call that sets up no actor
 # fails. Paths in the running simulation's world are refused: this edits the
 # editor world.
 BULK_PHYSICS = PHYSICS_HELPERS + """
@@ -3373,10 +3642,13 @@ def setup():
         with unreal.ScopedEditorTransaction(args["transaction"]) as transaction:
             for actor, component in plan:
                 before = snapshot(component)
+                ref = part_ref(component)
                 component.modify()
                 if preset:
                     component.set_collision_profile_name(preset)
-                apply(component, mode, False)
+                # Writing the flag re-runs a Blueprint actor's construction script, which replaces the
+                # component (part_ref): the values and every check go to the one it returns.
+                component = apply(component, mode, False)
                 write_params(component, args["values"])
                 problem = unmet(component, mode)
                 if problem is not None:
@@ -3384,25 +3656,34 @@ def setup():
                     not_applied[actor.get_path_name()] = {"physics_mode": report["physics_mode"],
                                                           "simulate_physics": report["simulate_physics"],
                                                           "mobility": report["mobility"]}
-                    put_back(component, before)
+                    component = put_back(component, before)
+                    changed = left_changed(component, before)
                     failed.append({"actor_path": actor.get_path_name(),
-                                   "error": problem + "; it was put back as it was"})
+                                   "error": problem + ("; it was put back as it was" if changed is None
+                                                       else kept_note(changed))})
                     if not args["skip_failures"]:
-                        for done_component, done_before in reversed(written):
-                            put_back(done_component, done_before)
-                        transaction.cancel()
+                        kept = [actor.get_actor_label() + "'s " + changed] if changed else []
+                        for done_actor, done_ref, done_before in reversed(written):
+                            done = put_back(part_now(done_ref), done_before)
+                            left = left_changed(done, done_before)
+                            if left:
+                                kept.append(done_actor.get_actor_label() + "'s " + left)
+                        if not kept:
+                            transaction.cancel()
                         return {"success": False, "error_type": "PhysicsNotApplied",
-                                "error": actor.get_actor_label() + ": " + problem + "; every actor was put back "
-                                         "as it was, so nothing was changed (pass skip_failures true to keep the "
-                                         "actors that do take it)",
+                                "error": actor.get_actor_label() + ": " + problem + (
+                                    "; every actor was put back as it was, so nothing was changed (pass "
+                                    "skip_failures true to keep the actors that do take it)" if not kept else
+                                    "; every actor was put back, but " + ", ".join(kept) + " stayed changed, so "
+                                    "the call is kept as one undo step: Undo reverts it"),
                                 "details": {"code": "NOT_APPLIED", "expected": expected, "actual": not_applied,
                                             "failed": failed[:args["listed"]], "failed_count": len(failed),
-                                            "matched": matched}}
+                                            "matched": matched, "undo_kept": bool(kept)}}
                     continue
-                written.append((component, before))
+                written.append((actor, part_ref(component), before))
                 report = physics_report(component)
-                leaves = (before["parent"].get_path_name()
-                          if mode == "simulate" and before["parent"] is not None else None)
+                parent = parent_before(before)
+                leaves = parent.get_path_name() if mode == "simulate" and parent is not None else None
                 detaching += leaves is not None
                 configured.append({"actor_path": actor.get_path_name(), "physics_mode": report["physics_mode"],
                                    "mobility_changed_from": None if component.mobility == before["mobility"]
@@ -3714,6 +3995,16 @@ def state(actor, simulation):
     component = body_of(actor)
     if component is not None:
         entry.update(body_state(component))
+        if component != actor.root_component:
+            # The body is the actor's only part under a SceneComponent root (a Blueprint prop's Mesh):
+            # it moves away from the root as it simulates, so the root read the spawn point while the
+            # body lay on the floor (round-4 review). Its own transform is the body's.
+            rotation = component.get_world_rotation()
+            entry.update(location=vector(component.get_world_location()),
+                         rotation=[rotation.pitch, rotation.yaw, rotation.roll],
+                         note="location and rotation are the body's, " + component.get_name()
+                              + ", the actor's only primitive part; its root, " + actor.root_component.get_name()
+                              + ", is at " + str([round(v, 3) for v in vector(location)]) + ".")
         return entry
     parts = body_components(actor)
     entry.update(component_path=None, physics_mode=None)

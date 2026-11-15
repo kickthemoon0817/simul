@@ -268,6 +268,17 @@ class Actor(UObject):
     def get_components_by_class(self, cls: type) -> List[Any]:
         return [component for component in self.components if isinstance(component, cls)]
 
+    def actor_has_tag(self, tag: str) -> bool:
+        return tag in getattr(self, "tags", [])
+
+    def get_editor_property(self, name: str) -> Any:
+        assert name == "tags", name
+        return list(getattr(self, "tags", []))
+
+    def set_editor_property(self, name: str, value: Any) -> None:
+        assert name == "tags", name
+        self.tags = [str(tag) for tag in value]
+
 
 class AssetExportTask:
     def __init__(self) -> None:
@@ -385,6 +396,10 @@ class Editor:
         self.saved_config = dict(UE_DEFAULTS)
         self.config_writes: List[Dict[str, Any]] = []
         self.stages: Dict[str, List[str]] = {}
+        # What destroy_actors destroyed, a list a call; what the importer's Replace cleanup did; the frame.
+        self.destroyed: List[List[str]] = []
+        self.importer_destroyed: List[str] = []
+        self.frame = 100
         self.export_tasks: List[AssetExportTask] = []
         self.import_tasks: List[AssetImportTask] = []
         self.import_options: List[Any] = []  # what each import ran with; the script clears task.options
@@ -411,6 +426,19 @@ class Editor:
         """unreal.log: a LogPython line, at Display verbosity."""
         with open(self.log_path, "a") as handle:
             handle.write(f"{LOG_TIME}LogPython: {message}\n")
+
+    def destroy_actors(self, actors: List[Actor]) -> bool:
+        """EditorActorSubsystem.destroy_actors, which simul calls in a transaction of its own."""
+        assert self.open_transactions == 1, "destroyed outside a transaction"
+        for actor in actors:
+            self.actors.pop(actor.get_path_name(), None)
+        self.destroyed.append([actor.get_path_name() for actor in actors])
+        return True
+
+    def next_frame(self) -> int:
+        """SystemLibrary.get_frame_count: the editor ticks between requests."""
+        self.frame += 1
+        return self.frame
 
     def level_actors(self) -> List[Actor]:
         actors = list(self.actors.values())
@@ -495,6 +523,8 @@ class Editor:
             label = task.destination_name
             existing = [path for path, actor in self.actors.items() if actor.get_actor_label() == label]
             if existing and options.existing_actor_policy == "REPLACE":
+                # The importer's own cleanup of the earlier actors, which crashed UE 5.7.4.
+                self.importer_destroyed += existing
                 for path in existing:
                     del self.actors[path]
             scene = Actor(LEVEL + label + "_" + str(len(self.import_tasks)), self.world, self)
@@ -672,6 +702,7 @@ class Editor:
             ),
             "EditorActorSubsystem": SimpleNamespace(
                 get_all_level_actors=editor.level_actors,
+                destroy_actors=editor.destroy_actors,
                 get_selected_level_actors=lambda: list(editor.selection),
                 set_selected_level_actors=lambda actors: setattr(editor, "selection", list(actors)),
             ),
@@ -708,6 +739,7 @@ class Editor:
             UsdCollisionType=COLLISION,
             UsdUpAxis=SimpleNamespace(Y_AXIS="Y_AXIS", Z_AXIS="Z_AXIS"),
             PropertyAccessChangeNotifyMode=NOTIFY,
+            Name=str,
             ReplaceActorPolicy=SimpleNamespace(APPEND="APPEND", REPLACE="REPLACE", IGNORE="IGNORE"),
             ReplaceAssetPolicy=SimpleNamespace(APPEND="APPEND", REPLACE="REPLACE", IGNORE="IGNORE"),
             DirectoryPath=lambda path: SimpleNamespace(path=path),
@@ -752,6 +784,7 @@ class Editor:
             log=editor.log_python,
             SystemLibrary=SimpleNamespace(
                 is_valid=lambda obj: obj is not None,
+                get_frame_count=editor.next_frame,
                 get_game_name=lambda: "Fake",
                 get_engine_version=lambda: "5.7.4-fake",
                 execute_console_command=lambda world, command: editor.console_commands.append(command),
@@ -1196,9 +1229,148 @@ def test_replace_existing_replaces_the_assets_and_the_earlier_actors_and_says_so
     assert editor.fake.replaced_assets == ["/Game/Imports/scene/StaticMeshes/SM_Root"]
     assert replaced["removed_actor_paths"] == first["actor_paths"]
     options = editor.fake.import_options[-1]
-    assert (options.existing_actor_policy, options.existing_asset_policy) == ("REPLACE", "REPLACE")
+    assert (options.existing_actor_policy, options.existing_asset_policy) == ("APPEND", "REPLACE")
     payload = UnrealImportUsdResponse(**replaced).model_dump()
     assert payload["removed_actor_paths"] == first["actor_paths"]
+    assert payload["left_over_assets"] == [] and payload["left_over_assets_count"] == 0
+    # The earlier actors went in a request of their own, never through the importer's Replace cleanup,
+    # which crashed UE 5.7.4; the editor ticked between the two.
+    assert editor.fake.destroyed == [first["actor_paths"]] and editor.fake.importer_destroyed == []
+    assert "simul: remove the earlier USD import's actors" in editor.fake.transactions
+    (new_actor,) = replaced["actor_paths"]
+    assert editor.fake.actors[new_actor].tags == ["simul.usd_import:/Game/Imports/scene"]
+
+
+def test_a_replace_leaves_an_untagged_actor_that_shares_the_import_s_name(editor: SimpleNamespace) -> None:
+    """Never by label: a user's own actor named like the file stays, and the reply says so."""
+    first = _import(editor)
+    (earlier,) = first["actor_paths"]
+    editor.fake.actors[earlier].tags = []  # an import by an earlier simul, or the user's own actor
+
+    replaced = _import(editor, replace_existing=True)
+
+    assert replaced.get("success", True) is not False, replaced
+    assert earlier in editor.fake.actors and replaced["removed_actor_paths"] == []
+    assert editor.fake.destroyed == [] and editor.fake.importer_destroyed == []
+    (warning,) = [w for w in replaced["warnings"] if "no simul import tag" in w]
+    assert earlier in warning
+
+
+def test_a_replace_in_pie_destroys_nothing(editor: SimpleNamespace) -> None:
+    _import(editor)
+    editor.fake.pie = True
+
+    refused = _import(editor, replace_existing=True)
+
+    assert refused["success"] is False and refused["error_type"] == "PIEActive"
+    assert editor.fake.destroyed == []
+
+
+def test_a_replace_that_cannot_remove_the_earlier_actors_imports_nothing(
+    editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _import(editor)
+    tasks = len(editor.fake.import_tasks)
+    unreal_module = sys.modules["unreal"]
+    subsystem = unreal_module.get_editor_subsystem(unreal_module.EditorActorSubsystem)
+    monkeypatch.setattr(subsystem, "destroy_actors", lambda actors: False)
+
+    refused = _import(editor, replace_existing=True)
+
+    assert refused["success"] is False and refused["error_type"] == "InvalidState"
+    assert refused["details"]["kept"] == first["actor_paths"]
+    assert len(editor.fake.import_tasks) == tasks
+
+
+def test_replace_existing_reports_the_assets_an_earlier_import_left(editor: SimpleNamespace) -> None:
+    """Round-4 audit m5: SM_Root stayed in the folder beside the new meshes, unreported."""
+    _import(editor)  # collapsed: SM_Root
+
+    replaced = _import(editor, replace_existing=True, import_options={"use_prim_kinds_for_collapsing": False})
+
+    assert replaced.get("success", True) is not False, replaced
+    assert replaced["left_over_assets"] == ["/Game/Imports/scene/StaticMeshes/SM_Root"]
+    assert replaced["left_over_assets_count"] == 1
+    (warning,) = [w for w in replaced["warnings"] if "earlier import" in w]
+    assert "SM_Root" in warning and "left as they are" in warning
+    assert "/Game/Imports/scene/StaticMeshes/SM_Root" in editor.fake.content, "nothing is deleted"
+
+
+def _geometry_pxr(editor: SimpleNamespace, prims: List[Tuple[str, str]]) -> SimpleNamespace:
+    """The fake editor's pxr, with a stage of typed prims the import's geometry count walks."""
+    gprims = {"Mesh", "Cube", "Sphere", "Capsule", "Cylinder", "Cone"}
+
+    class Prim:
+        def __init__(self, path: str, kind: str) -> None:
+            self.path, self.kind = path, kind
+
+        def GetPath(self) -> str:  # noqa: N802 - pxr's name
+            return self.path
+
+        def GetTypeName(self) -> str:  # noqa: N802 - pxr's name
+            return self.kind
+
+        def IsA(self, schema: Any) -> bool:  # noqa: N802 - pxr's name
+            return schema == "Gprim" and self.kind in gprims
+
+    class PrimRange:
+        def __init__(self, root: Any, predicate: Any = None) -> None:
+            self.prims, self.at, self.pruned = [Prim(p, k) for p, k in prims], -1, None
+
+        def __iter__(self) -> "PrimRange":
+            return self
+
+        def __next__(self) -> Prim:
+            while True:
+                self.at += 1
+                if self.at >= len(self.prims):
+                    raise StopIteration
+                prim = self.prims[self.at]
+                if self.pruned is None or not prim.path.startswith(self.pruned + "/"):
+                    return prim
+
+        def PruneChildren(self) -> None:  # noqa: N802 - pxr's name
+            self.pruned = self.prims[self.at].path
+
+    stage = SimpleNamespace(GetPseudoRoot=lambda: Prim("/", ""), GetPrimAtPath=lambda path: SimpleNamespace())
+    base = editor.fake.pxr()
+    base.Usd.Stage.LoadAll = "LoadAll"
+    base.Usd.Stage.Open = lambda path, load=None: stage
+    base.Usd.PrimRange = PrimRange
+    base.Usd.TraverseInstanceProxies = lambda: "instance proxies"
+    base.UsdGeom = SimpleNamespace(Gprim="Gprim")
+    return base
+
+
+ROBOTS = [("/Root", "Xform"), ("/Root/Robot", "Xform"), ("/Root/Robot/Chassis", "Mesh"),
+          ("/Root/Robot/Chassis/Arm", "Mesh"), ("/Root/Robot/Chassis/Wheel", "Mesh"),
+          ("/Root/Hand", "SkelRoot"), ("/Root/Hand/Skin", "Mesh")]
+
+
+def test_a_collapsing_import_that_merges_prims_warns(
+    editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-4 audit m4: two robots of 6 mesh prims came back as one SM_Root, with no warning."""
+    monkeypatch.setitem(sys.modules, "pxr", _geometry_pxr(editor, ROBOTS))
+
+    merged = _import(editor)
+    apart = _import(editor, destination_path="/Game/Apart", import_options={"use_prim_kinds_for_collapsing": False})
+
+    # The skeletal mesh under its SkelRoot is no static mesh component a prim, so it is left out.
+    assert merged["stage_geometry_prims"] == 3 and merged["mesh_components"] == 1
+    (warning,) = [w for w in merged["warnings"] if "use_prim_kinds_for_collapsing" in w]
+    assert "3 geometry prims" in warning and "1 static mesh component from them" in warning
+    assert "prims were merged" in warning and "which a USD export gives" not in warning
+    assert "use_prim_kinds_for_collapsing false" in warning
+    assert not any("use_prim_kinds_for_collapsing true" in w for w in apart["warnings"])
+    assert apart["stage_geometry_prims"] is None, "not counted when collapsing is off"
+
+
+def test_an_import_whose_stage_pxr_cannot_read_has_no_geometry_count(editor: SimpleNamespace) -> None:
+    result = _import(editor)
+
+    assert result["stage_geometry_prims"] is None
+    assert not any("use_prim_kinds_for_collapsing" in w for w in result["warnings"])
 
 
 def test_an_import_leaves_no_factory_holding_its_scene_actor_in_the_console(

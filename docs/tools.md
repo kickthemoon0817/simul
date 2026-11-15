@@ -1117,7 +1117,12 @@ Behaviour worth knowing:
   In Editor by default (`mode: "simulate"`: the level runs and its physics
   steps with no player, and the level viewport keeps the editor camera) or,
   with `mode: "play"`, a Play session in the level viewport, where the game
-  mode spawns and possesses the player's pawn. Both are Play In Editor
+  mode spawns and possesses the player's pawn. When a Play session stops,
+  Unreal leaves the player camera's last view in the level viewport (after a
+  player at the origin the camera read [0,0,0], and the next editor-view
+  capture rendered the origin), so `stop` puts the editor camera back where it
+  was when `start` began the session (`editor_camera_restored`, null after
+  Simulate, which keeps the camera, or a session the tool did not start). Both are Play In Editor
   sessions, and everything below about PIE holds for either. Starting while a
   session runs resumes it if paused and otherwise leaves it as it is, whichever
   mode it runs in (the reply's `mode` is then `null`); `pause` and `resume`
@@ -1189,7 +1194,11 @@ Behaviour worth knowing:
     tag) in the running simulation while one runs and in the editor world
     otherwise (`world` picks one): location, rotation, linear velocity (cm/s),
     angular velocity (degrees/s), whether the body is awake, mass, center of
-    mass, gravity and the physics mode. Each body lists both its
+    mass, gravity and the physics mode. An actor whose one body is not its
+    root (a Blueprint prop: a Mesh under DefaultSceneRoot) reads the body's
+    location and rotation, which part it is in `note`: the root stays at the
+    spawn point while the body falls, and the actor's location read there.
+    Each body lists both its
     `editor_path` and `simulation_path`, and a body given by both is read
     once; a path with no live actor, or no live copy in the world read, is in
     `not_found`, and `warning` then says why that can be. A multi-part actor
@@ -1296,7 +1305,7 @@ Behaviour worth knowing:
     `NO_GEOMETRY` for a StaticMeshActor without a mesh,
     `NO_SIMPLE_COLLISION` for a static or generated dynamic mesh without a
     simple shape, `COMPLEX_AS_SIMPLE` for a simulated mesh that uses its
-    render triangles as simple collision, `ATTACHED`), each message naming
+    render triangles as simple collision), each message naming
     the fix: a blocking preset, or `collision_enabled: true` only where the
     body's responses already block. A body that blocks some object types
     but not WorldStatic, the type of the level's static floors and walls,
@@ -1339,6 +1348,17 @@ Behaviour worth knowing:
     simulation and after the map reloaded.
   - A path in a running simulation's world (`UEDPIE_<n>_<map>`) edits that
     play copy, which is neither undoable nor saved (`world: "simulation"`).
+  - A Blueprint actor's parts added in the Blueprint editor (its
+    construction-script components) take the same edits. Writing a
+    property of one as the Details panel does re-runs the construction
+    script, which replaces those components with new ones of the same name
+    and renames the old ones `TRASH_<class>_<n>`; the physics, collision and
+    light tools check, put back and report the component the actor holds
+    afterwards. Cancelling a transaction drops its undo record and keeps
+    what it changed, so a `PhysicsNotApplied` call cancels it only when
+    everything was put back as it was (`details.undo_kept: false`, "nothing
+    was changed"); otherwise the edit stays as one undo step
+    (`undo_kept: true`).
   - `setup_unreal_physics_bulk` does the same for many editor actors in one
     call and one undoable transaction: the `actor_paths`, plus every actor
     with `tag`, in the outliner `folder` (or one under it) and whose label or
@@ -1384,7 +1404,11 @@ Behaviour worth knowing:
     Unreal's default, whatever the project's saved settings say. By default
     the importer merges the meshes under a prim of a collapsing kind into one
     (three exported StaticMeshActors came back as one `SM_Root`); pass
-    `use_prim_kinds_for_collapsing` false for a mesh per prim.
+    `use_prim_kinds_for_collapsing` false for a mesh per prim. The reply
+    counts the stage's geometry prims, instance proxies included and skeletal
+    meshes and point instancers left out (`stage_geometry_prims`, counted
+    only with collapsing on, else null), and warns when the import made fewer
+    mesh components than that.
     `fallback_collision_type` is the collision a mesh whose prim has no
     UsdPhysics collision gets, and its default, `none`, gives it none: no
     simple shape and a NoCollision component, so an exported ground slab
@@ -1414,10 +1438,27 @@ Behaviour worth knowing:
     `AssetImportTask.replace_existing` says: a re-import replaced a mesh
     customized since (its collision and lightmap resolution were lost) and
     deleted the earlier import's actors. With `replace_existing` true the
-    folder's assets and the level's actors from an earlier import of the file
-    (the top-level actor named after the file) are replaced;
-    `removed_actor_paths` lists the actors that went, and `actor_paths` lists
-    each new actor once. `warnings` holds the warnings and errors the editor
+    folder's assets and the level's actors from an earlier import of the
+    folder are replaced; `removed_actor_paths` lists the actors that went,
+    and `actor_paths` lists each new actor once. Every actor an import adds
+    carries the tag `simul.usd_import:<folder>`, and the earlier actors are
+    the ones with that tag, never found by label: an actor of your own named
+    like the file, or one an earlier simul version imported without the tag,
+    stays in the level and a warning names it. Those actors are destroyed
+    first, in a request of their own, and the import runs after the editor
+    has ticked, with the Append actor policy:
+    Unreal's Replace actor policy destroyed them inside the import call
+    itself, and that crashed the editor (an assertion in the world's
+    end-of-frame component bookkeeping, `LevelTick.cpp:956`, from
+    `UUsdStageImporter` cleanup, UE 5.7.4). A replace whose earlier actors
+    cannot all be destroyed imports nothing (`InvalidState`,
+    `details.kept`). A USD import clears the editor's undo history, so
+    neither an import nor the replace before it can be undone, and edits
+    made before the import can no longer be undone either. Unreal replaces only the assets the new import
+    makes: an earlier import's assets it does not make again (an `SM_Root`
+    the earlier, collapsed import made) stay in the folder, listed in
+    `left_over_assets` (`left_over_assets_count`) with a warning, and are
+    not deleted. `warnings` holds the warnings and errors the editor
     logged during the import (read back from its log file; they can include a
     line from other editor activity at the same time), and a file the
     importer cannot read fails with `EngineError` carrying those lines. The
@@ -3300,6 +3341,13 @@ first JSON object printed on its own line; Blender keeps the printed text in
 `output` and fails the call only when that whole output is one JSON object
 with `"success": false`. The skills' error-safe template
 (`{"success": False, "error": str(e)}` in an `except`) follows this rule.
+An Unreal script that prints no JSON object comes back with its printed
+`output` and, beside it, `stderr`: what it wrote to `sys.stderr` or logged
+as a warning or an error (`unreal.log_warning`), one entry a line, present
+when there is any. A script that raises keeps its `output` and `stderr`
+beside the error, the traceback left to the error. A JSON object it prints
+comes back as printed, with nothing added, so a script that wants its
+warnings returned puts them in that object.
 
 simul's own granular tools work differently: their generated scripts report
 a failure under `error`, or a partial one under a `*_error` key such as

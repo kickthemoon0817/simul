@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator
 
@@ -656,10 +657,44 @@ def test_start_begins_simulate_or_play(
     assert started == {"action": "start", "state": "playing", "mode": mode}
     assert again == {"action": "start", "state": "playing", "mode": None}
     assert editor.started_modes == [called]
+    before = ([-458.0, 1300.0, 440.0], [-20.0, 30.0, 0.0])
+    # Round-4 m3: Unreal leaves a Play session's camera in the level viewport; stop puts the editor's back.
     assert run(session.control_simulation("stop")) == {
         "action": "stop",
         "state": "stopped",
+        "editor_camera_restored": (
+            {"location": before[0], "rotation": before[1]} if mode == "play" else None
+        ),
     }
+    assert editor.camera == before
+
+
+def test_a_stop_with_no_saved_camera_leaves_the_viewport_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session the tool did not start (the editor's Play button) saved no camera."""
+    editor = Editor()
+    session = physics_session(monkeypatch, editor)
+    editor.begin("play")
+
+    result = run(session.control_simulation("stop"))
+
+    assert result["editor_camera_restored"] is None and editor.camera == ([0.0] * 3, [0.0] * 3)
+
+
+def test_a_camera_that_cannot_be_put_back_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    editor = Editor()
+    session = physics_session(monkeypatch, editor)
+    run(session.control_simulation("start", mode="play"))
+
+    def refuse(location: Any, rotation: Any) -> None:
+        raise RuntimeError("no level viewport")
+
+    subsystem = sys.modules["unreal"].get_editor_subsystem("UnrealEditorSubsystem")
+    monkeypatch.setattr(subsystem, "set_level_viewport_camera_info", refuse)
+
+    result = run(session.control_simulation("stop"))
+
+    assert result["state"] == "stopped" and result["editor_camera_restored"] is None
+    assert "Could not put the level viewport camera back" in result["warning"]
 
 
 def test_an_unknown_simulation_mode_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
