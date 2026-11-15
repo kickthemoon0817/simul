@@ -119,6 +119,7 @@ from ._unreal_scripts import (
     CAPTURE_LOCK_HELPERS,
     CREATE_MATERIAL_INSTANCE,
     DELETE_ACTOR,
+    EDITOR_FRAME,
     EDITOR_RELATIVE_PATHS,
     EDITOR_WORLD,
     ENABLE_PHYSICS,
@@ -157,6 +158,7 @@ from ._unreal_scripts import (
     SPAWN_ACTOR,
     USD_EXPORT,
     USD_IMPORT,
+    USD_IMPORT_CLEAR,
     VIEWPORT_STATE,
     WORLD_PARTITION_LISTED,
     WORLD_PARTITION_LOAD,
@@ -3116,18 +3118,25 @@ class UnrealRuntimeSession(LoggerMixin):
         entries = [entry for entry in raw.get("LogOutput") or [] if isinstance(entry, dict)]
         output = "".join(str(entry.get("Output", "")) for entry in entries if entry.get("Type") == "Info")
         failure = self._python_failure(raw)
+        # Unreal logs sys.stderr's writes as Error entries and unreal.log_warning's as Warning entries;
+        # only the Info ones are output, so they were reported nowhere (round-4 m6). Each entry is a
+        # line (a warning's has no newline of its own); the traceback of a script that raised is its
+        # error already.
+        lines = [
+            str(entry.get("Output", "")) for entry in entries if entry.get("Type") in ("Warning", "Error")
+        ]
+        stderr = "".join(
+            text if text.endswith("\n") else text + "\n"
+            for text in lines
+            if text.strip() and not (failure and text.strip() in failure)
+        )
+        printed: Dict[str, Any] = {"stderr": stderr} if stderr else {}
         if failure is not None:
             refusal = self._attached_refusal({"error": failure})
             if refusal is not None:
                 return refusal
             # What the script printed before it raised: the error alone lost it.
-            return {**self._script_error(failure), **({"output": output} if output else {})}
-        # Unreal logs sys.stderr's writes as Error entries and unreal.log_warning's as Warning entries;
-        # only the Info ones are output, so a script that ran was reported without them (round-4 m6).
-        stderr = "".join(
-            str(entry.get("Output", "")) for entry in entries if entry.get("Type") in ("Warning", "Error")
-        )
-        printed: Dict[str, Any] = {"stderr": stderr} if stderr else {}
+            return {**self._script_error(failure), **({"output": output} if output else {}), **printed}
         if mode == "EvaluateStatement":
             return {"success": True, "result": raw.get("CommandResult"), "output": output, **printed}
         parsed = self._first_json_object(raw)
@@ -7210,18 +7219,57 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         if problems:
             return {"success": False, "error_type": "ValidationError", "error": "; ".join(problems)}
         self._check_usd_composition(usd_path)
-        args = {
+        args: Dict[str, Any] = {
             "path": usd_path,
             "destination": destination,
             "name": _sanitized_object_name(Path(usd_path).stem),
             "options": options,
             "replace": replace_existing,
         }
+        if replace_existing:
+            # The earlier import's actors go first, in a request of their own (USD_IMPORT_CLEAR): the
+            # importer's own Replace cleanup of them crashed the editor (round-4 audit, UE 5.7.4).
+            place = {key: args[key] for key in ("path", "destination", "name")}
+            cleared = await self._execute_json_script(
+                f"args = {place!r}\n" + USD_IMPORT_CLEAR,
+                expected_errors=("NotFoundError", "PluginUnavailable", PIE_ACTIVE),
+            )
+            if cleared.get("error"):
+                return cleared
+            if cleared.get("kept"):
+                return {
+                    "success": False,
+                    "error_type": "InvalidState",
+                    "error": (
+                        "Could not remove the earlier import's actors "
+                        + ", ".join(cleared["kept"][:3])
+                        + " before replacing it, so nothing was imported"
+                    ),
+                    "details": {"kept": cleared["kept"], "removed_actor_paths": cleared.get("removed", [])},
+                }
+            await self._next_editor_frame(cleared.get("frame"))
+            args.update(removed=cleared.get("removed", []), untagged=cleared.get("untagged", []))
         return await self._run_import_export(
             f"args = {args!r}\n" + USD_IMPORT,
             f"the import of {usd_path}",
             expected_errors=("NotFoundError", "InvalidState", "PluginUnavailable"),
         )
+
+    async def _next_editor_frame(self, frame: Optional[int], within: float = 2.0) -> None:
+        """Wait, at most ``within`` seconds, until the editor has ticked past ``frame``.
+
+        Two requests can be served in one frame; the import that follows
+        USD_IMPORT_CLEAR runs after the world has processed the destroyed
+        actors' end of frame. Nothing is waited for without a frame count.
+        """
+        if frame is None:
+            return
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            now = await self._execute_json_script(EDITOR_FRAME, failure_log_level=logging.DEBUG)
+            if now.get("error") or not isinstance(now.get("frame"), int) or now["frame"] > frame:
+                return
+            await asyncio.sleep(0.02)
 
     async def export_usd(
         self,

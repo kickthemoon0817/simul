@@ -1192,7 +1192,11 @@ Behaviour worth knowing:
     tag) in the running simulation while one runs and in the editor world
     otherwise (`world` picks one): location, rotation, linear velocity (cm/s),
     angular velocity (degrees/s), whether the body is awake, mass, center of
-    mass, gravity and the physics mode. Each body lists both its
+    mass, gravity and the physics mode. An actor whose one body is not its
+    root (a Blueprint prop: a Mesh under DefaultSceneRoot) reads the body's
+    location and rotation, which part it is in `note`: the root stays at the
+    spawn point while the body falls, and the actor's location read there.
+    Each body lists both its
     `editor_path` and `simulation_path`, and a body given by both is read
     once; a path with no live actor, or no live copy in the world read, is in
     `not_found`, and `warning` then says why that can be. A multi-part actor
@@ -1399,9 +1403,10 @@ Behaviour worth knowing:
     the importer merges the meshes under a prim of a collapsing kind into one
     (three exported StaticMeshActors came back as one `SM_Root`); pass
     `use_prim_kinds_for_collapsing` false for a mesh per prim. The reply
-    counts the stage's geometry prims (`stage_geometry_prims`, skeletal
-    meshes and point instancers left out) and warns when collapsing made
-    fewer mesh components than that.
+    counts the stage's geometry prims, instance proxies included and skeletal
+    meshes and point instancers left out (`stage_geometry_prims`, counted
+    only with collapsing on, else null), and warns when the import made fewer
+    mesh components than that.
     `fallback_collision_type` is the collision a mesh whose prim has no
     UsdPhysics collision gets, and its default, `none`, gives it none: no
     simple shape and a NoCollision component, so an exported ground slab
@@ -1431,10 +1436,21 @@ Behaviour worth knowing:
     `AssetImportTask.replace_existing` says: a re-import replaced a mesh
     customized since (its collision and lightmap resolution were lost) and
     deleted the earlier import's actors. With `replace_existing` true the
-    folder's assets and the level's actors from an earlier import of the file
-    (the top-level actor named after the file) are replaced;
-    `removed_actor_paths` lists the actors that went, and `actor_paths` lists
-    each new actor once. Unreal replaces only the assets the new import
+    folder's assets and the level's actors from an earlier import of the
+    folder are replaced; `removed_actor_paths` lists the actors that went,
+    and `actor_paths` lists each new actor once. Every actor an import adds
+    carries the tag `simul.usd_import:<folder>`, and the earlier actors are
+    the ones with that tag, never found by label: an actor of your own named
+    like the file, or one an earlier simul version imported without the tag,
+    stays in the level and a warning names it. Those actors are destroyed
+    first, in a request of their own and one undoable transaction, and the
+    import runs after the editor has ticked, with the Append actor policy:
+    Unreal's Replace actor policy destroyed them inside the import call
+    itself, and that crashed the editor (an assertion in the world's
+    end-of-frame component bookkeeping, `LevelTick.cpp:956`, from
+    `UUsdStageImporter` cleanup, UE 5.7.4). A replace whose earlier actors
+    cannot all be destroyed imports nothing (`InvalidState`,
+    `details.kept`). Unreal replaces only the assets the new import
     makes: an earlier import's assets it does not make again (an `SM_Root`
     the earlier, collapsed import made) stay in the folder, listed in
     `left_over_assets` (`left_over_assets_count`) with a warning, and are
@@ -3323,9 +3339,11 @@ with `"success": false`. The skills' error-safe template
 (`{"success": False, "error": str(e)}` in an `except`) follows this rule.
 An Unreal script that prints no JSON object comes back with its printed
 `output` and, beside it, `stderr`: what it wrote to `sys.stderr` or logged
-as a warning or an error (`unreal.log_warning`), present when there is any.
-A JSON object it prints comes back as printed, with nothing added, so a
-script that wants its warnings returned puts them in that object.
+as a warning or an error (`unreal.log_warning`), one entry a line, present
+when there is any. A script that raises keeps its `output` and `stderr`
+beside the error, the traceback left to the error. A JSON object it prints
+comes back as printed, with nothing added, so a script that wants its
+warnings returned puts them in that object.
 
 simul's own granular tools work differently: their generated scripts report
 a failure under `error`, or a partial one under a `*_error` key such as

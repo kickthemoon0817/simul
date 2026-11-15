@@ -312,6 +312,9 @@ class PrimitiveComponent(SceneComponent):
         self.refuses_simulation = False
         # A body whose simulate flag, once set, the Details panel write cannot clear (putting it back fails).
         self.sticky_simulation = False
+        # Where the part is when it is not at its actor's location (a body that fell away from its root).
+        self.world_location: Optional[Vector] = None
+        self.world_rotation: Optional[Rotator] = None
         # Motion: velocity in cm/s, the force pending for the next step, and
         # every force and impulse call, as (kind, vector, location).
         self.velocity = Vector()
@@ -534,10 +537,12 @@ class PrimitiveComponent(SceneComponent):
 
     def get_world_location(self) -> Vector:
         assert self.owner is not None
+        if self.world_location is not None:
+            return self.world_location
         return self.owner.location
 
     def get_world_rotation(self) -> Rotator:
-        return Rotator()
+        return self.world_rotation or Rotator()
 
     # -- collision ----------------------------------------------------------------
     def get_collision_enabled(self) -> Enum:

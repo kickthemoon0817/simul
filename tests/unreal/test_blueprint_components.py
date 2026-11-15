@@ -183,3 +183,24 @@ def test_collision_off_on_a_blueprint_crate_reaches_the_live_component(monkeypat
     assert mesh.collision == "NO_COLLISION" and mesh.use_default_collision is False
     assert result["collision_mode"] == "NO_COLLISION" and result["component_path"].endswith(".Mesh")
     assert editor.unrecorded_writes() == []
+
+
+def test_physics_state_reads_a_blueprint_crate_s_body_where_it_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-4 review: the crate read its root's spawn point while its Mesh lay on the floor at z=50."""
+    from tests.unreal.physics_editor import Rotator, Vector
+
+    editor = Editor()
+    crate = editor.blueprint_crate()
+    crate.location = Vector(300.0, -300.0, 300.0)
+    mesh = part(crate, "Mesh")
+    mesh.world_location, mesh.world_rotation = Vector(300.0, -298.0, 50.0), Rotator(0.0, 12.0, 0.0)
+    cube = editor.cube("PlainCube", mobility="MOVABLE")
+    session = physics_session(monkeypatch, editor)
+
+    result = run(session.get_physics_state([crate.get_path_name(), cube.get_path_name()], world="editor"))
+
+    body, plain = result["bodies"]
+    assert body["component_path"].endswith(".Mesh")
+    assert body["location"] == [300.0, -298.0, 50.0] and body["rotation"] == [0.0, 12.0, 0.0]
+    assert "location and rotation are the body's, Mesh" in body["note"] and "DefaultSceneRoot" in body["note"]
+    assert plain["location"] == [0.0, 0.0, 300.0] and plain.get("note") is None

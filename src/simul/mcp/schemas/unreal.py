@@ -1708,7 +1708,8 @@ class UnrealImportUsdResponse(BaseModel):
         description=(
             "Geometry prims in the stage (under prims_to_import), skeletal meshes and point instancers left "
             "out; fewer mesh_components than these with use_prim_kinds_for_collapsing true means Unreal "
-            "merged prims into one mesh, which warnings says. Null when the editor cannot read the stage"
+            "merged prims into one mesh, which warnings says. Null with collapsing off, or when the editor "
+            "cannot read the stage"
         ),
     )
     left_over_assets: List[str] = Field(

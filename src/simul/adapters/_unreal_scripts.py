@@ -566,7 +566,57 @@ print(json.dumps({"paths": {name: sorted({os.path.abspath(name), unreal.Paths.co
 # import's factory holds the scene actor it spawned the same way. Each task's
 # object references are also cleared before the function returns.
 
-# Expects ``args`` = {"path", "destination", "name", "options", "replace"}:
+#: The actor tag every actor a USD import adds carries, followed by the import's
+#: folder (``/Game/Imports/robot``): what a later ``replace_existing`` import of
+#: the same folder destroys first (USD_IMPORT_CLEAR).
+USD_IMPORT_TAG = "simul.usd_import:"
+
+# Expects ``args`` = {"path", "destination", "name"}. Before a replace_existing
+# import (see USD_IMPORT): refuses as the import would (no USDImporter, PIE, no
+# file), then destroys the level actors tagged with the folder's import tag in
+# one undoable transaction, and reports them (removed), any it could not
+# destroy (kept), the untagged actors labelled like the import's root
+# (untagged) and the editor's frame count, so that the session can wait for a
+# frame before it imports.
+USD_IMPORT_CLEAR = EDITOR_WORLD + f"USD_IMPORT_TAG = {USD_IMPORT_TAG!r}\n" + """
+import os
+
+def clear(path, destination, name):
+    if not hasattr(unreal, "UsdStageImportFactory"):
+        return {"success": False, "error_type": "PluginUnavailable",
+                "error": "USD import requires the USDImporter plugin enabled at editor startup."}
+    if pie_active():
+        return pie_refusal("import USD into the level")
+    if not os.path.isfile(path):
+        return {"success": False, "error_type": "NotFoundError",
+                "error": "USD file not found on the editor host: " + path}
+    tag = USD_IMPORT_TAG + destination + "/" + name
+    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    actors = {actor.get_path_name(): actor for actor in subsystem.get_all_level_actors()}
+    earlier = [actor for actor in actors.values() if actor.actor_has_tag(tag)]
+    untagged = [path for path, actor in actors.items() if actor.get_actor_label() == name and actor not in earlier]
+    removed = [actor.get_path_name() for actor in earlier]
+    if earlier:
+        with unreal.ScopedEditorTransaction("simul: remove the earlier USD import's actors"):
+            subsystem.destroy_actors(earlier)
+    kept = [path for path in removed
+            if unreal.SystemLibrary.is_valid(unreal.find_object(None, path))]
+    frame = unreal.SystemLibrary.get_frame_count() if hasattr(unreal.SystemLibrary, "get_frame_count") else None
+    return {"removed": [path for path in removed if path not in kept], "kept": kept, "untagged": untagged,
+            "frame": frame}
+
+print(json.dumps(clear(**args)))
+"""
+
+#: Prints the editor's frame count, which the session polls until a frame has
+#: passed since USD_IMPORT_CLEAR.
+EDITOR_FRAME = """
+import json, unreal
+print(json.dumps({"frame": unreal.SystemLibrary.get_frame_count()}))
+"""
+
+# Expects ``args`` = {"path", "destination", "name", "options", "replace",
+# "removed", "untagged"}:
 # the USD file on the editor host, the content folder, the folder name the
 # import is filed under (the file's name, sanitized as Unreal names assets),
 # the importer options (``properties`` by UsdStageImportOptions property
@@ -594,7 +644,19 @@ print(json.dumps({"paths": {name: sorted({os.path.abspath(name), unreal.Paths.co
 # Unreal's defaults, Replace for both, replaced an earlier import's assets
 # (a customized mesh lost its collision and lightmap resolution) and deleted
 # its actors even though AssetImportTask.replace_existing was False, which the
-# USD importer does not read. With replace, both policies are Replace.
+# USD importer does not read. With replace, the asset policy is Replace and
+# the actor policy Append: the importer's Replace actor policy destroys the
+# earlier import's actor tree itself, inside the call that spawns the new
+# actors (UUsdStageImporter::ImportFromFile, Cleanup, RecursiveDestroyActor),
+# and that crashed the editor on an assertion in the world's end-of-frame
+# component bookkeeping (ComponentsThatNeedEndOfFrameUpdate_OnGameThread,
+# LevelTick.cpp:956; round-4 audit, UE 5.7.4). So simul destroys those actors
+# first, in a request of its own (USD_IMPORT_CLEAR), and lets the editor tick
+# before the import. Every actor an import adds carries the tag
+# USD_IMPORT_TAG + its folder, which is how a later replace finds them: never
+# by label, which a user's own actor can share. args["removed"] carries the
+# paths USD_IMPORT_CLEAR destroyed, and args["untagged"] the actors labelled
+# like the import's root that carry no such tag, which are left and reported.
 #
 # fallback_collision_type is the collision the importer gives a mesh whose
 # prim has no UsdPhysics collision, and its default, none, gives none: an
@@ -602,7 +664,7 @@ print(json.dumps({"paths": {name: sorted({os.path.abspath(name), unreal.Paths.co
 # component, so bodies would fall through it (UE 5.7.4). The new actors are
 # checked (without_collision) and the reply lists those simulated bodies pass
 # through, with a warning naming the options that give collision.
-USD_IMPORT = EDITOR_WORLD + EDITOR_LOG + DIRTY_PACKAGES + """
+USD_IMPORT = EDITOR_WORLD + EDITOR_LOG + DIRTY_PACKAGES + f"USD_IMPORT_TAG = {USD_IMPORT_TAG!r}\n" + """
 import os
 
 # UsdStageImportOptions' constructor defaults (UE 5.7) for the options simul sets on every import,
@@ -644,7 +706,9 @@ def import_options(values, replace):
         stage_options.set_editor_property("up_axis", getattr(unreal.UsdUpAxis, stage["up_axis"]))
         options.set_editor_property("stage_options", stage_options, quiet)
     if replace:
-        actors, assets = unreal.ReplaceActorPolicy.REPLACE, unreal.ReplaceAssetPolicy.REPLACE
+        # The earlier import's actors were destroyed first, in a request of their own (USD_IMPORT_CLEAR):
+        # the importer's own Replace cleanup of them crashed the editor (round-4 audit, UE 5.7.4).
+        actors, assets = unreal.ReplaceActorPolicy.APPEND, unreal.ReplaceAssetPolicy.REPLACE
     else:
         actors, assets = unreal.ReplaceActorPolicy.APPEND, unreal.ReplaceAssetPolicy.IGNORE
     options.set_editor_property("existing_actor_policy", actors, quiet)
@@ -691,7 +755,8 @@ def stage_geometry(path, prims):
         return None
     roots = [root.rstrip("/") + "/" for root in (prims or ["/"])]
     count = 0
-    walk = iter(Usd.PrimRange(stage.GetPseudoRoot()))
+    # Instance proxies too: an instanced asset's parts are prims of its prototype (UE imports each).
+    walk = iter(Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies()))
     for prim in walk:
         if prim.GetTypeName() in ("SkelRoot", "PointInstancer"):
             walk.PruneChildren()
@@ -701,7 +766,15 @@ def stage_geometry(path, prims):
             count += 1
     return count
 
-def import_usd(path, destination, name, options, replace):
+def tag_imported(actor_paths, tag):
+    # The import's tag on each actor it added, which a later replace_existing import destroys by.
+    for path in actor_paths:
+        actor = unreal.find_object(None, path)
+        if isinstance(actor, unreal.Actor) and not actor.actor_has_tag(tag):
+            tags = list(actor.get_editor_property("tags"))
+            actor.set_editor_property("tags", tags + [unreal.Name(tag)])
+
+def import_usd(path, destination, name, options, replace, removed=(), untagged=()):
     if not hasattr(unreal, "UsdStageImportFactory"):
         return {"success": False, "error_type": "PluginUnavailable",
                 "error": "USD import requires the USDImporter plugin enabled at editor startup."}
@@ -746,13 +819,21 @@ def import_usd(path, destination, name, options, replace):
     known = set(before)
     actors = [p for p in after if p not in known]
     current = set(after)
-    removed = [p for p in before if p not in current]
+    removed = list(dict.fromkeys(list(removed) + [p for p in before if p not in current]))
     if not assets and not actors:
         return {"success": False, "error_type": "EngineError",
                 "error": "The USD importer produced no assets or actors from " + path
-                         + (": " + "; ".join(logged) if logged else "; see the editor log"),
-                "details": {"log": logged}}
+                         + (": " + "; ".join(logged) if logged else "; see the editor log")
+                         + ("; the earlier import's actors were removed before it (Undo restores them)"
+                            if removed else ""),
+                "details": {"log": logged, "removed_actor_paths": removed}}
+    tag_imported(actors, USD_IMPORT_TAG + folder)
     warnings = list(logged)
+    if untagged:
+        warnings.append(
+            str(len(untagged)) + " actor(s) labelled " + name + " carry no simul import tag (an import by an earlier "
+            "simul version, or an actor of your own), so the replace left them in the level: "
+            + ", ".join(untagged[:3]) + ". Delete them if they are from the earlier import.")
     dirtied = dirty_engine_packages()
     if dirtied:
         warnings.append(dirty_engine_warning(dirtied))
@@ -780,17 +861,17 @@ def import_usd(path, destination, name, options, replace):
             "them; they are listed in actors_without_collision. Import again with replace_existing true and "
             "fallback_collision_type convex_decomposition (concave meshes, such as a floor with walls) or convex_hull "
             "(one hull per mesh), or give a mesh simple collision with compute_unreal_convex_hull (output collision).")
-    geometry = stage_geometry(path, options.get("prims_to_import"))
     properties = options.get("properties", {})
     collapsing = properties.get("use_prim_kinds_for_collapsing", DEFAULTS["use_prim_kinds_for_collapsing"])
-    if collapsing and actors and geometry and meshes < geometry:
+    # Counted only when collapsing can merge prims: it opens the stage a second time.
+    geometry = stage_geometry(path, options.get("prims_to_import")) if collapsing and actors else None
+    if geometry and meshes < geometry:
         warnings.append(
             "The stage has " + str(geometry) + " geometry prims and the import made " + str(meshes) + " static "
-            "mesh component" + ("" if meshes == 1 else "s") + ": with use_prim_kinds_for_collapsing true (Unreal's "
-            "default) Unreal merges the prims under a prim of a kind it collapses (kinds_to_collapse, component "
-            "and the like, which a USD export gives each actor) into one mesh, so the parts of an asset, such as "
-            "a robot's links, became one. To keep each prim a mesh of its own, import again with replace_existing "
-            "true and use_prim_kinds_for_collapsing false.")
+            "mesh component" + ("" if meshes == 1 else "s") + " from them, with use_prim_kinds_for_collapsing true "
+            "(Unreal's default), so prims were merged: a stage exported from Unreal, with no kind authored, came "
+            "back as one mesh. To keep each prim a mesh of its own, import again with replace_existing true and "
+            "use_prim_kinds_for_collapsing false.")
     # The earlier import's assets this one did not make again are left in the folder (Unreal's
     # Replace policy replaces only the assets an import makes), which look like part of this one.
     made = {asset.partition(".")[0] for asset in assets}
@@ -3914,6 +3995,16 @@ def state(actor, simulation):
     component = body_of(actor)
     if component is not None:
         entry.update(body_state(component))
+        if component != actor.root_component:
+            # The body is the actor's only part under a SceneComponent root (a Blueprint prop's Mesh):
+            # it moves away from the root as it simulates, so the root read the spawn point while the
+            # body lay on the floor (round-4 review). Its own transform is the body's.
+            rotation = component.get_world_rotation()
+            entry.update(location=vector(component.get_world_location()),
+                         rotation=[rotation.pitch, rotation.yaw, rotation.roll],
+                         note="location and rotation are the body's, " + component.get_name()
+                              + ", the actor's only primitive part; its root, " + actor.root_component.get_name()
+                              + ", is at " + str([round(v, 3) for v in vector(location)]) + ".")
         return entry
     parts = body_components(actor)
     entry.update(component_path=None, physics_mode=None)

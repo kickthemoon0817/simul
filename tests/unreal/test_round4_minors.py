@@ -172,3 +172,31 @@ def test_an_evaluated_statement_s_warnings_come_back_beside_its_result() -> None
     result = asyncio.run(session.execute_script("1 + 2", mode="EvaluateStatement"))
 
     assert result == {"success": True, "result": "3", "output": "", "stderr": "deprecated\n"}
+
+
+def test_each_stderr_entry_is_a_line() -> None:
+    """Review nit: log_warning('careful') then log_error('bad thing') came back as 'carefulbad thing'."""
+    session = _session_answering([
+        {"Type": "Warning", "Output": "careful"},
+        {"Type": "Error", "Output": "bad thing"},
+        {"Type": "Error", "Output": "err\n"},
+    ])
+
+    assert asyncio.run(session.execute_script("..."))["stderr"] == "careful\nbad thing\nerr\n"
+
+
+def test_a_script_that_raises_keeps_its_stderr_without_the_traceback() -> None:
+    session = _session_answering(
+        [
+            {"Type": "Info", "Output": "step 1\n"},
+            {"Type": "Warning", "Output": "careful"},
+            {"Type": "Error", "Output": "Traceback (most recent call last):\nValueError: boom"},
+        ],
+        return_value=False,
+        result="Traceback (most recent call last):\nValueError: boom",
+    )
+
+    result = asyncio.run(session.execute_script("..."))
+
+    assert (result["success"], result["error_type"]) == (False, "ScriptError")
+    assert result["output"] == "step 1\n" and result["stderr"] == "careful\n"
