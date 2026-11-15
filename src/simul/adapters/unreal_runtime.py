@@ -2177,7 +2177,8 @@ class UnrealRuntimeSession(LoggerMixin):
         elif attached:
             self._load_attachment()  # the editor a hold is kept for
         if not probe:
-            held = self._holds.refusal(self._endpoint)
+            # Takes over a hold another server left on this editor, if any.
+            held = await self._holds.admit(self.host, self.port, self._probe_headers())
             if held is not None:
                 raise held
         if attached and not runs_python:
@@ -2331,8 +2332,11 @@ class UnrealRuntimeSession(LoggerMixin):
             changes_state=not retry_safe and not self.tool_read_only,
             since=time.monotonic(),
         )
-        passphrase = {"Passphrase": self._passphrase_md5} if self._passphrase_md5 else {}
-        self._holds.hold(self.host, self.port, request, passphrase)
+        self._holds.hold(self.host, self.port, request, self._probe_headers())
+
+    def _probe_headers(self) -> Dict[str, str]:
+        """Headers a hold's probe sends: the passphrase, when the editor has one."""
+        return {"Passphrase": self._passphrase_md5} if self._passphrase_md5 else {}
 
     def _request_headers(self, path: str) -> Dict[str, str]:
         """Headers one request adds to the session's defaults.

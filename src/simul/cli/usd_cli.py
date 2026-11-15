@@ -45,7 +45,8 @@ def _load_or_fail(session: "HeadlessUSDSession", file_path: Path) -> str:
     from simul.usd.validation import USDLoadError
 
     try:
-        stage_id: str = session.load_stage_or_raise(file_path)
+        # The CLI never reuses, reloads or saves the stage.
+        stage_id: str = session.load_stage_or_raise(file_path, track_changes=False)
     except USDLoadError as exc:
         fail(str(exc), exc.error_type, exc.details)
     return stage_id
@@ -279,7 +280,7 @@ def summary(
         from simul.usd.validation import USDLoadError
 
         try:
-            stage_id = session.load_stage_or_raise(file_path)
+            stage_id = session.load_stage_or_raise(file_path, track_changes=False)
         except USDLoadError as exc:
             if is_json_mode() or format == "json":
                 emit_error(str(exc), exc.error_type, exc.details)

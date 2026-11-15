@@ -27,7 +27,8 @@ from ..usd import editing, stage_files
 from ..usd.editing import USDEditError
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
-from ..usd.sandbox import CompositionSandbox, OutsidePath, open_arc_layers
+from ..usd import sandbox as _sandbox
+from ..usd.sandbox import CompositionSandbox, OutsidePath
 from ..usd.validation import (
     USDLoadError,
     check_usd_file,
@@ -136,6 +137,16 @@ def _unrecorded_read_stamp(current: stage_files.Stamp, started: Optional[int]) -
     if current is None or started is None or current[0] < started - _UNRECORDED_READ_MARGIN_NS:
         return current
     return None
+
+
+def open_arc_layers(root: Any, reads: Dict[str, stage_files.Stamp]) -> List[Any]:
+    """A load's walk without the sandbox: ``sandbox.open_arc_layers``, an unselected variant's layers only stamped.
+
+    Opening every variant's layers made an 8-variant asset load 2.9 times
+    slower with the sandbox off (round-5 audit m1); composition reads only
+    the selected variant's.
+    """
+    return _sandbox.open_arc_layers(root, reads, variants=False)
 
 
 def _open_composed_layers(
@@ -429,7 +440,11 @@ class HeadlessUSDSession(LoggerMixin):
 
     @monitor_performance("headless_session.load_stage")
     def load_stage_or_raise(
-        self, file_path: Union[str, Path], sandbox: Optional[CompositionSandbox] = None
+        self,
+        file_path: Union[str, Path],
+        sandbox: Optional[CompositionSandbox] = None,
+        *,
+        track_changes: bool = True,
     ) -> str:
         """
         Load a USD stage from file, saying why when it cannot.
@@ -445,6 +460,12 @@ class HeadlessUSDSession(LoggerMixin):
             file_path: Path to USD file
             sandbox: Holds every layer and asset the stage draws on to the
                 file sandbox; None (the CLI) checks nothing beyond the file.
+            track_changes: Stamp the files the stage composes before pxr
+                reads them, so a later reuse, reload or save can tell what
+                changed on disk. False for a caller that never reuses,
+                reloads or saves the stage (the CLI's ``usd info`` and
+                ``summary``): without the sandbox the load then opens nothing
+                ahead of composition, which reads only the layers it uses.
 
         Returns:
             Stage identifier
@@ -512,7 +533,10 @@ class HeadlessUSDSession(LoggerMixin):
             ) from exc
         # Held while the stage is composed, so composition finds these layers
         # in pxr's registry instead of parsing the files again.
-        walked = _open_composed_layers(root, sandbox, reads)
+        if track_changes or (sandbox is not None and sandbox.enabled):
+            walked = _open_composed_layers(root, sandbox, reads)
+        else:
+            walked = []
         try:
             stage = stage_files.compose_stage(root)
         except Exception as exc:

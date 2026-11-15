@@ -20,7 +20,10 @@ Each hold is also recorded for the other simul servers on the machine
 stdio server, and a server that knew nothing of another's hold sent its own
 request into the same queue (round-3 audit M3-2). A request to an editor
 another server holds is refused with ``InstanceBusy`` before anything is sent,
-until that server sees the editor answer again.
+until that server sees the editor answer again. A server that stops while it
+holds the editor leaves its record ``released``, and one that is killed
+leaves it behind: the next server about to send that editor a request takes
+the hold over and sends its own probe first (``EditorHolds.admit``).
 """
 
 from __future__ import annotations
@@ -45,6 +48,10 @@ PROBE_CONNECT_TIMEOUT_S: float = 2.0
 
 #: ``details.reason`` of the refusal, shared with the Isaac hold.
 HOLD_REASON = "finishing_timed_out_call"
+
+#: How long a request that takes over another server's orphaned hold waits
+#: for its probe before it is refused: an idle editor answers at once.
+ADOPTED_HOLD_PROBE_SECONDS: float = 1.0
 
 
 def is_hold_refusal(exc: BaseException) -> bool:
@@ -85,12 +92,18 @@ class EditorHold:
         request: The request that timed out.
         task: The probe that ends the hold once the editor answers.
         record: The hold's record for the other simul servers, or None.
+        limit: The hold's limit in seconds; ``EditorHolds.limit`` when None.
+            A hold taken over keeps the one it had.
+        adopted_from: For a hold taken over from another simul server that
+            stopped or exited while it held the editor, that server's pid.
     """
 
     endpoint: str
     request: TimedOutRequest
     task: "Optional[asyncio.Task[None]]" = None
     record: Optional[Path] = None
+    limit: Optional[float] = None
+    adopted_from: Optional[int] = None
 
 
 def _shared_key(endpoint: str) -> Optional[str]:
@@ -138,6 +151,70 @@ class EditorHolds:
         """The hold another simul server on the machine keeps on ``endpoint``, or None."""
         key = _shared_key(endpoint)
         return None if key is None else self._shared.foreign(key)
+
+    async def admit(self, host: str, port: int, headers: Mapping[str, str]) -> Optional[UnrealError]:
+        """The refusal for a request to the editor at ``host:port``, after taking over an orphaned hold.
+
+        A hold another simul server left on the editor (it stopped, or was
+        killed, while the editor may still run the request that timed out)
+        is taken over first: this server republishes its record and sends
+        its own probe (``GET /remote/info``). An editor that answers within
+        ``ADOPTED_HOLD_PROBE_SECONDS`` has finished, and the request goes
+        ahead; otherwise the hold goes on here and the request is refused.
+        Nothing is taken over while ``limit`` is 0.
+
+        Args:
+            host: The editor's host.
+            port: Its Remote Control port.
+            headers: Headers the probe sends (the passphrase).
+
+        Returns:
+            The InstanceBusy error, or None when the request may be sent.
+        """
+        endpoint = f"{host}:{port}"
+        if self.get(endpoint) is None:
+            live, orphans = self._shared.records(endpoint_key(host, port))
+            if not live and not orphans:
+                return None  # one read of the records for the usual case
+            if not live and self.limit > 0:
+                await self._take_over(host, port, headers, min(orphans, key=lambda hold: hold.since))
+        return self.refusal(endpoint)
+
+    async def _take_over(self, host: str, port: int, headers: Mapping[str, str], orphan: SharedHold) -> None:
+        """Take over ``orphan``, the hold left on ``host:port``, and wait briefly for its probe."""
+        endpoint = f"{host}:{port}"
+        request = TimedOutRequest(
+            call=orphan.tool,
+            route=str(orphan.detail("timed_out_route", "")),
+            changes_state=bool(orphan.detail("changes_state", True)),
+            since=time.monotonic() - max(0.0, time.time() - orphan.since),
+        )
+        hold = EditorHold(
+            endpoint=endpoint,
+            request=request,
+            limit=max(0.0, orphan.expires_at - orphan.since),
+            adopted_from=orphan.pid,
+        )
+        taken, record = self._shared.adopt(
+            orphan,
+            live=lambda: hold.task is None or (not hold.task.done() and not hold.task.get_loop().is_closed()),
+        )
+        if not taken:
+            return  # another server took it over first: its live record refuses this request
+        hold.record = record
+        task = asyncio.get_running_loop().create_task(self._wait_for_editor(hold, host, port, dict(headers)))
+        hold.task = task
+        task.add_done_callback(lambda _task: self._end(hold))
+        self._holds[endpoint] = hold
+        logger.warning(
+            "The editor at %s may still be running %s for another simul server (pid %d) that stopped holding "
+            "it; probing it before sending anything",
+            endpoint,
+            orphan.tool,
+            orphan.pid,
+        )
+        remaining = max(0.0, orphan.expires_at - time.time())
+        await asyncio.wait({task}, timeout=min(ADOPTED_HOLD_PROBE_SECONDS, remaining))
 
     def hold(self, host: str, port: int, request: TimedOutRequest, headers: Mapping[str, str]) -> bool:
         """Hold the editor at ``host:port`` until it answers a probe sent now.
@@ -211,13 +288,16 @@ class EditorHolds:
             elsewhere = self.elsewhere(endpoint)
             return None if elsewhere is None else elsewhere.info()
         request = hold.request
-        return {
+        info: Dict[str, Any] = {
             "timed_out_tool": request.call,
             "timed_out_route": request.route,
             "changes_state": request.changes_state,
             "busy_for_seconds": round(time.monotonic() - request.since, 1),
-            "hold_limit_seconds": self.limit,
+            "hold_limit_seconds": self.limit if hold.limit is None else round(hold.limit, 3),
         }
+        if hold.adopted_from is not None:
+            info["adopted_from"] = hold.adopted_from
+        return info
 
     def refusal(self, endpoint: str) -> Optional[UnrealError]:
         """The InstanceBusy error for a request to a held editor, or None when it is not held."""
@@ -230,12 +310,13 @@ class EditorHolds:
             else "it only reads, but the editor serves nothing else until it ends"
         )
         holder = info.get("held_by")
-        whose = (
-            f" for another simul server on this machine (pid {holder.get('pid')})"
-            if isinstance(holder, dict)
-            else ""
-        )
-        ends = "that server sees the editor answer" if whose else "the editor answers"
+        if isinstance(holder, dict):
+            whose = f" for another simul server on this machine (pid {holder.get('pid')})"
+        elif info.get("adopted_from") is not None:
+            whose = f" for another simul server (pid {info['adopted_from']}) that stopped holding it"
+        else:
+            whose = ""
+        ends = "that server sees the editor answer" if isinstance(holder, dict) else "the editor answers"
         return UnrealError(
             f"The editor at {endpoint} is still running {info['timed_out_tool']}{whose}, whose answer timed "
             f"out {info['busy_for_seconds']:.0f}s ago ({effect}). Remote Control runs one request at a "
@@ -247,7 +328,11 @@ class EditorHolds:
         )
 
     def close(self) -> None:
-        """Release every hold, with a warning naming its call (the server is stopping)."""
+        """Release every hold, with a warning naming its call (the server is stopping).
+
+        Each record is left ``released`` for the other simul servers: the
+        next one about to send the editor a request takes the hold over.
+        """
         for hold in list(self._holds.values()):
             logger.warning(
                 "Released the Unreal editor at %s while it may still be running %s, which timed out %.0fs ago",
@@ -255,6 +340,8 @@ class EditorHolds:
                 hold.request.call,
                 time.monotonic() - hold.request.since,
             )
+            record, hold.record = hold.record, None
+            self._shared.release(record)
             self._end(hold)
             if hold.task is not None and not hold.task.get_loop().is_closed():
                 hold.task.cancel()
@@ -267,7 +354,8 @@ class EditorHolds:
 
     async def _wait_for_editor(self, hold: EditorHold, host: str, port: int, headers: Dict[str, str]) -> None:
         """Wait, up to the limit, for the editor to answer a probe queued behind the timed-out request."""
-        remaining = self.limit - (time.monotonic() - hold.request.since)
+        limit = self.limit if hold.limit is None else hold.limit
+        remaining = limit - (time.monotonic() - hold.request.since)
         outcome = await editor_answer(host, port, headers, remaining)
         waited = time.monotonic() - hold.request.since
         if outcome == "answered":
