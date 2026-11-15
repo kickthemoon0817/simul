@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -16,10 +17,17 @@ from pathlib import Path
 import simul
 
 SRC = str(Path(simul.__file__).resolve().parents[1])
+# Rich colours help text on CI runners (GITHUB_ACTIONS forces a terminal).
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _run(*args: str) -> "subprocess.CompletedProcess[str]":
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [SRC, os.environ.get("PYTHONPATH")]))}
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(filter(None, [SRC, os.environ.get("PYTHONPATH")])),
+        "NO_COLOR": "1",
+        "TERM": "dumb",
+    }
     return subprocess.run(
         [sys.executable, "-m", "simul", *args], capture_output=True, text=True, env=env, timeout=120
     )
@@ -36,5 +44,6 @@ def test_python_m_simul_names_itself_simul_in_its_help() -> None:
     result = _run("--help")
 
     assert result.returncode == 0, result.stderr
-    assert "Usage: simul " in result.stdout
-    assert "__main__" not in result.stdout
+    help_text = ANSI.sub("", result.stdout)
+    assert "Usage: simul " in help_text
+    assert "__main__" not in help_text
