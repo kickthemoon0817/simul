@@ -824,7 +824,7 @@ def import_usd(path, destination, name, options, replace, removed=(), untagged=(
         return {"success": False, "error_type": "EngineError",
                 "error": "The USD importer produced no assets or actors from " + path
                          + (": " + "; ".join(logged) if logged else "; see the editor log")
-                         + ("; the earlier import's actors were removed before it (Undo restores them)"
+                         + ("; the earlier import's actors were removed before it"
                             if removed else ""),
                 "details": {"log": logged, "removed_actor_paths": removed}}
     tag_imported(actors, USD_IMPORT_TAG + folder)

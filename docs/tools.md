@@ -1445,14 +1445,16 @@ Behaviour worth knowing:
     the ones with that tag, never found by label: an actor of your own named
     like the file, or one an earlier simul version imported without the tag,
     stays in the level and a warning names it. Those actors are destroyed
-    first, in a request of their own and one undoable transaction, and the
-    import runs after the editor has ticked, with the Append actor policy:
+    first, in a request of their own, and the import runs after the editor
+    has ticked, with the Append actor policy:
     Unreal's Replace actor policy destroyed them inside the import call
     itself, and that crashed the editor (an assertion in the world's
     end-of-frame component bookkeeping, `LevelTick.cpp:956`, from
     `UUsdStageImporter` cleanup, UE 5.7.4). A replace whose earlier actors
     cannot all be destroyed imports nothing (`InvalidState`,
-    `details.kept`). Unreal replaces only the assets the new import
+    `details.kept`). A USD import clears the editor's undo history, so
+    neither an import nor the replace before it can be undone, and edits
+    made before the import can no longer be undone either. Unreal replaces only the assets the new import
     makes: an earlier import's assets it does not make again (an `SM_Root`
     the earlier, collapsed import made) stay in the folder, listed in
     `left_over_assets` (`left_over_assets_count`) with a warning, and are
