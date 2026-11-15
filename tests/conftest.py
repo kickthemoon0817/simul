@@ -16,6 +16,7 @@ need.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Iterator, Type
@@ -81,6 +82,29 @@ def simul_state_outside_home(tmp_path_factory: pytest.TempPathFactory) -> Iterat
         config._get_cached_settings.cache_clear()
         yield
     config._get_cached_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def no_hold_records_left() -> Iterator[None]:
+    """Remove the engine hold records a test left in the suite's holds directory.
+
+    A server that stops while it holds an engine leaves its record
+    ``released`` for the next server to take over (``engine_holds``); a later
+    test whose fake engine got the same ephemeral port would take it over and
+    find its engine held.
+    """
+    yield
+    from simul.utils import engine_holds
+
+    try:
+        entries = list(os.scandir(engine_holds._DEFAULT_HOLD_DIR))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            os.unlink(entry.path)
+        except OSError:
+            pass
 
 
 @pytest.fixture(autouse=True)

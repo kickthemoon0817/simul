@@ -29,7 +29,7 @@ import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import yaml
 
@@ -638,6 +638,19 @@ def _stop_audit_listener() -> None:
     _audit_listener = None
 
 
+def error_log_path(settings: Settings) -> Optional[Path]:
+    """The errors log (``simul_errors.log`` beside ``logging.file_path``), as ``setup_logging`` names it.
+
+    Returns:
+        Its path, or None when file logging is off.
+    """
+    if not settings.logging.file_enabled:
+        return None
+    handlers: Dict[str, Any] = {"error_file": {}}
+    _configure_file_handler_paths(handlers, settings.logging.file_path, per_instance=settings.logging.per_instance)
+    return Path(handlers["error_file"]["filename"]).expanduser()
+
+
 def flush_logs() -> None:
     """Write out every queued audit row, then flush and close every log handler.
 
@@ -1052,9 +1065,72 @@ def note_call_outcome(**fields: Any) -> None:
     recorded under), ``status``, ``error_type``, ``agent_id``, ``session``
     and ``reason``; a no-op outside a tool call.
     """
+    bound_call_outcome()(**fields)
+
+
+def bound_call_outcome() -> Callable[..., None]:
+    """``note_call_outcome`` for the call in progress, usable outside its context too.
+
+    The envelope keeps it so a process about to exit with the call still in
+    flight (``record_calls_in_flight``) can tell the call's audit row how it
+    ended from outside the call. A no-op outside a tool call.
+    """
     outcome = _CALL_OUTCOME_VAR.get()
-    if outcome is not None:
-        outcome.update({key: value for key, value in fields.items() if value is not None})
+
+    def note(**fields: Any) -> None:
+        if outcome is not None:
+            outcome.update({key: value for key, value in fields.items() if value is not None})
+
+    return note
+
+
+#: The tool calls in progress, by request id: the name, the outcome dict the
+#: envelope fills, and ``time.monotonic()`` when the call began. Their audit
+#: rows are written as they end, or by ``record_calls_in_flight``.
+_CALLS_IN_FLIGHT: Dict[str, Tuple[str, Dict[str, Any], float]] = {}
+
+
+def record_calls_in_flight(reason: str) -> int:
+    """Write the audit row of every tool call still in progress, for a process about to exit without them.
+
+    ``os._exit`` ends the process without unwinding the calls, so their rows
+    would never be written (a second SIGTERM while the server stops). A call
+    the envelope has not finished is written ``cancelled`` with ``reason``
+    and ``executed`` as the envelope noted it (``"unknown"`` otherwise); one
+    it had finished keeps its own status. Each row is written once.
+
+    Args:
+        reason: Why the process exits (``forced_exit``).
+
+    Returns:
+        How many rows were written.
+    """
+    written = 0
+    for request_id, (tool_name, outcome, start) in list(_CALLS_IN_FLIGHT.items()):
+        if _CALLS_IN_FLIGHT.pop(request_id, None) is None:
+            continue
+        status = str(outcome.get("status") or "cancelled")
+        executed = outcome.get("executed")
+        if status == "cancelled" and executed is None:
+            executed = "unknown"
+        recorded_tool = str(outcome.get("tool") or tool_name)
+        try:
+            emit_audit(
+                tool=recorded_tool,
+                request_id=request_id,
+                duration_ms=(time.monotonic() - start) * 1000.0,
+                status=status,
+                extra={"requested_tool": tool_name} if recorded_tool != tool_name else None,
+                error_type=outcome.get("error_type"),
+                agent_id=outcome.get("agent_id"),
+                session=outcome.get("session"),
+                reason=outcome.get("reason") or (reason if status == "cancelled" else None),
+                executed=executed,
+            )
+            written += 1
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.warning("Could not write the audit row of %s: %s", tool_name, exc)
+    return written
 
 
 def _outcome_of_result(result: Any) -> Dict[str, Any]:
@@ -1099,6 +1175,7 @@ def _tool_call_context(tool_name: str) -> Iterator[Dict[str, Any]]:
     tn_token = _TOOL_NAME_VAR.set(tool_name)
     outcome_token = _CALL_OUTCOME_VAR.set(outcome)
     start = time.monotonic()
+    _CALLS_IN_FLIGHT[request_id] = (tool_name, outcome, start)
     error_class: Optional[str] = None
     try:
         yield outcome
@@ -1108,40 +1185,42 @@ def _tool_call_context(tool_name: str) -> Iterator[Dict[str, Any]]:
     finally:
         duration_ms = (time.monotonic() - start) * 1000.0
         try:
-            if error_class == "CancelledError":
-                status = "cancelled"
-            elif error_class is not None:
-                status = "error"
-            elif "status" in outcome:
-                status = str(outcome["status"])
-            else:
-                derived = _outcome_of_result(outcome.get("result"))
-                status = derived["status"]
-                outcome.setdefault("error_type", derived.get("error_type"))
-            if status == "cancelled" and "executed" not in outcome:
-                outcome["executed"] = "unknown"
-            # The envelope names the call as its usage row does: a tool that
-            # is not registered is <unknown tool>, the name given kept aside.
-            recorded_tool = str(outcome.get("tool") or tool_name)
-            try:
-                emit_audit(
-                    tool=recorded_tool,
-                    request_id=request_id,
-                    duration_ms=duration_ms,
-                    status=status,
-                    error_class=error_class,
-                    extra=(
-                        {"requested_tool": tool_name} if recorded_tool != tool_name else None
-                    ),
-                    error_type=outcome.get("error_type"),
-                    agent_id=outcome.get("agent_id"),
-                    session=outcome.get("session"),
-                    reason=outcome.get("reason"),
-                    executed=outcome.get("executed"),
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                # The audit row never fails the call it describes.
-                _logger.warning("Could not write the audit row of %s: %s", _bounded(tool_name), exc)
+            # None: record_calls_in_flight already wrote the row (the process is exiting).
+            if _CALLS_IN_FLIGHT.pop(request_id, None) is not None:
+                if error_class == "CancelledError":
+                    status = "cancelled"
+                elif error_class is not None:
+                    status = "error"
+                elif "status" in outcome:
+                    status = str(outcome["status"])
+                else:
+                    derived = _outcome_of_result(outcome.get("result"))
+                    status = derived["status"]
+                    outcome.setdefault("error_type", derived.get("error_type"))
+                if status == "cancelled" and "executed" not in outcome:
+                    outcome["executed"] = "unknown"
+                # The envelope names the call as its usage row does: a tool that
+                # is not registered is <unknown tool>, the name given kept aside.
+                recorded_tool = str(outcome.get("tool") or tool_name)
+                try:
+                    emit_audit(
+                        tool=recorded_tool,
+                        request_id=request_id,
+                        duration_ms=duration_ms,
+                        status=status,
+                        error_class=error_class,
+                        extra=(
+                            {"requested_tool": tool_name} if recorded_tool != tool_name else None
+                        ),
+                        error_type=outcome.get("error_type"),
+                        agent_id=outcome.get("agent_id"),
+                        session=outcome.get("session"),
+                        reason=outcome.get("reason"),
+                        executed=outcome.get("executed"),
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    # The audit row never fails the call it describes.
+                    _logger.warning("Could not write the audit row of %s: %s", _bounded(tool_name), exc)
         finally:
             _CALL_OUTCOME_VAR.reset(outcome_token)
             _REQUEST_ID_VAR.reset(rid_token)
