@@ -2,8 +2,9 @@
 
 * m2: a ``simul unreal exec`` timeout promised a hold that the short-lived
   command released as it exited, so the next command queued behind the
-  timed-out script. Its record is now handed over to the editor endpoint and
-  bounded by its expiry; the next call ends it once the editor answers.
+  timed-out script. Its record is now left ``released`` as the command exits
+  (#372's path for a stopping holder), and the next command takes it over
+  with its own probe, within the record's expiry.
 * m3: after a Play session the level viewport camera read [0,0,0], where the
   player's camera was, and the next editor-view capture rendered the origin.
   The editor camera is now saved before Play and put back on stop.
@@ -18,8 +19,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -28,7 +27,7 @@ import pytest
 from simul.adapters.unreal_runtime import UnrealError, UnrealRuntimeSession, UnrealTimeoutError
 from simul.config import Settings
 from simul.utils import engine_holds
-from simul.utils.engine_holds import SharedHolds, endpoint_key
+
 from tests.unreal.test_unreal_timeout_hold import _GameThreadEditor, _settings
 
 # ---------------------------------------------------------------------------
@@ -73,50 +72,6 @@ def test_an_exec_timeout_keeps_the_editor_held_for_the_next_command(
     assert not any("marker_b" in command for command in editor.commands()), "the refused call never ran"
     assert after == {"success": True, "output": "ran"}
     assert finally_left == [], "the call that saw the editor answer removed the record"
-
-
-def test_a_handed_over_record_outlives_its_process_until_it_expires(tmp_path: Path) -> None:
-    keeper, reader = SharedHolds("unreal", tmp_path), SharedHolds("unreal", tmp_path)
-    key = endpoint_key("localhost", 30200)
-    since = time.time()
-    record = keeper.publish(key, "simul unreal exec", since, 60.0, live=lambda: True,
-                            details={"timed_out_route": "/remote/object/call", "changes_state": True})
-    keeper.hand_over(record)
-
-    held = reader.foreign(key)
-    assert held is not None and held.handed_over is True
-    assert held.info()["held_by"] == {"pid": os.getpid(), "exited": True}
-    # Its process no longer counts: a record naming a process that is gone is still live.
-    data = engine_holds.BridgeFiles.read(record)
-    engine_holds.BridgeFiles.write(record, {**data, "pid": 2 ** 22 + 12345})
-    assert reader.foreign(key) is not None
-    # An answer to a request sent before the call timed out does not end it; one sent after does.
-    assert reader.clear_handed_over(key, since - 1.0) == 0 and reader.foreign(key) is not None
-    assert reader.clear_handed_over(key, since + 1.0) == 1 and reader.foreign(key) is None
-
-
-def test_a_handed_over_record_past_its_expiry_is_ignored(tmp_path: Path) -> None:
-    keeper, reader = SharedHolds("unreal", tmp_path), SharedHolds("unreal", tmp_path)
-    key = endpoint_key("127.0.0.1", 30200)
-    record = keeper.publish(key, "exec", time.time() - 10.0, 5.0, live=lambda: True)
-    keeper.hand_over(record)  # already expired: withdrawn rather than handed over
-
-    assert reader.foreign(key) is None and not list(tmp_path.glob("*.json"))
-
-
-def test_a_handed_over_hold_names_the_exited_command_in_its_refusal(tmp_path: Path) -> None:
-    from simul.adapters._unreal_hold import EditorHolds
-
-    keeper = SharedHolds("unreal", tmp_path)
-    record = keeper.publish(endpoint_key("127.0.0.1", 30200), "PUT /remote/object/call",
-                            time.time(), 60.0, live=lambda: True)
-    keeper.hand_over(record)
-
-    refusal = EditorHolds(60.0, SharedHolds("unreal", tmp_path)).refusal("127.0.0.1:30200")
-
-    assert refusal is not None and refusal.error_type == "InstanceBusy"
-    assert "a simul command that has exited" in str(refusal)
-    assert refusal.details["held_by"]["exited"] is True
 
 
 # ---------------------------------------------------------------------------

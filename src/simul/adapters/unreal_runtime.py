@@ -2181,9 +2181,6 @@ class UnrealRuntimeSession(LoggerMixin):
         elif attached:
             self._load_attachment()  # the editor a hold is kept for
         if not probe:
-            # A hold a `simul unreal exec` left as it exited is ended or held here first (take_over).
-            passphrase = {"Passphrase": self._passphrase_md5} if self._passphrase_md5 else {}
-            await self._holds.take_over(self.host, self.port, passphrase, self.ping_timeout)
             held = self._holds.refusal(self._endpoint)
             if held is not None:
                 raise held
@@ -8642,9 +8639,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         when the session is garbage-collected.
         """
         if self._owns_holds:
-            # A session of its own (simul unreal exec): nothing outlives it to end its hold, so its
-            # record is left for the next simul call, which ends it once the editor answers.
-            self._holds.close(hand_over=True)
+            # A session of its own: nothing outlives it to end its hold.
+            self._holds.close()
         if self._session is not None and not self._session.closed:
             await self._session.close()
         self._session = None
@@ -8668,7 +8664,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         ``async with``) instead.
         """
         if self._owns_holds:
-            self._holds.close(hand_over=True)
+            self._holds.close()
         if self._session is None or self._session.closed:
             self._session = None
             return
