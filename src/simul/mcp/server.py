@@ -1970,7 +1970,11 @@ class SimulMCPServer(LoggerMixin):
             if recorded:
                 return
             since = started if started is not None else entered
-            record(
+            # Called from the signal path, outside the call's context: run in
+            # the snapshot taken as the call began, so its rows carry its
+            # request id and name its agent as they would have.
+            call_context.run(
+                record,
                 (time.monotonic() - since) * 1000,
                 False,
                 reason,
@@ -1979,6 +1983,7 @@ class SimulMCPServer(LoggerMixin):
                 executed="unknown" if call_started else False,
             )
 
+        call_context = contextvars.copy_context()
         in_flight = next(self._call_keys)
         self._calls_in_flight[in_flight] = record_forced_exit
         try:

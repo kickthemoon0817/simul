@@ -182,6 +182,7 @@ class _Server:
         tool: str = "validate_usd_file",
         arguments: Optional[Dict[str, object]] = None,
         started: Optional[Path] = None,
+        before: Optional[List[tuple]] = None,
     ) -> None:
         began = started or self.started
         self._send({
@@ -192,6 +193,11 @@ class _Server:
         assert self.proc.stdout is not None
         assert json.loads(self.proc.stdout.readline())["id"] == 1
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        for number, (name, args) in enumerate(before or [], start=10):
+            # Calls answered before the one left running (a claim).
+            self._send({"jsonrpc": "2.0", "id": number, "method": "tools/call",
+                        "params": {"name": name, "arguments": args}})
+            assert json.loads(self.proc.stdout.readline())["id"] == number
         self._send({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": tool, "arguments": arguments if arguments is not None else {"file_path": SAMPLE}},
@@ -332,7 +338,12 @@ def test_stdio_a_second_signal_records_the_isaac_call_it_cuts_short(
             "ISAAC_SIM__DISCOVERY_DIR": str(tmp_path / "discovery"),
         },
     )
-    server.start_stdio_call("execute_isaac_script", {"code": "print('SLOW_MARKER')"}, started=got)
+    server.start_stdio_call(
+        "execute_isaac_script",
+        {"code": "print('SLOW_MARKER')"},
+        started=got,
+        before=[("claim_isaac_instance", {"agent_id": "robot-7", "purpose": "forced-exit test"})],
+    )
 
     server.proc.send_signal(signal.SIGTERM)
     time.sleep(1.0)
@@ -350,6 +361,10 @@ def test_stdio_a_second_signal_records_the_isaac_call_it_cuts_short(
     (audit,) = [row for row in server.audit_rows() if row.get("tool") == "execute_isaac_script"]
     assert audit["status"] == "cancelled" and audit["reason"] == "forced_exit"
     assert audit["executed"] == "unknown"
+    # Review of #372: written from the signal path, the usage row had no
+    # request id and both rows named the session instead of the claim's agent.
+    assert row["request_id"] and row["request_id"] == audit["request_id"]
+    assert row["agent_id"] == audit["agent_id"] == "robot-7"
 
 
 def test_stdio_closed_stdin_exits_at_the_shutdown_timeout_with_a_usd_call_running(

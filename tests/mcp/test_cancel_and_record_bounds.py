@@ -74,8 +74,12 @@ def _server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> server_module.Si
     return instance
 
 
-def _cancel_inside_a_call(tool: str, start: Any) -> None:
-    """Run ``start()`` inside the audit middleware's call scope, cancel it once it runs."""
+def _cancel_inside_a_call(tool: str, start: Any, between: Any = None) -> None:
+    """Run ``start()`` inside the audit middleware's call scope, cancel it once it runs.
+
+    ``between`` runs once the call is running, outside its context (as the
+    signal path of a forced exit does), before it is cancelled.
+    """
     middleware = simul_logging.build_request_context_middleware()
 
     class _Context:
@@ -89,6 +93,8 @@ def _cancel_inside_a_call(tool: str, start: Any) -> None:
 
         task = asyncio.ensure_future(middleware.on_call_tool(_Context(), call_next))
         await started.wait()
+        if between is not None:
+            between()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -193,8 +199,11 @@ def test_a_forced_exit_records_the_calls_still_in_flight_once(
 ) -> None:
     """Review of #370: a second SIGTERM exited 143 with no usage or audit row for the call it cut short.
 
-    ``simul server`` calls ``record_calls_in_flight`` just before ``os._exit``;
-    here the call then goes on and is cancelled, and is not recorded again.
+    ``simul server`` calls ``record_calls_in_flight`` from its signal path,
+    outside the call's context, just before ``os._exit``; here the call then
+    goes on and is cancelled, and is not recorded again. The usage row pairs
+    with the audit row: the same request id and agent (review of #372: the
+    forced usage row had ``request_id: None``).
     """
     instance = _server(monkeypatch, tmp_path)
     recorded: List[int] = []
@@ -211,13 +220,16 @@ def test_a_forced_exit_records_the_calls_still_in_flight_once(
     async def start(started: asyncio.Event) -> Any:
         async def script(session: Any) -> Dict[str, Any]:
             started.set()
-            recorded.append(instance.record_calls_in_flight("forced_exit"))
             await asyncio.sleep(10)
             return {"success": True}
 
         return await instance._exec_backend("execute_unreal_script", _Adapter(), "Unreal", None, script)
 
-    _cancel_inside_a_call("execute_unreal_script", start)
+    _cancel_inside_a_call(
+        "execute_unreal_script",
+        start,
+        between=lambda: recorded.append(instance.record_calls_in_flight("forced_exit")),
+    )
 
     assert recorded == [1]
     row = _row(instance, "execute_unreal_script")
@@ -231,6 +243,9 @@ def test_a_forced_exit_records_the_calls_still_in_flight_once(
     assert audit["status"] == "cancelled" and audit["reason"] == "forced_exit"
     assert audit["executed"] == "unknown" and audit["tool"] == "execute_unreal_script"
     assert audit["request_id"] and audit["session"], "the envelope told the row its session"
+    (logged,) = [json.loads(line) for line in (tmp_path / "tool_usage.jsonl").read_text().splitlines()]
+    assert logged["request_id"] == audit["request_id"]
+    assert logged["agent_id"] == audit["agent_id"] and logged["session"] == audit["session"]
     assert instance.record_calls_in_flight("forced_exit") == 0, "nothing is left in flight"
 
 

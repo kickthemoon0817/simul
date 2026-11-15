@@ -30,12 +30,14 @@ before it sends it anything:
   is about to send that engine something takes the hold over
   (``SharedHolds.adopt``): it publishes the record as its own, removes the
   orphan, and runs its own idle probe before it sends anything. Exactly one
-  server takes an orphan over (the one whose unlink of it succeeds).
+  server takes an orphan over: the one whose exclusive claim file
+  (``<record>.claim``, ``O_CREAT | O_EXCL``) is created.
 - A record of this process counts only while the hold that wrote it is still
   running (``_IN_PROCESS``), so a hold whose event loop ended without
   withdrawing it (a test) is not mistaken for a live one.
-- A temporary file a writer killed mid-publish left behind is removed once
-  it is ``STALE_TEMP_SECONDS`` old.
+- A temporary file a writer killed mid-publish left behind, or an adoption
+  claim an adopter killed mid-adoption left, is removed once it is
+  ``STALE_TEMP_SECONDS`` old.
 
 What a record cannot cover: it exists only once a reply has timed out, so a
 call another server sends while the first call is still running (before its
@@ -79,6 +81,8 @@ STALE_TEMP_SECONDS = 60.0
 _LOOPBACK_NAMES = frozenset({"localhost", "::1", "ip6-localhost", "0.0.0.0", "::"})
 _UNSAFE = re.compile(r"[^A-Za-z0-9]+")
 _TEMP_PREFIX = ".simul-"
+#: Suffix of the file an adopter creates to claim an orphan (``SharedHolds.adopt``).
+_CLAIM_SUFFIX = ".claim"
 
 #: The holds this process published and has not withdrawn, by record file
 #: name: each reports whether the hold that wrote it is still running.
@@ -344,9 +348,14 @@ class SharedHolds:
 
         The orphan is republished as this server's record, with the same
         call, start and expiry (``details.adopted_from`` names the server it
-        came from), and then removed. Only the server whose removal succeeds
-        keeps the hold; one that got there first had already published its
-        own record, so the others see a live hold from then on.
+        came from). Then the server claims the orphan by creating
+        ``<orphan>.claim`` with ``O_CREAT | O_EXCL``, which exactly one
+        process can do (two ``unlink`` calls of one file can both succeed,
+        on APFS), and removes the orphan and its claim. A server whose claim
+        fails, or that finds the orphan already gone, withdraws its copy:
+        the winner published its record before it claimed, so the others see
+        a live hold from then on. A claim left by a server killed in between
+        is taken over once it is ``STALE_TEMP_SECONDS`` old.
 
         Args:
             orphan: A hold ``orphan`` returned.
@@ -366,13 +375,17 @@ class SharedHolds:
         )
         if mine is None or orphan.record is None:
             return True, mine
-        try:
-            os.unlink(orphan.record)
-        except FileNotFoundError:
+        claim = orphan.record.with_name(orphan.record.name + _CLAIM_SUFFIX)
+        claimed = _claim(claim)
+        if claimed is None:
+            return True, mine  # no claim to be had (an unwritable directory): every adopter probes
+        if not claimed or not orphan.record.exists():
             self.withdraw(mine)
+            if claimed:
+                _unlink(claim)
             return False, None
-        except OSError:
-            pass  # it stays: another server may take it over too, and probe as well
+        _unlink(orphan.record)
+        _unlink(claim)
         return True, mine
 
     def records(self, endpoint: str) -> Tuple[List[SharedHold], List[SharedHold]]:
@@ -395,7 +408,7 @@ class SharedHolds:
                 for entry in entries:
                     if entry.name.startswith(prefix) and entry.name.endswith(".json"):
                         names.append(entry.name)
-                    elif entry.name.startswith(_TEMP_PREFIX):
+                    elif entry.name.startswith(_TEMP_PREFIX) or entry.name.endswith(_CLAIM_SUFFIX):
                         _remove_if_stale_temp(entry, now)
         except OSError:
             return [], []  # no directory yet: nothing was ever held
@@ -449,8 +462,39 @@ def _state(hold: SharedHold, name: str, now: float, released: bool) -> str:
     return "orphan" if _holder_gone(hold) else "live"
 
 
+def _claim(path: Path) -> Optional[bool]:
+    """Create ``path`` exclusively: True when this process did, False when another holds it, None when it cannot be.
+
+    A claim older than ``STALE_TEMP_SECONDS`` (its adopter was killed before
+    removing it) is removed and tried once more.
+    """
+    for _attempt in range(2):
+        try:
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            return True
+        except FileExistsError:
+            try:
+                if time.time() - os.stat(path).st_mtime < STALE_TEMP_SECONDS:
+                    return False
+                os.unlink(path)
+            except FileNotFoundError:
+                continue  # released meanwhile: try again
+            except OSError:
+                return False
+        except OSError:
+            return None
+    return False
+
+
+def _unlink(path: Path) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def _remove_if_stale_temp(entry: "os.DirEntry[str]", now: float) -> None:
-    """Remove a ``BridgeFiles.write`` temporary file of this user older than ``STALE_TEMP_SECONDS``."""
+    """Remove this user's ``BridgeFiles.write`` temporary file or adoption claim once ``STALE_TEMP_SECONDS`` old."""
     try:
         info = entry.stat(follow_symlinks=False)
         if hasattr(os, "getuid") and info.st_uid != os.getuid():

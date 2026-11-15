@@ -296,6 +296,43 @@ def test_exactly_one_keeper_takes_a_released_hold_over(tmp_path: Path) -> None:
     assert c.orphan(_ENDPOINT) is None
     b.withdraw(mine_b)
     assert list(tmp_path.glob("*.json")) == []
+    assert list(tmp_path.glob("*.claim")) == [], "the claim is removed with the orphan"
+
+
+#: One process racing to take an orphan over: waits for the start time, then
+#: prints whether it took the hold.
+_ADOPTER = """
+import sys, time
+from simul.utils.engine_holds import SharedHolds
+holds = SharedHolds("isaac", __import__("pathlib").Path(sys.argv[1]))
+while time.time() < float(sys.argv[2]):
+    time.sleep(0.001)
+orphan = holds.orphan(sys.argv[3])
+taken = holds.adopt(orphan, lambda: True)[0] if orphan is not None else False
+print(taken, flush=True)
+time.sleep(1.0)  # alive while the others look: a dead adopter's record is an orphan again
+"""
+
+
+def test_exactly_one_of_many_racing_processes_takes_an_orphan_over(tmp_path: Path) -> None:
+    """Review of #372: on APFS several processes' unlink of one file succeeded, so 2 to 4 of 12 adopters won."""
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [SRC, os.environ.get("PYTHONPATH")]))}
+    for trial in range(2):
+        directory = tmp_path / f"trial{trial}"
+        holder = SharedHolds("isaac", directory)
+        holder.release(holder.publish(_ENDPOINT, "execute_isaac_script", time.time(), 300.0, _live))
+        start = time.time() + 1.5
+        adopters = [
+            subprocess.Popen(
+                [sys.executable, "-c", _ADOPTER, str(directory), str(start), _ENDPOINT],
+                env=env, stdout=subprocess.PIPE, text=True,
+            )
+            for _ in range(10)
+        ]
+        results = [adopter.communicate(timeout=60)[0].strip() for adopter in adopters]
+
+        assert results.count("True") == 1, results
+        assert list(directory.glob("*.claim")) == []
 
 
 # ---------------------------------------------------------------------------
